@@ -19,7 +19,7 @@ impl AliveTracker {
 
     pub fn spawn_listener(&self, mut rx: tokio::sync::broadcast::Receiver<Event>) {
         let inner = self.inner.clone();
-        
+
         tokio::spawn(async move {
             while let Ok(ev) = rx.recv().await {
                 match ev.kind {

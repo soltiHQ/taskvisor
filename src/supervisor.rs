@@ -39,8 +39,7 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
 
         let mut set = JoinSet::new();
         self.task_actors(&mut set, &token, &semaphore, tasks);
-        self.shutdown(&mut set, &token, &alive)
-            .await
+        self.shutdown(&mut set, &token, &alive).await
     }
 
     fn observer_listener(&self) {

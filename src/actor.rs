@@ -53,7 +53,7 @@ impl TaskActor {
 
             let _permit_guard = match &self.global_sem {
                 Some(sem) => {
-                    let permit_fut = sem.clone().acquire_owned(); // без аргумента
+                    let permit_fut = sem.clone().acquire_owned();
                     tokio::pin!(permit_fut);
                     select! {
                         res = &mut permit_fut => {
