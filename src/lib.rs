@@ -8,34 +8,50 @@
 //!
 //! ## Features
 //!
-//! | Area              | Description                                                           | Key types / traits                 |
-//! |-------------------|-----------------------------------------------------------------------|------------------------------------|
-//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom observers). | `Observer`                         |
-//! | **Policies**      | Configure restart/backoff strategies for tasks.                       | `RestartPolicy`, `BackoffStrategy` |
-//! | **Supervision**   | Manage groups of tasks and their lifecycle.                           | `Supervisor`                       |
-//! | **Errors**        | Typed errors for orchestration and task execution.                    | `TaskError`, `RuntimeError`        |
-//! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.          | `TaskRef`, `TaskFn`, `TaskSpec`    |
-//! | **Configuration** | Centralize runtime settings.                                          | `Config`                           |
+//! | Area              | Description                                                           | Key types / traits                     |
+//! |-------------------|-----------------------------------------------------------------------|----------------------------------------|
+//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom observers). | [`Observer`]                           |
+//! | **Policies**      | Configure restart/backoff strategies for tasks.                       | [`RestartPolicy`], [`BackoffStrategy`] |
+//! | **Supervision**   | Manage groups of tasks and their lifecycle.                           | [`Supervisor`]                         |
+//! | **Errors**        | Typed errors for orchestration and task execution.                    | [`TaskError`], [`RuntimeError`]        |
+//! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.          | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
+//! | **Configuration** | Centralize runtime settings.                                          | [`Config`]                             |
 //!
 //! ## Optional features
-//! - `logging`: exports a simple built-in `LoggerObserver` __(demo/reference only)__.
-//! - `events`: exports `Event` and `EventKind` for advanced integrations.
+//! - `logging`: exports a simple built-in [`LoggerObserver`] _(demo/reference only)_.
+//! - `events`: exports [`Event`] and [`EventKind`] for advanced integrations.
 //!
-//! ## Example
 //! ```no_run
-//! use taskvisor::{Config, Supervisor, TaskFn};
+//! use std::time::Duration;
+//! use tokio_util::sync::CancellationToken;
+//! use taskvisor::{
+//!     BackoffStrategy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LoggerObserver
+//! };
 //!
-//! #[tokio::main]
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let cfg = Config::default();
-//!     let mut s = Supervisor::new(cfg);
+//!     let mut cfg = Config::default();
+//!     cfg.timeout = Duration::from_secs(5);
 //!
-//!     let task = TaskFn::new("hello", |_| async {
+//!     // Use the built-in logger observer (enabled via --features "logging").
+//!     let mut s = Supervisor::new(cfg.clone(), LoggerObserver);
+//!
+//!     // Define a simple task with a cancellation token.
+//!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
+//!         if ctx.is_cancelled() { return Ok(()); }
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     s.run(vec![task.into()]).await?;
+//!     // Build a specification for the task.
+//!     let spec = TaskSpec::new(
+//!         hello,
+//!         RestartPolicy::Never,
+//!         BackoffStrategy::default(),
+//!         Some(Duration::from_secs(5)),
+//!     );
+//!
+//!     s.run(vec![spec]).await?;
 //!     Ok(())
 //! }
 //! ```
@@ -64,7 +80,7 @@ pub use observer::Observer;
 pub use policy::RestartPolicy;
 pub use strategy::BackoffStrategy;
 pub use supervisor::Supervisor;
-pub use task::{TaskFn, TaskRef};
+pub use task::{Task, TaskFn, TaskRef};
 pub use task_spec::TaskSpec;
 
 // Optional: expose event types.

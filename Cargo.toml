@@ -17,6 +17,9 @@ default = []
 logging = []
 events = []
 
+[package.metadata.docs.rs]
+features = ["logging", "events"]
+
 [dependencies]
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 async-trait = "0.1.89"
