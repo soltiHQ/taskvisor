@@ -1,0 +1,21 @@
+[package]
+name = "taskvisor"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+logging = []
+events = []
+
+[dependencies]
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+async-trait = "0.1.89"
+tokio-util = "0.7.16"
+thiserror = "2.0.16"
+anyhow = "1.0.100"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+required-features = ["logging"]
