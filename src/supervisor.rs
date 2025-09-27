@@ -15,10 +15,11 @@
 //!               ┌─────────────┐
 //!               │  Supervisor │
 //!               └──────┬──────┘
-//!                      │
 //!             owns (bus, cfg, obs)
 //!                      │
 //!       ┌──────────────┼──────────────┐
+//!       ▼              ▼              ▼
+//!   TaskSpec       TaskSpec ...    TaskSpec
 //!       ▼              ▼              ▼
 //!   TaskActor      TaskActor ...   TaskActor
 //!       │              │              │
@@ -166,7 +167,7 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
                 TaskActorParams {
                     restart: spec.restart,
                     backoff: spec.backoff,
-                    attempt_timeout: spec.timeout,
+                    timeout: spec.timeout,
                 },
                 self.bus.clone(),
                 global_sem.clone(),
