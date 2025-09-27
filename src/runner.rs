@@ -5,14 +5,11 @@
 //! # High-level architecture:
 //!
 //! ```text
-//!   ┌────────────┐
-//!   │    Task    │
-//!   └──────┬─────┘
-//!      run_once()
-//!          ▼
-//!  CancellationToken ──► timeout? ──► result
-//!      └─────────► publishes ◄──────────┘
-//!       (Bus: Stopped/Failed/TimeoutHit)
+//!  Task ──► run_once()
+//!              ▼
+//!      CancellationToken ──► timeout? ──► result
+//!          └─────────► publishes ◄──────────┘
+//!           (Bus: Stopped/Failed/TimeoutHit)
 //! ```
 //! - If `timeout` is `Some(dur) > 0`, the task is wrapped in [`tokio::time::timeout`].
 //!   On timeout the child token is cancelled, a [`EventKind::TimeoutHit`] is published, and [`TaskError::Timeout`] is returned.
