@@ -11,7 +11,7 @@
 //!      run_once()
 //!          ▼
 //!  CancellationToken ──► timeout? ──► result
-//!      └────────── publishes ───────────┘
+//!      └─────────► publishes ◄──────────┘
 //!       (Bus: Stopped/Failed/TimeoutHit)
 //! ```
 //! - If `timeout` is `Some(dur) > 0`, the task is wrapped in [`tokio::time::timeout`].
