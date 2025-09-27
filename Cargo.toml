@@ -3,7 +3,7 @@ name = "taskvisor"
 version = "0.0.1"
 edition = "2024"
 
-description = "Lightweight orchestrator/runner with task observers"
+description = "Event-driven task orchestration with restart, backoff, and user-defined observers"
 repository = "https://github.com/soltiHQ/taskvisor"
 documentation = "https://docs.rs/taskvisor"
 license = "Apache-2.0"
