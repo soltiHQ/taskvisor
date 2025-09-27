@@ -3,19 +3,22 @@ name = "taskvisor"
 version = "0.0.1"
 edition = "2024"
 
-description = "Lightweight orchestrator/runner with task observers"
+description = "Event-driven task orchestration with restart, backoff, and user-defined observers"
 repository = "https://github.com/soltiHQ/taskvisor"
 documentation = "https://docs.rs/taskvisor"
 license = "Apache-2.0"
 readme = "README.md"
 
-categories = ["development-tools", "command-line-utilities"]
-keywords = ["tasks", "orchestrator", "runner"]
+keywords = ["async", "tasks", "supervisor", "backoff", "orchestration"]
+categories = ["asynchronous", "concurrency", "development-tools"]
 
 [features]
 default = []
 logging = []
 events = []
+
+[package.metadata.docs.rs]
+features = ["logging", "events"]
 
 [dependencies]
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }

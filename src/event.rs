@@ -1,29 +1,70 @@
+//! # Runtime events emitted by the supervisor and task actors.
+//!
+//! The [`EventKind`] enum classifies event types (shutdown, failures, retries, etc.).
+//! The [`Event`] struct carries additional metadata such as timestamps, task name, error messages, and backoff delays.
+//!
+//! # Example
+//! ```
+//! use std::time::Duration;
+//! use taskvisor::{Event, EventKind};
+//!
+//! let ev = Event::now(EventKind::TaskFailed)
+//!     .with_task("demo-task")
+//!     .with_error("boom")
+//!     .with_attempt(3)
+//!     .with_timeout(Duration::from_secs(5));
+//!
+//! assert_eq!(ev.kind, EventKind::TaskFailed);
+//! assert_eq!(ev.task.as_deref(), Some("demo-task"));
+//! assert_eq!(ev.error.as_deref(), Some("boom"));
+//! ```
+
 use std::time::{Duration, SystemTime};
 
+/// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
+    /// Shutdown requested (OS signal received).
     ShutdownRequested,
+    /// A task is scheduled to back off before retrying.
     BackoffScheduled,
+    /// All tasks stopped within the configured grace period.
     AllStoppedWithin,
+    /// Grace period exceeded; some tasks did not stop in time.
     GraceExceeded,
+    /// A task is starting execution.
     TaskStarting,
+    /// A task has stopped (finished or cancelled).
     TaskStopped,
+    /// A task failed with an error.
     TaskFailed,
+    /// A task hit its configured timeout.
     TimeoutHit,
 }
 
+/// Runtime event with optional metadata.
+///
+/// Carries information about task lifecycle, retries, errors, backoff delays, and timing.
 #[derive(Debug, Clone)]
 pub struct Event {
+    /// Task timeout (if relevant).
     pub timeout: Option<Duration>,
+    /// Backoff delay before retry (if relevant).
     pub delay: Option<Duration>,
+    /// Error message, if the event represents a failure.
     pub error: Option<String>,
+    /// Attempt count (starting from 1).
     pub attempt: Option<u64>,
+    /// Name of the task, if applicable.
     pub task: Option<String>,
+    /// The kind of event.
     pub kind: EventKind,
+    /// Timestamp when the event was created.
     pub at: SystemTime,
 }
 
 impl Event {
+    /// Creates a new event of the given kind with current timestamp.
     pub fn now(kind: EventKind) -> Self {
         Self {
             kind,
@@ -36,26 +77,31 @@ impl Event {
         }
     }
 
+    /// Attaches an error message.
     pub fn with_error(mut self, msg: impl Into<String>) -> Self {
         self.error = Some(msg.into());
         self
     }
 
+    /// Attaches a task name.
     pub fn with_task(mut self, name: impl Into<String>) -> Self {
         self.task = Some(name.into());
         self
     }
 
+    /// Attaches a timeout duration.
     pub fn with_timeout(mut self, d: Duration) -> Self {
         self.timeout = Some(d);
         self
     }
 
+    /// Attaches a backoff delay.
     pub fn with_delay(mut self, d: Duration) -> Self {
         self.delay = Some(d);
         self
     }
 
+    /// Attaches an attempt count.
     pub fn with_attempt(mut self, n: u64) -> Self {
         self.attempt = Some(n);
         self

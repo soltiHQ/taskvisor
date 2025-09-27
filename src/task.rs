@@ -1,3 +1,11 @@
+//! # Task abstraction and function-backed task implementation.
+//!
+//! This module defines the [`Task`] trait (async, cancelable) and a convenient function-backed implementation [`TaskFn`].
+//! The common handle type is [`TaskRef`], an `Arc<dyn Task>` suitable for sharing across the runtime.
+//!
+//! A task receives a [`CancellationToken`] and should periodically check it to
+//! stop cooperatively during shutdown.
+
 use std::{borrow::Cow, future::Future, sync::Mutex};
 
 use async_trait::async_trait;
@@ -5,21 +13,84 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::TaskError;
 
+/// # Shared handle to a task object.
+///
+/// This is the primary type used by the supervisor and specs.
 pub type TaskRef = std::sync::Arc<dyn Task>;
 
+/// # Asynchronous, cancelable unit.
+///
+/// A `Task` has a stable [`name`](Task::name) and an async [`run`](Task::run) method that receives a [`CancellationToken`].
+/// Implementors should regularly check cancellation and exit promptly during shutdown.
+///
+/// # Example
+/// ```
+/// use tokio_util::sync::CancellationToken;
+/// use async_trait::async_trait;
+/// use taskvisor::{Task, TaskError};
+///
+/// struct Demo;
+///
+/// #[async_trait]
+/// impl Task for Demo {
+///     fn name(&self) -> &str { "demo" }
+///
+///     async fn run(&self, ctx: CancellationToken) -> Result<(), TaskError> {
+///         if ctx.is_cancelled() {
+///             return Ok(());
+///         }
+///         // do work...
+///         Ok(())
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait Task: Send + Sync + 'static {
+    /// Returns a stable, human-readable task name.
     fn name(&self) -> &str;
+
+    /// Executes the task until completion or cancellation.
+    ///
+    /// Implementations should check `ctx.is_cancelled()` and exit quickly to honor graceful shutdown.
     async fn run(&self, ctx: CancellationToken) -> Result<(), TaskError>;
 }
 
+/// # Function-backed task implementation.
+///
+/// [`TaskFn`] wraps a closure `Fnc: FnMut(CancellationToken) -> Fut`.
+/// The closure is protected by a [`Mutex`] to allow calling `run(&self, …)` multiple times even though the closure is `FnMut`.
+/// Use [`TaskFn::arc`] for a one-liner that returns a [`TaskRef`].
+///
+/// ### Note:
+/// `TaskFn` is **not re-entrant**; concurrent `run` calls on the same instance are serialized by the internal `Mutex`.
+///
+/// The mutex is held only to invoke the `FnMut` and create the future; it is
+/// released before `await`, which makes it safe in async contexts.
+///
+/// # Example
+/// ```
+/// use tokio_util::sync::CancellationToken;
+/// use taskvisor::{TaskFn, TaskRef, TaskError};
+///
+/// let t: TaskRef = TaskFn::arc("worker", |ctx: CancellationToken| async move {
+///     if ctx.is_cancelled() {
+///         return Ok(());
+///     }
+///     // do work...
+///     Ok::<_, TaskError>(())
+/// });
+///
+/// assert_eq!(t.name(), "worker");
+/// ```
 #[derive(Debug)]
 pub struct TaskFn<Fnc, Fut>
 where
     Fnc: FnMut(CancellationToken) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
+    /// Stable task name.
     name: Cow<'static, str>,
+    /// Underlying function (guarded by a mutex to allow `FnMut` with `&self`).
     func: Mutex<Fnc>,
 }
 
@@ -28,6 +99,9 @@ where
     Fnc: FnMut(CancellationToken) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
+    /// Creates a new function-backed task.
+    ///
+    /// Prefer [`TaskFn::arc`] when you immediately need a [`TaskRef`].
     pub fn new(name: impl Into<Cow<'static, str>>, func: Fnc) -> Self {
         Self {
             name: name.into(),
@@ -35,6 +109,16 @@ where
         }
     }
 
+    /// Creates the task and returns it as a shared handle (`Arc<dyn Task>`).
+    ///
+    /// # Example
+    /// ```
+    /// use tokio_util::sync::CancellationToken;
+    /// use taskvisor::{TaskFn, TaskRef, TaskError};
+    ///
+    /// let t: TaskRef = TaskFn::arc("hello", |_ctx: CancellationToken| async { Ok::<_, TaskError>(()) });
+    /// assert_eq!(t.name(), "hello");
+    /// ```
     pub fn arc(name: impl Into<Cow<'static, str>>, func: Fnc) -> TaskRef {
         std::sync::Arc::new(Self::new(name, func))
     }
