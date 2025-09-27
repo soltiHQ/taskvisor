@@ -1,4 +1,4 @@
-//! Task specification.
+//! # Task specification.
 //!
 //! This module defines [`TaskSpec`] — a configuration bundle that
 //! describes how a task should be executed under supervision

@@ -1,4 +1,4 @@
-//! Supervisor: orchestrates task actors, lifecycle, and graceful shutdown.
+//! # Supervisor: orchestrates task actors, lifecycle, and graceful shutdown.
 //!
 //! The [`Supervisor`] owns the event bus, an observer, and global runtime configuration.
 //! It spawns per-task actors, handles OS signals, and enforces a global concurrency cap via an optional semaphore.

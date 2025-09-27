@@ -1,4 +1,4 @@
-//! Task abstraction and function-backed task implementation.
+//! # Task abstraction and function-backed task implementation.
 //!
 //! This module defines the [`Task`] trait (async, cancelable) and a convenient function-backed implementation [`TaskFn`].
 //! The common handle type is [`TaskRef`], an `Arc<dyn Task>` suitable for sharing across the runtime.

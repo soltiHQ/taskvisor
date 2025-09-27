@@ -1,4 +1,4 @@
-//! Cross-platform OS signal handling utilities.
+//! # Cross-platform OS signal handling utilities.
 //!
 //! This module provides a single async helper [`wait_for_shutdown_signal`]
 //! that completes when the process receives a termination signal.

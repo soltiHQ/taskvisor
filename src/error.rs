@@ -1,4 +1,4 @@
-//! Error types used by the taskvisor runtime and tasks.
+//! # Error types used by the taskvisor runtime and tasks.
 //!
 //! This module defines two main error enums:
 //!
