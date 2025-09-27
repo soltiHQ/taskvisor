@@ -55,8 +55,6 @@
 //!     Ok(())
 //! }
 //! ```
-//!
-//! ---
 
 mod actor;
 mod alive;
@@ -65,6 +63,7 @@ mod config;
 mod error;
 mod event;
 mod observer;
+mod os_signals;
 mod policy;
 mod runner;
 mod strategy;

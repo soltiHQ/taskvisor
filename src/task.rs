@@ -130,10 +130,11 @@ where
     Fnc: FnMut(CancellationToken) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     async fn run(&self, ctx: CancellationToken) -> Result<(), TaskError> {
-        // Lock the FnMut and invoke it to produce the future, then await it.
         let fut = {
             let mut f = self.func.lock().map_err(|_| TaskError::Fatal {
                 error: "mutex poisoned".into(),
