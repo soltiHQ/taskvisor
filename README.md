@@ -4,13 +4,11 @@
 
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![Docs.rs](https://docs.rs/taskvisor/badge.svg)](https://docs.rs/taskvisor)
----
 
 ## Overview
 **taskvisor** is an event-driven supervisor for asynchronous tasks.  
 It provides **restart policies**, **backoff strategies**, **timeouts**, and **graceful shutdown**,  
 while exposing events via the [`Observer`] trait for logging, metrics, or custom monitoring.
----
 
 ## Features
 - 🛑 Graceful shutdown on OS signals (SIGINT, SIGTERM)
@@ -19,7 +17,6 @@ while exposing events via the [`Observer`] trait for logging, metrics, or custom
 - 📡 Event bus with pluggable observers
 - ⏳ Exponential backoff strategies
 - 🚦 Supervision of async tasks
----
 
 ## Quick start
 ```rust,no_run
