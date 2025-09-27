@@ -64,23 +64,18 @@
 //! │  { restart, backoff, timeout }         │
 //! └────┬───────────────────────────────────┘
 //!      │ (1) optional: acquire global Semaphore permit (cancellable)
-//!      │
 //!      │ (2) publish Event::TaskStarting{ task, attempt }
-//!      │
 //!      │ (3) run_once(task, attempt_timeout, bus, child_token)
-//!      │         │
 //!      │         ├─ Ok  ──► publish TaskStopped
 //!      │         │          └─ apply RestartPolicy from TaskSpec:
 //!      │         │                - Never        ⇒ exit
 //!      │         │                - OnFailure    ⇒ exit
 //!      │         │                - Always       ⇒ continue
-//!      │         │
 //!      │         └─ Err ──► publish TaskFailed
 //!      │                    decide retry using RestartPolicy:
 //!      │                      - Never        ⇒ exit
 //!      │                      - OnFailure    ⇒ retry
 //!      │                      - Always       ⇒ retry
-//!      │
 //!      │ (4) if retry:
 //!      │       delay = backoff.next(prev_delay) // BackoffStrategy from TaskSpec
 //!      │       publish BackoffScheduled{ task, delay, attempt, error }
@@ -88,7 +83,6 @@
 //!      │       prev_delay = Some(delay)
 //!      │       attempt += 1
 //!      │       goto (1)
-//!      │
 //!      └─ stop conditions:
 //!              - runtime token cancelled (OS signal → graceful shutdown)
 //!              - RestartPolicy (from TaskSpec) disallows further runs
