@@ -90,9 +90,9 @@
 //!      │       goto (1)
 //!      │
 //!      └─ stop conditions:
-//!             - runtime token cancelled (OS signal → graceful shutdown)
-//!             - RestartPolicy (from TaskSpec) disallows further runs
-//!             - semaphore closed / join end
+//!              - runtime token cancelled (OS signal → graceful shutdown)
+//!              - RestartPolicy (from TaskSpec) disallows further runs
+//!              - semaphore closed / join end
 //!```
 //!---
 //!

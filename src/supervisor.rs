@@ -21,10 +21,10 @@
 //!
 //! Spawn actors:
 //!   TaskSpec[0]  TaskSpec[1]  ...  TaskSpec[N-1]
-//!       │            │                         │
+//!       │            │                   │
 //!       └──► TaskActor::new(task, params, bus, global_sem)   (one per spec)
-//!                     └─ child CancellationToken = runtime_token.child_token()
-//!                        set.spawn(actor.run(child_token))
+//!                    └─ child CancellationToken = runtime_token.child_token()
+//!                       set.spawn(actor.run(child_token))
 //!
 //! Event flow (as wired here):
 //!   TaskActor ... ── publish(Event) ──► Bus ── broadcasts ──► Observer
@@ -33,7 +33,7 @@
 //! Shutdown path:
 //!   os_signals::wait_for_shutdown_signal()
 //!             └─► Bus.publish(ShutdownRequested)
-//!             └─► runtime_token.cancel()        (propagates to child tokens)
+//!             └─► runtime_token.cancel()   → propagates to child tokens
 //!             └─► wait_all_with_grace(cfg.grace):
 //!                    ├─ Ok (all joined)    → Bus.publish(AllStoppedWithin)
 //!                    └─ Timeout exceeded   → Bus.publish(GraceExceeded)
