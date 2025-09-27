@@ -9,8 +9,8 @@ documentation = "https://docs.rs/taskvisor"
 license = "Apache-2.0"
 readme = "README.md"
 
-categories = ["development-tools", "command-line-utilities"]
-keywords = ["tasks", "orchestrator", "runner"]
+keywords = ["async", "tasks", "supervisor", "backoff", "orchestration"]
+categories = ["asynchronous", "concurrency", "development-tools"]
 
 [features]
 default = []
