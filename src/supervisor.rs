@@ -10,24 +10,36 @@
 //! - perform graceful shutdown with a configurable [`Config::grace`]
 //!
 //! # High-level architecture:
-//!
 //! ```text
-//!               ┌─────────────┐
-//!               │  Supervisor │
-//!               └──────┬──────┘
-//!             owns (bus, cfg, obs)
-//!                      │
-//!       ┌──────────────┼──────────────┐
-//!       ▼              ▼              ▼
-//!   TaskSpec       TaskSpec ...    TaskSpec
-//!       ▼              ▼              ▼
-//!   TaskActor      TaskActor ...   TaskActor
-//!       │              │              │
-//!       └────────────emits────────────┘
-//!                      │
-//!                      ▼
-//!                 Event Bus ◄── receives ── Observer
+//! Inputs to run():
+//!   Vec<TaskSpec>  ──►  Supervisor::run(cfg, observer, bus)
+//!
+//! Preparation:
+//!   - build_semaphore() from cfg.max_concurrent (None = unlimited)
+//!   - observer_listener(): Bus.subscribe() ─► forward to Observer.on_event(&Event)
+//!   - AliveTracker::new().spawn_listener(Bus.subscribe())
+//!
+//! Spawn actors:
+//!   TaskSpec[0]  TaskSpec[1]  ...  TaskSpec[N-1]
+//!       │            │                         │
+//!       └──► TaskActor::new(task, params, bus, global_sem)   (one per spec)
+//!                     └─ child CancellationToken = runtime_token.child_token()
+//!                        set.spawn(actor.run(child_token))
+//!
+//! Event flow (as wired here):
+//!   TaskActor ... ── publish(Event) ──► Bus ── broadcasts ──► Observer
+//!                                                  └────────► AliveTracker
+//!
+//! Shutdown path:
+//!   os_signals::wait_for_shutdown_signal()
+//!             └─► Bus.publish(ShutdownRequested)
+//!             └─► runtime_token.cancel()        (propagates to child tokens)
+//!             └─► wait_all_with_grace(cfg.grace):
+//!                    ├─ Ok (all joined)    → Bus.publish(AllStoppedWithin)
+//!                    └─ Timeout exceeded   → Bus.publish(GraceExceeded)
+//!                                            (AliveTracker.snapshot() for stuck tasks)
 //! ```
+//!
 //! - `Supervisor` spawns actors based on [`TaskSpec`].
 //! - `Observer` subscribes to the [`Bus`] and processes [`Event`]s.
 //! - On OS signal, supervisor cancels all actors and waits up to [`Config::grace`].

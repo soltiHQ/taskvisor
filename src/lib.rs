@@ -6,6 +6,96 @@
 //! with configurable policies. The crate is designed as a building block
 //! for higher-level orchestrators and agents.
 //!
+//! # Architecture
+//! ## High-level
+//!```text
+//!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+//!     │   TaskSpec   │ … │   TaskSpec   │ … │   TaskSpec   │
+//!     │(user task #1)│ … │(user task #2)│ … │(user task #3)│
+//!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+//!            ▼                  ▼                  ▼
+//! ┌───────────────────────────────────────────────────────────────────┐
+//! │              supervisor (create actor, handles OS signals)        │
+//! └──────┬──────────────────┬──────────────────┬───────────────┬──────┘
+//!        ▼                  ▼                  ▼               │
+//!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
+//!     │  TaskActor   │   │  TaskActor   │   │  TaskActor   │   │
+//!     │ (retry loop) │   │ (retry loop) │   │ (retry loop) │   │
+//!     └┬─────────────┘   └┬─────────────┘   └┬─────────────┘   │
+//!      │ Publishes        │ Publishes        │ Publishes       │
+//!      │ Events           │ Events           │ Events          │
+//!      │                  │                  │                 │
+//!      │·TaskStarting     │ (…same kinds…)   │ (…same kinds…)  │
+//!      │·TaskFailed       │                  │                 │
+//!      │·TaskStopped      │                  │                 │
+//!      │·TimeoutHit       │                  │                 │
+//!      │·BackoffScheduled │                  │                 │
+//!      │                  │                  │         graceful shutdown
+//!      ▼                  ▼                  ▼                 ▼
+//! ┌───────────────────────────────────────────────────────────────────┐
+//! │                                bus                                │
+//! │                          broadcast<Event>                         │
+//! └─────────────────────────────────┬─────────────────────────────────┘
+//!                      broadcasts to all subscribers
+//!                                   ▼
+//!     ┌───────────────────────┐           ┌───────────────────────┐
+//!     │       Observer        │           │      AliveTracker     │
+//!     │   on_event(&Event)    │           │  maintains alive set  │
+//!     │    (user-defined)     │           │   (Starting/Stopped)  │
+//!     └───────────────────────┘           └───────────────────────┘
+//!```
+//! ---
+//!
+//! ## Attempt flow
+//!```text
+//! ┌────────────────────────────────────────┐
+//! │               TaskSpec                 │
+//! │  {                                     │
+//! │    task: TaskRef,                      │
+//! │    restart: RestartPolicy,             │
+//! │    backoff: BackoffStrategy,           │
+//! │    timeout: Option<Duration>           │
+//! │  }                                     │
+//! └────┬───────────────────────────────────┘
+//!      │  (constructed directly or via Config::from_task)
+//!      ▼
+//! ┌────────────────────────────────────────┐
+//! │               TaskActor                │
+//! │  { restart, backoff, timeout }         │
+//! └────┬───────────────────────────────────┘
+//!      │ (1) optional: acquire global Semaphore permit (cancellable)
+//!      │
+//!      │ (2) publish Event::TaskStarting{ task, attempt }
+//!      │
+//!      │ (3) run_once(task, attempt_timeout, bus, child_token)
+//!      │         │
+//!      │         ├─ Ok  ──► publish TaskStopped
+//!      │         │          └─ apply RestartPolicy from TaskSpec:
+//!      │         │                - Never        ⇒ exit
+//!      │         │                - OnFailure    ⇒ exit
+//!      │         │                - Always       ⇒ continue
+//!      │         │
+//!      │         └─ Err ──► publish TaskFailed
+//!      │                    decide retry using RestartPolicy:
+//!      │                      - Never        ⇒ exit
+//!      │                      - OnFailure    ⇒ retry
+//!      │                      - Always       ⇒ retry
+//!      │
+//!      │ (4) if retry:
+//!      │       delay = backoff.next(prev_delay) // BackoffStrategy from TaskSpec
+//!      │       publish BackoffScheduled{ task, delay, attempt, error }
+//!      │       sleep(delay)  (cancellable via runtime token)
+//!      │       prev_delay = Some(delay)
+//!      │       attempt += 1
+//!      │       goto (1)
+//!      │
+//!      └─ stop conditions:
+//!             - runtime token cancelled (OS signal → graceful shutdown)
+//!             - RestartPolicy (from TaskSpec) disallows further runs
+//!             - semaphore closed / join end
+//!```
+//!---
+//!
 //! ## Features
 //!
 //! | Area              | Description                                                           | Key types / traits                     |
@@ -19,7 +109,7 @@
 //!
 //! ## Optional features
 //! - `logging`: exports a simple built-in [`LoggerObserver`] _(demo/reference only)_.
-//! - `events`: exports [`Event`] and [`EventKind`] for advanced integrations.
+//! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
 //!
 //! ```no_run
 //! use std::time::Duration;

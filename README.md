@@ -4,24 +4,6 @@
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![Docs.rs](https://docs.rs/taskvisor/badge.svg)](https://docs.rs/taskvisor)
 
-## Architecture
-```text
-               ┌─────────────┐
-               │  Supervisor │
-               └──────┬──────┘
-             owns (bus, cfg, obs)
-                      │
-       ┌──────────────┼──────────────┐
-       ▼              ▼              ▼
-   TaskSpec       TaskSpec ...    TaskSpec
-       ▼              ▼              ▼
-   TaskActor      TaskActor ...   TaskActor
-       │              │              │
-       └────────────emits────────────┘
-                      │
-                      ▼
-                 Event Bus ◄── receives ── Observer
-```
 
 ## Features
 - Supervision Trees - Automatically restart failed tasks with configurable policies
