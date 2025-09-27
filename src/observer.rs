@@ -28,7 +28,7 @@
 //!              ┌───────────────────────┼───────────────────────┐
 //!              ▼                       ▼                       ▼
 //!      LoggerObserver            MetricsObserver         CustomObserver
-//!        (stdout)                  (Prometheus, OTEL)     (user logic)
+//!        (stdout)               (Prometheus, OTEL)        (user logic)
 //! ```
 //!
 //! #### Note:
