@@ -58,14 +58,22 @@ pub trait Task: Send + Sync + 'static {
 /// # Function-backed task implementation.
 ///
 /// [`TaskFn`] wraps a closure `Fnc: FnMut(CancellationToken) -> Fut`.
-/// The closure is protected by a [`Mutex`] to allow calling `run(&self, …)` multiple times even though the closure is `FnMut`.
+/// The closure is protected by a [`Mutex`] to allow calling `run(&self, ...)` multiple times even though the closure is `FnMut`.
 /// Use [`TaskFn::arc`] for a one-liner that returns a [`TaskRef`].
 ///
-/// ### Note:
-/// `TaskFn` is **not re-entrant**; concurrent `run` calls on the same instance are serialized by the internal `Mutex`.
+/// ### Concurrency semantics:
+/// `TaskFn` uses a mutex to safely invoke the `FnMut` closure. The mutex is held ONLY during
+/// the creation of the future (calling the closure), not during its execution.
 ///
-/// The mutex is held only to invoke the `FnMut` and create the future; it is
-/// released before `await`, which makes it safe in async contexts.
+/// This means:
+/// - Multiple calls to `run()` can execute concurrently after their futures are created
+/// - The mutex prevents data races when accessing the closure's captured state
+/// - There's no performance bottleneck from long-running async operations
+///
+/// ### Note:
+/// If your closure captures mutable state that's accessed INSIDE the returned future,
+/// you must add your own synchronization (Arc<Mutex<_>>, etc.) as the TaskFn's mutex
+/// doesn't protect the future's execution, only its creation.
 ///
 /// # Example
 /// ```

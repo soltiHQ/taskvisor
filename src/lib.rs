@@ -124,7 +124,7 @@
 //!     cfg.timeout = Duration::from_secs(5);
 //!
 //!     // Use the built-in logger observer (enabled via --features "logging").
-//!     let mut s = Supervisor::new(cfg.clone(), LoggerObserver);
+//!     let s = Supervisor::new(cfg.clone(), LoggerObserver);
 //!
 //!     // Define a simple task with a cancellation token.
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
