@@ -9,16 +9,13 @@
 //! It also publishes lifecycle [`Event`]s to the internal bus.
 //!
 //! # High-level architecture:
-//!
 //! ```text
 //! TaskSpec ──► Supervisor ──► TaskActor (from TaskSpec)
 //!
 //! attempt ──► run_once(task, timeout)
-//!  │           │
-//!  │           ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
-//!  │           └── Err ─► schedule backoff ─► sleep ─► retry
-//!  │
-//!  └──► cancelled (runtime_token) ─► exit
+//!      │       ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
+//!      │       └── Err ─► schedule backoff ─► sleep ─► retry
+//!      └────► cancelled (runtime_token) ─► exit
 //! ```
 //!
 //! #### Notes:

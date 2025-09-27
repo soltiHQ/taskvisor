@@ -3,18 +3,28 @@
 //! This helper drives one execution of a [`Task`], with cancellation and publishing lifecycle [`Event`]s to the [`Bus`].
 //!
 //! # High-level architecture:
-//!
 //! ```text
-//!  Task ──► run_once()
-//!              ▼
-//!      CancellationToken ──► timeout? ──► result
-//!          └─────────► publishes ◄──────────┘
-//!           (Bus: Stopped/Failed/TimeoutHit)
+//! Task ──► run_once ──► derive child CancellationToken
+//!                                    │
+//!                                    ▼
+//!                             ┌─────────────┐
+//!       ┌─────────────────────│ timeout > 0 │
+//!       │                     └─────┬───────┘
+//!       no                         yes
+//!       ▼                           ▼
+//! task.run(child).await        tokio::time::timeout(dur, task.run(child))
+//!       │                           │
+//!       │                   ┌───────┴────────────────────┐
+//!       │                Ok(result)                  Err(elapsed)
+//!       │                   │                            │
+//!    result = Ok()   → publish TaskStopped           cancel child → publish TimeoutHit
+//!    result = Err(e) → publish TaskFailed
 //! ```
-//! - If `timeout` is `Some(dur) > 0`, the task is wrapped in [`tokio::time::timeout`].
-//!   On timeout the child token is cancelled, a [`EventKind::TimeoutHit`] is published, and [`TaskError::Timeout`] is returned.
-//! - On failure, publishes [`EventKind::TaskFailed`] with the error.
+//!
 //! - On success, publishes [`EventKind::TaskStopped`].
+//! - On failure, publishes [`EventKind::TaskFailed`].
+//! - On timeout, cancels the child token, publishes [`EventKind::TimeoutHit`], and returns [`TaskError::Timeout`].
+//! - This function performs **one attempt only**; retries/backoff are handled by [`TaskActor`](crate::actor::TaskActor).
 
 use std::time::Duration;
 use tokio::time;

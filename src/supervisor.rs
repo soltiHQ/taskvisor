@@ -23,8 +23,8 @@
 //!   TaskSpec[0]  TaskSpec[1]  ...  TaskSpec[N-1]
 //!       │            │                   │
 //!       └──► TaskActor::new(task, params, bus, global_sem)   (one per spec)
-//!                    └─ child CancellationToken = runtime_token.child_token()
-//!                       set.spawn(actor.run(child_token))
+//!                    └──► child CancellationToken = runtime_token.child_token()
+//!                         set.spawn(actor.run(child_token))
 //!
 //! Event flow (as wired here):
 //!   TaskActor ... ── publish(Event) ──► Bus ── broadcasts ──► Observer
