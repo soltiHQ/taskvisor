@@ -1,0 +1,66 @@
+name: Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  CI: "true"
+  CARGO_TERM_COLOR: "always"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ${{ vars.RUNS_ON }}
+    timeout-minutes: 10
+    steps:
+      - name: Invoke
+        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        with:
+          command: cargo/fmt
+
+  clippy:
+    name: clippy
+    runs-on: ${{ vars.RUNS_ON }}
+    timeout-minutes: 10
+    steps:
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/cargo/registry
+            ~/.cache/cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Invoke
+        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        with:
+          command: cargo/clippy
+
+  test:
+    name: test
+    runs-on: ${{ vars.RUNS_ON }}
+    timeout-minutes: 10
+    steps:
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/cargo/registry
+            ~/.cache/cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Invoke
+        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        with:
+          command: cargo/test

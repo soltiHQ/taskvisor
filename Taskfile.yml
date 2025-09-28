@@ -1,0 +1,86 @@
+version: '3'
+
+vars:
+  git_root:
+    sh: git rev-parse --show-toplevel
+
+  rust_version: "1.90"
+
+tasks:
+  default:
+    desc: Default task.
+    cmds:
+      - echo "Please enter a task or use '-l' or '--list-all' to list all available tasks"
+    silent: true
+
+  # ================================================#
+  # ---------------------INTERNAL-------------------#
+  # ================================================#
+
+  _docker/run:
+    desc: Internal task to run secure container (quiet pulls).
+    internal: true
+    silent: true
+    requires:
+      vars: [ IMAGE, CMD, MOUNT_DIR ]
+    dir: "{{.git_root}}"
+    cmd: |
+      if ! docker image inspect "{{.IMAGE}}" >/dev/null 2>&1; then
+        docker pull -q "{{.IMAGE}}" >/dev/null 2>&1 || {
+          echo "Failed to pull image: {{.IMAGE}}"
+          exit 1
+        }
+      fi
+
+      docker run --rm --init --pull=never {{if .TTY}}-it{{end}} \
+        --security-opt no-new-privileges \
+        --user $(id -u):$(id -g) \
+        --workdir /workspace \
+        --cap-drop=ALL \
+        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}}\
+        {{if .PORTS}}{{range $port := .PORTS}}--publish {{$port}} {{end}}{{end}}\
+        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}}\
+        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
+        "{{.IMAGE}}" \
+        {{.CMD}}
+
+  _cargo/tool:
+    internal: true
+    silent: true
+    requires:
+      vars: [ CMD ]
+    cmds:
+      - task: _docker/run
+        vars:
+          IMAGE: "rust:{{.rust_version}}-slim"
+          CMD: "{{.CMD}}"
+          MOUNT_DIR: "."
+          VOLUMES:
+            - "{{.git_root}}/.cache/cargo/registry:/usr/local/cargo/registry"
+            - "{{.git_root}}/.cache/cargo/git:/usr/local/cargo/git"
+            - "{{.git_root}}/target:/workspace/target"
+
+  # ================================================#
+  # ----------------------PUBLIC--------------------#
+  # ================================================#
+
+  cargo/fmt:
+    desc: Run 'cargo fmt'.
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "rustup component add rustfmt >/dev/null 2>&1 && cargo fmt --check --verbose"
+
+  cargo/clippy:
+    desc: Run 'cargo clippy'.
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "rustup component add clippy >/dev/null 2>&1 && cargo clippy -- -D warnings"
+
+  cargo/test:
+    desc: Run 'cargo test'.
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "cargo test --all --all-features"
