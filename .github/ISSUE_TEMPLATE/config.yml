@@ -1,8 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: 📖 Documentation
-    url: https://docs.rs/taskvisor
-    about: Read the crate documentation before filing an issue
-  - name: 📝 Examples
-    url: https://github.com/soltiHQ/taskvisor/tree/main/examples
-    about: Check usage examples for common patterns
