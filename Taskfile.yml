@@ -34,7 +34,6 @@ tasks:
 
       docker run --rm --init --pull=never {{if .TTY}}-it{{end}} \
         --security-opt no-new-privileges \
-        --user $(id -u):$(id -g) \
         --workdir /workspace \
         --cap-drop=ALL \
         {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}}\
