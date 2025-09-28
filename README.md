@@ -32,7 +32,7 @@ taskvisor = "0.1"
 taskvisor = { version = "0.1", features = ["logging", "events"] }
 ```
 
-## Quick start
+## 📝 Quick start
 This example shows how taskvisor handles task lifecycle: `execution`, `failure`, `restart with backoff`, and `graceful shutdown`.
 ```rust
 use std::time::Duration;
