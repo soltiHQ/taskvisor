@@ -100,3 +100,7 @@ async fn main() -> anyhow::Result<()> {
 - how `BackoffStrategy` delays retries after failures
 - how `LoggerObserver` prints events to see what's happening
 - how Ctrl+C triggers graceful shutdown with a 5-second grace period
+
+## 🤝 Contributing
+We're open to any new ideas and contributions.  
+Found a bug? Have an idea? We welcome pull requests and issues.
