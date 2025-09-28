@@ -24,7 +24,7 @@ taskvisor = "0.1"
 ```
 
 > Optional features:
->  - `logging` - enables the built-in [`LoggerObserver`], which prints events to stdout _(handy for demos and debugging)_;
+>  - `logging` - enables the built-in [`LoggerObserver`], which prints events to stdout _(for demo and debug)_;
 >  - `events` - exports [`Event`] and [`EventKind`] types at the crate root for direct use.
 
 ```toml
