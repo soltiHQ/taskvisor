@@ -1,158 +1,105 @@
 # taskvisor
-> A lightweight, flexible task orchestration library for Rust with built-in supervision, restart policies, and graceful shutdown support.
+> Event-driven task orchestration library for Rust.
 
+[![Minimum Rust 1.75](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
-[![Docs.rs](https://docs.rs/taskvisor/badge.svg)](https://docs.rs/taskvisor)
+[![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-orange.svg)](./LICENSE)
+---
 
+<div align="center">
+  <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
+  <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
+</div>
 
-## Features
-- Supervision Trees - Automatically restart failed tasks with configurable policies
-- Graceful Shutdown - Handle OS signals (SIGINT/SIGTERM) with configurable grace periods
-- Backoff Strategies - Exponential, constant, or custom backoff between retries
-- Observability - Pluggable observer system for metrics, logging, and monitoring
-- Concurrency Control - Global semaphore-based task limiting
-- Timeout Management - Per-task execution timeouts with automatic cancellation
+---
+## 📖 Features
+- spawn supervised task actors with restart/backoff/timeout policies;
+- observe all lifecycle events (start/stop/failure/backoff/timeout/shutdown);
+- integrate with custom observers for logging, metrics, monitoring, ...;
+- enforce global concurrency limits and graceful shutdown on signals.
 
-## Installation
+## ⚡ Installation
+Add to your Cargo.toml:
 ```toml
 [dependencies]
 taskvisor = "0.1"
+```
 
-# Optional features
+### Optional features:
+- `logging` - enables the built-in [`LoggerObserver`], which prints events to stdout _(handy for demos and debugging)_.
+- `events` - exports [`Event`] and [`EventKind`] types at the crate root for direct use.
+
+### Example:
+```toml
+[dependencies]
 taskvisor = { version = "0.1", features = ["logging", "events"] }
 ```
 
 ## Quick start
+This example shows how taskvisor handles task lifecycle: `execution`, `failure`, `restart with backoff`, and `graceful shutdown`.
 ```rust
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use taskvisor::{Config, Supervisor, TaskFn, TaskRef, RestartPolicy};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure the supervisor
-    let mut config = Config::default();
-    config.max_concurrent = 4;
-    config.grace = Duration::from_secs(10);
+use taskvisor::{
+    BackoffStrategy, 
+    Config, 
+    RestartPolicy, 
+    Supervisor,
+    TaskFn, 
+    TaskRef, 
+    TaskSpec, 
+    LoggerObserver, 
+    TaskError,
+};
 
-    // Create a supervisor with a simple logger
-    let supervisor = Supervisor::new(config, taskvisor::LoggerObserver);
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let cfg = Config {
+        grace: Duration::from_secs(5),
+        ..Default::default()
+    };
 
-    // Define a task
-    let worker: TaskRef = TaskFn::arc("worker", |ctx: CancellationToken| async move {
-        while !ctx.is_cancelled() {
-            // Do work...
-            tokio::time::sleep(Duration::from_secs(1)).await;
+    let sup = Supervisor::new(cfg.clone(), LoggerObserver);
+
+    // Simple task that occasionally fails to demonstrate restart behavior
+    let demo_task: TaskRef = TaskFn::arc("demo", |ctx: CancellationToken| async move {
+        if ctx.is_cancelled() {
+            return Ok(());
         }
+        println!("Task running...");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Fail 30% of the time to show a restart mechanism
+        if rand::random::<f32>() < 0.3 {
+            return Err(TaskError::Fail {
+                error: "Simulated failure".into()
+            });
+        }
+        println!("Task completed successfully");
         Ok(())
     });
 
-    // Run with automatic restart on failure
-    let spec = TaskSpec::from_task(worker, &config);
-    supervisor.run(vec![spec]).await?;
-    
+    let spec = TaskSpec::new(
+        demo_task,
+        RestartPolicy::Always,                // Restart on both success and failure
+        BackoffStrategy {
+            first: Duration::from_secs(1),
+            max: Duration::from_secs(5),
+            factor: 2.0,                      // Exponential: 1s, 2s, 4s, 5s (capped)
+        },
+        None,                                 // No timeout
+    );
+
+    // Run until Ctrl+C
+    sup.run(vec![spec]).await?;
     Ok(())
 }
 ```
 
-## Concepts
-### Tasks
-Tasks are async functions that receive a `CancellationToken` for cooperative shutdown:
-```rust
-use taskvisor::{Task, TaskError};
-use async_trait::async_trait;
-
-struct DatabaseSync;
-
-#[async_trait]
-impl Task for DatabaseSync {
-    fn name(&self) -> &str { 
-        "db-sync" 
-    }
-
-    async fn run(&self, ctx: CancellationToken) -> Result<(), TaskError> {
-        while !ctx.is_cancelled() {
-            // Perform sync...
-            if let Err(e) = sync_database().await {
-                // Retryable error
-                return Err(TaskError::Fail { 
-                    error: e.to_string() 
-                });
-            }
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
-        Ok(())
-    }
-}
-```
-
-### Restart Policies
-Control when tasks should be restarted:
-- `RestartPolicy::OnFailure` - Restart only on errors (default)
-- `RestartPolicy::Always` - Restart unconditionally
-- `RestartPolicy::Never` - Run once and stop
-
-### Backoff Strategies
-Configure delays between restart attempts:
-```rust
-use taskvisor::BackoffStrategy;
-
-let backoff = BackoffStrategy {
-    first: Duration::from_millis(100),
-    max: Duration::from_secs(30),
-    factor: 2.0,  // Exponential backoff
-};
-```
-
-### Custom Observers
-Integrate with your metrics and monitoring systems or smth else:
-```rust
-use taskvisor::{Observer, Event, EventKind};
-use async_trait::async_trait;
-
-struct MetricsObserver;
-
-#[async_trait]
-impl Observer for MetricsObserver {
-    async fn on_event(&self, event: &Event) {
-        match event.kind {
-            EventKind::TaskFailed => {
-                metrics::counter!("task.failures", 1);
-            }
-            EventKind::TaskStarting => {
-                metrics::gauge!("tasks.active", 1);
-            }
-            _ => {}
-        }
-    }
-}
-```
-
-
-## Advanced Usage
-### Complex Task Specifications
-```rust
-let spec = TaskSpec::new(
-    task,
-    RestartPolicy::OnFailure,
-    BackoffStrategy {
-        first: Duration::from_secs(1),
-        max: Duration::from_secs(60),
-        factor: 1.5,
-    },
-    Some(Duration::from_secs(30)), // Task timeout
-);
-```
-
-### Graceful Shutdown
-The supervisor automatically handles OS signals and attempts graceful shutdown:
-- Receives SIGINT/SIGTERM
-- Cancels all task tokens
-- Waits up to `Config::grace` duration
-- Reports stuck tasks if grace period exceeded
-
-## Examples
-Check the [examples/](https://github.com/soltiHQ/taskvisor/tree/main/examples) directory
-
-## Contributing
-We welcome contributions! Please see our Contributing Guidelines.
+### What this example shows:
+- how tasks are defined using `TaskFn::arc`
+- how `RestartPolicy::Always` keeps the task running continuously
+- how `BackoffStrategy` delays retries after failures
+- how `LoggerObserver` prints events to see what's happening
+- how Ctrl+C triggers graceful shutdown with a 5-second grace period
