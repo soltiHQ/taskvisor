@@ -3,34 +3,29 @@
 //! [`AliveTracker`] subscribes to runtime events and maintains a set of active task names.
 //! It listens for [`EventKind::TaskStarting`] and [`EventKind::TaskStopped`] to update its state.
 //!
-//! This is primarily used by the [`Supervisor`] to report which tasks are still alive during graceful shutdown.
+//! This is primarily used by the [`Supervisor`](crate::supervisor::Supervisor) to report which tasks
+//! are still alive during graceful shutdown.
 //!
-//! # High-level architecture
-//!
+//! # High-level architecture:
 //! ```text
-//!            ┌─────────────┐
-//!  tasks ──► │  TaskActor  │
-//!            └──────┬──────┘
-//!               publishes
-//!                   ▼
-//!            ┌─────────────┐
-//!            │     Bus     │
-//!            └──────┬──────┘
-//!                subscribe
-//!                   ▼
-//!   ┌──────────────────────────────────┐
-//!   │AliveTracker (maintains alive set)│
-//!   └───────────────┬──────────────────┘
-//!               snapshot()
-//!                   ▼
-//!   ┌──────────────────────────────────┐
-//!   │  Supervisor (graceful shutdown)  │
-//!   └──────────────────────────────────┘
+//!  TaskActor ── publish(Event) ──► Bus
+//!                                   │
+//!                              subscribe()
+//!                                   │
+//!                                   ▼
+//!                  AliveTracker (in-memory set of task names)
+//!                         │                  │
+//!          TaskStarting ──┘                  └── TaskStopped
+//!          insert(name)                          remove(name)
+//!
+//! Snapshot:
+//!   AliveTracker::snapshot() ──► Vec<String> of alive tasks
+//!                     └────────► Used by Supervisor during graceful shutdown
 //! ```
 //!
-//! - Actors publish [`Event`]s (e.g. [`EventKind::TaskStarting`]/[`EventKind::TaskStopped`]) to the bus.
-//! - [`Supervisor`](crate::supervisor::Supervisor) queries `snapshot()` during shutdown.
-//! - [`AliveTracker`] subscribes and updates the in-memory set of alive task names.
+//! - Actors publish [`EventKind::TaskStarting`] / [`EventKind::TaskStopped`] into the bus.
+//! - [`AliveTracker`] listens in background and updates its set accordingly.
+//! - [`Supervisor`](crate::supervisor::Supervisor) calls `snapshot()` to detect “stuck” tasks after grace timeout.
 
 use std::collections::HashSet;
 use std::sync::Arc;

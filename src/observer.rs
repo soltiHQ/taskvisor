@@ -10,15 +10,25 @@
 //! - other usage.
 //!
 //! # High-level architecture:
-//!
 //! ```text
-//! TaskActor ── emits Events ──► Bus ──► Observer (user-defined)
-//!                                          ▼
-//!                                    on_event(&Event)
-//!                      ┌───────────────────┼──────────────────┐
-//!                      ▼                   ▼                  ▼
-//!                LoggingObserver    MetricsObserver    CustomObserver
-//!                   (stdout)         (e.g. OTEL)        (user logic)
+//! Event flow:
+//!   TaskActor ── publish(Event) ──► Bus ──► Supervisor.observer_listener()
+//!                                              └─► Observer::on_event(&Event)
+//!
+//! User-defined observers:
+//!   - implement [`Observer`] trait
+//!   - receive every [`Event`] from the bus
+//!   - run custom logic asynchronously
+//!
+//! Provided implementations:
+//!   - [`LoggerObserver`] (enabled via `logging` feature) → prints events to stdout
+//!
+//!   TaskActor ... ──► Bus ──► Observer::on_event(&Event)
+//!                                      │
+//!              ┌───────────────────────┼───────────────────────┐
+//!              ▼                       ▼                       ▼
+//!      LoggerObserver            MetricsObserver         CustomObserver
+//!        (stdout)               (Prometheus, OTEL)        (user logic)
 //! ```
 //!
 //! #### Note:
