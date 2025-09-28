@@ -1,35 +1,32 @@
-# taskvisor
-> Event-driven task orchestration library for Rust.
-
 [![Minimum Rust 1.75](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-orange.svg)](./LICENSE)
----
 
-<div align="center">
+# taskvisor
+> Event-driven task orchestration library for Rust.
+
+<div>
   <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
   <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
 </div>
 
----
 ## 📖 Features
-- spawn supervised task actors with restart/backoff/timeout policies;
 - observe all lifecycle events (start/stop/failure/backoff/timeout/shutdown);
 - integrate with custom observers for logging, metrics, monitoring, ...;
-- enforce global concurrency limits and graceful shutdown on signals.
+- enforce global concurrency limits and graceful shutdown on signals;
+- spawn supervised task actors with restart/backoff/timeout policies.
 
-## ⚡ Installation
-Add to your Cargo.toml:
+## 📦 Installation
+#### Cargo.toml:
 ```toml
 [dependencies]
 taskvisor = "0.1"
 ```
 
-### Optional features:
-- `logging` - enables the built-in [`LoggerObserver`], which prints events to stdout _(handy for demos and debugging)_.
-- `events` - exports [`Event`] and [`EventKind`] types at the crate root for direct use.
+> Optional features:
+>  - `logging` - enables the built-in [`LoggerObserver`], which prints events to stdout _(handy for demos and debugging)_;
+>  - `events` - exports [`Event`] and [`EventKind`] types at the crate root for direct use.
 
-### Example:
 ```toml
 [dependencies]
 taskvisor = { version = "0.1", features = ["logging", "events"] }
@@ -97,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### What this example shows:
+#### What this example shows:
 - how tasks are defined using `TaskFn::arc`
 - how `RestartPolicy::Always` keeps the task running continuously
 - how `BackoffStrategy` delays retries after failures
