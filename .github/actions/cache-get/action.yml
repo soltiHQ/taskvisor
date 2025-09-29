@@ -1,7 +1,5 @@
 name: 'Cache Get'
-
 description: 'Restore cache'
-
 inputs:
   job_name:
     description: 'Job name for cache key'
@@ -9,7 +7,6 @@ inputs:
   rust_version:
     description: 'Rust version'
     default: '1.90'
-
 outputs:
   cache-hit:
     description: 'Cache hit status'
@@ -21,9 +18,11 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Prepare cache dirs
+    - name: Prepare cache dirs with proper permissions
       shell: bash
-      run: mkdir -p .cache/cargo .cache/target
+      run: |
+        mkdir -p .cache/cargo .cache/target
+        chmod -R 777 .cache
 
     - name: Restore cache
       id: cache
@@ -33,4 +32,12 @@ runs:
           .cache/cargo
           .cache/target
         key: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-
+        restore-keys: |
+          ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-
+
+    - name: Fix permissions after restore
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        # Фиксим права после восстановления кэша
+        chmod -R 777 .cache || true
