@@ -85,7 +85,7 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "cargo fetch --locked && cargo clippy --all --all-features -- -D warnings"
+          CMD: "cargo clippy --all --all-features --locked -- -D warnings"
 
   cargo/test:
     desc: Run 'cargo test'.
