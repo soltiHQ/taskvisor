@@ -85,7 +85,11 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "cargo test --all --all-features"
+          CMD: |
+            rustup component add clippy >/dev/null 2>&1
+            export CARGO_TARGET_DIR=/tmp/.cache/target
+            export CARGO_HOME=/tmp/.cache/cargo
+            cargo clippy --all --all-features -- -D warnings
   
 
   cargo/test:
