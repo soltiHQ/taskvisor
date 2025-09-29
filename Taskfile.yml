@@ -41,7 +41,7 @@ tasks:
         --user $(id -u):$(id -g) \
         --cap-drop=ALL \
         \
-        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
+        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:ro" \
         {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}\{{end}}
         {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}\{{end}}
         --workdir /workspace \
@@ -61,11 +61,9 @@ tasks:
           MOUNT_DIR: "."
           VOLUMES:
             - "{{.git_root}}/.cache/cargo:/tmp/cargo"
-            - "{{.git_root}}/.cache/rustup:/tmp/rustup"
             - "{{.git_root}}/.cache/target:/tmp/target"
           ENVS:
             - "CARGO_TARGET_DIR=/tmp/target"
-            - "RUSTUP_HOME=/tmp/rustup"
             - "CARGO_HOME=/tmp/cargo"
             - "CARGO_INCREMENTAL=0"
 
