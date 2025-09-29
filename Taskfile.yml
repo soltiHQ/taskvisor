@@ -86,14 +86,13 @@ tasks:
       - task: _cargo/tool
         vars:
           CMD: |
-            echo "CARGO_HOME=$CARGO_HOME" && \
-            echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" && \
             rustup component add clippy >/dev/null 2>&1 && \
+            cargo build --all --all-features && \
+            echo "=== AFTER BUILD ===" && \
+            find /tmp/.cache -type f 2>/dev/null | wc -l && \
             cargo clippy --all --all-features -- -D warnings && \
-            echo "=== WHERE ARE THE FILES? ===" && \
-            find / -name "*.rlib" 2>/dev/null | head -5 || echo "No rlib files found" && \
-            ls -la /workspace/target 2>/dev/null | head -5 || echo "No /workspace/target" && \
-            ls -la target 2>/dev/null | head -5 || echo "No ./target"
+            echo "=== AFTER CLIPPY ===" && \
+            пшеfind /tmp/.cache -type f 2>/dev/null | wc -l
 
   cargo/test:
     desc: Run 'cargo test'.
