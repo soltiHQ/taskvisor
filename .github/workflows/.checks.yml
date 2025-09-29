@@ -23,6 +23,9 @@ jobs:
 
   clippy:
     runs-on: ${{ vars.RUNS_ON }}
+    concurrency:
+      group: cache-${{ github.ref_name }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -44,6 +47,9 @@ jobs:
 
   test:
     runs-on: ${{ vars.RUNS_ON }}
+    concurrency:
+      group: cache-${{ github.ref_name }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
