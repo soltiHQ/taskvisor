@@ -63,6 +63,7 @@ tasks:
             - "{{.git_root}}/.cache/cargo/git:/usr/local/cargo/git"
           ENVS:
             - "CARGO_TARGET_DIR=/tmp/target"
+            - "CARGO_HOME=/tmp/cargo"
             - "CARGO_INCREMENTAL=0"
 
   # ================================================#
@@ -81,7 +82,7 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add clippy >/dev/null 2>&1 && cargo clippy -- -D warnings"
+          CMD: "rustup component add clippy >/dev/null 2>&1 && cargo clippy --all --all-features -- -D warnings"
 
   cargo/test:
     desc: Run 'cargo test'.
