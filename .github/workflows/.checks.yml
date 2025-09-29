@@ -9,66 +9,27 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  fmt:
-    runs-on: ${{ vars.RUNS_ON }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Invoke
-        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
-        with: { command: cargo/fmt }
-
-  clippy:
-    runs-on: ${{ vars.RUNS_ON }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare cache dirs
-        run: mkdir -p .cache/cargo .cache/target
-      - name: Restore clippy-cache
-        id: clippy_cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            .cache/cargo
-            .cache/target
-          key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            clippy-cache-${{ runner.os }}-rust-1.90-
-      - name: Run clippy
-        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
-        with: { command: cargo/clippy }
-      - name: Save clippy-cache (only if miss)
-        if: steps.clippy_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .cache/cargo
-            .cache/target
-          key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
-
   test:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare cache dirs
-        run: mkdir -p .cache/cargo .cache/target
-      - name: Restore test-cache
-        id: test_cache
-        uses: actions/cache/restore@v4
+
+      - name: Get cache
+        id: cache_get
+        uses: ./.github/actions/cache
         with:
-          path: |
-            .cache/cargo
-            .cache/target
-          key: test-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            test-cache-${{ runner.os }}-rust-1.90-
+          job_name: test
+          action: get
+          rust_version: "1.90"
+
       - name: Run tests
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
         with: { command: cargo/test }
-      - name: Save test-cache (only if miss)
-        if: steps.test_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+
+      - name: Put cache
+        if: steps.cache_get.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache
         with:
-          path: |
-            .cache/cargo
-            .cache/target
-          key: test-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
+          job_name: test
+          action: put
+          rust_version: "1.90"
