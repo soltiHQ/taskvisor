@@ -28,6 +28,7 @@ jobs:
       - &restore_checks_cache
         name: Restore checks-cache
         uses: actions/cache@v4
+        id: cache
         with:
           path: |
             .cache/cargo
@@ -41,6 +42,16 @@ jobs:
         with:
           command: cargo/fmt
 
+      - &save_checks_cache
+        name: Save checks-cache
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/cargo
+            .cache/target
+          key: checks-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
+
   clippy:
     name: clippy
     runs-on: ${{ vars.RUNS_ON }}
@@ -53,6 +64,7 @@ jobs:
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
         with:
           command: cargo/clippy
+      - *save_checks_cache
 
   test:
     name: test
@@ -66,3 +78,4 @@ jobs:
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
         with:
           command: cargo/test
+      - *save_checks_cache
