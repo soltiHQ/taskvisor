@@ -37,7 +37,7 @@ jobs:
         with: { command: cargo/clippy }
 
       - name: Put cache
-        if: steps.cache_get.outputs.cache-hit != 'true'
+        if: steps.cache_get.outputs.matched-key != steps.cache_get.outputs.primary-key
         uses: ./.github/actions/cache-put
         with:
           job_name: clippy
@@ -58,7 +58,7 @@ jobs:
         with: { command: cargo/test }
 
       - name: Put cache
-        if: steps.cache_get.outputs.cache-hit != 'true'
+        if: steps.cache_get.outputs.matched-key != steps.cache_get.outputs.primary-key
         uses: ./.github/actions/cache-put
         with:
           job_name: test

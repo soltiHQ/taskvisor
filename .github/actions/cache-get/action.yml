@@ -13,6 +13,12 @@ outputs:
   cache-key:
     description: Cache key
     value: ${{ steps.cache.outputs.cache-primary-key }}
+  matched-key:
+    description: Matched cache key
+    value: ${{ steps.cache.outputs.cache-matched-key }}
+  primary-key:
+    description: Primary cache key used in 'key:'
+    value: ${{ steps.meta.outputs.primary-key }}
 
 runs:
   using: "composite"
@@ -22,6 +28,11 @@ runs:
       shell: bash
       run: mkdir -p .cache/cargo .cache/target
 
+    - name: Compute primary key
+      id: meta
+      shell: bash
+      run: echo "primary-key=job-${{ inputs.job_name }}-hash-${{ hashFiles('**/Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+
     - name: Restore cache
       id: cache
       uses: actions/cache/restore@v4
@@ -29,5 +40,5 @@ runs:
         path: |
           .cache/cargo
           .cache/target
-        key: job-${{ inputs.job_name }}-hash-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ steps.meta.outputs.primary-key }}
         restore-keys: job-${{ inputs.job_name }}-hash-
