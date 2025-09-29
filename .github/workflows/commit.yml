@@ -16,9 +16,14 @@ concurrency:
   group: commit-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {
+  contents: read,
+  actions: write
+}
+
 jobs:
   checks:
-    name: Commit Flow
+    name: Run
     uses: ./.github/workflows/.checks.yml
 
   commit-check:
