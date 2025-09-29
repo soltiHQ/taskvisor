@@ -40,9 +40,9 @@ tasks:
         --security-opt no-new-privileges \
         --cap-drop=ALL \
         \
-        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:ro" \
-        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}\{{end}}
-        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}\{{end}}
+        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
+        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
+        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}} \
         --workdir /workspace \
         {{.IMAGE}} \
         {{.CMD}}
@@ -58,12 +58,9 @@ tasks:
           IMAGE: "rust:{{.rust_version}}-slim"
           CMD: "{{.CMD}}"
           MOUNT_DIR: "."
-          VOLUMES:
-            - "{{.git_root}}/.cache/cargo:/tmp/cargo"
-            - "{{.git_root}}/.cache/target:/tmp/target"
           ENVS:
-            - "CARGO_TARGET_DIR=/tmp/target"
-            - "CARGO_HOME=/tmp/cargo"
+            - "CARGO_TARGET_DIR=/workspace/.cache/target"
+            - "CARGO_HOME=/workspace/.cache/cargo"
             - "CARGO_INCREMENTAL=0"
 
   # ================================================#
