@@ -41,7 +41,7 @@ tasks:
         --user $(id -u):$(id -g) \
         --cap-drop=ALL \
         \
-        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:ro" \
+        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
         {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
         {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}} \
         \
@@ -87,14 +87,7 @@ tasks:
         vars:
           CMD: |
             rustup component add clippy >/dev/null 2>&1 && \
-            cargo build --all --all-features && \
-            echo "=== FIND TARGET ===" && \
-            find /workspace -name "*.rlib" 2>/dev/null | head -3 && \
-            echo "=== FIND CARGO REGISTRY ===" && \
-            find / -path "*/registry/cache/*" 2>/dev/null | head -3 && \
-            echo "=== CHECK DEFAULT PATHS ===" && \
-            ls -la /workspace/target/debug 2>/dev/null | head -3 || echo "No /workspace/target" && \
-            ls -la ~/.cargo 2>/dev/null | head -3 || echo "No ~/.cargo"
+            strace -e trace=open,openat cargo build --all --all-features 2>&1 | grep -E "target|cargo" | head -10
 
   cargo/test:
     desc: Run 'cargo test'.
