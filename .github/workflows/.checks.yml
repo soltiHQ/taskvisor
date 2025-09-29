@@ -1,4 +1,5 @@
 name: Checks
+
 on: { workflow_call: {} }
 
 permissions: {
@@ -8,15 +9,14 @@ permissions: {
 
 env:
   CI: "true"
-  CARGO_TERM_COLOR: "always"
   RUST_BACKTRACE: "1"
+  CARGO_TERM_COLOR: "always"
 
 jobs:
   fmt:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Run fmt
         uses: ./.github/actions/taskfile
         with: { command: cargo/fmt }
@@ -26,45 +26,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get cache
+      - name: Get Cache
         id: cache_get
         uses: ./.github/actions/cache-get
-        with:
-          job_name: clippy
+        with: { job_name: clippy }
 
-      - name: Run clippy
+      - name: Run Job
         uses: ./.github/actions/taskfile
         with: { command: cargo/clippy }
 
-      - name: Inspect cache before save (host)
-        run: |
-          du -sh .cache/cargo || true
-          du -sh .cache/target || true
-          find .cache/cargo/registry/cache -maxdepth 2 -type f -name '*.crate' | head -n 20 || true
-
-      - name: Put cache
+      - name: Put Cache
         if: steps.cache_get.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-put
-        with:
-          job_name: clippy
+        with: { job_name: clippy }
 
   test:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get cache
+      - name: Get Cache
         id: cache_get
         uses: ./.github/actions/cache-get
-        with:
-          job_name: test
+        with: { job_name: test }
 
-      - name: Run tests
+      - name: Run Job
         uses: ./.github/actions/taskfile
         with: { command: cargo/test }
 
-      - name: Put cache
+      - name: Put Cache
         if: steps.cache_get.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-put
-        with:
-          job_name: test
+        with: { job_name: test }
