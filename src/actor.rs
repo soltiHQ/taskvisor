@@ -102,19 +102,13 @@ impl TaskActor {
             if runtime_token.is_cancelled() {
                 break;
             }
-
-            // Acquire global concurrency permit if configured (cancellable).
             let _permit_guard = match &self.global_sem {
                 Some(sem) => {
                     let permit_fut = sem.clone().acquire_owned();
+
                     tokio::pin!(permit_fut);
                     select! {
-                        res = &mut permit_fut => {
-                            match res {
-                                Ok(permit) => Some(permit),
-                                Err(_) => None,
-                            }
-                        }
+                        res = &mut permit_fut => { res.ok() }
                         _ = runtime_token.cancelled() => { break; }
                     }
                 }

@@ -75,7 +75,7 @@ impl TaskSpec {
             task,
             restart: cfg.restart,
             backoff: cfg.backoff,
-            timeout: (!cfg.timeout.is_zero()).then(|| cfg.timeout),
+            timeout: (!cfg.timeout.is_zero()).then_some(cfg.timeout),
         }
     }
 }

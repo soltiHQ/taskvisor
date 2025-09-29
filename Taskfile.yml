@@ -18,29 +18,33 @@ tasks:
   # ================================================#
 
   _docker/run:
-    desc: Internal task to run secure container (quiet pulls).
+    desc: Internal task to run task in containers.
     internal: true
     silent: true
     requires:
       vars: [ IMAGE, CMD, MOUNT_DIR ]
     dir: "{{.git_root}}"
     cmd: |
+      set -euo pipefail
       if ! docker image inspect "{{.IMAGE}}" >/dev/null 2>&1; then
+        echo "pulling: {{.IMAGE}}"
+      
         docker pull -q "{{.IMAGE}}" >/dev/null 2>&1 || {
           echo "Failed to pull image: {{.IMAGE}}"
           exit 1
         }
       fi
-
-      docker run --rm --init --pull=never {{if .TTY}}-it{{end}} \
+      docker run --rm --init --pull=never \
         --security-opt no-new-privileges \
-        --workdir /workspace \
+        --user $(id -u):$(id -g) \
         --cap-drop=ALL \
-        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}}\
-        {{if .PORTS}}{{range $port := .PORTS}}--publish {{$port}} {{end}}{{end}}\
-        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}}\
+        \
         --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
-        "{{.IMAGE}}" \
+        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}}
+        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}}
+        \
+        --workdir /workspace \
+        {{.IMAGE}} \
         {{.CMD}}
 
   _cargo/tool:
@@ -58,6 +62,8 @@ tasks:
             - "{{.git_root}}/.cache/cargo/registry:/usr/local/cargo/registry"
             - "{{.git_root}}/.cache/cargo/git:/usr/local/cargo/git"
             - "{{.git_root}}/target:/workspace/target"
+          ENVS:
+            - "CARGO_INCREMENTAL=0"
 
   # ================================================#
   # ----------------------PUBLIC--------------------#

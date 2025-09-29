@@ -78,7 +78,6 @@ pub trait Observer {
     async fn on_event(&self, event: &Event);
 }
 
-
 /// Base observer that logs events to stdout.
 ///
 /// Enabled via the `logging` feature. Useful for demos and debugging.
