@@ -1,10 +1,7 @@
 name: Checks
 on: { workflow_call: {} }
 
-permissions: {
-  contents: read,
-  actions: write
-}
+permissions: { contents: read, actions: write }
 
 env:
   CI: "true"
@@ -12,59 +9,61 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  fmt:
+  lockhash:
     runs-on: ${{ vars.RUNS_ON }}
+    outputs:
+      lock_hash: ${{ steps.calc.outputs.lock_hash }}
     steps:
       - uses: actions/checkout@v4
+      - id: calc
+        shell: bash
+        run: echo "lock_hash=${{ hashFiles('**/Cargo.lock') }}" >> "$GITHUB_OUTPUT"
 
+  fmt:
+    runs-on: ${{ vars.RUNS_ON }}
+    needs: [lockhash]
+    steps:
+      - uses: actions/checkout@v4
       - name: Run fmt
         uses: ./.github/actions/taskfile
         with: { command: cargo/fmt }
 
   clippy:
     runs-on: ${{ vars.RUNS_ON }}
+    needs: [lockhash]
     concurrency:
-      group: cache-${{ github.ref_name }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+      group: cache-${{ github.ref_name }}-clippy-${{ needs.lockhash.outputs.lock_hash }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-
       - name: Get cache
         id: cache_get
         uses: ./.github/actions/cache-get
-        with:
-          job_name: clippy
-
+        with: { job_name: clippy }
       - name: Run clippy
         uses: ./.github/actions/taskfile
         with: { command: cargo/clippy }
-
       - name: Put cache
         if: steps.cache_get.outputs.matched-key != steps.cache_get.outputs.primary-key
         uses: ./.github/actions/cache-put
-        with:
-          job_name: clippy
+        with: { job_name: clippy }
 
   test:
     runs-on: ${{ vars.RUNS_ON }}
+    needs: [lockhash]
     concurrency:
-      group: cache-${{ github.ref_name }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+      group: cache-${{ github.ref_name }}-test-${{ needs.lockhash.outputs.lock_hash }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-
       - name: Get cache
         id: cache_get
         uses: ./.github/actions/cache-get
-        with:
-          job_name: test
-
+        with: { job_name: test }
       - name: Run tests
         uses: ./.github/actions/taskfile
         with: { command: cargo/test }
-
       - name: Put cache
         if: steps.cache_get.outputs.matched-key != steps.cache_get.outputs.primary-key
         uses: ./.github/actions/cache-put
-        with:
-          job_name: test
+        with: { job_name: test }
