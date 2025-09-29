@@ -3,8 +3,6 @@ version: '3'
 vars:
   git_root:
     sh: git rev-parse --show-toplevel
-  host_uid:
-    sh: id -u
 
   rust_version: "1.90"
 
@@ -58,8 +56,8 @@ tasks:
       vars: [ CMD ]
     cmds:
       - cmd: |
-          mkdir -p "{{.git_root}}/.cache/cargo-uid{{.host_uid}}" \
-                   "{{.git_root}}/.cache/target-uid{{.host_uid}}"
+          mkdir -p "{{.git_root}}/.cache/cargo" \
+                   "{{.git_root}}/.cache/target"
       - task: _docker/run
         vars:
           IMAGE: "rust:{{.rust_version}}-slim"
