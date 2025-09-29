@@ -1,21 +1,22 @@
-name: 'Cache Manager'
+name: 'Cache Get'
 
-description: 'Manage cache operations'
+description: 'Restore cache'
 
 inputs:
   job_name:
     description: 'Job name for cache key'
     required: true
-  action:
-    description: 'get or put'
-    required: true
   rust_version:
     description: 'Rust version'
-    required: true
+    default: '1.90'
+
 outputs:
   cache-hit:
     description: 'Cache hit status'
     value: ${{ steps.cache.outputs.cache-hit }}
+  cache-key:
+    description: 'Generated cache key'
+    value: ${{ steps.cache.outputs.cache-primary-key }}
 
 runs:
   using: "composite"
@@ -24,12 +25,12 @@ runs:
       shell: bash
       run: mkdir -p .cache/cargo .cache/target
 
-    - name: Cache operation
+    - name: Restore cache
       id: cache
-      uses: ${{ inputs.action == 'get' && 'actions/cache/restore@v4' || 'actions/cache/save@v4' }}
+      uses: actions/cache/restore@v4
       with:
         path: |
           .cache/cargo
           .cache/target
         key: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ inputs.action == 'get' && format('{0}-cache-{1}-rust-{2}-', inputs.job_name, runner.os, inputs.rust_version) || '' }}
+        restore-keys: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-
