@@ -41,30 +41,30 @@ jobs:
           path: .cache/cargo
           key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
 
-#  test:
-#    runs-on: ${{ vars.RUNS_ON }}
-#    steps:
-#      - uses: actions/checkout@v4
-#      - name: Prepare cache dirs
-#        run: mkdir -p .cache/cargo .cache/target
-#      - name: Restore test-cache
-#        id: test_cache
-#        uses: actions/cache/restore@v4
-#        with:
-#          path: |
-#            .cache/cargo
-#            .cache/target
-#          key: test-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
-#          restore-keys: |
-#            test-cache-${{ runner.os }}-rust-1.90-
-#      - name: Invoke
-#        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
-#        with: { command: cargo/test }
-#      - name: Save test-cache
-#        if: steps.test_cache.outputs.cache-hit != 'true'
-#        uses: actions/cache/save@v4
-#        with:
-#          path: |
-#            .cache/cargo
-#            .cache/target
-#          key: test-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
+  test:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare cache dirs
+        run: mkdir -p .cache/cargo .cache/target
+      - name: Restore test-cache
+        id: test_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/cargo
+            .cache/target
+          key: test-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            test-cache-${{ runner.os }}-rust-1.90-
+      - name: Run tests
+        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        with: { command: cargo/test }
+      - name: Save test-cache (only if miss)
+        if: steps.test_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/cargo
+            .cache/target
+          key: test-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
