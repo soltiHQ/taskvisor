@@ -36,6 +36,12 @@ jobs:
         uses: ./.github/actions/taskfile
         with: { command: cargo/clippy }
 
+      - name: Inspect cache before save (host)
+        run: |
+          du -sh .cache/cargo || true
+          du -sh .cache/target || true
+          find .cache/cargo/registry/cache -maxdepth 2 -type f -name '*.crate' | head -n 20 || true
+
       - name: Put cache
         if: steps.cache_get.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-put

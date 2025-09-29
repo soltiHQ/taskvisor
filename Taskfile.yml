@@ -85,7 +85,13 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add clippy && cargo fetch --locked && cargo check --all --all-features -q && cargo clippy --all --all-features --locked -- -D warnings"
+          CMD: >
+            set -euo pipefail
+            echo "CARGO_HOME=$CARGO_HOME"
+            echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+            cargo fetch --locked
+            cargo check --all --all-features -q
+            cargo clippy --all --all-features --locked -- -D warnings
 
   cargo/test:
     desc: Run 'cargo test'.
