@@ -85,7 +85,13 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add clippy >/dev/null 2>&1 && cargo clippy --all --all-features -- -D warnings"
+          CMD: |
+            rustup component add clippy >/dev/null 2>&1 && \
+            cargo clippy --all --all-features -- -D warnings && \
+            echo "=== INSIDE CONTAINER ===" && \
+            echo "Files in /tmp/.cache: $(find /tmp/.cache -type f 2>/dev/null | wc -l)" && \
+            ls -la /tmp/.cache/cargo/registry/ 2>/dev/null | head -5 || echo "No registry" && \
+            ls -la /tmp/.cache/target/ 2>/dev/null | head -5 || echo "No target"
 
   cargo/test:
     desc: Run 'cargo test'.
