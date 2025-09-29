@@ -1,20 +1,21 @@
-name: 'Cache Put'
-description: 'Save cache'
+name: Cache Put
+description: Put cache to github
+
 inputs:
   job_name:
-    description: 'Job name for cache key'
+    description: Job name for cache key
     required: true
   rust_version:
-    description: 'Rust version'
-    default: '1.90'
+    description: Rust version
+    required: true
 
 runs:
   using: "composite"
+
   steps:
     - name: Fix permissions before save
       shell: bash
-      run: |
-        chmod -R 755 .cache || true
+      run: chmod -R 777 .cache || true
 
     - name: Save cache
       uses: actions/cache/save@v4

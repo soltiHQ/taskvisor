@@ -1,28 +1,29 @@
-name: 'Cache Get'
-description: 'Restore cache'
+name: Cache Get
+description: Get cache from github
+
 inputs:
   job_name:
-    description: 'Job name for cache key'
+    description: Job name for cache key
     required: true
   rust_version:
-    description: 'Rust version'
-    default: '1.90'
+    description: Rust version
+    required: true
+
 outputs:
   cache-hit:
-    description: 'Cache hit status'
+    description: Cache status
     value: ${{ steps.cache.outputs.cache-hit }}
   cache-key:
-    description: 'Generated cache key'
+    description: Cache key
     value: ${{ steps.cache.outputs.cache-primary-key }}
 
 runs:
   using: "composite"
+
   steps:
     - name: Prepare cache dirs with proper permissions
       shell: bash
-      run: |
-        mkdir -p .cache/cargo .cache/target
-        chmod -R 777 .cache
+      run: mkdir -p .cache/cargo .cache/target
 
     - name: Restore cache
       id: cache
@@ -32,12 +33,4 @@ runs:
           .cache/cargo
           .cache/target
         key: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-
-
-    - name: Fix permissions after restore
-      if: steps.cache.outputs.cache-hit == 'true'
-      shell: bash
-      run: |
-        # Фиксим права после восстановления кэша
-        chmod -R 777 .cache || true
+        restore-keys: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-
