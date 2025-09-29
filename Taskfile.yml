@@ -38,7 +38,6 @@ tasks:
 
       docker run --rm --init --pull=never \
         --security-opt no-new-privileges \
-        --user $(id -u):$(id -g) \
         --cap-drop=ALL \
         \
         --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:ro" \
