@@ -1,0 +1,25 @@
+name: 'Cache Put'
+description: 'Save cache'
+inputs:
+  job_name:
+    description: 'Job name for cache key'
+    required: true
+  rust_version:
+    description: 'Rust version'
+    default: '1.90'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Fix permissions before save
+      shell: bash
+      run: |
+        chmod -R 755 .cache || true
+
+    - name: Save cache
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          .cache/cargo
+          .cache/target
+        key: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-${{ hashFiles('**/Cargo.lock') }}
