@@ -9,23 +9,8 @@ permissions:
 
 env:
   CI: "true"
-  RUST_BACKTRACE: "1"
   CARGO_TERM_COLOR: "always"
-
-x-steps:
-  restore_checks_cache: &restore_checks_cache
-    - name: Prepare cache dirs
-      run: mkdir -p .cache/cargo .cache/target
-    - name: Restore checks-cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          .cache/cargo
-          .cache/target
-        key: checks-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          checks-cache-${{ runner.os }}-rust-1.90-
-
+  RUST_BACKTRACE: "1"
 
 jobs:
   fmt:
@@ -33,8 +18,24 @@ jobs:
     runs-on: ${{ vars.RUNS_ON }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - *restore_checks_cache
+      - &checkout
+        uses: actions/checkout@v4
+
+      - &prepare_cache_dirs
+        name: Prepare cache dirs
+        run: mkdir -p .cache/cargo .cache/target
+
+      - &restore_checks_cache
+        name: Restore checks-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/cargo
+            .cache/target
+          key: checks-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            checks-cache-${{ runner.os }}-rust-1.90-
+
       - name: Invoke
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
         with:
@@ -45,7 +46,8 @@ jobs:
     runs-on: ${{ vars.RUNS_ON }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - *checkout
+      - *prepare_cache_dirs
       - *restore_checks_cache
       - name: Invoke
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
@@ -57,7 +59,8 @@ jobs:
     runs-on: ${{ vars.RUNS_ON }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - *checkout
+      - *prepare_cache_dirs
       - *restore_checks_cache
       - name: Invoke
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
