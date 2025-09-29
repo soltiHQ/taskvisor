@@ -1,0 +1,35 @@
+name: Commit
+
+on:
+  push:
+    branches-ignore:
+      - main
+    paths-ignore:
+      - "CODE_OF_CONDUCT.md"
+      - "README.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/ISSUE_TEMPLATE/*"
+      - ".github/pull_request_template.md"
+
+concurrency:
+  group: commit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {
+  contents: read,
+  actions: write
+}
+
+jobs:
+  checks:
+    name: Run
+    uses: ./.github/workflows/.checks.yml
+
+  commit-check:
+    name: Commit Check
+    needs: checks
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - name: All checks passed
+        run: echo "All Commit checks completed successfully!"

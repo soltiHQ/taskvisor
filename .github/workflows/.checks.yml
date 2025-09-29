@@ -1,0 +1,60 @@
+name: Checks
+
+on: { workflow_call: {} }
+
+permissions: {
+  contents: read,
+  actions: write
+}
+
+env:
+  CI: "true"
+  RUST_BACKTRACE: "1"
+  CARGO_TERM_COLOR: "always"
+
+jobs:
+  fmt:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run fmt
+        uses: ./.github/actions/taskfile
+        with: { command: cargo/fmt }
+
+  test:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with: { job_name: test }
+
+      - name: Run Job
+        uses: ./.github/actions/taskfile
+        with: { command: cargo/test }
+
+      - name: Put Cache
+        if: steps.cache_get.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-put
+        with: { job_name: test }
+
+  clippy:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with: { job_name: clippy }
+
+      - name: Run Job
+        uses: ./.github/actions/taskfile
+        with: { command: cargo/clippy }
+
+      - name: Put Cache
+        if: steps.cache_get.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-put
+        with: { job_name: clippy }

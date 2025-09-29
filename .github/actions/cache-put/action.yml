@@ -1,0 +1,19 @@
+name: Cache Put
+description: Put cache to github
+
+inputs:
+  job_name:
+    description: Job name for cache key
+    required: true
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: Save cache
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          .cache/cargo
+          .cache/target
+        key: job-${{ inputs.job_name }}-hash-${{ hashFiles('Cargo.lock') }}

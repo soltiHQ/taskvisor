@@ -5,22 +5,118 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: read
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions: {
+  contents: read,
+  actions: write
+}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  check-main-branch:
+    name: Verify tag from main branch
+    runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Ensure main is fetched
+        run: git fetch origin main --depth=1
+
+      - name: Verify tag commit is on main
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          
+          TAG_COMMIT=$(git rev-list -n 1 "$REF")  
+          git rev-parse --verify origin/main >/dev/null
+          
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "Tag commit is not an ancestor of origin/main"
+            exit 1
+          fi
+
+      - name: Verify Cargo.toml version matches tag
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          
+          TAG_VERSION="${REF_NAME#v}"
+          FILE_VERSION=$(grep -E '^\s*version\s*=' Cargo.toml | head -n1 | cut -d '"' -f2)
+          
+          if [ -z "$FILE_VERSION" ] || [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Cargo.toml version must equal tag (without 'v')"
+            exit 1
+          fi
+
+  publish-crate:
+    needs: check-main-branch
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish
+        run: cargo publish --locked
+        env: { CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }} }
+
+  publish-release:
+    needs: publish-crate
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          set -euo pipefail
+          
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" "$PREV_TAG"..HEAD)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s")
+          fi
+          
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          tag_name: ${{ github.ref_name }}
+          name: "Taskvisor ${{ github.ref_name }}"
+          body: |
+            # Taskvisor
+            > Event-driven task orchestration library for Rust.
+            
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ## Links
+            • Crate: https://crates.io/crates/taskvisor
+            • Docs: https://docs.rs/taskvisor
