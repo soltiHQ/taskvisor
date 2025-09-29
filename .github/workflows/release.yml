@@ -80,6 +80,8 @@ jobs:
   publish-release:
     needs: publish-crate
     runs-on: ${{ vars.RUNS_ON }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
