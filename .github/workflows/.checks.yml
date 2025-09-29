@@ -24,15 +24,22 @@ jobs:
       - name: Prepare cache dirs
         run: mkdir -p .cache/cargo
       - name: Restore clippy-cache
-        uses: actions/cache@v4
+        id: clippy_cache
+        uses: actions/cache/restore@v4
         with:
           path: .cache/cargo
           key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             clippy-cache-${{ runner.os }}-rust-1.90-
-      - name: Invoke
+      - name: Run clippy
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
         with: { command: cargo/clippy }
+      - name: Save clippy-cache (only if miss)
+        if: steps.clippy_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/cargo
+          key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
 
   test:
     runs-on: ${{ vars.RUNS_ON }}
