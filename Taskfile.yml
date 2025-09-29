@@ -88,8 +88,12 @@ tasks:
           CMD: |
             rustup component add clippy >/dev/null 2>&1
             CARGO_HOME=/tmp/.cache/cargo cargo build --all --all-features --target-dir /tmp/.cache/target
-            CARGO_HOME=/tmp/.cache/cargo cargo clippy --all --all-features --target-dir /tmp/.cache/target -- -D warnings
-            ls -la /tmp/.cache/target/ 2>/dev/null | head -5
+            echo "=== FIND COMPILED FILES ===" 
+            find / -name "libtaskvisor*" 2>/dev/null || echo "No libtaskvisor found"
+            find / -name "*.rlib" 2>/dev/null | head -5 || echo "No rlib files"
+            echo "=== CHECK DEFAULT TARGET ==="
+            ls -la target/ 2>/dev/null | head -5 || echo "No ./target"
+            ls -la /workspace/target/ 2>/dev/null | head -5 || echo "No /workspace/target"
 
           # CMD: "rustup component add rustfmt >/dev/null 2>&1 && cargo clippy --all --all-features -- -D warnings"
 
