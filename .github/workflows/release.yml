@@ -9,6 +9,11 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: true
 
+permissions: {
+  contents: read,
+  actions: write
+}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
