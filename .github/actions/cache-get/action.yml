@@ -1,5 +1,5 @@
 name: Cache Get
-description: Get cache from github
+description: Get cache from GitHub
 
 inputs:
   job_name:
@@ -13,7 +13,6 @@ outputs:
 
 runs:
   using: "composite"
-
   steps:
     - name: Prepare cache dirs
       shell: bash
@@ -27,4 +26,3 @@ runs:
           .cache/cargo
           .cache/target
         key: job-${{ inputs.job_name }}-hash-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: job-${{ inputs.job_name }}-hash-
