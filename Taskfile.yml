@@ -40,8 +40,8 @@ tasks:
         --cap-drop=ALL \
         \
         --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
-        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}}
-        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}}
+        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}\{{end}}
+        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}\{{end}}
         \
         --workdir /workspace \
         {{.IMAGE}} \
