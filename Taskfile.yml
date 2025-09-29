@@ -61,8 +61,8 @@ tasks:
           VOLUMES:
             - "{{.git_root}}/.cache/cargo/registry:/usr/local/cargo/registry"
             - "{{.git_root}}/.cache/cargo/git:/usr/local/cargo/git"
-            - "{{.git_root}}/target:/workspace/target"
           ENVS:
+            - "CARGO_TARGET_DIR=/tmp/target"
             - "CARGO_INCREMENTAL=0"
 
   # ================================================#
