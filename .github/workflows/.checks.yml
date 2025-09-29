@@ -14,11 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-#      - name: Get cache
-#        id: cache_get
-#        uses: ./.github/actions/cache-get
-#        with:
-#          job_name: test
+      - name: Get cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with:
+          job_name: test
 
       - name: Run tests
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
