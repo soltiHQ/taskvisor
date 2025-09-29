@@ -55,6 +55,9 @@ tasks:
     requires:
       vars: [ CMD ]
     cmds:
+      - sh: |
+          mkdir -p "{{.git_root}}/.cache/cargo-uid{{.host_uid}}" \
+                   "{{.git_root}}/.cache/target-uid{{.host_uid}}"
       - task: _docker/run
         vars:
           IMAGE: "rust:{{.rust_version}}-slim"
