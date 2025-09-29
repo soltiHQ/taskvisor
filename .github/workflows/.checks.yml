@@ -21,7 +21,7 @@ jobs:
           job_name: test
 
       - name: Run tests
-        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        uses: ./.github/actions/taskfile
         with: { command: cargo/test }
 
       - name: Put cache
