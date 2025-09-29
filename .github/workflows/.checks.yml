@@ -22,12 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Prepare cache dirs
-        run: mkdir -p .cache/cargo
+        run: mkdir -p .cache/cargo .cache/target
       - name: Restore clippy-cache
         id: clippy_cache
         uses: actions/cache/restore@v4
         with:
-          path: .cache/cargo
+          path: |
+            .cache/cargo
+            .cache/target
           key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             clippy-cache-${{ runner.os }}-rust-1.90-
@@ -38,7 +40,9 @@ jobs:
         if: steps.clippy_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: .cache/cargo
+          path: |
+            .cache/cargo
+            .cache/target
           key: clippy-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
 
   test:
