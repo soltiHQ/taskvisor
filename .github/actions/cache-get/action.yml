@@ -29,5 +29,5 @@ runs:
         path: |
           .cache/cargo
           .cache/target
-        key: ${{ inputs.job_name }}-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ inputs.job_name }}-cache-${{ runner.os }}-
+        key: job-${{ inputs.job_name }}-hash-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: job-${{ inputs.job_name }}-hash-

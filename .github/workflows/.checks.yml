@@ -1,7 +1,10 @@
 name: Checks
 on: { workflow_call: {} }
 
-permissions: { contents: read, actions: write }
+permissions: {
+  contents: read,
+  actions: write
+}
 
 env:
   CI: "true"
@@ -9,6 +12,36 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  fmt:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run fmt
+        uses: ./.github/actions/taskfile
+        with: { command: cargo/fmt }
+
+  clippy:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with:
+          job_name: clippy
+
+      - name: Run clippy
+        uses: ./.github/actions/taskfile
+        with: { command: cargo/clippy }
+
+      - name: Put cache
+        if: steps.cache_get.outputs.cache-hit != 'true'
+        uses: ./.github/actions/cache-put
+        with:
+          job_name: clippy
+
   test:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
