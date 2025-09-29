@@ -5,9 +5,6 @@ inputs:
   job_name:
     description: Job name for cache key
     required: true
-  rust_version:
-    description: Rust version
-    required: true
 
 outputs:
   cache-hit:
@@ -32,5 +29,5 @@ runs:
         path: |
           .cache/cargo
           .cache/target
-        key: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ inputs.job_name }}-cache-${{ runner.os }}-rust-${{ inputs.rust_version }}-
+        key: ${{ inputs.job_name }}-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ inputs.job_name }}-cache-${{ runner.os }}-
