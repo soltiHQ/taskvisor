@@ -92,7 +92,7 @@ tasks:
             find /tmp/.cache -type f 2>/dev/null | wc -l && \
             cargo clippy --all --all-features -- -D warnings && \
             echo "=== AFTER CLIPPY ===" && \
-            пшеfind /tmp/.cache -type f 2>/dev/null | wc -l
+            find /tmp/.cache -type f 2>/dev/null | wc -l
 
   cargo/test:
     desc: Run 'cargo test'.
