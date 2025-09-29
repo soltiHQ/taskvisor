@@ -37,7 +37,7 @@ jobs:
         with: { command: cargo/clippy }
 
       - name: Put cache
-        if: steps.cache_get.outputs.cache-restored != 'true'
+        if: steps.cache_get.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-put
         with:
           job_name: clippy
@@ -53,17 +53,12 @@ jobs:
         with:
           job_name: test
 
-      - name: Debug cache outputs
-        run: |
-          echo "cache-hit: '${{ steps.cache_get.outputs.cache-hit }}'"
-          echo "All outputs: ${{ toJSON(steps.cache_get.outputs) }}"
-
       - name: Run tests
         uses: ./.github/actions/taskfile
         with: { command: cargo/test }
 
       - name: Put cache
-        if: steps.cache_get.outputs.cache-restored != 'true'
+        if: steps.cache_get.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-put
         with:
           job_name: test
