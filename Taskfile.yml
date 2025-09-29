@@ -88,11 +88,13 @@ tasks:
           CMD: |
             rustup component add clippy >/dev/null 2>&1 && \
             cargo build --all --all-features && \
-            echo "=== AFTER BUILD ===" && \
-            find /tmp/.cache -type f 2>/dev/null | wc -l && \
-            cargo clippy --all --all-features -- -D warnings && \
-            echo "=== AFTER CLIPPY ===" && \
-            find /tmp/.cache -type f 2>/dev/null | wc -l
+            echo "=== FIND TARGET ===" && \
+            find /workspace -name "*.rlib" 2>/dev/null | head -3 && \
+            echo "=== FIND CARGO REGISTRY ===" && \
+            find / -path "*/registry/cache/*" 2>/dev/null | head -3 && \
+            echo "=== CHECK DEFAULT PATHS ===" && \
+            ls -la /workspace/target/debug 2>/dev/null | head -3 || echo "No /workspace/target" && \
+            ls -la ~/.cargo 2>/dev/null | head -3 || echo "No ~/.cargo"
 
   cargo/test:
     desc: Run 'cargo test'.
