@@ -1,11 +1,7 @@
 name: Checks
+on: { workflow_call: {} }
 
-on:
-  workflow_call:
-
-permissions:
-  contents: read
-  actions: write
+permissions: { contents: read, actions: write }
 
 env:
   CI: "true"
@@ -14,21 +10,14 @@ env:
 
 jobs:
   fmt:
-    name: fmt
     runs-on: ${{ vars.RUNS_ON }}
-    timeout-minutes: 10
     steps:
-      - &checkout
-        uses: actions/checkout@v4
-
-      - &prepare_cache_dirs
-        name: Prepare cache dirs
-        run: mkdir -p .cache/cargo .cache/target
-
-      - &restore_checks_cache
+      - &checkout { uses: actions/checkout@v4 }
+      - &prep { name: Prepare cache dirs, run: mkdir -p .cache/cargo .cache/target }
+      - &restore
         name: Restore checks-cache
-        uses: actions/cache@v4
-        id: cache
+        id: checks_cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             .cache/cargo
@@ -36,46 +25,35 @@ jobs:
           key: checks-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             checks-cache-${{ runner.os }}-rust-1.90-
-
       - name: Invoke
         uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
-        with:
-          command: cargo/fmt
+        with: { command: cargo/fmt }
 
-      - &save_checks_cache
-        name: Save checks-cache
-        if: always() && steps.cache.outputs.cache-hit != 'true'
+  clippy:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - *checkout
+      - *prep
+      - *restore
+      - name: Invoke
+        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        with: { command: cargo/clippy }
+
+  test:
+    runs-on: ${{ vars.RUNS_ON }}
+    needs: [fmt, clippy]
+    steps:
+      - *checkout
+      - *prep
+      - *restore
+      - name: Invoke
+        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
+        with: { command: cargo/test }
+      - name: Save checks-cache
+        if: steps.checks_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             .cache/cargo
             .cache/target
           key: checks-cache-${{ runner.os }}-rust-1.90-${{ hashFiles('**/Cargo.lock') }}
-
-  clippy:
-    name: clippy
-    runs-on: ${{ vars.RUNS_ON }}
-    timeout-minutes: 10
-    steps:
-      - *checkout
-      - *prepare_cache_dirs
-      - *restore_checks_cache
-      - name: Invoke
-        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
-        with:
-          command: cargo/clippy
-      - *save_checks_cache
-
-  test:
-    name: test
-    runs-on: ${{ vars.RUNS_ON }}
-    timeout-minutes: 10
-    steps:
-      - *checkout
-      - *prepare_cache_dirs
-      - *restore_checks_cache
-      - name: Invoke
-        uses: Mad-Pixels/github-workflows/actions/taskfile-runner@v1
-        with:
-          command: cargo/test
-      - *save_checks_cache
