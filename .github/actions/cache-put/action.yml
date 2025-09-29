@@ -10,9 +10,13 @@ runs:
   using: "composite"
 
   steps:
-    - name: Fix permissions before save
+    - name: Debug before save
       shell: bash
-      run: chmod -R 777 .cache || true
+      run: |
+        echo "Current dir: $(pwd)"
+        echo "Cargo.lock exists: $(test -f Cargo.lock && echo YES || echo NO)"
+        echo "Cache dir size: $(du -sh .cache)"
+        echo "Files in cache: $(find .cache -type f | wc -l)"
 
     - name: Save cache
       uses: actions/cache/save@v4
@@ -20,4 +24,4 @@ runs:
         path: |
           .cache/cargo
           .cache/target
-        key: job-${{ inputs.job_name }}-hash-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ inputs.job_name }}-hash-${{ hashFiles('**/Cargo.lock') }}
