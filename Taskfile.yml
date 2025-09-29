@@ -86,8 +86,12 @@ tasks:
       - task: _cargo/tool
         vars:
           CMD: |
+            echo "=== ENV CHECK ===" && \
+            env | grep CARGO && \
+            echo "=== END ENV ===" && \
             rustup component add clippy >/dev/null 2>&1 && \
-            strace -e trace=open,openat cargo build --all --all-features 2>&1 | grep -E "target|cargo" | head -10
+            cargo clippy --all --all-features --target-dir /tmp/.cache/target -- -D warnings
+  
 
   cargo/test:
     desc: Run 'cargo test'.
