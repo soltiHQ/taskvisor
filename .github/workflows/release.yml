@@ -61,24 +61,24 @@ jobs:
             exit 1
           fi
 
-  publish-crate:
-    needs: check-main-branch
-    runs-on: ${{ vars.RUNS_ON }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+#  publish-crate:
+#    needs: check-main-branch
+#    runs-on: ${{ vars.RUNS_ON }}
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+#          fetch-depth: 0
+#          fetch-tags: true
+#
+#      - uses: dtolnay/rust-toolchain@stable
+#
+#      - name: Publish to crates.io
+#        run: cargo publish --locked
+#        env:
+#          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
 
   publish-release:
-    needs: publish-crate
+    #needs: publish-crate
     runs-on: ${{ vars.RUNS_ON }}
     permissions:
       contents: write
