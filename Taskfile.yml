@@ -78,14 +78,18 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add rustfmt >/dev/null 2>&1 && cargo fmt --check --verbose"
+          CMD: "rustup component add rustfmt && cargo fmt --check --verbose"
 
   cargo/clippy:
     desc: Run 'cargo clippy'.
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add clippy 2>&1 && cargo clippy --all --all-features --locked -- -D warnings"
+          CMD: |
+            rustup component add clippy
+            && cargo fetch --locked
+            && cargo check --all --all-features -q
+            && cargo clippy --all --all-features --locked -- -D warnings
 
   cargo/test:
     desc: Run 'cargo test'.
