@@ -8,7 +8,6 @@
 //! This is used internally by the [`Supervisor`](crate::core::Supervisor)
 //! to deliver task lifecycle events to observers and subscribers like `AliveTracker`.
 
-
 use super::event::Event;
 use tokio::sync::broadcast;
 
