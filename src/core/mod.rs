@@ -1,6 +1,6 @@
 mod actor;
-mod signals;
 mod runner;
+mod signals;
 mod supervisor;
 
 pub use supervisor::Supervisor;
