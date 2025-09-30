@@ -21,23 +21,6 @@
 //! During shutdown:
 //!   Supervisor calls AliveTracker::snapshot() ──► Vec<String> of stuck tasks
 //! ```
-//!
-//! ## Example
-//! ```no_run
-//! # use taskvisor::subscribers::AliveTracker;
-//! # use taskvisor::events::Bus;
-//! # async fn demo() {
-//! let bus = Bus::new(1024);
-//! let tracker = AliveTracker::new();
-//!
-//! // Spawn background listener
-//! tracker.spawn_listener(bus.subscribe());
-//!
-//! // Later, get snapshot of running tasks
-//! let running_tasks = tracker.snapshot().await;
-//! println!("Currently running: {:?}", running_tasks);
-//! # }
-//! ```
 
 use std::collections::HashSet;
 use std::sync::Arc;
