@@ -7,7 +7,8 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::{config::Config, policy::RestartPolicy, strategy::BackoffStrategy, task::TaskRef};
+use crate::task::task::TaskRef;
+use crate::{config::Config, policy::RestartPolicy, strategy::BackoffStrategy};
 
 /// # Specification for running a task under supervision.
 ///
