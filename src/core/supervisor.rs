@@ -87,7 +87,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{TaskActor, TaskActorParams};
 use crate::core::os_signals;
-use crate::task::spec::TaskSpec;
+use crate::task::TaskSpec;
 use crate::{
     alive::AliveTracker,
     bus::Bus,
