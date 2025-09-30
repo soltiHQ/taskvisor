@@ -34,7 +34,7 @@ use crate::{
     events::Bus,
     events::{Event, EventKind},
     policies::RestartPolicy,
-    task::Task,
+    tasks::Task,
 };
 
 /// Parameters controlling retries/backoff/timeout for a task actor.

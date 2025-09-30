@@ -89,7 +89,7 @@ use crate::core::actor::{TaskActor, TaskActorParams};
 use crate::core::os_signals;
 use crate::observers::AliveTracker;
 use crate::observers::Observer;
-use crate::task::TaskSpec;
+use crate::tasks::TaskSpec;
 use crate::{
     config::Config,
     error::RuntimeError,

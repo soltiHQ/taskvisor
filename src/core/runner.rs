@@ -34,7 +34,7 @@ use crate::{
     error::TaskError,
     events::Bus,
     events::{Event, EventKind},
-    task::Task,
+    tasks::Task,
 };
 
 /// Executes a single run of a task with optional timeout.
