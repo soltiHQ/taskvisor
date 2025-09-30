@@ -31,6 +31,7 @@ pub type TaskRef = std::sync::Arc<dyn Task>;
 ///
 /// # Example
 /// ```
+/// use std::future::Future;
 /// use tokio_util::sync::CancellationToken;
 /// use taskvisor::{TaskFn, TaskRef, TaskError};
 ///

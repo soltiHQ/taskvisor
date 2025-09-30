@@ -17,8 +17,14 @@
 //!     factor: 2.0,
 //! };
 //!
+//! // First attempt - uses 'first'
 //! assert_eq!(backoff.next(None), Duration::from_millis(100));
+//!
+//! // Second attempt - multiplied by factor (100ms * 2.0 = 200ms)
 //! assert_eq!(backoff.next(Some(Duration::from_millis(100))), Duration::from_millis(200));
+//!
+//! // When previous delay exceeds max, result is capped at max
+//! // (20s * 2.0 = 40s, but capped at max=10s)
 //! assert_eq!(backoff.next(Some(Duration::from_secs(20))), Duration::from_secs(10));
 //! ```
 
@@ -59,6 +65,11 @@ impl BackoffPolicy {
     ///
     /// - If `prev` is `None`, returns [`BackoffPolicy::first`].
     /// - Otherwise multiplies the previous delay by [`BackoffPolicy::factor`], and caps it at [`BackoffPolicy::max`].
+    ///
+    /// # Note
+    /// If `factor` is less than 1.0, delays will decrease over time (not typical for backoff).
+    /// If `factor` equals 1.0, delay remains constant at `first` (up to `max`).
+    /// If `factor` is greater than 1.0, delays grow exponentially (typical backoff behavior).
     pub fn next(&self, prev: Option<Duration>) -> Duration {
         match prev {
             None => self.first,

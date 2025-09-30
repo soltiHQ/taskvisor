@@ -25,9 +25,11 @@ use crate::{config::Config, policies::RestartPolicy};
 /// # Example
 /// ```
 /// use tokio_util::sync::CancellationToken;
-/// use taskvisor::{TaskSpec, TaskFn, Config, RestartPolicy, BackoffPolicy, TaskRef};
+/// use taskvisor::{TaskSpec, TaskFn, Config, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
 ///
-/// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move { Ok(()) });
+/// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
+///     Ok::<(), TaskError>(())
+/// });
 ///
 /// // Build spec explicitly:
 /// let spec = TaskSpec::new(

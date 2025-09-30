@@ -12,10 +12,15 @@
 //! ```text
 //! TaskSpec ──► Supervisor ──► TaskActor (from TaskSpec)
 //!
-//! attempt ──► run_once(task, timeout)
-//!      │       ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
-//!      │       └── Err ─► schedule backoff ─► sleep ─► retry
-//!      └────► cancelled (runtime_token) ─► exit
+//! loop:
+//!   ├─► acquire semaphore (if configured, cancellable)
+//!   ├─► publish TaskStarting(attempt)
+//!   ├─► run_once(task, timeout)
+//!   │     ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
+//!   │     └── Err ─► apply RestartPolicy, if retry:
+//!   │                   └─► publish BackoffScheduled
+//!   │                   └─► sleep(backoff_delay, cancellable)
+//!   └─► exit if cancelled or restart not allowed
 //! ```
 //!
 //! #### Notes:

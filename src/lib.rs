@@ -65,7 +65,7 @@
 //! └────┬───────────────────────────────────┘
 //!      │ (1) optional: acquire global Semaphore permit (cancellable)
 //!      │ (2) publish Event::TaskStarting{ task, attempt }
-//!      │ (3) run_once(task, attempt_timeout, bus, child_token)
+//!      │ (3) run_once(task, parent_token, timeout, bus)
 //!      │         ├─ Ok  ──► publish TaskStopped
 //!      │         │          └─ apply RestartPolicy from TaskSpec:
 //!      │         │                - Never        ⇒ exit
@@ -102,7 +102,7 @@
 //! | **Configuration** | Centralize runtime settings.                                          | [`Config`]                             |
 //!
 //! ## Optional features
-//! - `logging`: exports a simple built-in [`Writer`] _(demo/reference only)_.
+//! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
 //! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
 //!
 //! ```no_run

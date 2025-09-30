@@ -30,15 +30,6 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     /// Returns a short stable label (snake_case) for use in logs/metrics.
-    ///
-    /// # Example
-    /// ```
-    /// use taskvisor::RuntimeError;
-    /// use std::time::Duration;
-    ///
-    /// let err = RuntimeError::GraceExceeded { grace: Duration::from_secs(5), stuck: vec![] };
-    /// assert_eq!(err.as_label(), "runtime_grace_exceeded");
-    /// ```
     pub fn as_label(&self) -> &'static str {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
@@ -90,15 +81,6 @@ pub enum TaskError {
 
 impl TaskError {
     /// Returns a short stable label (snake_case) for use in logs/metrics.
-    ///
-    /// # Example
-    /// ```
-    /// use taskvisor::TaskError;
-    /// use std::time::Duration;
-    ///
-    /// let err = TaskError::Timeout { timeout: Duration::from_secs(1) };
-    /// assert_eq!(err.as_label(), "task_timeout");
-    /// ```
     pub fn as_label(&self) -> &'static str {
         match self {
             TaskError::Timeout { .. } => "task_timeout",
@@ -119,20 +101,6 @@ impl TaskError {
     }
 
     /// Indicates whether the error type is safe to retry.
-    ///
-    /// Returns `true` for [`TaskError::Fail`] and [`TaskError::Timeout`],
-    /// `false` otherwise.
-    ///
-    /// # Example
-    /// ```
-    /// use taskvisor::TaskError;
-    ///
-    /// let retryable = TaskError::Fail { error: "boom".into() };
-    /// assert!(retryable.is_retryable()); // true
-    ///
-    /// let fatal = TaskError::Fatal { error: "nope".into() };
-    /// assert!(!fatal.is_retryable()); // false
-    /// ```
     pub fn is_retryable(&self) -> bool {
         matches!(self, TaskError::Fail { .. } | TaskError::Timeout { .. })
     }

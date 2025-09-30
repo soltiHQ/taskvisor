@@ -31,7 +31,7 @@
 //!                                                  └────────► AliveTracker
 //!
 //! Shutdown path:
-//!   os_signals::wait_for_shutdown_signal()
+//!   shutdown::wait_for_shutdown_signal()
 //!             └─► Bus.publish(ShutdownRequested)
 //!             └─► runtime_token.cancel()   → propagates to child tokens
 //!             └─► wait_all_with_grace(cfg.grace):
@@ -167,12 +167,14 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
         }
     }
 
-    /// Spawns task actors and registers them into the given join set.
+    /// Spawns task actors and adds them to the given join set.
     ///
     /// Each actor gets:
-    /// - a child cancellation token (derived from the runtime token);
-    /// - a bus clone;
-    /// - an optional shared global semaphore.
+    /// - a child cancellation token (derived from the runtime token)
+    /// - a bus clone
+    /// - an optional shared global semaphore
+    ///
+    /// The actors are added to the JoinSet for lifecycle management.
     fn task_actors(
         &self,
         set: &mut JoinSet<()>,

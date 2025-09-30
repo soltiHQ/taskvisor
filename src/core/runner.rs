@@ -18,7 +18,7 @@
 //!       │                Ok(result)                  Err(elapsed)
 //!       │                   │                            │
 //!    result = Ok()   → publish TaskStopped           cancel child → publish TimeoutHit
-//!    result = Err(e) → publish TaskFailed
+//!    result = Err(e) → publish TaskFailed                         → return Timeout error
 //! ```
 //!
 //! - On success, publishes [`EventKind::TaskStopped`].
