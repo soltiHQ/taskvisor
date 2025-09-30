@@ -32,10 +32,10 @@ use crate::{
     bus::Bus,
     event::{Event, EventKind},
     policy::RestartPolicy,
-    runner::run_once,
     strategy::BackoffStrategy,
     task::Task,
 };
+use crate::core::runner::run_once;
 
 /// Parameters controlling retries/backoff/timeout for a task actor.
 #[derive(Clone)]

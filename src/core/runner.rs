@@ -24,7 +24,7 @@
 //! - On success, publishes [`EventKind::TaskStopped`].
 //! - On failure, publishes [`EventKind::TaskFailed`].
 //! - On timeout, cancels the child token, publishes [`EventKind::TimeoutHit`], and returns [`TaskError::Timeout`].
-//! - This function performs **one attempt only**; retries/backoff are handled by [`TaskActor`](crate::actor::TaskActor).
+//! - This function performs **one attempt only**; retries/backoff are handled by [`TaskActor`](crate::core::actor::TaskActor).
 
 use std::time::Duration;
 use tokio::time;

@@ -5,7 +5,7 @@
 //! - [`Bus::publish`] sends an event to all subscribers (non-blocking).
 //! - [`Bus::subscribe`] creates a new receiver for consuming events.
 //!
-//! This is used internally by the [`Supervisor`](crate::supervisor::Supervisor)
+//! This is used internally by the [`Supervisor`](crate::core::supervisor::Supervisor)
 //! to deliver task lifecycle events to the [`Observer`](crate::observer::Observer)
 //! and to the [`AliveTracker`](crate::alive::AliveTracker).
 

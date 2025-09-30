@@ -140,21 +140,17 @@
 //! }
 //! ```
 
-mod actor;
 mod alive;
 mod bus;
 mod config;
 mod error;
 mod event;
 mod observer;
-mod os_signals;
 mod policy;
-mod runner;
 mod strategy;
-mod supervisor;
 mod task;
 mod task_spec;
-
+mod core;
 // ---- Public re-exports ----
 
 pub use config::Config;
@@ -162,7 +158,7 @@ pub use error::{RuntimeError, TaskError};
 pub use observer::Observer;
 pub use policy::RestartPolicy;
 pub use strategy::BackoffStrategy;
-pub use supervisor::Supervisor;
+pub use core::supervisor::Supervisor;
 pub use task::{Task, TaskFn, TaskRef};
 pub use task_spec::TaskSpec;
 

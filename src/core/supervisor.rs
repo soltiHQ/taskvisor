@@ -86,16 +86,16 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    actor::{TaskActor, TaskActorParams},
     alive::AliveTracker,
     bus::Bus,
     config::Config,
     error::RuntimeError,
     event::{Event, EventKind},
     observer::Observer,
-    os_signals,
     task_spec::TaskSpec,
 };
+use crate::core::actor::{TaskActor, TaskActorParams};
+use crate::core::os_signals;
 
 /// # Coordinates task actors, event delivery, and graceful shutdown.
 ///
