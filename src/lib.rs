@@ -147,6 +147,7 @@ mod events;
 mod policies;
 mod subscribers;
 mod tasks;
+
 // ---- Public re-exports ----
 
 pub use config::Config;

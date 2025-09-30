@@ -28,6 +28,6 @@ thiserror = "2.0.16"
 anyhow = "1.0.100"
 
 [[example]]
-name = "demo"
-path = "examples/demo.rs"
+name = "simple_pipeline"
+path = "examples/simple_pipeline.rs"
 required-features = ["logging"]
