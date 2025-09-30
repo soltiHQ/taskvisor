@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use crate::policy::{BackoffPolicy, RestartPolicy};
+use crate::policies::{BackoffPolicy, RestartPolicy};
 
 /// Global configuration for the runtime and supervisor.
 ///

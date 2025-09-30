@@ -145,7 +145,7 @@ mod core;
 mod error;
 mod events;
 mod observers;
-mod policy;
+mod policies;
 mod task;
 // ---- Public re-exports ----
 
@@ -153,8 +153,8 @@ pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
 pub use observers::Observer;
-pub use policy::BackoffPolicy;
-pub use policy::RestartPolicy;
+pub use policies::BackoffPolicy;
+pub use policies::RestartPolicy;
 pub use task::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.
