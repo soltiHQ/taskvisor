@@ -50,7 +50,7 @@
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{
-//!     BackoffStrategy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LoggerObserver
+//!     BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LogWriter
 //! };
 //!
 //! #[tokio::main(flavor = "current_thread")]
@@ -59,7 +59,7 @@
 //!     cfg.max_concurrent = 2;
 //!     cfg.grace = Duration::from_secs(5);
 //!
-//!     let sup = Supervisor::new(cfg.clone(), LoggerObserver);
+//!     let sup = Supervisor::new(cfg.clone(), LogWriter);
 //!
 //!     let t1: TaskRef = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
 //!         while !ctx.is_cancelled() {
@@ -71,7 +71,7 @@
 //!     let spec = TaskSpec::new(
 //!         t1,
 //!         RestartPolicy::Never,
-//!         BackoffStrategy::default(),
+//!         BackoffPolicy::default(),
 //!         Some(Duration::from_secs(2)),
 //!     );
 //!
@@ -87,14 +87,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{TaskActor, TaskActorParams};
 use crate::core::os_signals;
-use crate::observers::alive::AliveTracker;
-use crate::observers::observer::Observer;
+use crate::observers::AliveTracker;
+use crate::observers::Observer;
 use crate::task::TaskSpec;
 use crate::{
     config::Config,
     error::RuntimeError,
-    event::Bus,
-    event::{Event, EventKind},
+    events::Bus,
+    events::{Event, EventKind},
 };
 
 /// # Coordinates task actors, event delivery, and graceful shutdown.

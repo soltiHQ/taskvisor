@@ -32,8 +32,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::TaskError,
-    event::Bus,
-    event::{Event, EventKind},
+    events::Bus,
+    events::{Event, EventKind},
     task::Task,
 };
 

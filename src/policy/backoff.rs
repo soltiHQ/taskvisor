@@ -1,17 +1,17 @@
-//! # Backoff strategy for retrying tasks.
+//! # Backoff policy for retrying tasks.
 //!
-//! [`BackoffStrategy`] controls how retry delays grow after repeated failures.
+//! [`BackoffPolicy`] controls how retry delays grow after repeated failures.
 //! It is parameterized by:
-//! - [`BackoffStrategy::factor`] — the multiplicative growth factor;
-//! - [`BackoffStrategy::first`] — the initial delay;
-//! - [`BackoffStrategy::max`] — the maximum delay cap.
+//! - [`BackoffPolicy::factor`] — the multiplicative growth factor;
+//! - [`BackoffPolicy::first`] — the initial delay;
+//! - [`BackoffPolicy::max`] — the maximum delay cap.
 //!
 //! # Example
 //! ```
 //! use std::time::Duration;
-//! use taskvisor::BackoffStrategy;
+//! use taskvisor::BackoffPolicy;
 //!
-//! let backoff = BackoffStrategy {
+//! let backoff = BackoffPolicy {
 //!     first: Duration::from_millis(100),
 //!     max: Duration::from_secs(10),
 //!     factor: 2.0,
@@ -31,7 +31,7 @@ use std::time::Duration;
 /// - [`first`] — the initial delay;
 /// - [`max`] — the maximum delay cap.
 #[derive(Clone, Copy, Debug)]
-pub struct BackoffStrategy {
+pub struct BackoffPolicy {
     /// Initial delay before the first retry.
     pub first: Duration,
     /// Maximum delay cap for retries.
@@ -40,7 +40,7 @@ pub struct BackoffStrategy {
     pub factor: f64,
 }
 
-impl Default for BackoffStrategy {
+impl Default for BackoffPolicy {
     /// Returns a strategy with:
     /// - `factor = 1.0` (constant delay);
     /// - `first = 100ms`;
@@ -54,11 +54,11 @@ impl Default for BackoffStrategy {
     }
 }
 
-impl BackoffStrategy {
+impl BackoffPolicy {
     /// Computes the next delay based on the previous one.
     ///
-    /// - If `prev` is `None`, returns [`BackoffStrategy::first`].
-    /// - Otherwise multiplies the previous delay by [`BackoffStrategy::factor`], and caps it at [`BackoffStrategy::max`].
+    /// - If `prev` is `None`, returns [`BackoffPolicy::first`].
+    /// - Otherwise multiplies the previous delay by [`BackoffPolicy::factor`], and caps it at [`BackoffPolicy::max`].
     pub fn next(&self, prev: Option<Duration>) -> Duration {
         match prev {
             None => self.first,

@@ -1,3 +1,5 @@
-pub mod base;
+mod backoff;
+mod restart;
 
-pub use base::RestartPolicy;
+pub use backoff::BackoffPolicy;
+pub use restart::RestartPolicy;

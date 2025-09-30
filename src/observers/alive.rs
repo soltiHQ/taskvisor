@@ -3,7 +3,7 @@
 //! [`AliveTracker`] subscribes to runtime events and maintains a set of active task names.
 //! It listens for [`EventKind::TaskStarting`] and [`EventKind::TaskStopped`] to update its state.
 //!
-//! This is primarily used by the [`Supervisor`](crate::core::supervisor::Supervisor) to report which tasks
+//! This is primarily used by the [`Supervisor`](crate::core::Supervisor) to report which tasks
 //! are still alive during graceful shutdown.
 //!
 //! # High-level architecture:
@@ -25,14 +25,14 @@
 //!
 //! - Actors publish [`EventKind::TaskStarting`] / [`EventKind::TaskStopped`] into the bus.
 //! - [`AliveTracker`] listens in background and updates its set accordingly.
-//! - [`Supervisor`](crate::core::supervisor::Supervisor) calls `snapshot()` to detect “stuck” tasks after grace timeout.
+//! - [`Supervisor`](crate::core::Supervisor) calls `snapshot()` to detect “stuck” tasks after grace timeout.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::event::{Event, EventKind};
+use crate::events::{Event, EventKind};
 
 /// Tracks which tasks are currently alive (running).
 ///
@@ -40,7 +40,7 @@ use crate::event::{Event, EventKind};
 /// - [`EventKind::TaskStarting`] inserts the task name.
 /// - [`EventKind::TaskStopped`] removes the task name.
 ///
-/// Used by the [`Supervisor`](crate::core::supervisor::Supervisor) during graceful shutdown to identify "stuck" tasks.
+/// Used by the [`Supervisor`](crate::core::Supervisor) during graceful shutdown to identify "stuck" tasks.
 #[derive(Clone)]
 pub struct AliveTracker {
     inner: Arc<Mutex<HashSet<String>>>,

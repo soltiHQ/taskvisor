@@ -7,12 +7,12 @@
 //! # Example
 //! ```
 //! use std::time::Duration;
-//! use taskvisor::{Config, RestartPolicy, BackoffStrategy};
+//! use taskvisor::{Config, RestartPolicy, BackoffPolicy};
 //!
 //! let mut cfg = Config::default();
 //! cfg.grace = Duration::from_secs(10);
 //! cfg.timeout = Duration::from_secs(5);
-//! cfg.backoff = BackoffStrategy::default();
+//! cfg.backoff = BackoffPolicy::default();
 //! cfg.restart = RestartPolicy::Always;
 //! cfg.max_concurrent = 4;
 //!
@@ -21,8 +21,7 @@
 
 use std::time::Duration;
 
-use crate::event::strategy::BackoffStrategy;
-use crate::policy::RestartPolicy;
+use crate::policy::{BackoffPolicy, RestartPolicy};
 
 /// Global configuration for the runtime and supervisor.
 ///
@@ -37,8 +36,8 @@ pub struct Config {
     pub bus_capacity: usize,
     /// Default restart policy for tasks.
     pub restart: RestartPolicy,
-    /// Default backoff strategy for retries.
-    pub backoff: BackoffStrategy,
+    /// Default backoff policy for retries.
+    pub backoff: BackoffPolicy,
     /// Default task timeout (0 = no timeout).
     pub timeout: Duration,
 }
@@ -50,14 +49,14 @@ impl Default for Config {
     /// - `bus_capacity = 1024`
     /// - `timeout = 0s` (no timeout)
     /// - `restart = RestartPolicy::OnFailure`
-    /// - `backoff = BackoffStrategy::default()`
+    /// - `backoff = BackoffPolicy::default()`
     fn default() -> Self {
         Self {
             max_concurrent: 0,
             bus_capacity: 1024,
             timeout: Duration::from_secs(0),
             grace: Duration::from_secs(30),
-            backoff: BackoffStrategy::default(),
+            backoff: BackoffPolicy::default(),
             restart: RestartPolicy::default(),
         }
     }

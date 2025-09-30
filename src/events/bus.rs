@@ -5,11 +5,11 @@
 //! - [`Bus::publish`] sends an event to all subscribers (non-blocking).
 //! - [`Bus::subscribe`] creates a new receiver for consuming events.
 //!
-//! This is used internally by the [`Supervisor`](crate::core::supervisor::Supervisor)
+//! This is used internally by the [`Supervisor`](crate::core::Supervisor)
 //! to deliver task lifecycle events to the [`Observer`](crate::observers::observer::Observer)
 //! and to the [`AliveTracker`](crate::observers::alive::AliveTracker).
 
-use crate::event::base::Event;
+use crate::events::event::Event;
 use tokio::sync::broadcast;
 
 /// Broadcast channel for runtime events.

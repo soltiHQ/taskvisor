@@ -21,18 +21,18 @@
 //!   - run custom logic asynchronously
 //!
 //! Provided implementations:
-//!   - [`LoggerObserver`] (enabled via `logging` feature) → prints events to stdout
+//!   - [`LogWriter`] (enabled via `logging` feature) → prints events to stdout
 //!
 //!   TaskActor ... ──► Bus ──► Observer::on_event(&Event)
 //!                                      │
 //!              ┌───────────────────────┼───────────────────────┐
 //!              ▼                       ▼                       ▼
-//!      LoggerObserver            MetricsObserver         CustomObserver
-//!        (stdout)               (Prometheus, OTEL)        (user logic)
+//!          LogWriter              MetricsObserver         CustomObserver
+//!          (stdout)             (Prometheus, OTEL)        (user logic)
 //! ```
 //!
 //! #### Note:
-//! A simple [`LoggerObserver`] is available (enabled via the `logging` feature), useful for debug and testing.
+//! A simple [`LogWriter`] is available (enabled via the `logging` feature), useful for debug and testing.
 //!
 //! # Example: custom observer
 //! ```no_run
@@ -63,7 +63,7 @@
 //! # }
 //! ```
 
-use crate::event::{Event, EventKind};
+use crate::events::Event;
 use async_trait::async_trait;
 
 /// # Trait for receiving runtime events from the bus.
@@ -76,49 +76,4 @@ use async_trait::async_trait;
 pub trait Observer {
     /// Called for every emitted [`Event`].
     async fn on_event(&self, event: &Event);
-}
-
-/// Base observer that logs events to stdout.
-///
-/// Enabled via the `logging` feature. Useful for demos and debugging.
-pub struct LoggerObserver;
-
-#[async_trait]
-impl Observer for LoggerObserver {
-    async fn on_event(&self, e: &Event) {
-        match e.kind {
-            EventKind::TaskStarting => {
-                if let (Some(task), Some(att)) = (&e.task, e.attempt) {
-                    println!("[starting] task={task} attempt={att}");
-                }
-            }
-            EventKind::TaskFailed => {
-                println!(
-                    "[failed] task={:?} err={:?} attempt={:?}",
-                    e.task, e.error, e.attempt
-                );
-            }
-            EventKind::TaskStopped => {
-                println!("[stopped] task={:?}", e.task);
-            }
-            EventKind::ShutdownRequested => {
-                println!("[shutdown-requested]");
-            }
-            EventKind::AllStoppedWithin => {
-                println!("[all-stopped-within-grace]");
-            }
-            EventKind::GraceExceeded => {
-                println!("[grace-exceeded]");
-            }
-            EventKind::BackoffScheduled => {
-                println!(
-                    "[backoff] task={:?} delay={:?} after_attempt={:?} err={:?}",
-                    e.task, e.delay, e.attempt, e.error
-                );
-            }
-            EventKind::TimeoutHit => {
-                println!("[timeout] task={:?} timeout={:?}", e.task, e.timeout);
-            }
-        }
-    }
 }

@@ -1,4 +1,6 @@
-pub mod actor;
+mod actor;
 mod os_signals;
 mod runner;
-pub mod supervisor;
+mod supervisor;
+
+pub use supervisor::Supervisor;

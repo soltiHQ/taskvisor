@@ -2,7 +2,7 @@
 //!
 //! A `TaskActor` drives one [`Task`] through repeated attempts, applying:
 //! - restart policy ([`RestartPolicy`]),
-//! - backoff delays ([`BackoffStrategy`]),
+//! - backoff delays ([`BackoffPolicy`]),
 //! - per-attempt timeout (optional, via `timeout`),
 //! - cooperative cancellation via a runtime [`CancellationToken`].
 //!
@@ -29,10 +29,10 @@ use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::runner::run_once;
-use crate::event::strategy::BackoffStrategy;
+use crate::policy::BackoffPolicy;
 use crate::{
-    event::Bus,
-    event::{Event, EventKind},
+    events::Bus,
+    events::{Event, EventKind},
     policy::RestartPolicy,
     task::Task,
 };
@@ -42,8 +42,8 @@ use crate::{
 pub struct TaskActorParams {
     /// Restart policy applied after each attempt.
     pub restart: RestartPolicy,
-    /// Backoff strategy used between failed attempts.
-    pub backoff: BackoffStrategy,
+    /// Backoff policy used between failed attempts.
+    pub backoff: BackoffPolicy,
     /// Optional per-attempt timeout; `None` or `0` means no timeout.
     pub timeout: Option<Duration>,
 }
