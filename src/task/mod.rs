@@ -1,5 +1,5 @@
-mod spec;
 mod base;
+mod spec;
 
-pub use spec::TaskSpec;
 pub use base::{Task, TaskFn, TaskRef};
+pub use spec::TaskSpec;

@@ -141,7 +141,6 @@
 //! ```
 
 mod alive;
-mod bus;
 mod config;
 mod core;
 mod error;

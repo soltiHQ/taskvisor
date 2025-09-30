@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::runner::run_once;
 use crate::{
-    bus::Bus,
+    event::Bus,
     event::{Event, EventKind},
     policy::RestartPolicy,
     strategy::BackoffStrategy,

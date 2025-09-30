@@ -9,9 +9,8 @@
 //! to deliver task lifecycle events to the [`Observer`](crate::observer::Observer)
 //! and to the [`AliveTracker`](crate::alive::AliveTracker).
 
+use crate::event::base::Event;
 use tokio::sync::broadcast;
-
-use crate::event::Event;
 
 /// Broadcast channel for runtime events.
 ///

@@ -90,9 +90,9 @@ use crate::core::os_signals;
 use crate::task::TaskSpec;
 use crate::{
     alive::AliveTracker,
-    bus::Bus,
     config::Config,
     error::RuntimeError,
+    event::Bus,
     event::{Event, EventKind},
     observer::Observer,
 };
