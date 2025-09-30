@@ -1,4 +1,4 @@
-pub mod supervisor;
 pub mod actor;
-mod runner;
 mod os_signals;
+mod runner;
+pub mod supervisor;

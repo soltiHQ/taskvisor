@@ -143,6 +143,7 @@
 mod alive;
 mod bus;
 mod config;
+mod core;
 mod error;
 mod event;
 mod observer;
@@ -150,15 +151,14 @@ mod policy;
 mod strategy;
 mod task;
 mod task_spec;
-mod core;
 // ---- Public re-exports ----
 
 pub use config::Config;
+pub use core::supervisor::Supervisor;
 pub use error::{RuntimeError, TaskError};
 pub use observer::Observer;
 pub use policy::RestartPolicy;
 pub use strategy::BackoffStrategy;
-pub use core::supervisor::Supervisor;
 pub use task::{Task, TaskFn, TaskRef};
 pub use task_spec::TaskSpec;
 

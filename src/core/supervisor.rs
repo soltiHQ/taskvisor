@@ -85,6 +85,8 @@ use std::sync::Arc;
 use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::actor::{TaskActor, TaskActorParams};
+use crate::core::os_signals;
 use crate::{
     alive::AliveTracker,
     bus::Bus,
@@ -94,8 +96,6 @@ use crate::{
     observer::Observer,
     task_spec::TaskSpec,
 };
-use crate::core::actor::{TaskActor, TaskActorParams};
-use crate::core::os_signals;
 
 /// # Coordinates task actors, event delivery, and graceful shutdown.
 ///

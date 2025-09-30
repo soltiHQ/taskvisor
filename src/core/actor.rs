@@ -28,6 +28,7 @@ use std::time::Duration;
 use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::runner::run_once;
 use crate::{
     bus::Bus,
     event::{Event, EventKind},
@@ -35,7 +36,6 @@ use crate::{
     strategy::BackoffStrategy,
     task::Task,
 };
-use crate::core::runner::run_once;
 
 /// Parameters controlling retries/backoff/timeout for a task actor.
 #[derive(Clone)]
