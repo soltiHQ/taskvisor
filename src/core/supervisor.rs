@@ -1,10 +1,10 @@
 //! # Supervisor: orchestrates task actors, lifecycle, and graceful shutdown.
 //!
-//! The [`Supervisor`] owns the event bus, an observer, and global runtime configuration.
+//! The [`Supervisor`] owns the event bus, a subscriber, and global runtime configuration.
 //! It spawns per-task actors, handles OS signals, and enforces a global concurrency cap via an optional semaphore.
 //!
 //! Key responsibilities:
-//! - subscribe and forward events to the [`Observer`]
+//! - subscribe and forward events to the [`Subscriber`]
 //! - spawn task actors with restart/backoff/timeout policies
 //! - handle OS termination signals (e.g. SIGINT/SIGTERM/Ctrl-C)
 //! - perform graceful shutdown with a configurable [`Config::grace`]
@@ -12,11 +12,11 @@
 //! # High-level architecture:
 //! ```text
 //! Inputs to run():
-//!   Vec<TaskSpec>  ──►  Supervisor::run(cfg, observer, bus)
+//!   Vec<TaskSpec>  ──►  Supervisor::run(cfg, subscriber, bus)
 //!
 //! Preparation:
 //!   - build_semaphore() from cfg.max_concurrent (None = unlimited)
-//!   - observer_listener(): Bus.subscribe() ─► forward to Observer.on_event(&Event)
+//!   - subscriber_listener(): Bus.subscribe() ─► forward to Subscriber.handle(&Event)
 //!   - AliveTracker::new().spawn_listener(Bus.subscribe())
 //!
 //! Spawn actors:
@@ -27,7 +27,7 @@
 //!                         set.spawn(actor.run(child_token))
 //!
 //! Event flow (as wired here):
-//!   TaskActor ... ── publish(Event) ──► Bus ── broadcasts ──► Observer
+//!   TaskActor ... ── publish(Event) ──► Bus ── broadcasts ──► Subscriber
 //!                                                  └────────► AliveTracker
 //!
 //! Shutdown path:
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! - `Supervisor` spawns actors based on [`TaskSpec`].
-//! - `Observer` subscribes to the [`Bus`] and processes [`Event`]s.
+//! - `Subscriber` subscribes to the [`Bus`] and processes [`Event`]s.
 //! - On OS signal, supervisor cancels all actors and waits up to [`Config::grace`].
 //!
 //! # Example
@@ -92,10 +92,11 @@ use std::sync::Arc;
 use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::actor::{TaskActor, TaskActorParams};
-use crate::core::shutdown;
-use crate::observers::AliveTracker;
-use crate::observers::Observer;
+use crate::core::{
+    actor::{TaskActor, TaskActorParams},
+    shutdown,
+};
+use crate::subscribers::{AliveTracker, Subscriber};
 use crate::tasks::TaskSpec;
 use crate::{
     config::Config,
@@ -107,25 +108,25 @@ use crate::{
 /// # Coordinates task actors, event delivery, and graceful shutdown.
 ///
 /// A `Supervisor`:
-/// - forwards all bus events to the provided [`Observer`]
+/// - forwards all bus events to the provided [`Subscriber`]
 /// - spawns per-task actors using the given specs
 /// - enforces a global concurrency limit (if [`Config::max_concurrent`] > 0)
 /// - handles OS termination signals and waits up to [`Config::grace`] before failing
-pub struct Supervisor<O: Observer + Send + Sync + 'static> {
+pub struct Supervisor<Sub: Subscriber + Send + Sync + 'static> {
     /// Global runtime configuration.
     pub cfg: Config,
-    /// Observer used to process emitted runtime events.
-    pub obs: Arc<O>,
+    /// Subscriber used to process emitted runtime events.
+    pub sub: Arc<Sub>,
     /// Event bus shared with all actors.
     pub bus: Bus,
 }
 
-impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
-    /// Creates a new supervisor with the given config and observer.
-    pub fn new(cfg: Config, observer: Obs) -> Self {
+impl<Sub: Subscriber + Send + Sync + 'static> Supervisor<Sub> {
+    /// Creates a new supervisor with the given config and subscriber.
+    pub fn new(cfg: Config, subscriber: Sub) -> Self {
         Self {
             bus: Bus::new(cfg.bus_capacity),
-            obs: Arc::new(observer),
+            sub: Arc::new(subscriber),
             cfg,
         }
     }
@@ -137,7 +138,7 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         let semaphore = self.build_semaphore();
         let token = CancellationToken::new();
-        self.observer_listener();
+        self.subscriber_listener();
 
         let alive = AliveTracker::new();
         alive.spawn_listener(self.bus.subscribe());
@@ -147,14 +148,14 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
         self.shutdown(&mut set, &token, &alive).await
     }
 
-    /// Subscribes the observer to the bus and forwards events asynchronously.
-    fn observer_listener(&self) {
+    /// Subscribes the subscriber to the bus and forwards events asynchronously.
+    fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
-        let obs = self.obs.clone();
+        let sub = self.sub.clone();
 
         tokio::spawn(async move {
             while let Ok(ev) = rx.recv().await {
-                obs.on_event(&ev).await;
+                sub.handle(&ev).await;
             }
         });
     }

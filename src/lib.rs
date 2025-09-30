@@ -94,7 +94,7 @@
 //!
 //! | Area              | Description                                                           | Key types / traits                     |
 //! |-------------------|-----------------------------------------------------------------------|----------------------------------------|
-//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom observers). | [`Observer`]                           |
+//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom subscribers). | [`Observer`]                           |
 //! | **Policies**      | Configure restart/backoff strategies for tasks.                       | [`RestartPolicy`], [`BackoffPolicy`]   |
 //! | **Supervision**   | Manage groups of tasks and their lifecycle.                           | [`Supervisor`]                         |
 //! | **Errors**        | Typed errors for orchestration and task execution.                    | [`TaskError`], [`RuntimeError`]        |
@@ -144,17 +144,17 @@ mod config;
 mod core;
 mod error;
 mod events;
-mod observers;
 mod policies;
+mod subscribers;
 mod tasks;
 // ---- Public re-exports ----
 
 pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
-pub use observers::Observer;
 pub use policies::BackoffPolicy;
 pub use policies::RestartPolicy;
+pub use subscribers::Subscriber;
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.
@@ -165,4 +165,4 @@ pub use crate::events::{Event, EventKind};
 // Optional: expose a simple built-in logger observer (demo/reference).
 // Enable with: `--features logging`
 #[cfg(feature = "logging")]
-pub use observers::LogWriter;
+pub use subscribers::LogWriter;

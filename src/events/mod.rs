@@ -5,7 +5,7 @@
 //! - [`EventKind`] - classification of event types (startup, failure, shutdown, etc.)
 //! - [`Bus`] - broadcast channel for publishing events to multiple subscribers
 //!
-//! Events flow from task actors through the bus to all observers:
+//! Events flow from task actors through the bus to all subscribers:
 //! ```text
 //! TaskActor → Bus.publish(Event) → broadcast → all subscribers
 //! ```

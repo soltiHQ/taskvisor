@@ -14,7 +14,7 @@
 //! - [`Bus::subscribe`] creates a new receiver that will receive all future events
 //!
 //! This is used internally by the [`Supervisor`](crate::core::Supervisor)
-//! to deliver task lifecycle events to observers and subscribers like `AliveTracker`.
+//! to deliver task lifecycle events to subscribers and subscribers like `AliveTracker`.
 
 use super::event::Event;
 use tokio::sync::broadcast;
@@ -43,7 +43,7 @@ impl Bus {
     ///
     /// The event is cloned and sent to each subscriber independently.
     /// If there are no active subscribers, the event is dropped silently.
-    /// This is intentional as the system can operate without observers.
+    /// This is intentional as the system can operate without subscribers.
     pub fn publish(&self, ev: Event) {
         let _ = self.tx.send(ev);
     }
