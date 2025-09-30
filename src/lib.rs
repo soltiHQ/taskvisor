@@ -39,7 +39,7 @@
 //!                      broadcasts to all subscribers
 //!                                   ▼
 //!     ┌───────────────────────┐           ┌───────────────────────┐
-//!     │       Observer        │           │      AliveTracker     │
+//!     │      Subscriber       │           │      AliveTracker     │
 //!     │   on_event(&Event)    │           │  maintains alive set  │
 //!     │    (user-defined)     │           │   (Starting/Stopped)  │
 //!     └───────────────────────┘           └───────────────────────┘
@@ -92,14 +92,14 @@
 //!
 //! ## Features
 //!
-//! | Area              | Description                                                           | Key types / traits                     |
-//! |-------------------|-----------------------------------------------------------------------|----------------------------------------|
-//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom subscribers). | [`Observer`]                           |
-//! | **Policies**      | Configure restart/backoff strategies for tasks.                       | [`RestartPolicy`], [`BackoffPolicy`]   |
-//! | **Supervision**   | Manage groups of tasks and their lifecycle.                           | [`Supervisor`]                         |
-//! | **Errors**        | Typed errors for orchestration and task execution.                    | [`TaskError`], [`RuntimeError`]        |
-//! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.          | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
-//! | **Configuration** | Centralize runtime settings.                                          | [`Config`]                             |
+//! | Area              | Description                                                            | Key types / traits                     |
+//! |-------------------|------------------------------------------------------------------------|----------------------------------------|
+//! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscriber`]                         |
+//! | **Policies**      | Configure restart/backoff strategies for tasks.                        | [`RestartPolicy`], [`BackoffPolicy`]   |
+//! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`]                         |
+//! | **Errors**        | Typed errors for orchestration and task execution.                     | [`TaskError`], [`RuntimeError`]        |
+//! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.           | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
+//! | **Configuration** | Centralize runtime settings.                                           | [`Config`]                             |
 //!
 //! ## Optional features
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
@@ -117,7 +117,7 @@
 //!     let mut cfg = Config::default();
 //!     cfg.timeout = Duration::from_secs(5);
 //!
-//!     // Use the built-in logger observer (enabled via --features "logging").
+//!     // Use the built-in logger subscriber (enabled via --features "logging").
 //!     let s = Supervisor::new(cfg.clone(), LogWriter);
 //!
 //!     // Define a simple task with a cancellation token.
@@ -162,7 +162,7 @@ pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 #[cfg(feature = "events")]
 pub use crate::events::{Event, EventKind};
 
-// Optional: expose a simple built-in logger observer (demo/reference).
+// Optional: expose a simple built-in logger subscriber (demo/reference).
 // Enable with: `--features logging`
 #[cfg(feature = "logging")]
 pub use subscribers::LogWriter;
