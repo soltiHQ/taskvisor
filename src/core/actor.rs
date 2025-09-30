@@ -2,7 +2,7 @@
 //!
 //! A `TaskActor` drives one [`Task`] through repeated attempts, applying:
 //! - restart policy ([`RestartPolicy`]),
-//! - backoff delays ([`BackoffStrategy`]),
+//! - backoff delays ([`BackoffPolicy`]),
 //! - per-attempt timeout (optional, via `timeout`),
 //! - cooperative cancellation via a runtime [`CancellationToken`].
 //!
@@ -12,10 +12,15 @@
 //! ```text
 //! TaskSpec ──► Supervisor ──► TaskActor (from TaskSpec)
 //!
-//! attempt ──► run_once(task, timeout)
-//!      │       ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
-//!      │       └── Err ─► schedule backoff ─► sleep ─► retry
-//!      └────► cancelled (runtime_token) ─► exit
+//! loop:
+//!   ├─► acquire semaphore (if configured, cancellable)
+//!   ├─► publish TaskStarting(attempt)
+//!   ├─► run_once(task, timeout)
+//!   │     ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
+//!   │     └── Err ─► apply RestartPolicy, if retry:
+//!   │                   └─► publish BackoffScheduled
+//!   │                   └─► sleep(backoff_delay, cancellable)
+//!   └─► exit if cancelled or restart not allowed
 //! ```
 //!
 //! #### Notes:
@@ -29,12 +34,10 @@ use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    bus::Bus,
-    event::{Event, EventKind},
-    policy::RestartPolicy,
-    runner::run_once,
-    strategy::BackoffStrategy,
-    task::Task,
+    core::runner::run_once,
+    events::{Bus, Event, EventKind},
+    policies::{BackoffPolicy, RestartPolicy},
+    tasks::Task,
 };
 
 /// Parameters controlling retries/backoff/timeout for a task actor.
@@ -42,8 +45,8 @@ use crate::{
 pub struct TaskActorParams {
     /// Restart policy applied after each attempt.
     pub restart: RestartPolicy,
-    /// Backoff strategy used between failed attempts.
-    pub backoff: BackoffStrategy,
+    /// Backoff policy used between failed attempts.
+    pub backoff: BackoffPolicy,
     /// Optional per-attempt timeout; `None` or `0` means no timeout.
     pub timeout: Option<Duration>,
 }

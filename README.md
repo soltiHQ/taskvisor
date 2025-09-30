@@ -24,7 +24,7 @@ taskvisor = "0.1"
 ```
 
 > Optional features:
->  - `logging` - enables the built-in [`LoggerObserver`], which prints events to stdout _(for demo and debug)_;
+>  - `logging` - enables the built-in [`LogWriter`], which prints events to stdout _(for demo and debug)_;
 >  - `events` - exports [`Event`] and [`EventKind`] types at the crate root for direct use.
 
 ```toml
@@ -39,14 +39,14 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffStrategy, 
+    BackoffPolicy, 
     Config, 
     RestartPolicy, 
     Supervisor,
     TaskFn, 
     TaskRef, 
     TaskSpec, 
-    LoggerObserver, 
+    LogWriter, 
     TaskError,
 };
 
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let sup = Supervisor::new(cfg.clone(), LoggerObserver);
+    let sup = Supervisor::new(cfg.clone(), LogWriter);
 
     // Simple task that occasionally fails to demonstrate restart behavior
     let demo_task: TaskRef = TaskFn::arc("demo", |ctx: CancellationToken| async move {
@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let spec = TaskSpec::new(
         demo_task,
         RestartPolicy::Always,                // Restart on both success and failure
-        BackoffStrategy {
+        BackoffPolicy {
             first: Duration::from_secs(1),
             max: Duration::from_secs(5),
             factor: 2.0,                      // Exponential: 1s, 2s, 4s, 5s (capped)
@@ -97,8 +97,8 @@ async fn main() -> anyhow::Result<()> {
 #### What this example shows:
 - how tasks are defined using `TaskFn::arc`
 - how `RestartPolicy::Always` keeps the task running continuously
-- how `BackoffStrategy` delays retries after failures
-- how `LoggerObserver` prints events to see what's happening
+- how `BackoffPolicy` delays retries after failures
+- how `LogWriter` prints events to see what's happening
 - how Ctrl+C triggers graceful shutdown with a 5-second grace period
 
 ## 🤝 Contributing

@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffStrategy, Config, LoggerObserver, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef,
     TaskSpec,
 };
 
@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     cfg.max_concurrent = 2;
     cfg.timeout = Duration::from_secs(5);
 
-    let supervisor = Supervisor::new(cfg.clone(), LoggerObserver);
+    let supervisor = Supervisor::new(cfg.clone(), LogWriter);
 
     let ticker: TaskRef = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
         loop {
@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         TaskSpec {
             task: ticker.clone(),
             restart: RestartPolicy::Always,
-            backoff: BackoffStrategy::default(),
+            backoff: BackoffPolicy::default(),
             timeout: Some(Duration::from_secs(5)),
         },
         TaskSpec::from_task(flaky.clone(), &cfg),

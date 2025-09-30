@@ -53,7 +53,7 @@
 //! │  {                                     │
 //! │    task: TaskRef,                      │
 //! │    restart: RestartPolicy,             │
-//! │    backoff: BackoffStrategy,           │
+//! │    backoff: BackoffPolicy,             │
 //! │    timeout: Option<Duration>           │
 //! │  }                                     │
 //! └────┬───────────────────────────────────┘
@@ -65,7 +65,7 @@
 //! └────┬───────────────────────────────────┘
 //!      │ (1) optional: acquire global Semaphore permit (cancellable)
 //!      │ (2) publish Event::TaskStarting{ task, attempt }
-//!      │ (3) run_once(task, attempt_timeout, bus, child_token)
+//!      │ (3) run_once(task, parent_token, timeout, bus)
 //!      │         ├─ Ok  ──► publish TaskStopped
 //!      │         │          └─ apply RestartPolicy from TaskSpec:
 //!      │         │                - Never        ⇒ exit
@@ -77,7 +77,7 @@
 //!      │                      - OnFailure    ⇒ retry
 //!      │                      - Always       ⇒ retry
 //!      │ (4) if retry:
-//!      │       delay = backoff.next(prev_delay) // BackoffStrategy from TaskSpec
+//!      │       delay = backoff.next(prev_delay) // BackoffPolicy from TaskSpec
 //!      │       publish BackoffScheduled{ task, delay, attempt, error }
 //!      │       sleep(delay)  (cancellable via runtime token)
 //!      │       prev_delay = Some(delay)
@@ -94,22 +94,22 @@
 //!
 //! | Area              | Description                                                           | Key types / traits                     |
 //! |-------------------|-----------------------------------------------------------------------|----------------------------------------|
-//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom observers). | [`Observer`]                           |
-//! | **Policies**      | Configure restart/backoff strategies for tasks.                       | [`RestartPolicy`], [`BackoffStrategy`] |
+//! | **Observer API**  | Hook into task lifecycle events (logging, metrics, custom subscribers). | [`Observer`]                           |
+//! | **Policies**      | Configure restart/backoff strategies for tasks.                       | [`RestartPolicy`], [`BackoffPolicy`]   |
 //! | **Supervision**   | Manage groups of tasks and their lifecycle.                           | [`Supervisor`]                         |
 //! | **Errors**        | Typed errors for orchestration and task execution.                    | [`TaskError`], [`RuntimeError`]        |
 //! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.          | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
 //! | **Configuration** | Centralize runtime settings.                                          | [`Config`]                             |
 //!
 //! ## Optional features
-//! - `logging`: exports a simple built-in [`LoggerObserver`] _(demo/reference only)_.
+//! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
 //! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
 //!
 //! ```no_run
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{
-//!     BackoffStrategy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LoggerObserver
+//!     BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LogWriter
 //! };
 //!
 //! #[tokio::main(flavor = "current_thread")]
@@ -118,7 +118,7 @@
 //!     cfg.timeout = Duration::from_secs(5);
 //!
 //!     // Use the built-in logger observer (enabled via --features "logging").
-//!     let s = Supervisor::new(cfg.clone(), LoggerObserver);
+//!     let s = Supervisor::new(cfg.clone(), LogWriter);
 //!
 //!     // Define a simple task with a cancellation token.
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
@@ -131,7 +131,7 @@
 //!     let spec = TaskSpec::new(
 //!         hello,
 //!         RestartPolicy::Never,
-//!         BackoffStrategy::default(),
+//!         BackoffPolicy::default(),
 //!         Some(Duration::from_secs(5)),
 //!     );
 //!
@@ -140,38 +140,29 @@
 //! }
 //! ```
 
-mod actor;
-mod alive;
-mod bus;
 mod config;
+mod core;
 mod error;
-mod event;
-mod observer;
-mod os_signals;
-mod policy;
-mod runner;
-mod strategy;
-mod supervisor;
-mod task;
-mod task_spec;
-
+mod events;
+mod policies;
+mod subscribers;
+mod tasks;
 // ---- Public re-exports ----
 
 pub use config::Config;
+pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
-pub use observer::Observer;
-pub use policy::RestartPolicy;
-pub use strategy::BackoffStrategy;
-pub use supervisor::Supervisor;
-pub use task::{Task, TaskFn, TaskRef};
-pub use task_spec::TaskSpec;
+pub use policies::BackoffPolicy;
+pub use policies::RestartPolicy;
+pub use subscribers::Subscriber;
+pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.
 // Enable with: `--features events`
 #[cfg(feature = "events")]
-pub use crate::event::{Event, EventKind};
+pub use crate::events::{Event, EventKind};
 
 // Optional: expose a simple built-in logger observer (demo/reference).
 // Enable with: `--features logging`
 #[cfg(feature = "logging")]
-pub use observer::LoggerObserver;
+pub use subscribers::LogWriter;

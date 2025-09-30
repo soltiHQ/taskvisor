@@ -18,28 +18,44 @@
 //!       │                Ok(result)                  Err(elapsed)
 //!       │                   │                            │
 //!    result = Ok()   → publish TaskStopped           cancel child → publish TimeoutHit
-//!    result = Err(e) → publish TaskFailed
+//!    result = Err(e) → publish TaskFailed                         → return Timeout error
 //! ```
 //!
 //! - On success, publishes [`EventKind::TaskStopped`].
 //! - On failure, publishes [`EventKind::TaskFailed`].
 //! - On timeout, cancels the child token, publishes [`EventKind::TimeoutHit`], and returns [`TaskError::Timeout`].
-//! - This function performs **one attempt only**; retries/backoff are handled by [`TaskActor`](crate::actor::TaskActor).
+//! - This function performs **one attempt only**;
 
 use std::time::Duration;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    bus::Bus,
     error::TaskError,
-    event::{Event, EventKind},
-    task::Task,
+    events::Bus,
+    events::{Event, EventKind},
+    tasks::Task,
 };
 
-/// Executes a single run of a task with optional timeout.
+/// Runs a single attempt of `task`, publishing lifecycle events to `bus`.
 ///
-/// Publishes lifecycle events to the [`Bus`] and respects cancellation tokens.
+/// Events (in order):
+/// 1. `TaskStarted`
+/// 2. one of:
+///    - `TaskCompleted` (ok)
+///    - `TaskFailed` (err from task)
+///    - `TimeoutHit` + `TaskFailed` (if timed out)
+///    - `TaskCancelled` (if parent cancellation)
+///
+/// # Cancellation
+/// A child cancellation token is derived per attempt; parent cancel aborts the attempt.
+///
+/// # Timeout
+/// If `timeout > 0`, the attempt is `tokio::time::timeout`-wrapped. On hit, publishes `TimeoutHit`.
+///
+/// # Returns
+/// - `Ok(())` when the attempt finished successfully
+/// - `Err` with the task error or timeout error
 pub async fn run_once<T: Task + ?Sized>(
     task: &T,
     parent: &CancellationToken,

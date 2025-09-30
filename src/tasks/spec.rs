@@ -7,14 +7,16 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::{config::Config, policy::RestartPolicy, strategy::BackoffStrategy, task::TaskRef};
+use crate::policies::BackoffPolicy;
+use crate::tasks::task_fn::TaskRef;
+use crate::{config::Config, policies::RestartPolicy};
 
 /// # Specification for running a task under supervision.
 ///
 /// A [`TaskSpec`] bundles:
 /// - the task itself ([`TaskRef`])
 /// - restart policy ([`RestartPolicy`])
-/// - backoff strategy ([`BackoffStrategy`])
+/// - backoff polict ([`BackoffPolicy`])
 /// - optional execution timeout
 ///
 /// It can be created manually with [`TaskSpec::new`] or derived from a
@@ -23,15 +25,17 @@ use crate::{config::Config, policy::RestartPolicy, strategy::BackoffStrategy, ta
 /// # Example
 /// ```
 /// use tokio_util::sync::CancellationToken;
-/// use taskvisor::{TaskSpec, TaskFn, Config, RestartPolicy, BackoffStrategy, TaskRef};
+/// use taskvisor::{TaskSpec, TaskFn, Config, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
 ///
-/// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move { Ok(()) });
+/// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
+///     Ok::<(), TaskError>(())
+/// });
 ///
 /// // Build spec explicitly:
 /// let spec = TaskSpec::new(
 ///     demo.clone(),
 ///     RestartPolicy::Never,
-///     BackoffStrategy::default(),
+///     BackoffPolicy::default(),
 ///     None,
 /// );
 /// assert!(spec.timeout.is_none());
@@ -46,8 +50,8 @@ pub struct TaskSpec {
     pub task: TaskRef,
     /// Policy controlling if/when the task should be restarted.
     pub restart: RestartPolicy,
-    /// Strategy controlling delays between restarts.
-    pub backoff: BackoffStrategy,
+    /// Policy controlling delays between restarts.
+    pub backoff: BackoffPolicy,
     /// Optional timeout for the task execution.
     pub timeout: Option<Duration>,
 }
@@ -57,7 +61,7 @@ impl TaskSpec {
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
-        backoff: BackoffStrategy,
+        backoff: BackoffPolicy,
         timeout: Option<Duration>,
     ) -> Self {
         Self {

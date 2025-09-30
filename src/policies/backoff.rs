@@ -1,24 +1,30 @@
-//! # Backoff strategy for retrying tasks.
+//! # Backoff policy for retrying tasks.
 //!
-//! [`BackoffStrategy`] controls how retry delays grow after repeated failures.
+//! [`BackoffPolicy`] controls how retry delays grow after repeated failures.
 //! It is parameterized by:
-//! - [`BackoffStrategy::factor`] — the multiplicative growth factor;
-//! - [`BackoffStrategy::first`] — the initial delay;
-//! - [`BackoffStrategy::max`] — the maximum delay cap.
+//! - [`BackoffPolicy::factor`] — the multiplicative growth factor;
+//! - [`BackoffPolicy::first`] — the initial delay;
+//! - [`BackoffPolicy::max`] — the maximum delay cap.
 //!
 //! # Example
-//! ```
+//! ```rust
 //! use std::time::Duration;
-//! use taskvisor::BackoffStrategy;
+//! use taskvisor::BackoffPolicy;
 //!
-//! let backoff = BackoffStrategy {
+//! let backoff = BackoffPolicy {
 //!     first: Duration::from_millis(100),
 //!     max: Duration::from_secs(10),
 //!     factor: 2.0,
 //! };
 //!
+//! // First attempt - uses 'first'
 //! assert_eq!(backoff.next(None), Duration::from_millis(100));
+//!
+//! // Second attempt - multiplied by factor (100ms * 2.0 = 200ms)
 //! assert_eq!(backoff.next(Some(Duration::from_millis(100))), Duration::from_millis(200));
+//!
+//! // When previous delay exceeds max, result is capped at max
+//! // (20s * 2.0 = 40s, but capped at max=10s)
 //! assert_eq!(backoff.next(Some(Duration::from_secs(20))), Duration::from_secs(10));
 //! ```
 
@@ -31,7 +37,7 @@ use std::time::Duration;
 /// - [`first`] — the initial delay;
 /// - [`max`] — the maximum delay cap.
 #[derive(Clone, Copy, Debug)]
-pub struct BackoffStrategy {
+pub struct BackoffPolicy {
     /// Initial delay before the first retry.
     pub first: Duration,
     /// Maximum delay cap for retries.
@@ -40,7 +46,7 @@ pub struct BackoffStrategy {
     pub factor: f64,
 }
 
-impl Default for BackoffStrategy {
+impl Default for BackoffPolicy {
     /// Returns a strategy with:
     /// - `factor = 1.0` (constant delay);
     /// - `first = 100ms`;
@@ -54,11 +60,16 @@ impl Default for BackoffStrategy {
     }
 }
 
-impl BackoffStrategy {
+impl BackoffPolicy {
     /// Computes the next delay based on the previous one.
     ///
-    /// - If `prev` is `None`, returns [`BackoffStrategy::first`].
-    /// - Otherwise multiplies the previous delay by [`BackoffStrategy::factor`], and caps it at [`BackoffStrategy::max`].
+    /// - If `prev` is `None`, returns [`BackoffPolicy::first`].
+    /// - Otherwise multiplies the previous delay by [`BackoffPolicy::factor`], and caps it at [`BackoffPolicy::max`].
+    ///
+    /// # Note
+    /// If `factor` is less than 1.0, delays will decrease over time (not typical for backoff).
+    /// If `factor` equals 1.0, delay remains constant at `first` (up to `max`).
+    /// If `factor` is greater than 1.0, delays grow exponentially (typical backoff behavior).
     pub fn next(&self, prev: Option<Duration>) -> Duration {
         match prev {
             None => self.first,

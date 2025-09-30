@@ -1,46 +1,38 @@
-//! # Tracks currently alive (running) tasks.
+//! # Stateful subscriber that tracks currently running tasks.
 //!
-//! [`AliveTracker`] subscribes to runtime events and maintains a set of active task names.
-//! It listens for [`EventKind::TaskStarting`] and [`EventKind::TaskStopped`] to update its state.
+//! [`AliveTracker`] maintains an in-memory set of active task names by listening to
+//! [`EventKind::TaskStarting`] and [`EventKind::TaskStopped`] events.
 //!
-//! This is primarily used by the [`Supervisor`](crate::supervisor::Supervisor) to report which tasks
-//! are still alive during graceful shutdown.
+//! This is used internally by the [`Supervisor`](crate::core::Supervisor) during
+//! graceful shutdown to identify tasks that haven't stopped within the grace period.
 //!
-//! # High-level architecture:
+//! ## Architecture
 //! ```text
 //!  TaskActor ── publish(Event) ──► Bus
 //!                                   │
 //!                              subscribe()
 //!                                   │
 //!                                   ▼
-//!                  AliveTracker (in-memory set of task names)
+//!                  AliveTracker (HashSet<String> behind Mutex)
 //!                         │                  │
 //!          TaskStarting ──┘                  └── TaskStopped
 //!          insert(name)                          remove(name)
 //!
-//! Snapshot:
-//!   AliveTracker::snapshot() ──► Vec<String> of alive tasks
-//!                     └────────► Used by Supervisor during graceful shutdown
+//! During shutdown:
+//!   Supervisor calls AliveTracker::snapshot() ──► Vec<String> of stuck tasks
 //! ```
-//!
-//! - Actors publish [`EventKind::TaskStarting`] / [`EventKind::TaskStopped`] into the bus.
-//! - [`AliveTracker`] listens in background and updates its set accordingly.
-//! - [`Supervisor`](crate::supervisor::Supervisor) calls `snapshot()` to detect “stuck” tasks after grace timeout.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::event::{Event, EventKind};
+use crate::events::{Event, EventKind};
 
 /// Tracks which tasks are currently alive (running).
 ///
-/// Listens for task lifecycle events via a broadcast channel:
-/// - [`EventKind::TaskStarting`] inserts the task name.
-/// - [`EventKind::TaskStopped`] removes the task name.
-///
-/// Used by the [`Supervisor`](crate::supervisor::Supervisor) during graceful shutdown to identify "stuck" tasks.
+/// Maintains an internal HashSet of task names, updated based on lifecycle events.
+/// Thread-safe and cloneable - multiple references share the same internal state.
 #[derive(Clone)]
 pub struct AliveTracker {
     inner: Arc<Mutex<HashSet<String>>>,
@@ -54,9 +46,15 @@ impl AliveTracker {
         }
     }
 
-    /// Spawns a background listener that subscribes to the given event stream.
+    /// Spawns a background task that subscribes to events and updates the tracker.
     ///
-    /// Updates the internal set of alive tasks based on `TaskStarting` and `TaskStopped` events.
+    /// The spawned task will:
+    /// - Insert task names on `TaskStarting` events
+    /// - Remove task names on `TaskStopped` events
+    /// - Exit when the receiver is dropped or the bus is destroyed
+    ///
+    /// # Parameters
+    /// - `rx`: Broadcast receiver subscribed to the event bus
     pub fn spawn_listener(&self, mut rx: tokio::sync::broadcast::Receiver<Event>) {
         let inner = self.inner.clone();
 
@@ -79,9 +77,18 @@ impl AliveTracker {
         });
     }
 
-    /// Returns a snapshot of currently alive tasks as a vector of names.
+    /// Returns a snapshot of currently alive task names.
+    ///
+    /// # Returns
+    /// Vector of task names that have started but not yet stopped.
     pub async fn snapshot(&self) -> Vec<String> {
         let g = self.inner.lock().await;
         g.iter().cloned().collect()
+    }
+}
+
+impl Default for AliveTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
