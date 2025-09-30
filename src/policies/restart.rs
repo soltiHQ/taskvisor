@@ -8,7 +8,7 @@
 //! - [`RestartPolicy::OnFailure`] — the task is restarted only if it fails (default).
 //!
 //! # Example
-//! ```
+//! ```rust
 //! use taskvisor::RestartPolicy;
 //!
 //! let p1 = RestartPolicy::Never;

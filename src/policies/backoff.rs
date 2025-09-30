@@ -7,7 +7,7 @@
 //! - [`BackoffPolicy::max`] — the maximum delay cap.
 //!
 //! # Example
-//! ```
+//! ```rust
 //! use std::time::Duration;
 //! use taskvisor::BackoffPolicy;
 //!
