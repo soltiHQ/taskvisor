@@ -6,21 +6,14 @@
 //! - Multiple cooperating tasks
 //! - Graceful shutdown
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy,
-    Config,
-    LogWriter,
-    RestartPolicy,
-    Supervisor,
-    TaskError,
-    TaskFn,
-    TaskRef,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef,
     TaskSpec,
 };
 
@@ -172,7 +165,6 @@ async fn main() -> anyhow::Result<()> {
             BackoffPolicy::default(),
             None,
         ),
-
         // Processor: restart on failure with backoff
         TaskSpec::new(
             processor(num_rx, result_tx),
@@ -184,7 +176,6 @@ async fn main() -> anyhow::Result<()> {
             },
             None,
         ),
-
         // Printer: never restart
         TaskSpec::new(
             printer(result_rx),
