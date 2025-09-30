@@ -29,11 +29,11 @@ use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::runner::run_once;
+use crate::event::strategy::BackoffStrategy;
 use crate::{
     event::Bus,
     event::{Event, EventKind},
     policy::RestartPolicy,
-    strategy::BackoffStrategy,
     task::Task,
 };
 

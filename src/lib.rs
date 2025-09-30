@@ -140,23 +140,21 @@
 //! }
 //! ```
 
-mod alive;
 mod config;
 mod core;
 mod error;
 mod event;
-mod observer;
+mod observers;
 mod policy;
-mod strategy;
 mod task;
 // ---- Public re-exports ----
 
 pub use config::Config;
 pub use core::supervisor::Supervisor;
 pub use error::{RuntimeError, TaskError};
-pub use observer::Observer;
+pub use event::strategy::BackoffStrategy;
+pub use observers::observer::Observer;
 pub use policy::RestartPolicy;
-pub use strategy::BackoffStrategy;
 pub use task::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.
@@ -167,4 +165,4 @@ pub use crate::event::{Event, EventKind};
 // Optional: expose a simple built-in logger observer (demo/reference).
 // Enable with: `--features logging`
 #[cfg(feature = "logging")]
-pub use observer::LoggerObserver;
+pub use observers::observer::LoggerObserver;
