@@ -86,7 +86,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{TaskActor, TaskActorParams};
-use crate::core::os_signals;
+use crate::core::signals;
 use crate::observers::AliveTracker;
 use crate::observers::Observer;
 use crate::tasks::TaskSpec;
@@ -202,7 +202,7 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
         alive: &AliveTracker,
     ) -> Result<(), RuntimeError> {
         tokio::select! {
-            _ = os_signals::wait_for_shutdown_signal() => {
+            _ = signals::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::now(EventKind::ShutdownRequested));
                 runtime_token.cancel();
                 self.wait_all_with_grace(set, alive).await

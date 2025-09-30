@@ -1,5 +1,5 @@
 mod actor;
-mod os_signals;
+mod signals;
 mod runner;
 mod supervisor;
 
