@@ -6,10 +6,10 @@
 //! - [`Bus::subscribe`] creates a new receiver for consuming events.
 //!
 //! This is used internally by the [`Supervisor`](crate::core::Supervisor)
-//! to deliver task lifecycle events to the [`Observer`](crate::observers::observer::Observer)
-//! and to the [`AliveTracker`](crate::observers::alive::AliveTracker).
+//! to deliver task lifecycle events to observers and subscribers like `AliveTracker`.
 
-use crate::events::event::Event;
+
+use super::event::Event;
 use tokio::sync::broadcast;
 
 /// Broadcast channel for runtime events.

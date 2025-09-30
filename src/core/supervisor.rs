@@ -45,12 +45,19 @@
 //! - On OS signal, supervisor cancels all actors and waits up to [`Config::grace`].
 //!
 //! # Example
-//! ```no_run
+//! ```
 //! #![cfg(feature = "logging")]
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{
-//!     BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LogWriter
+//!     BackoffPolicy,
+//!     Config,
+//!     RestartPolicy,
+//!     Supervisor,
+//!     TaskFn,
+//!     TaskRef,
+//!     TaskSpec,
+//!     LogWriter,
 //! };
 //!
 //! #[tokio::main(flavor = "current_thread")]
@@ -86,7 +93,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{TaskActor, TaskActorParams};
-use crate::core::signals;
+use crate::core::shutdown;
 use crate::observers::AliveTracker;
 use crate::observers::Observer;
 use crate::tasks::TaskSpec;
@@ -202,7 +209,7 @@ impl<Obs: Observer + Send + Sync + 'static> Supervisor<Obs> {
         alive: &AliveTracker,
     ) -> Result<(), RuntimeError> {
         tokio::select! {
-            _ = signals::wait_for_shutdown_signal() => {
+            _ = shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::now(EventKind::ShutdownRequested));
                 runtime_token.cancel();
                 self.wait_all_with_grace(set, alive).await

@@ -1,5 +1,6 @@
-use crate::{Event, EventKind, Observer};
+use crate::events::{Event, EventKind};
 use async_trait::async_trait;
+use crate::Observer;
 
 /// Base observer that logs events to stdout.
 ///

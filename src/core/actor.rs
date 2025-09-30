@@ -28,12 +28,10 @@ use std::time::Duration;
 use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::runner::run_once;
-use crate::policies::BackoffPolicy;
 use crate::{
-    events::Bus,
-    events::{Event, EventKind},
-    policies::RestartPolicy,
+    core::runner::run_once,
+    events::{Bus, Event, EventKind},
+    policies::{BackoffPolicy, RestartPolicy},
     tasks::Task,
 };
 
