@@ -26,7 +26,9 @@ pub struct LogWriter;
 impl LogWriter {
     /// Construct a new [`LogWriter`].
     #[must_use]
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[async_trait]
