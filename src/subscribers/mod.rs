@@ -56,5 +56,4 @@ mod subscribe;
 pub use set::SubscriberSet;
 pub use subscribe::Subscribe;
 
-pub use embedded::AliveTracker;
 pub use embedded::LogWriter;

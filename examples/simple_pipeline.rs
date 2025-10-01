@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    AliveTracker, BackoffPolicy, Config, LogWriter, RestartPolicy, Subscribe, Supervisor,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Subscribe, Supervisor,
     TaskError, TaskFn, TaskRef, TaskSpec,
 };
 
@@ -156,13 +156,12 @@ async fn main() -> anyhow::Result<()> {
     config.grace = Duration::from_secs(3);
     config.max_concurrent = 3;
 
-    // Build subscriber set: AliveTracker + LogWriter
-    let alive = Arc::new(AliveTracker::new());
-    let mut subs: Vec<Arc<dyn Subscribe>> = vec![alive.clone()];
+    // Build subscriber set: LogWriter
+    let mut subs: Vec<Arc<dyn Subscribe>> = vec![];
     subs.push(Arc::new(LogWriter::new()));
 
     // NEW: Supervisor takes the list of subscribers and the alive tracker handle
-    let supervisor = Supervisor::new(config, subs, alive);
+    let supervisor = Supervisor::new(config, subs);
 
     let tasks = vec![
         // Generator: always restart to keep producing

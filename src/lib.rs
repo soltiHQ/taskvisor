@@ -38,11 +38,11 @@
 //! └─────────────────────────────────┬─────────────────────────────────┘
 //!                      broadcasts to all subscribers
 //!                                   ▼
-//!     ┌───────────────────────┐           ┌───────────────────────┐
-//!     │      Subscriber       │           │      AliveTracker     │
-//!     │   on_event(&Event)    │           │  maintains alive set  │
-//!     │    (user-defined)     │           │   (Starting/Stopped)  │
-//!     └───────────────────────┘           └───────────────────────┘
+//!                       ┌───────────────────────┐
+//!                       │      Subscriber       │
+//!                       │   on_event(&Event)    │
+//!                       │    (user-defined)     │
+//!                       └───────────────────────┘
 //!```
 //! ---
 //!
@@ -155,7 +155,7 @@ pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
 pub use policies::BackoffPolicy;
 pub use policies::RestartPolicy;
-pub use subscribers::{AliveTracker, Subscribe, SubscriberSet};
+pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.
