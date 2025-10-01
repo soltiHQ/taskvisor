@@ -20,14 +20,13 @@ use crate::subscribers::Subscribe;
 use async_trait::async_trait;
 
 /// Event writer subscriber.
+#[derive(Default)]
 pub struct LogWriter;
 
 impl LogWriter {
     /// Construct a new [`LogWriter`].
     #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 }
 
 #[async_trait]
@@ -66,6 +65,7 @@ impl Subscribe for LogWriter {
             }
         }
     }
+
     fn name(&self) -> &'static str {
         "LogWriter"
     }

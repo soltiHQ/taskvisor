@@ -42,7 +42,7 @@
 //!             └─► Bus.publish(ShutdownRequested)
 //!             └─► runtime_token.cancel()   → propagates to child tokens
 //!             └─► wait_all_with_grace(cfg.grace):
-//!                    ├─ Ok (all joined)    → Bus.publish(AllStoppedWithinGrace)
+//!                    ├─ Ok (all joined)    → Bus.publish(AllStoppedWithin)
 //!                    └─ Timeout exceeded   → Bus.publish(GraceExceeded)
 //!                                            (supervisor.snapshot() for stuck tasks)
 //! ```
@@ -171,7 +171,9 @@ impl Supervisor {
         v
     }
 
-    /// Subscribes to the bus, **updates alive inline**, then forwards events to subscribers (fire-and-forget).
+    /// Subscribes to the bus, updates alive inline, then fans out to subscribers.
+    ///
+    /// Best-effort: subscriber queues may drop; alive set remains correct.
     fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
