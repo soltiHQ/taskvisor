@@ -26,6 +26,8 @@ async-trait = "0.1.89"
 tokio-util = "0.7.16"
 thiserror = "2.0.16"
 anyhow = "1.0.100"
+log = "0.4.28"
+futures = "0.3.31"
 
 [[example]]
 name = "simple_pipeline"

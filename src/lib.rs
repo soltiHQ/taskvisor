@@ -155,7 +155,7 @@ pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
 pub use policies::BackoffPolicy;
 pub use policies::RestartPolicy;
-pub use subscribers::Subscriber;
+pub use subscribers::{AliveTracker, Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.

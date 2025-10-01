@@ -6,7 +6,7 @@
 //! - per-attempt timeout (optional, via `timeout`),
 //! - cooperative cancellation via a runtime [`CancellationToken`].
 //!
-//! It also publishes lifecycle [`Event`]s to the internal bus.
+//! It also publishes lifecycle [`Event`]s to the embedded bus.
 //!
 //! # High-level architecture:
 //! ```text
