@@ -5,26 +5,30 @@
 //! queue that is owned by the [`SubscriberSet`](crate::subscribers::SubscriberSet).
 //!
 //! ## Contract
-//! - Implementations may be slow (I/O, batching, retries) – they do **not** block
-//!   the publisher nor other subscribers.
-//! - Each subscriber **declares** its preferred queue capacity via
-//!   [`Subscribe::queue_capacity`]. If a queue overflows, events for that
-//!   subscriber are **dropped** (warn).
+//! - Implementations may be slow (I/O, batching, retries) – they do **not** block the publisher nor other subscribers.
+//! - Each subscriber **declares** its preferred queue capacity via [`Subscribe::queue_capacity`].
+//!   If a queue overflows, events for that subscriber are **dropped** (warn).
 //!
-//! ## Example (skeleton)
+//! ## Example
 //! ```rust
-//! // use taskvisor::subscribers::Subscribe;
-//! // use taskvisor::events::Event;
-//! //
-//! // struct Audit;
-//! // #[async_trait::async_trait]
-//! // impl Subscribe for Audit {
-//! //     async fn on_event(&self, ev: &Event) {
-//! //         // write audit record...
-//! //     }
-//! //     fn name(&self) -> &'static str { "audit" }
-//! //     fn queue_capacity(&self) -> usize { 512 }
-//! // }
+//! use taskvisor::Subscribe;
+//!
+//! struct Audit;
+//!
+//! #[cfg(feature = "events")]
+//! #[async_trait::async_trait]
+//! impl Subscribe for Audit {
+//!     async fn on_event(&self, _ev: &taskvisor::Event) {
+//!         // do smth ...
+//!     }
+//!     fn name(&self) -> &'static str { "audit" }
+//!     fn queue_capacity(&self) -> usize { 512 }
+//! }
+//!
+//! #[tokio::main(flavor = "current_thread")]
+//! async fn main() {
+//!     let _s = Audit;
+//! }
 //! ```
 
 use crate::events::Event;
