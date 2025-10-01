@@ -105,20 +105,33 @@
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
 //! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
 //!
-//! ```no_run
+//!```rust
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
-//! use taskvisor::{
-//!     BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec, LogWriter
-//! };
+//! use taskvisor::{BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
+//! #[cfg(feature = "logging")]
+//! use taskvisor::LogWriter;
+//! #[cfg(feature = "logging")]
+//! use taskvisor::Subscribe;
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut cfg = Config::default();
 //!     cfg.timeout = Duration::from_secs(5);
 //!
-//!     // Use the built-in logger subscriber (enabled via --features "logging").
-//!     let s = Supervisor::new(cfg.clone(), LogWriter);
+//!     // Build supervisor with/without logging subscriber depending on features.
+//!     let s = {
+//!         #[cfg(feature = "logging")]
+//!         {
+//!             let subs: Vec<std::sync::Arc<dyn Subscribe>> =
+//!                 vec![std::sync::Arc::new(LogWriter)];
+//!             Supervisor::new(cfg.clone(), subs)
+//!         }
+//!         #[cfg(not(feature = "logging"))]
+//!         {
+//!             Supervisor::new(cfg.clone(), Vec::new())
+//!         }
+//!     };
 //!
 //!     // Define a simple task with a cancellation token.
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {

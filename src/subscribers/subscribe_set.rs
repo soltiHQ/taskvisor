@@ -24,19 +24,36 @@
 //!
 //! ## Example
 //! ```rust
-//! // use std::sync::Arc;
-//! // use taskvisor::subscribers::{Subscribe, SubscriberSet};
-//! // use taskvisor::events::Event;
-//! //
-//! // struct Printer;
-//! // #[async_trait::async_trait]
-//! // impl Subscribe for Printer {
-//! //     async fn on_event(&self, ev: &Event) { let _ = ev; /* println! ... */ }
-//! //     fn name(&self) -> &'static str { "printer" }
-//! // }
-//! //
-//! // let set = SubscriberSet::new(vec![Arc::new(Printer) as _]);
-//! // // set.emit(&event);
+//! use std::sync::Arc;
+//! use taskvisor::{Subscribe, SubscriberSet};
+//!
+//! struct Printer;
+//!
+//! #[cfg(feature = "events")]
+//! #[async_trait::async_trait]
+//! impl Subscribe for Printer {
+//!     async fn on_event(&self, _ev: &taskvisor::Event) {
+//!         // do smth ...
+//!     }
+//!     fn name(&self) -> &'static str { "printer" }
+//!     fn queue_capacity(&self) -> usize { 128 }
+//! }
+//!
+//! #[tokio::main(flavor = "current_thread")]
+//! async fn main() {
+//!     #[cfg(feature = "events")]
+//!     let set = SubscriberSet::new(vec![Arc::new(Printer) as Arc<dyn Subscribe>]);
+//!     #[cfg(not(feature = "events"))]
+//!     let set = SubscriberSet::new(Vec::new());
+//!
+//!     #[cfg(feature = "events")]
+//!     {
+//!         let ev = taskvisor::Event::now(taskvisor::EventKind::ShutdownRequested);
+//!         set.emit(&ev);
+//!         tokio::task::yield_now().await;
+//!     }
+//!     set.shutdown().await;
+//! }
 //! ```
 
 use std::sync::Arc;

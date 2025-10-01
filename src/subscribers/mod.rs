@@ -50,10 +50,10 @@
 //! ```
 
 mod embedded;
-mod set;
+mod subscribe_set;
 mod subscribe;
 
-pub use set::SubscriberSet;
+pub use subscribe_set::SubscriberSet;
 pub use subscribe::Subscribe;
 
 pub use embedded::LogWriter;
