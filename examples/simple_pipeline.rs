@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy, Config, LogWriter, RestartPolicy, Subscribe, Supervisor,
-    TaskError, TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Subscribe, Supervisor, TaskError, TaskFn,
+    TaskRef, TaskSpec,
 };
 
 /// Generates numbers every second

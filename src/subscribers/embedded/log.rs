@@ -15,9 +15,9 @@
 //! [grace-exceeded]
 //! ```
 
-use async_trait::async_trait;
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
+use async_trait::async_trait;
 
 /// Event writer subscriber.
 pub struct LogWriter;
@@ -25,7 +25,9 @@ pub struct LogWriter;
 impl LogWriter {
     /// Construct a new [`LogWriter`].
     #[must_use]
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[async_trait]
@@ -36,7 +38,10 @@ impl Subscribe for LogWriter {
                 println!("[starting] task={:?} attempt={:?}", e.task, e.attempt);
             }
             EventKind::TaskFailed => {
-                println!("[failed] task={:?} err={:?} attempt={:?}", e.task, e.error, e.attempt);
+                println!(
+                    "[failed] task={:?} err={:?} attempt={:?}",
+                    e.task, e.error, e.attempt
+                );
             }
             EventKind::TaskStopped => {
                 println!("[stopped] task={:?}", e.task);
@@ -51,12 +56,17 @@ impl Subscribe for LogWriter {
                 println!("[grace-exceeded]");
             }
             EventKind::BackoffScheduled => {
-                println!("[backoff] task={:?} delay={:?} after_attempt={:?} err={:?}", e.task, e.delay, e.attempt, e.error);
+                println!(
+                    "[backoff] task={:?} delay={:?} after_attempt={:?} err={:?}",
+                    e.task, e.delay, e.attempt, e.error
+                );
             }
             EventKind::TimeoutHit => {
                 println!("[timeout] task={:?} timeout={:?}", e.task, e.timeout);
             }
         }
     }
-    fn name(&self) -> &'static str { "LogWriter" }
+    fn name(&self) -> &'static str {
+        "LogWriter"
+    }
 }
