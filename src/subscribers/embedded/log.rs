@@ -35,17 +35,8 @@ impl LogWriter {
 impl Subscribe for LogWriter {
     async fn on_event(&self, e: &Event) {
         match e.kind {
-            EventKind::TaskStarting => {
-                println!("[starting] task={:?} attempt={:?}", e.task, e.attempt);
-            }
-            EventKind::TaskFailed => {
-                println!(
-                    "[failed] task={:?} err={:?} attempt={:?}",
-                    e.task, e.error, e.attempt
-                );
-            }
-            EventKind::TaskStopped => {
-                println!("[stopped] task={:?}", e.task);
+            EventKind::GraceExceeded => {
+                println!("[grace-exceeded]");
             }
             EventKind::ShutdownRequested => {
                 println!("[shutdown-requested]");
@@ -53,8 +44,14 @@ impl Subscribe for LogWriter {
             EventKind::AllStoppedWithin => {
                 println!("[all-stopped-within-grace]");
             }
-            EventKind::GraceExceeded => {
-                println!("[grace-exceeded]");
+            EventKind::TaskStopped => {
+                println!("[stopped] task={:?}", e.task);
+            }
+            EventKind::TimeoutHit => {
+                println!("[timeout] task={:?} timeout={:?}", e.task, e.timeout);
+            }
+            EventKind::TaskStarting => {
+                println!("[starting] task={:?} attempt={:?}", e.task, e.attempt);
             }
             EventKind::BackoffScheduled => {
                 println!(
@@ -62,8 +59,17 @@ impl Subscribe for LogWriter {
                     e.task, e.delay, e.attempt, e.error
                 );
             }
-            EventKind::TimeoutHit => {
-                println!("[timeout] task={:?} timeout={:?}", e.task, e.timeout);
+            EventKind::SubscriberOverflow => {
+                println!(
+                    "[subscriber-overflow] subscriber={:?} reason={:?}",
+                    e.task, e.error
+                );
+            }
+            EventKind::TaskFailed => {
+                println!(
+                    "[failed] task={:?} err={:?} attempt={:?}",
+                    e.task, e.error, e.attempt
+                );
             }
         }
     }

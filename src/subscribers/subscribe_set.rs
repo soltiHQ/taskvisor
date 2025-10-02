@@ -61,9 +61,8 @@ use std::sync::Arc;
 use futures::FutureExt;
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::events::Event;
-
 use super::Subscribe;
+use crate::events::{Bus, Event, EventKind};
 
 /// Per-subscriber channel with metadata
 struct SubscriberChannel {
@@ -75,12 +74,13 @@ struct SubscriberChannel {
 pub struct SubscriberSet {
     channels: Vec<SubscriberChannel>,
     workers: Vec<JoinHandle<()>>,
+    bus: Bus,
 }
 
 impl SubscriberSet {
     /// Creates a new set and spawns one worker per subscriber.
     #[must_use]
-    pub fn new(subs: Vec<Arc<dyn Subscribe>>) -> Self {
+    pub fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
         let mut channels = Vec::with_capacity(subs.len());
         let mut workers = Vec::with_capacity(subs.len());
 
@@ -106,8 +106,11 @@ impl SubscriberSet {
             channels.push(SubscriberChannel { name, sender: tx });
             workers.push(handle);
         }
-
-        Self { channels, workers }
+        Self {
+            channels,
+            workers,
+            bus,
+        }
     }
 
     /// Fan-out one event to all subscribers (non-blocking).
@@ -115,21 +118,23 @@ impl SubscriberSet {
     /// If a subscriber's queue is **full** or **closed**, the event is dropped for it
     /// and a warning is logged with the subscriber's name.
     pub fn emit(&self, event: &Event) {
-        let ev = Arc::new(event.clone());
+        let is_overflow = matches!(event.kind, EventKind::SubscriberOverflow);
+        let event = Arc::new(event.clone());
+
         for channel in &self.channels {
-            match channel.sender.try_send(Arc::clone(&ev)) {
+            match channel.sender.try_send(Arc::clone(&event)) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    eprintln!(
-                        "[taskvisor] subscriber '{}' dropped event: queue full",
-                        channel.name
-                    );
+                    if !is_overflow {
+                        self.bus
+                            .publish(Event::subscriber_overflow(channel.name, "full"));
+                    }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    eprintln!(
-                        "[taskvisor] subscriber '{}' dropped event: worker closed",
-                        channel.name
-                    );
+                    if !is_overflow {
+                        self.bus
+                            .publish(Event::subscriber_overflow(channel.name, "closed"));
+                    }
                 }
             }
         }

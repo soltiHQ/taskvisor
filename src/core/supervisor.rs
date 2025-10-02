@@ -141,7 +141,7 @@ impl Supervisor {
     /// `subscribers` may be empty; fan-out will no-op in that case.
     pub fn new(cfg: Config, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         let bus = Bus::new(cfg.bus_capacity);
-        let subs = Arc::new(SubscriberSet::new(subscribers));
+        let subs = Arc::new(SubscriberSet::new(subscribers, bus.clone()));
         Self {
             cfg,
             bus,
