@@ -24,6 +24,8 @@ use std::time::{Duration, SystemTime};
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
+    /// Subscriber event on panic,
+    SubscriberPanicked,
     /// A subscriber dropped an event (queue full or worker closed).
     SubscriberOverflow,
     /// Shutdown requested (OS signal received).
@@ -119,5 +121,11 @@ impl Event {
         ev.delay = None;
         ev.task = None;
         ev
+    }
+
+    pub fn subscriber_panicked(subscriber: &'static str, info: String) -> Self {
+        Event::now(EventKind::SubscriberPanicked)
+            .with_task(subscriber)
+            .with_error(info)
     }
 }

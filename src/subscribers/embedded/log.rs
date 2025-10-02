@@ -71,6 +71,13 @@ impl Subscribe for LogWriter {
                     e.task, e.error, e.attempt
                 );
             }
+            EventKind::SubscriberPanicked => {
+                println!(
+                    "[subscriber-panicked] subscriber={} info={}",
+                    e.task.as_deref().unwrap_or("unknown"),
+                    e.error.as_deref().unwrap_or("unknown"),
+                );
+            }
         }
     }
 

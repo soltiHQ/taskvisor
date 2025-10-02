@@ -21,40 +21,6 @@
 //!        ├────────────────► [queue S2] ─► worker S2 ─► on_event()
 //!        └────────────────► [queue SN] ─► worker SN ─► on_event()
 //! ```
-//!
-//! ## Example
-//! ```rust
-//! use std::sync::Arc;
-//! use taskvisor::{Subscribe, SubscriberSet};
-//!
-//! struct Printer;
-//!
-//! #[cfg(feature = "events")]
-//! #[async_trait::async_trait]
-//! impl Subscribe for Printer {
-//!     async fn on_event(&self, _ev: &taskvisor::Event) {
-//!         // do smth ...
-//!     }
-//!     fn name(&self) -> &'static str { "printer" }
-//!     fn queue_capacity(&self) -> usize { 128 }
-//! }
-//!
-//! #[tokio::main(flavor = "current_thread")]
-//! async fn main() {
-//!     #[cfg(feature = "events")]
-//!     let set = SubscriberSet::new(vec![Arc::new(Printer) as Arc<dyn Subscribe>]);
-//!     #[cfg(not(feature = "events"))]
-//!     let set = SubscriberSet::new(Vec::new());
-//!
-//!     #[cfg(feature = "events")]
-//!     {
-//!         let ev = taskvisor::Event::now(taskvisor::EventKind::ShutdownRequested);
-//!         set.emit(&ev);
-//!         tokio::task::yield_now().await;
-//!     }
-//!     set.shutdown().await;
-//! }
-//! ```
 
 use std::sync::Arc;
 
@@ -79,6 +45,9 @@ pub struct SubscriberSet {
 
 impl SubscriberSet {
     /// Creates a new set and spawns one worker per subscriber.
+    ///
+    /// Each subscriber gets a bounded MPSC queue of size `max(queue_capacity, 1)`.
+    /// Worker isolation: panics are caught and reported as `SubscriberPanicked`.
     #[must_use]
     pub fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
         let mut channels = Vec::with_capacity(subs.len());
@@ -89,16 +58,23 @@ impl SubscriberSet {
             let name = sub.name();
             let (tx, mut rx) = mpsc::channel::<Arc<Event>>(cap);
             let s = Arc::clone(&sub);
+            let bus_for_worker = bus.clone();
 
             let handle = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
                     let fut = s.on_event(ev.as_ref());
                     if let Err(panic_err) = std::panic::AssertUnwindSafe(fut).catch_unwind().await {
-                        eprintln!(
-                            "[taskvisor] subscriber '{}' panicked: {:?}",
-                            s.name(),
-                            panic_err
-                        );
+                        let info = {
+                            let any = &*panic_err;
+                            if let Some(msg) = any.downcast_ref::<&'static str>() {
+                                (*msg).to_string()
+                            } else if let Some(msg) = any.downcast_ref::<String>() {
+                                msg.clone()
+                            } else {
+                                "unknown panic".to_string()
+                            }
+                        };
+                        bus_for_worker.publish(Event::subscriber_panicked(s.name(), info));
                     }
                 }
             });
@@ -106,6 +82,7 @@ impl SubscriberSet {
             channels.push(SubscriberChannel { name, sender: tx });
             workers.push(handle);
         }
+
         Self {
             channels,
             workers,
@@ -116,22 +93,23 @@ impl SubscriberSet {
     /// Fan-out one event to all subscribers (non-blocking).
     ///
     /// If a subscriber's queue is **full** or **closed**, the event is dropped for it
-    /// and a warning is logged with the subscriber's name.
+    /// and a `SubscriberOverflow` system event is published.
     pub fn emit(&self, event: &Event) {
-        let is_overflow = matches!(event.kind, EventKind::SubscriberOverflow);
-        let event = Arc::new(event.clone());
+        // Prevent infinite loops: do not generate overflow-on-overflow events.
+        let is_overflow_evt = matches!(event.kind, EventKind::SubscriberOverflow);
 
+        let ev = Arc::new(event.clone());
         for channel in &self.channels {
-            match channel.sender.try_send(Arc::clone(&event)) {
+            match channel.sender.try_send(Arc::clone(&ev)) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    if !is_overflow {
+                    if !is_overflow_evt {
                         self.bus
                             .publish(Event::subscriber_overflow(channel.name, "full"));
                     }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    if !is_overflow {
+                    if !is_overflow_evt {
                         self.bus
                             .publish(Event::subscriber_overflow(channel.name, "closed"));
                     }
