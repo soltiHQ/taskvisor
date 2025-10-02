@@ -9,12 +9,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef,
-    TaskSpec,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Subscribe, Supervisor, TaskError, TaskFn,
+    TaskRef, TaskSpec,
 };
 
 /// Generates numbers every second
@@ -27,13 +28,13 @@ fn number_generator(tx: mpsc::Sender<u64>) -> TaskRef {
 
         async move {
             loop {
-                // Check cancellation
                 if ctx.is_cancelled() {
                     println!("🔢 Generator: Shutting down");
                     return Ok(());
                 }
+
                 let num = counter.fetch_add(1, Ordering::Relaxed);
-                println!("🔢 Generator: Sending {}", num);
+                println!("🔢 Generator: Sending {num}");
 
                 if tx.send(num).await.is_err() {
                     return Err(TaskError::Fatal {
@@ -41,7 +42,6 @@ fn number_generator(tx: mpsc::Sender<u64>) -> TaskRef {
                     });
                 }
 
-                // Cancellable sleep
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {},
                     _ = ctx.cancelled() => {
@@ -74,18 +74,19 @@ fn processor(rx: mpsc::Receiver<u64>, tx: mpsc::Sender<String>) -> TaskRef {
                         }
                     }
                 };
+
                 match num {
                     Some(num) => {
-                        println!("⚙️  Processor: Got {}", num);
+                        println!("⚙️  Processor: Got {num}");
 
                         // Fail on numbers divisible by 5 to demonstrate restart
                         if num % 5 == 0 && num != 0 {
                             return Err(TaskError::Fail {
-                                error: format!("Cannot process {} (divisible by 5)", num),
+                                error: format!("Cannot process {num} (divisible by 5)"),
                             });
                         }
-                        // Process the number
-                        let result = format!("Processed: {} -> {}", num, num * 2);
+
+                        let result = format!("Processed: {num} -> {}", num * 2);
 
                         if tx.send(result).await.is_err() {
                             return Err(TaskError::Fatal {
@@ -111,7 +112,7 @@ fn printer(rx: mpsc::Receiver<String>) -> TaskRef {
         let rx = rx.clone();
 
         async move {
-            let mut count = 0;
+            let mut count = 0usize;
 
             loop {
                 let result = {
@@ -119,7 +120,7 @@ fn printer(rx: mpsc::Receiver<String>) -> TaskRef {
                     tokio::select! {
                         result = rx.recv() => result,
                         _ = ctx.cancelled() => {
-                            println!("📝 Printer: Cancelled after {} items", count);
+                            println!("📝 Printer: Cancelled after {count} items");
                             return Ok(());
                         }
                     }
@@ -128,10 +129,10 @@ fn printer(rx: mpsc::Receiver<String>) -> TaskRef {
                 match result {
                     Some(result) => {
                         count += 1;
-                        println!("📝 Printer: [{}] {}", count, result);
+                        println!("📝 Printer: [{count}] {result}");
                     }
                     None => {
-                        println!("📝 Printer: Channel closed after {} items", count);
+                        println!("📝 Printer: Channel closed after {count} items");
                         return Ok(());
                     }
                 }
@@ -155,7 +156,12 @@ async fn main() -> anyhow::Result<()> {
     config.grace = Duration::from_secs(3);
     config.max_concurrent = 3;
 
-    let supervisor = Supervisor::new(config, LogWriter);
+    // Build subscriber set: LogWriter
+    let mut subs: Vec<Arc<dyn Subscribe>> = vec![];
+    subs.push(Arc::new(LogWriter::new()));
+
+    // NEW: Supervisor takes the list of subscribers and the alive tracker handle
+    let supervisor = Supervisor::new(config, subs);
 
     let tasks = vec![
         // Generator: always restart to keep producing
@@ -184,9 +190,11 @@ async fn main() -> anyhow::Result<()> {
             None,
         ),
     ];
+
     match supervisor.run(tasks).await {
         Ok(()) => println!("\n✅ Pipeline completed successfully"),
-        Err(e) => println!("\n⚠️  Pipeline stopped with error: {}", e),
+        Err(e) => println!("\n⚠️  Pipeline stopped with error: {e}"),
     }
+
     Ok(())
 }

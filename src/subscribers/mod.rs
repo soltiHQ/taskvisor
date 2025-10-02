@@ -1,50 +1,59 @@
-//! # Event subscribers for the taskvisor runtime.
+//! # Event subscribers for the taskvisor runtime (fire-and-forget).
 //!
-//! This module provides the [`Subscriber`] trait and built-in implementations
-//! for handling runtime events broadcast through the [`Bus`](crate::events::Bus).
+//! This module exposes the core extension point [`Subscribe`] and the composite
+//! fan-out [`SubscriberSet`]. Incoming [`Event`](crate::events::Event)s are
+//! **fanned out without awaiting** subscriber processing.
 //!
-//! ## Architecture
+//! ## Architecture (fan-out, per-subscriber queues)
 //! ```text
-//! Event flow:
-//!   TaskActor ── publish(Event) ──► Bus ──► broadcast to all subscribers
-//!                                              │
-//!                                              ├──► Subscriber::handle(&Event)
-//!                                              │         │
-//!                                              │    ┌────┴────┬─────────┬───────┐
-//!                                              │    ▼         ▼         ▼       ▼
-//!                                              │  LogWriter  Metrics  Custom  ...
-//!                                              │
-//!                                              └──► AliveTracker (internal state tracking)
+//! Publisher ──► SubscriberSet::emit(&Event) ──(clone Arc<Event>)────┐
+//!                                                                  │
+//!                     ┌───────────────┬───────────────┬────────────┴─────┐
+//!                     ▼               ▼               ▼                  ▼
+//!                mpsc queue       mpsc queue      mpsc queue        mpsc queue
+//!                 (cap S1)         (cap S2)        (cap S3)          (cap SN)
+//!                     │               │               │                  │
+//!             worker_task S1   worker_task S2  worker_task S3    worker_task SN
+//!                     │               │               │                  │
+//!             sub.on_event()   sub.on_event()  sub.on_event()    sub.on_event()
 //! ```
 //!
-//! ## Subscriber types
-//! - **Passive subscribers** - observe and react to events (logging, metrics, alerts)
-//! - **Stateful subscribers** - maintain internal state based on events (AliveTracker)
+//! ### Delivery semantics
+//! - `emit(&Event)` returns immediately (no barrier per event).
+//! - Per-subscriber **FIFO** is preserved (queue order). No global ordering.
+//! - If a queue is **full**, the event is **dropped** for that subscriber (warn).
+//! - A panic inside a subscriber is **isolated**; it is logged and does not crash
+//!   the runtime or other subscribers.
 //!
-//! ## Implementing custom subscribers
-//! ```no_run
-//! use taskvisor::{Subscriber, Event, EventKind};
-//! use async_trait::async_trait;
+//! ### Shutdown semantics
+//! Call [`SubscriberSet::shutdown`] to close all queues and await worker tasks.
+//! Emitting after shutdown is not supported.
 //!
-//! struct MetricsSubscriber;
-//!
-//! #[async_trait]
-//! impl Subscriber for MetricsSubscriber {
-//!     async fn handle(&self, event: &Event) {
-//!         match event.kind {
-//!             EventKind::TaskFailed => {
-//!                 // increment failure counter
-//!             }
-//!             _ => {}
-//!         }
-//!     }
-//! }
+//! ## Minimal example
+//! (Adapt the `Event` creation to your actual type.)
+//! ```rust
+//! // use taskvisor::subscribers::{Subscribe, SubscriberSet};
+//! // use taskvisor::events::Event;
+//! //
+//! // struct Metrics;
+//! // #[async_trait::async_trait]
+//! // impl Subscribe for Metrics {
+//! //     async fn on_event(&self, ev: &Event) {
+//! //         // export metrics here...
+//! //     }
+//! //     fn name(&self) -> &'static str { "metrics" }
+//! //     fn queue_capacity(&self) -> usize { 1024 }
+//! // }
+//! //
+//! // let set = SubscriberSet::new(vec![std::sync::Arc::new(Metrics) as _]);
+//! // // set.emit(&event);
 //! ```
 
-mod alive;
-mod log;
-mod subscriber;
+mod embedded;
+mod subscribe;
+mod subscribe_set;
 
-pub use alive::AliveTracker;
-pub use log::LogWriter;
-pub use subscriber::Subscriber;
+pub use subscribe::Subscribe;
+pub use subscribe_set::SubscriberSet;
+
+pub use embedded::LogWriter;

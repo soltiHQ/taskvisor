@@ -1,6 +1,6 @@
 //! Runtime core: orchestration and lifecycle.
 //!
-//! This module contains the internal implementation of the taskvisor runtime.
+//! This module contains the embedded implementation of the taskvisor runtime.
 //! The only public API from this module is [`Supervisor`], which orchestrates
 //! task execution, lifecycle management, and graceful shutdown.
 //!

@@ -14,7 +14,6 @@
 //! - [`Bus::subscribe`] creates a new receiver that will receive all future events
 //!
 //! This is used internally by the [`Supervisor`](crate::core::Supervisor)
-//! to deliver task lifecycle events to subscribers and subscribers like `AliveTracker`.
 
 use super::event::Event;
 use tokio::sync::broadcast;
