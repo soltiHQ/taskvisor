@@ -47,7 +47,10 @@ impl<F> TaskFn<F> {
     ///
     /// Prefer [`TaskFn::arc`] when you immediately need a [`TaskRef`].
     pub fn new(name: impl Into<Cow<'static, str>>, f: F) -> Self {
-        Self { name: name.into(), f }
+        Self {
+            name: name.into(),
+            f,
+        }
     }
 
     /// Creates the task and returns it as a shared handle (`Arc<dyn Task>`).

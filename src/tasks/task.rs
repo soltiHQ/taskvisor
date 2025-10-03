@@ -17,8 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::TaskError;
 
 /// Boxed future returned by a task spawn.
-pub type BoxTaskFuture =
-Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
+pub type BoxTaskFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
 /// # Asynchronous, cancelable unit.
 ///

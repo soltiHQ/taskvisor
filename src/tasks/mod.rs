@@ -12,4 +12,4 @@ mod task_fn;
 
 pub use spec::TaskSpec;
 pub use task::{Task, TaskRef};
-pub use task_fn::{TaskFn};
+pub use task_fn::TaskFn;

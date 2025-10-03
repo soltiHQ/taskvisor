@@ -90,17 +90,22 @@ impl SubscriberSet {
         }
     }
 
-    /// Fan-out one event to all subscribers (non-blocking).
+    /// Emit an event to all subscribers.
     ///
-    /// If a subscriber's queue is **full** or **closed**, the event is dropped for it
-    /// and a `SubscriberOverflow` system event is published.
+    /// This method clones the event. For hot paths, prefer [`emit_arc`].
     pub fn emit(&self, event: &Event) {
+        self.emit_arc(Arc::new(event.clone()));
+    }
+
+    /// Emit a pre-allocated event to all subscribers.
+    ///
+    /// Use this in hot paths to avoid cloning the event.
+    pub fn emit_arc(&self, event: Arc<Event>) {
         // Prevent infinite loops: do not generate overflow-on-overflow events.
         let is_overflow_evt = matches!(event.kind, EventKind::SubscriberOverflow);
 
-        let ev = Arc::new(event.clone());
         for channel in &self.channels {
-            match channel.sender.try_send(Arc::clone(&ev)) {
+            match channel.sender.try_send(Arc::clone(&event)) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if !is_overflow_evt {
