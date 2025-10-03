@@ -183,8 +183,9 @@ impl Supervisor {
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
-                        update_alive(&alive, &ev).await;
-                        set.emit(&ev);
+                        let arc_ev = Arc::new(ev);
+                        update_alive(&alive, &arc_ev).await;
+                        set.emit_arc(arc_ev);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
