@@ -11,6 +11,7 @@
 //! - [`shutdown`]: cross-platform shutdown signal handling
 
 mod actor;
+mod alive;
 mod runner;
 mod shutdown;
 mod supervisor;
