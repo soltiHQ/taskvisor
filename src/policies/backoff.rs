@@ -9,12 +9,13 @@
 //! # Example
 //! ```rust
 //! use std::time::Duration;
-//! use taskvisor::BackoffPolicy;
+//! use taskvisor::{BackoffPolicy, JitterPolicy};
 //!
 //! let backoff = BackoffPolicy {
 //!     first: Duration::from_millis(100),
 //!     max: Duration::from_secs(10),
 //!     factor: 2.0,
+//!     jitter: JitterPolicy::None,
 //! };
 //!
 //! // First attempt - uses 'first'

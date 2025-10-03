@@ -23,8 +23,8 @@
 //! assert!(actual_delay <= Duration::from_secs(2));
 //! ```
 
-use std::time::Duration;
 use rand::Rng;
+use std::time::Duration;
 
 /// Policy controlling randomization of retry delays.
 ///
@@ -87,12 +87,7 @@ impl JitterPolicy {
     ///
     /// # Returns
     /// New delay in range [base, min(prev * 3, max)]
-    pub fn apply_decorrelated(
-        &self,
-        base: Duration,
-        prev: Duration,
-        max: Duration,
-    ) -> Duration {
+    pub fn apply_decorrelated(&self, base: Duration, prev: Duration, max: Duration) -> Duration {
         if !matches!(self, JitterPolicy::Decorrelated) {
             return self.apply(prev);
         }
