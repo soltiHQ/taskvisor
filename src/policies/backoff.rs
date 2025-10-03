@@ -87,9 +87,7 @@ impl BackoffPolicy {
         // Apply jitter to the computed delay
         match self.jitter {
             JitterPolicy::Decorrelated => {
-                let prev_delay = prev.unwrap_or(self.first);
-                self.jitter
-                    .apply_decorrelated(self.first, prev_delay, self.max)
+                self.jitter.apply_decorrelated(self.first, base_delay, self.max)
             }
             _ => self.jitter.apply(base_delay),
         }
