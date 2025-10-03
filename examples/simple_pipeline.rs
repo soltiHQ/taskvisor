@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy, Config, LogWriter, RestartPolicy, Subscribe, Supervisor, TaskError, TaskFn,
-    TaskRef, TaskSpec,
+    BackoffPolicy, Config, JitterPolicy, LogWriter, RestartPolicy, Subscribe, Supervisor,
+    TaskError, TaskFn, TaskRef, TaskSpec,
 };
 
 /// Generates numbers every second
@@ -179,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
                 first: Duration::from_secs(2),
                 max: Duration::from_secs(5),
                 factor: 1.5,
+                jitter: JitterPolicy::Equal,
             },
             None,
         ),

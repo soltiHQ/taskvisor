@@ -167,6 +167,7 @@ pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
 pub use policies::BackoffPolicy;
+pub use policies::JitterPolicy;
 pub use policies::RestartPolicy;
 pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};

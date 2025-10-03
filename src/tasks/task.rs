@@ -25,28 +25,6 @@ pub type BoxTaskFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Se
 /// **creates a fresh future** bound to a [`CancellationToken`].
 ///
 /// Implementors should regularly check cancellation and exit promptly during shutdown.
-///
-/// ## Example
-/// ```rust
-/// use tokio_util::sync::CancellationToken;
-/// use taskvisor::{Task, TaskError};
-///
-/// struct Demo;
-///
-/// impl Task for Demo {
-///     fn name(&self) -> &str { "demo" }
-///
-///     fn spawn(&self, ctx: CancellationToken) -> taskvisor::BoxTaskFuture {
-///         Box::pin(async move {
-///             if ctx.is_cancelled() {
-///                 return Ok(());
-///             }
-///             // do work...
-///             Ok::<(), TaskError>(())
-///         })
-///     }
-/// }
-/// ```
 pub trait Task: Send + Sync + 'static {
     /// Returns a stable, human-readable task name.
     fn name(&self) -> &str;
