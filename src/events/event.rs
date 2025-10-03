@@ -27,7 +27,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 /// Global sequence counter for event ordering.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -75,9 +75,6 @@ pub struct Event {
     pub seq: u64,
     /// Wall-clock timestamp (may go backwards, use for logging only).
     pub at: SystemTime,
-    /// Monotonic timestamp (guaranteed to never go backwards).
-    /// Use this for interval measurements and ordering validation.
-    pub monotonic: Instant,
     /// Task timeout (if relevant).
     pub timeout: Option<Duration>,
     /// Backoff delay before retry (if relevant).
@@ -99,7 +96,6 @@ impl Event {
             seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
             kind,
             at: SystemTime::now(),
-            monotonic: Instant::now(),
             attempt: None,
             timeout: None,
             error: None,
