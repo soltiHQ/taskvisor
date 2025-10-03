@@ -65,7 +65,7 @@ pub async fn run_once<T: Task + ?Sized>(
     let child = parent.child_token();
 
     let res = if let Some(dur) = timeout.filter(|d| *d > Duration::ZERO) {
-        match time::timeout(dur, task.run(child.clone())).await {
+        match time::timeout(dur, task.spawn(child.clone())).await {
             Ok(r) => r,
             Err(_elapsed) => {
                 child.cancel();
@@ -74,7 +74,7 @@ pub async fn run_once<T: Task + ?Sized>(
             }
         }
     } else {
-        task.run(child.clone()).await
+        task.spawn(child.clone()).await
     };
 
     match res {
