@@ -3,8 +3,14 @@
 //! The [`EventKind`] enum classifies event types (shutdown, failures, retries, etc.).
 //! The [`Event`] struct carries additional metadata such as timestamps, task name, error messages, and backoff delays.
 //!
-//! # Example
-//! ```
+//! ## Ordering guarantees
+//! Each event has a globally unique sequence number (`seq`) that increases monotonically.
+//! This guarantees that events can be ordered correctly even when delivered out-of-order through async channels.
+//!
+//! ## Example
+//! ```rust
+//! # #[cfg(feature = "events")]
+//! # {
 //! use std::time::Duration;
 //! use taskvisor::{Event, EventKind};
 //!
@@ -17,55 +23,61 @@
 //! assert_eq!(ev.kind, EventKind::TaskFailed);
 //! assert_eq!(ev.task.as_deref(), Some("demo-task"));
 //! assert_eq!(ev.error.as_deref(), Some("boom"));
+//! # }
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Global sequence counter for event ordering
+/// Global sequence counter for event ordering.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
-    /// Subscriber event on panic,
+    /// Subscriber panicked during event processing.
     SubscriberPanicked,
-    /// A subscriber dropped an event (queue full or worker closed).
+    /// Subscriber dropped an event (queue full or worker closed).
     SubscriberOverflow,
     /// Shutdown requested (OS signal received).
     ShutdownRequested,
-    /// A task is scheduled to back off before retrying.
+    /// Task is scheduled to back off before retrying.
     BackoffScheduled,
     /// All tasks stopped within the configured grace period.
     AllStoppedWithin,
     /// Grace period exceeded; some tasks did not stop in time.
     GraceExceeded,
-    /// A task is starting execution.
+    /// Task is starting execution.
     TaskStarting,
-    /// A task has stopped (finished or cancelled).
+    /// Task has stopped (finished or cancelled).
     TaskStopped,
-    /// A task failed with an error.
+    /// Task failed with an error.
     TaskFailed,
-    /// A task hit its configured timeout.
+    /// Task hit its configured timeout.
     TimeoutHit,
 }
 
 /// Runtime event with optional metadata.
 ///
 /// Carries information about task lifecycle, retries, errors, backoff delays, and timing.
+///
+/// ## Fields
+///
+/// - `seq`: Unique sequence number for ordering (monotonically increasing)
+/// - `at`: Wall-clock timestamp (may go backwards due to NTP, use for logging only)
+/// - `monotonic`: Monotonic timestamp (never goes backwards, use for interval measurements)
+/// - `kind`: Event classification
+/// - `task`, `error`, `attempt`, `timeout`, `delay`: Optional metadata
 #[derive(Debug, Clone)]
 pub struct Event {
     /// Globally unique, monotonically increasing sequence number.
     /// Used to determine event ordering across async boundaries.
     pub seq: u64,
-
     /// Wall-clock timestamp (may go backwards, use for logging only).
     pub at: SystemTime,
-
     /// Monotonic timestamp (guaranteed to never go backwards).
     /// Use this for interval measurements and ordering validation.
     pub monotonic: Instant,
-
     /// Task timeout (if relevant).
     pub timeout: Option<Duration>,
     /// Backoff delay before retry (if relevant).
@@ -81,7 +93,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// Creates a new event of the given kind with current timestamp.
+    /// Creates a new event of the given kind with current timestamps and next sequence number.
     pub fn now(kind: EventKind) -> Self {
         Self {
             seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
@@ -126,18 +138,17 @@ impl Event {
         self
     }
 
-    /// Build an overflow event emitted by the runtime when a subscriber drops an event.
+    /// Creates a subscriber overflow event.
+    ///
+    /// Emitted when a subscriber's queue is full and an event is dropped.
     pub fn subscriber_overflow(subscriber: &'static str, reason: &'static str) -> Self {
-        let mut ev = Event::now(EventKind::SubscriberOverflow);
-
-        ev.error = Some(format!("subscriber={subscriber} reason={reason}"));
-        ev.attempt = None;
-        ev.timeout = None;
-        ev.delay = None;
-        ev.task = None;
-        ev
+        Event::now(EventKind::SubscriberOverflow)
+            .with_error(format!("subscriber={subscriber} reason={reason}"))
     }
 
+    /// Creates a subscriber panic event.
+    ///
+    /// Emitted when a subscriber panics during event processing.
     pub fn subscriber_panicked(subscriber: &'static str, info: String) -> Self {
         Event::now(EventKind::SubscriberPanicked)
             .with_task(subscriber)
