@@ -19,7 +19,11 @@
 //! assert_eq!(ev.error.as_deref(), Some("boom"));
 //! ```
 
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant, SystemTime};
+
+/// Global sequence counter for event ordering
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +55,17 @@ pub enum EventKind {
 /// Carries information about task lifecycle, retries, errors, backoff delays, and timing.
 #[derive(Debug, Clone)]
 pub struct Event {
+    /// Globally unique, monotonically increasing sequence number.
+    /// Used to determine event ordering across async boundaries.
+    pub seq: u64,
+
+    /// Wall-clock timestamp (may go backwards, use for logging only).
+    pub at: SystemTime,
+
+    /// Monotonic timestamp (guaranteed to never go backwards).
+    /// Use this for interval measurements and ordering validation.
+    pub monotonic: Instant,
+
     /// Task timeout (if relevant).
     pub timeout: Option<Duration>,
     /// Backoff delay before retry (if relevant).
@@ -63,16 +78,16 @@ pub struct Event {
     pub task: Option<String>,
     /// The kind of event.
     pub kind: EventKind,
-    /// Timestamp when the event was created.
-    pub at: SystemTime,
 }
 
 impl Event {
     /// Creates a new event of the given kind with current timestamp.
     pub fn now(kind: EventKind) -> Self {
         Self {
+            seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
             kind,
             at: SystemTime::now(),
+            monotonic: Instant::now(),
             attempt: None,
             timeout: None,
             error: None,
