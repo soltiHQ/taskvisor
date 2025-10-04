@@ -157,8 +157,7 @@ async fn main() -> anyhow::Result<()> {
     config.max_concurrent = 3;
 
     // Build subscriber set: LogWriter
-    let mut subs: Vec<Arc<dyn Subscribe>> = vec![];
-    subs.push(Arc::new(LogWriter::new()));
+    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter)];
 
     // NEW: Supervisor takes the list of subscribers and the alive tracker handle
     let supervisor = Supervisor::new(config, subs);

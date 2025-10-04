@@ -6,10 +6,10 @@
 //! - [`TaskRef`] - shared reference to a task (`Arc<dyn Task>`)
 //! - [`TaskSpec`] - specification bundling task with policies
 
+mod r#impl;
 mod spec;
 mod task;
-mod task_fn;
 
+pub use r#impl::func::TaskFn;
 pub use spec::TaskSpec;
 pub use task::{Task, TaskRef};
-pub use task_fn::TaskFn;

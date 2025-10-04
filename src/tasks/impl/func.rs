@@ -5,7 +5,6 @@
 //! ## Architecture
 //! ```text
 //! TaskFn<F> where F: Fn(CancellationToken) -> Future
-//!     │
 //!     └─► Each spawn() call creates a NEW future
 //!         └─► Future owns its state (no sharing between restarts)
 //! ```
