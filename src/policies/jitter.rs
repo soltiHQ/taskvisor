@@ -3,25 +3,10 @@
 //! [`JitterPolicy`] adds randomness to backoff delays to prevent thundering herd effects
 //! when multiple tasks retry simultaneously.
 //!
-//! # Variants
-//! - [`JitterPolicy::None`] — no jitter, use exact backoff delay
-//! - [`JitterPolicy::Full`] — random delay in range [0, backoff_delay]
-//! - [`JitterPolicy::Equal`] — delay = backoff_delay/2 + random[0, backoff_delay/2]
-//! - [`JitterPolicy::Decorrelated`] — delay = random[base, prev_delay * 3], capped at max
-//!
-//! # Example
-//! ```rust
-//! use std::time::Duration;
-//! use taskvisor::JitterPolicy;
-//!
-//! let jitter = JitterPolicy::Equal;
-//! let base_delay = Duration::from_secs(2);
-//!
-//! // Equal jitter: delay will be in range [1s, 2s]
-//! let actual_delay = jitter.apply(base_delay);
-//! assert!(actual_delay >= Duration::from_secs(1));
-//! assert!(actual_delay <= Duration::from_secs(2));
-//! ```
+//! - [`JitterPolicy::None`] — no randomization, predictable delays
+//! - [`JitterPolicy::Full`] — random delay in [0, backoff_delay] (most aggressive)
+//! - [`JitterPolicy::Equal`] — delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
+//! - [`JitterPolicy::Decorrelated`] — stateful jitter based on previous delay (sophisticated)
 
 use rand::Rng;
 use std::time::Duration;
@@ -29,21 +14,38 @@ use std::time::Duration;
 /// Policy controlling randomization of retry delays.
 ///
 /// Prevents synchronized retries across multiple tasks by adding controlled randomness.
+///
+/// ## Trade-offs
+/// - **None**: Predictable, but risks thundering herd
+/// - **Full**: Maximum randomness, aggressive load spreading
+/// - **Equal**: Balanced (recommended for most use cases)
+/// - **Decorrelated**: Stateful, prevents retry correlation (complex)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JitterPolicy {
     /// No jitter: use exact backoff delay.
+    ///
+    /// Use when:
+    /// - Only one task retrying (no herd risk)
+    /// - Predictable timing required
+    /// - Testing/debugging
     None,
 
     /// Full jitter: random delay in [0, backoff_delay].
+    ///
     /// Most aggressive jitter, can significantly reduce delay.
+    /// Use when maximum load spreading needed.
     Full,
 
     /// Equal jitter: delay = backoff_delay/2 + random[0, backoff_delay/2].
+    ///
     /// Balances predictability with randomness (recommended default).
+    /// Preserves ~75% of original backoff on average.
     Equal,
 
     /// Decorrelated jitter: delay = random[base, prev_delay * 3], capped at max.
+    ///
     /// More sophisticated, considers previous delay and grows independently.
+    /// Requires context (base, prev, max) via [`apply_decorrelated`](Self::apply_decorrelated).
     Decorrelated,
 }
 
@@ -57,36 +59,23 @@ impl Default for JitterPolicy {
 impl JitterPolicy {
     /// Applies jitter to the given delay.
     ///
-    /// # Parameters
-    /// - `delay`: base delay to apply jitter to
-    ///
-    /// # Returns
-    /// Modified delay with jitter applied according to the policy.
-    ///
-    /// # Note
-    /// For `Decorrelated`, you should use [`apply_decorrelated`] instead,
+    /// ### Note
+    /// For `Decorrelated`, this method returns the input unchanged.
+    /// Use [`apply_decorrelated`](Self::apply_decorrelated) instead,
     /// as it requires additional context (previous delay, base, max).
     pub fn apply(&self, delay: Duration) -> Duration {
         match self {
             JitterPolicy::None => delay,
             JitterPolicy::Full => self.full_jitter(delay),
             JitterPolicy::Equal => self.equal_jitter(delay),
-            JitterPolicy::Decorrelated => {
-                // Fallback to Full if called without context
-                self.full_jitter(delay)
-            }
+            JitterPolicy::Decorrelated => delay,
         }
     }
 
     /// Applies decorrelated jitter with full context.
     ///
-    /// # Parameters
-    /// - `base`: minimum delay (usually BackoffPolicy::first)
-    /// - `prev`: previous actual delay used
-    /// - `max`: maximum allowed delay (usually BackoffPolicy::max)
-    ///
-    /// # Returns
-    /// New delay in range [base, min(prev * 3, max)]
+    /// ### Note
+    /// If called on non-Decorrelated policy, falls back to `apply(prev)`.
     pub fn apply_decorrelated(&self, base: Duration, prev: Duration, max: Duration) -> Duration {
         if !matches!(self, JitterPolicy::Decorrelated) {
             return self.apply(prev);
