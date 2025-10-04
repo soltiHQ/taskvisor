@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-#### Minimal Example (embedded subscriber)
+#### Minimal Example (Embedded subscriber)
 ```toml
 [dependencies]
 taskvisor = { version = "0.0.4", features = ["logging"] }
