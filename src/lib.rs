@@ -170,7 +170,7 @@ pub use policies::BackoffPolicy;
 pub use policies::JitterPolicy;
 pub use policies::RestartPolicy;
 pub use subscribers::{Subscribe, SubscriberSet};
-pub use tasks::{Task, TaskFn, TaskRef, TaskSpec, TaskSpecBuilder};
+pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose event types.
 // Enable with: `--features events`

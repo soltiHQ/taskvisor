@@ -7,11 +7,9 @@
 //! - [`TaskSpec`] - specification bundling task with policies
 
 mod spec;
-mod spec_builder;
 mod task;
 mod task_fn;
 
 pub use spec::TaskSpec;
-pub use spec_builder::TaskSpecBuilder;
 pub use task::{Task, TaskRef};
 pub use task_fn::TaskFn;

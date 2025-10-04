@@ -211,11 +211,11 @@ impl Supervisor {
         for spec in tasks {
             let actor = TaskActor::new(
                 self.bus.clone(),
-                spec.task.clone(),
+                spec.task().clone(),
                 TaskActorParams {
-                    restart: spec.restart,
-                    backoff: spec.backoff,
-                    timeout: spec.timeout,
+                    restart: spec.restart(),
+                    backoff: spec.backoff(),
+                    timeout: spec.timeout(),
                 },
                 semaphore.clone(),
             );

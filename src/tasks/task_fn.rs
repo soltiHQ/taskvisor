@@ -1,51 +1,79 @@
-//! # Function-backed task (`TaskFn`)
+//! # Function-backed task implementation.
 //!
-//! [`TaskFn`] wraps a closure `F: Fn(CancellationToken) -> Fut`, producing a fresh
-//! future per spawn. This avoids shared mutable state and не требует `Mutex`.
+//! Provides [`TaskFn`] — a task implementation that wraps closures.
 //!
-//! ## Concurrency semantics
-//! - Каждый вызов [`TaskFn::spawn`] создаёт **новый** future, владеющий своим state.
-//! - Без скрытой мутации между рестартами; если нужен общий state — используйте `Arc<...>`
-//!   явно внутри замыкания.
+//! ## Architecture
+//! ```text
+//! TaskFn<F> where F: Fn(CancellationToken) -> Future
+//!     │
+//!     └─► Each spawn() call creates a NEW future
+//!         └─► Future owns its state (no sharing between restarts)
+//! ```
 //!
 //! ## Example
 //! ```rust
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{TaskFn, TaskRef, TaskError};
+//! use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 //!
-//! let t: TaskRef = TaskFn::arc("worker", |ctx: CancellationToken| async move {
-//!     if ctx.is_cancelled() {
-//!         return Ok(());
+//! // Stateless task (no shared state):
+//! let simple: TaskRef = TaskFn::arc("simple", |ctx: CancellationToken| async move {
+//!     while !ctx.is_cancelled() {
+//!         println!("working...");
+//!         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 //!     }
-//!     // do work...
-//!     Ok::<_, TaskError>(())
+//!     Ok(())
 //! });
 //!
-//! assert_eq!(t.name(), "worker");
+//! // Stateful task (with Arc for shared state):
+//! let counter = Arc::new(AtomicU64::new(0));
+//! let stateful: TaskRef = TaskFn::arc("counter", {
+//!     let counter = counter.clone();
+//!     move |ctx: CancellationToken| {
+//!         let counter = counter.clone();
+//!         async move {
+//!             while !ctx.is_cancelled() {
+//!                 let n = counter.fetch_add(1, Ordering::Relaxed);
+//!                 println!("count: {}", n);
+//!                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+//!             }
+//!             Ok(())
+//!         }
+//!     }
+//! });
 //! ```
 
-use std::borrow::Cow;
-use std::future::Future;
-use std::sync::Arc;
+use std::{borrow::Cow, future::Future, sync::Arc};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::error::TaskError;
-use crate::tasks::task::{BoxTaskFuture, Task};
+use crate::{
+    error::TaskError,
+    tasks::task::{BoxTaskFuture, Task},
+};
 
 /// Function-backed task implementation.
 ///
-/// Wraps a closure that *creates* a new future per spawn.
-#[derive(Debug)]
+/// Wraps a closure `F: Fn(CancellationToken) -> Future` that creates a fresh future on each [`spawn`](Task::spawn) call.
+///
+/// ### Rules
+/// - Each spawn creates an independent future (no shared state)
+/// - For shared state, use `Arc<Mutex<T>>` explicitly in closure
+/// - Closure is no mutable self
 pub struct TaskFn<F> {
     name: Cow<'static, str>,
     f: F,
 }
 
 impl<F> TaskFn<F> {
-    /// Creates a new function-backed task.
+    /// Creates a new function-backed task with the given name.
     ///
-    /// Prefer [`TaskFn::arc`] when you immediately need a [`TaskRef`].
+    /// ### Parameters
+    /// - `name`: Task name (for logging, metrics)
+    /// - `f`: Closure that creates a future when called
+    ///
+    /// ### Notes
+    /// Prefer [`TaskFn::arc`] when you need a [`TaskRef`](crate::TaskRef) immediately.
     pub fn new(name: impl Into<Cow<'static, str>>, f: F) -> Self {
         Self {
             name: name.into(),
@@ -55,12 +83,15 @@ impl<F> TaskFn<F> {
 
     /// Creates the task and returns it as a shared handle (`Arc<dyn Task>`).
     ///
-    /// ## Example
+    /// This is the most common way to create a TaskFn.
+    ///
+    /// ### Example
     /// ```rust
     /// use tokio_util::sync::CancellationToken;
     /// use taskvisor::{TaskFn, TaskRef, TaskError};
     ///
     /// let t: TaskRef = TaskFn::arc("hello", |_ctx: CancellationToken| async {
+    ///     println!("Hello from task!");
     ///     Ok::<_, TaskError>(())
     /// });
     /// assert_eq!(t.name(), "hello");
@@ -70,15 +101,14 @@ impl<F> TaskFn<F> {
     }
 }
 
-impl<F, Fut> Task for TaskFn<F>
+impl<Fnc, Fut> Task for TaskFn<Fnc>
 where
-    F: Fn(CancellationToken) -> Fut + Send + Sync + 'static, // Fn, not FnMut
+    Fnc: Fn(CancellationToken) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
     fn name(&self) -> &str {
         &self.name
     }
-
     fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture {
         let fut = (self.f)(ctx);
         Box::pin(fut)
