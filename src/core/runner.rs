@@ -58,6 +58,7 @@ pub async fn run_once<T: Task + ?Sized>(
     task: &T,
     parent: &CancellationToken,
     timeout: Option<Duration>,
+    attempt: u64,
     bus: &Bus,
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
@@ -80,7 +81,7 @@ pub async fn run_once<T: Task + ?Sized>(
             Ok(())
         }
         Err(e) => {
-            publish_failed(bus, task.name(), &e);
+            publish_failed(bus, task.name(), attempt, &e);
             Err(e)
         }
     }
@@ -92,10 +93,11 @@ fn publish_stopped(bus: &Bus, name: &str) {
 }
 
 /// Publishes `TaskFailed` event with error details.
-fn publish_failed(bus: &Bus, name: &str, err: &TaskError) {
+fn publish_failed(bus: &Bus, name: &str, attempt: u64, err: &TaskError) {
     bus.publish(
         Event::now(EventKind::TaskFailed)
             .with_task(name)
+            .with_attempt(attempt)
             .with_error(err.to_string()),
     );
 }

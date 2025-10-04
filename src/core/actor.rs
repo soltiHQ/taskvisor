@@ -42,7 +42,7 @@
 //!
 //! ## Rules
 //! - Attempts run **sequentially** within one actor (never parallel)
-//! - Backoff counter **resets on success** (healthy system = fresh start)
+//! - Attempt counter **increments on each spawn** (monotonic, never resets)
 //! - Events have **monotonic sequence numbers** (ordering guarantees)
 
 use std::{sync::Arc, time::Duration};
@@ -142,7 +142,7 @@ impl TaskActor {
     /// - Subsequent retries multiply previous delay by `factor`
     /// - Delays are capped at `BackoffPolicy::max`
     /// - Jitter is applied according to `BackoffPolicy::jitter`
-    /// - Counter **resets to zero** on successful attempt (healthy system = fresh start)
+    /// - Attempt counter **never resets** (monotonic lifetime counter)
     ///
     /// ### Observability
     /// All lifecycle events are published to the bus for subscribers to process:
@@ -189,6 +189,7 @@ impl TaskActor {
                 self.task.as_ref(),
                 &runtime_token,
                 self.params.timeout,
+                attempt,
                 &self.bus,
             )
             .await;
@@ -196,6 +197,7 @@ impl TaskActor {
             match res {
                 Ok(()) => {
                     prev_delay = None;
+
                     match self.params.restart {
                         RestartPolicy::Always => continue,
                         RestartPolicy::OnFailure => break,
