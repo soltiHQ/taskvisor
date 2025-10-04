@@ -1,30 +1,35 @@
-//! # Run a single attempt of a task with optional timeout and event reporting.
+//! # Run a single attempt of a task execution.
 //!
-//! This helper drives one execution of a [`Task`], with cancellation and publishing lifecycle [`Event`]s to the [`Bus`].
+//! Executes one attempt of a [`Task`] with optional timeout, publishes lifecycle events to [`Bus`].
 //!
-//! # High-level architecture:
+//! - **Execute ONE attempt** of the task with child cancellation token
+//! - **Apply timeout** if configured (wraps execution in `tokio::time::timeout`)
+//! - **Publish events** for observability (stopped/failed/timeout)
+//!
+//! ## Event flow
+//!
 //! ```text
-//! Task ──► run_once ──► derive child CancellationToken
-//!                                    │
-//!                                    ▼
-//!                             ┌─────────────┐
-//!       ┌─────────────────────│ timeout > 0 │
-//!       │                     └─────┬───────┘
-//!       no                         yes
-//!       ▼                           ▼
-//! task.run(child).await        tokio::time::timeout(dur, task.run(child))
-//!       │                           │
-//!       │                   ┌───────┴────────────────────┐
-//!       │                Ok(result)                  Err(elapsed)
-//!       │                   │                            │
-//!    result = Ok()   → publish TaskStopped           cancel child → publish TimeoutHit
-//!    result = Err(e) → publish TaskFailed                         → return Timeout error
+//! Success:
+//!   task.spawn() → Ok(()) → publish TaskStopped
+//!
+//! Cancellation:
+//!   task.spawn() → Err(Canceled) → publish TaskStopped (graceful exit)
+//!
+//! Failure:
+//!   task.spawn() → Err(Fail/Fatal) → publish TaskFailed
+//!
+//! Timeout:
+//!   timeout exceeded → cancel child → publish TimeoutHit
+//!                                   → return Timeout error
+//!                                   → publish TaskFailed (ctx cancel)
 //! ```
 //!
-//! - On success, publishes [`EventKind::TaskStopped`].
-//! - On failure, publishes [`EventKind::TaskFailed`].
-//! - On timeout, cancels the child token, publishes [`EventKind::TimeoutHit`], and returns [`TaskError::Timeout`].
-//! - This function performs **one attempt only**;
+//! ## Rules
+//! - Always publishes **exactly one** terminal event: `TaskStopped` or `TaskFailed`
+//! - `Canceled` is treated as graceful exit → `TaskStopped` (not `TaskFailed`)
+//! - `TimeoutHit` is published **in addition to** `TaskFailed` on timeout
+//! - Derives **child token** per attempt (isolated cancellation)
+//! - Child cancellation does **not** affect parent
 
 use std::time::Duration;
 use tokio::time;
@@ -32,49 +37,51 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::TaskError,
-    events::Bus,
-    events::{Event, EventKind},
+    events::{Bus, Event, EventKind},
     tasks::Task,
 };
 
-/// Runs a single attempt of `task`, publishing lifecycle events to `bus`.
+/// Executes a single attempt of `task`, publishing lifecycle events to `bus`.
 ///
-/// Events (in order):
-/// 1. `TaskStarted`
-/// 2. one of:
-///    - `TaskCompleted` (ok)
-///    - `TaskFailed` (err from task)
-///    - `TimeoutHit` + `TaskFailed` (if timed out)
-///    - `TaskCancelled` (if parent cancellation)
+/// ### Flow
+/// 1. Derive child cancellation token from parent
+/// 2. Execute task with optional timeout wrapper
+/// 3. Publish terminal event based on result
 ///
-/// # Cancellation
-/// A child cancellation token is derived per attempt; parent cancel aborts the attempt.
+/// ### Timeout behavior
+/// If `timeout` is `Some(dur)` and `dur > 0`:
+/// - Wraps execution in `tokio::time::timeout`
+/// - On timeout: cancels child token, publishes `TimeoutHit`, returns `Timeout` error
 ///
-/// # Timeout
-/// If `timeout > 0`, the attempt is `tokio::time::timeout`-wrapped. On hit, publishes `TimeoutHit`.
+/// ### Cancellation semantics
+/// - Parent cancellation propagates to child token
+/// - Task **should** return `Err(TaskError::Canceled)` when detecting cancellation
+/// - `Canceled` is treated as **graceful exit**, publishes `TaskStopped` (not `TaskFailed`)
+/// - Child cancellation does **not** affect parent (isolated per attempt)
 ///
-/// # Returns
-/// - `Ok(())` when the attempt finished successfully
-/// - `Err` with the task error or timeout error
+/// ### Event semantics
+/// Always publishes **exactly one** terminal event:
+/// - `TaskStopped` on `Ok(())` or `Err(Canceled)` (graceful completion)
+/// - `TaskFailed` on `Err(Fail/Fatal/Timeout)` (actual errors)
 pub async fn run_once<T: Task + ?Sized>(
     task: &T,
     parent: &CancellationToken,
     timeout: Option<Duration>,
+    attempt: u64,
     bus: &Bus,
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
-
     let res = if let Some(dur) = timeout.filter(|d| *d > Duration::ZERO) {
-        match time::timeout(dur, task.run(child.clone())).await {
+        match time::timeout(dur, task.spawn(child.clone())).await {
             Ok(r) => r,
             Err(_elapsed) => {
                 child.cancel();
                 publish_timeout(bus, task.name(), dur);
-                return Err(TaskError::Timeout { timeout: dur });
+                Err(TaskError::Timeout { timeout: dur })
             }
         }
     } else {
-        task.run(child.clone()).await
+        task.spawn(child.clone()).await
     };
 
     match res {
@@ -82,28 +89,33 @@ pub async fn run_once<T: Task + ?Sized>(
             publish_stopped(bus, task.name());
             Ok(())
         }
+        Err(TaskError::Canceled) => {
+            publish_stopped(bus, task.name());
+            Err(TaskError::Canceled)
+        }
         Err(e) => {
-            publish_failed(bus, task.name(), &e);
+            publish_failed(bus, task.name(), attempt, &e);
             Err(e)
         }
     }
 }
 
-/// Publishes a `TaskStopped` event for the given task.
+/// Publishes `TaskStopped` event (success or graceful cancellation).
 fn publish_stopped(bus: &Bus, name: &str) {
     bus.publish(Event::now(EventKind::TaskStopped).with_task(name));
 }
 
-/// Publishes a `TaskFailed` event with the given error.
-fn publish_failed(bus: &Bus, name: &str, err: &TaskError) {
+/// Publishes `TaskFailed` event with error details.
+fn publish_failed(bus: &Bus, name: &str, attempt: u64, err: &TaskError) {
     bus.publish(
         Event::now(EventKind::TaskFailed)
             .with_task(name)
+            .with_attempt(attempt)
             .with_error(err.to_string()),
     );
 }
 
-/// Publishes a `TimeoutHit` event for the given task and duration.
+/// Publishes `TimeoutHit` event (always followed by `TaskFailed`).
 fn publish_timeout(bus: &Bus, name: &str, dur: Duration) {
     bus.publish(
         Event::now(EventKind::TimeoutHit)

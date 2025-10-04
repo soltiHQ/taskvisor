@@ -1,117 +1,179 @@
-//! # Task actor: runs a single task with restart/backoff/timeout semantics.
+//! # TaskActor: single-task supervisor.
 //!
-//! A `TaskActor` drives one [`Task`] through repeated attempts, applying:
-//! - restart policy ([`RestartPolicy`]),
-//! - backoff delays ([`BackoffPolicy`]),
-//! - per-attempt timeout (optional, via `timeout`),
-//! - cooperative cancellation via a runtime [`CancellationToken`].
+//! Supervises execution of one [`Task`] with policies:
+//! - restarts per [`RestartPolicy`],
+//! - delays per [`BackoffPolicy`],
+//! - optional per-attempt timeout,
+//! - cooperative cancellation via [`CancellationToken`].
 //!
-//! It also publishes lifecycle [`Event`]s to the embedded bus.
-//!
-//! # High-level architecture:
+//! ## Event flow
+//! For each attempt, the actor publishes:
 //! ```text
-//! TaskSpec ──► Supervisor ──► TaskActor (from TaskSpec)
+//! TaskStarting → [task execution] → TaskStopped (success)
+//!                                 → TimeoutHit (timeout)
+//!                                 → TaskFailed (error)
 //!
-//! loop:
-//!   ├─► acquire semaphore (if configured, cancellable)
-//!   ├─► publish TaskStarting(attempt)
-//!   ├─► run_once(task, timeout)
-//!   │     ├── Ok  ─► apply RestartPolicy(Never/OnFailure/Always)
-//!   │     └── Err ─► apply RestartPolicy, if retry:
-//!   │                   └─► publish BackoffScheduled
-//!   │                   └─► sleep(backoff_delay, cancellable)
-//!   └─► exit if cancelled or restart not allowed
+//! If retry scheduled:
+//!   → BackoffScheduled → [sleep] → (next attempt with new seq)
 //! ```
 //!
-//! #### Notes:
-//! - One TaskActor runs attempts strictly sequentially (never in parallel).
-//! - Parallelism is possible only if you: **spawn multiple actors for the same Task**
+//! ## Architecture
+//! ```text
+//! TaskSpec ──► Supervisor ──► TaskActor::run()
+//!
+//! loop {
+//!   ├─► acquire semaphore
+//!   ├─► publish TaskStarting
+//!   ├─► run_once() ─────► task.spawn()
+//!   │       │                  ▼
+//!   │       │            (one attempt)
+//!   │       ▼                  ▼
+//!   │     Ok/Err ──► publish TaskStopped/TaskFailed
+//!   │       ▼
+//!   ├─► apply RestartPolicy
+//!   │     ├─► Never       → break
+//!   │     ├─► OnFailure   → break if Ok
+//!   │     └─► Always      → continue
+//!   └─► if retry:
+//!        ├─► publish BackoffScheduled
+//!        └─► sleep(backoff_delay)
+//! }
+//! ```
+//!
+//! ## Rules
+//! - Attempts run **sequentially** within one actor (never parallel)
+//! - Attempt counter **increments on each spawn** (monotonic, never resets)
+//! - Events have **monotonic sequence numbers** (ordering guarantees)
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    TaskError,
     core::runner::run_once,
     events::{Bus, Event, EventKind},
     policies::{BackoffPolicy, RestartPolicy},
     tasks::Task,
 };
 
-/// Parameters controlling retries/backoff/timeout for a task actor.
+/// Configuration parameters for a task actor.
+///
+/// These parameters are extracted from a [`TaskSpec`](crate::TaskSpec)
+/// by the [`Supervisor`](crate::Supervisor) when spawning actors.
 #[derive(Clone)]
 pub struct TaskActorParams {
-    /// Restart policy applied after each attempt.
+    /// When to restart the task.
     pub restart: RestartPolicy,
-    /// Backoff policy used between failed attempts.
+    /// How to compute retry delays.
     pub backoff: BackoffPolicy,
-    /// Optional per-attempt timeout; `None` or `0` means no timeout.
+    /// Optional per-attempt timeout (`None` = no timeout).
     pub timeout: Option<Duration>,
 }
 
-/// Drives a single [`Task`] with retries and backoff, publishing events.
+/// Supervises execution of a single [`Task`] with retries, backoff, and event publishing.
 ///
-/// The actor:
-/// - acquires an optional global semaphore permit (if provided),
-/// - emits [`EventKind::TaskStarting`] with the attempt number,
-/// - calls [`run_once`] to execute the task with optional timeout,
-/// - on success applies the restart policy,
-/// - on failure decides whether to retry and, if so, schedules backoff
-///   ([`EventKind::BackoffScheduled`]) and sleeps unless cancelled.
-/// - exits promptly when the runtime token is cancelled.
+/// ### Responsibilities
+/// - **Concurrency control**: Acquires semaphore permit before each attempt
+/// - **Graceful shutdown**: Responds to cancellation at safe points
+/// - **Event publishing**: Reports all lifecycle events to the bus
+/// - **Execution**: Runs the task via [`run_once`]
+/// - **Restart policy**: Supervises by the [`TaskActorParams`](crate::TaskActorParams)
+///
+/// ### Rules
+/// - Attempts run **sequentially** (never concurrent for one actor)
+/// - Cancellation is checked at **safe points** (semaphore acquire, backoff sleep)
+/// - Events are published with **monotonic sequence numbers** (ordering)
+/// - Backoff counter **resets on success** (healthy system assumption)
 pub struct TaskActor {
     /// Task to execute.
     pub task: Arc<dyn Task>,
-    /// Retry/backoff/timeout parameters.
+    /// Parameters for supervise task executions.
     pub params: TaskActorParams,
     /// Internal event bus (used to publish lifecycle events).
     pub bus: Bus,
-    /// Optional global concurrency limiter.
-    pub global_sem: Option<Arc<Semaphore>>,
+    /// Optional global tasks concurrency limiter.
+    pub semaphore: Option<Arc<Semaphore>>,
 }
 
 impl TaskActor {
-    /// Creates a new task actor with the given task, params, bus and semaphore.
+    /// Creates a new task actor.
     pub fn new(
+        bus: Bus,
         task: Arc<dyn Task>,
         params: TaskActorParams,
-        bus: Bus,
-        global_sem: Option<Arc<Semaphore>>,
+        semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         Self {
             task,
             params,
             bus,
-            global_sem,
+            semaphore,
         }
     }
 
     /// Runs the actor until completion, restart exhaustion, or cancellation.
     ///
-    /// Cancellation semantics:
-    /// - The provided `runtime_token` is checked between phases (permits, backoff sleep).
-    /// - On timeout inside [`run_once`], the child token is cancelled.
+    /// This is the main actor loop. It will:
+    /// 1. Acquire semaphore permit (if configured)
+    /// 2. Publish `TaskStarting` event
+    /// 3. Execute one attempt via `run_once`
+    /// 4. Apply restart policy (defined in params)
+    /// 5. If retry needed, publish `BackoffScheduled` and sleep
+    /// 6. Repeat until exit condition
     ///
-    /// Concurrency semantics:
-    /// - If `global_sem` is present, a permit is acquired per attempt.
-    ///   Acquisition is cancellable via `runtime_token`.
+    /// ### Exit conditions
+    /// The actor stops when:
+    /// - Task succeeds and restart policy forbids continuation
+    /// - Task fails and restart policy forbids retry
+    /// - `runtime_token` is cancelled (shutdown signal)
+    /// - Semaphore is closed (runtime shutdown in progress)
+    ///
+    /// ### Cancellation semantics
+    /// - `runtime_token` is checked at **safe points** only:
+    ///   - Before semaphore acquisition
+    ///   - During semaphore acquisition (cancellable wait)
+    ///   - During backoff sleep (cancellable wait)
+    /// - Task execution receives a **child token** that gets cancelled on timeout
+    /// - Cancellation during backoff **aborts sleep** immediately
+    ///
+    /// ### Backoff semantics
+    /// - First retry uses `BackoffPolicy::first` delay
+    /// - Subsequent retries multiply previous delay by `factor`
+    /// - Delays are capped at `BackoffPolicy::max`
+    /// - Jitter is applied according to `BackoffPolicy::jitter`
+    /// - Attempt counter **never resets** (monotonic lifetime counter)
+    ///
+    /// ### Observability
+    /// All lifecycle events are published to the bus for subscribers to process:
+    /// - `TaskStarting`: attempt started (includes attempt number)
+    /// - `TaskStopped`: attempt succeeded
+    /// - `TaskFailed`: attempt failed (includes error)
+    /// - `TimeoutHit`: attempt timed out
+    /// - `BackoffScheduled`: retry scheduled (includes delay and attempt number)
+    ///
+    /// Subscribers can implement metrics, logging, alerting, etc.
     pub async fn run(self, runtime_token: CancellationToken) {
-        let mut attempt: u64 = 0;
         let mut prev_delay: Option<Duration> = None;
+        let mut attempt: u64 = 0;
 
         loop {
             if runtime_token.is_cancelled() {
                 break;
             }
-            let _permit_guard = match &self.global_sem {
+            let _guard = match &self.semaphore {
                 Some(sem) => {
-                    let permit_fut = sem.clone().acquire_owned();
+                    let permit_future = sem.clone().acquire_owned();
+                    tokio::pin!(permit_future);
 
-                    tokio::pin!(permit_fut);
                     select! {
-                        res = &mut permit_fut => { res.ok() }
+                        res = &mut permit_future => {
+                            match res {
+                                Ok(permit) => Some(permit),
+                                Err(_closed) => { break; }
+                            }
+                        }
                         _ = runtime_token.cancelled() => { break; }
                     }
                 }
@@ -124,11 +186,11 @@ impl TaskActor {
                     .with_task(self.task.name())
                     .with_attempt(attempt),
             );
-
             let res = run_once(
                 self.task.as_ref(),
                 &runtime_token,
                 self.params.timeout,
+                attempt,
                 &self.bus,
             )
             .await;
@@ -136,11 +198,15 @@ impl TaskActor {
             match res {
                 Ok(()) => {
                     prev_delay = None;
+
                     match self.params.restart {
-                        RestartPolicy::Never => break,
-                        RestartPolicy::OnFailure => break,
                         RestartPolicy::Always => continue,
+                        RestartPolicy::OnFailure => break,
+                        RestartPolicy::Never => break,
                     }
+                }
+                Err(TaskError::Canceled) => {
+                    break;
                 }
                 Err(e) => {
                     let should_retry = matches!(

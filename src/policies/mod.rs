@@ -7,7 +7,9 @@
 //! - [`restart`] — decide whether to restart a task: *never / always / on failure*.
 
 mod backoff;
+mod jitter;
 mod restart;
 
 pub use backoff::BackoffPolicy;
+pub use jitter::JitterPolicy;
 pub use restart::RestartPolicy;

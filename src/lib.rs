@@ -1,100 +1,94 @@
 //! # taskvisor
 //!
-//! **Taskvisor** is a lightweight task orchestration library.
+//! **Taskvisor** is a lightweight task orchestration library for Rust.
 //!
 //! It provides primitives to define, supervise, and restart async tasks
 //! with configurable policies. The crate is designed as a building block
 //! for higher-level orchestrators and agents.
 //!
-//! # Architecture
-//! ## High-level
-//!```text
+//! ## Architecture
+//! ### Overview
+//! ```text
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
 //!     │   TaskSpec   │ … │   TaskSpec   │ … │   TaskSpec   │
 //!     │(user task #1)│ … │(user task #2)│ … │(user task #3)│
 //!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
 //!            ▼                  ▼                  ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
-//! │              supervisor (create actor, handles OS signals)        │
+//! │         Supervisor (spawns actors, handles OS signals)            │
+//! │  - Bus (broadcast events)                                         │
+//! │  - AliveTracker (tracks task state with sequence numbers)         │
+//! │  - SubscriberSet (fans out to user subscribers)                   │
 //! └──────┬──────────────────┬──────────────────┬───────────────┬──────┘
 //!        ▼                  ▼                  ▼               │
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
 //!     │  TaskActor   │   │  TaskActor   │   │  TaskActor   │   │
 //!     │ (retry loop) │   │ (retry loop) │   │ (retry loop) │   │
 //!     └┬─────────────┘   └┬─────────────┘   └┬─────────────┘   │
-//!      │ Publishes        │ Publishes        │ Publishes       │
-//!      │ Events           │ Events           │ Events          │
 //!      │                  │                  │                 │
-//!      │·TaskStarting     │ (…same kinds…)   │ (…same kinds…)  │
-//!      │·TaskFailed       │                  │                 │
-//!      │·TaskStopped      │                  │                 │
-//!      │·TimeoutHit       │                  │                 │
-//!      │·BackoffScheduled │                  │                 │
-//!      │                  │                  │         graceful shutdown
+//!      │ Publishes        │ Publishes        │ Publishes       │
+//!      │ Events:          │ Events:          │ Events:         │
+//!      │ - TaskStarting   │ - TaskStarting   │ - TaskStarting  │
+//!      │ - TaskFailed     │ - TaskStopped    │ - TimeoutHit    │
+//!      │ - BackoffSched.  │ - ...            │ - ...           │
+//!      │                  │                  │                 │
 //!      ▼                  ▼                  ▼                 ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
-//! │                                bus                                │
-//! │                          broadcast<Event>                         │
+//! │                        Bus (broadcast channel)                    │
+//! │                  (capacity: Config::bus_capacity)                 │
 //! └─────────────────────────────────┬─────────────────────────────────┘
-//!                      broadcasts to all subscribers
 //!                                   ▼
-//!                       ┌───────────────────────┐
-//!                       │      Subscriber       │
-//!                       │   on_event(&Event)    │
-//!                       │    (user-defined)     │
-//!                       └───────────────────────┘
-//!```
-//! ---
+//!                       ┌────────────────────────┐
+//!                       │  subscriber_listener   │
+//!                       │   (in Supervisor)      │
+//!                       └───┬────────────────┬───┘
+//!                           ▼                ▼
+//!                    AliveTracker     SubscriberSet
+//!                  (sequence-based)   (per-sub queues)
+//!                                            │
+//!                                  ┌─────────┼─────────┐
+//!                                  ▼         ▼         ▼
+//!                               worker1  worker2  workerN
+//!                                  │         │         │
+//!                                  ▼         ▼         ▼
+//!                             sub1.on   sub2.on   subN.on
+//!                              _event()  _event()  _event()
+//! ```
 //!
-//! ## Attempt flow
-//!```text
-//! ┌────────────────────────────────────────┐
-//! │               TaskSpec                 │
-//! │  {                                     │
-//! │    task: TaskRef,                      │
-//! │    restart: RestartPolicy,             │
-//! │    backoff: BackoffPolicy,             │
-//! │    timeout: Option<Duration>           │
-//! │  }                                     │
-//! └────┬───────────────────────────────────┘
-//!      │  (constructed directly or via Config::from_task)
-//!      ▼
-//! ┌────────────────────────────────────────┐
-//! │               TaskActor                │
-//! │  { restart, backoff, timeout }         │
-//! └────┬───────────────────────────────────┘
-//!      │ (1) optional: acquire global Semaphore permit (cancellable)
-//!      │ (2) publish Event::TaskStarting{ task, attempt }
-//!      │ (3) run_once(task, parent_token, timeout, bus)
-//!      │         ├─ Ok  ──► publish TaskStopped
-//!      │         │          └─ apply RestartPolicy from TaskSpec:
-//!      │         │                - Never        ⇒ exit
-//!      │         │                - OnFailure    ⇒ exit
-//!      │         │                - Always       ⇒ continue
-//!      │         └─ Err ──► publish TaskFailed
-//!      │                    decide retry using RestartPolicy:
-//!      │                      - Never        ⇒ exit
-//!      │                      - OnFailure    ⇒ retry
-//!      │                      - Always       ⇒ retry
-//!      │ (4) if retry:
-//!      │       delay = backoff.next(prev_delay) // BackoffPolicy from TaskSpec
-//!      │       publish BackoffScheduled{ task, delay, attempt, error }
-//!      │       sleep(delay)  (cancellable via runtime token)
-//!      │       prev_delay = Some(delay)
-//!      │       attempt += 1
-//!      │       goto (1)
-//!      └─ stop conditions:
-//!              - runtime token cancelled (OS signal → graceful shutdown)
-//!              - RestartPolicy (from TaskSpec) disallows further runs
-//!              - semaphore closed / join end
-//!```
-//!---
+//! ### Lifecycle
+//! ```text
+//! TaskSpec ──► Supervisor ──► TaskActor::run()
+//!
+//! loop {
+//!   ├─► attempt += 1
+//!   ├─► acquire semaphore (optional, cancellable)
+//!   ├─► publish TaskStarting{ task, attempt }
+//!   ├─► run_once(task, timeout, attempt)
+//!   │       │
+//!   │       ├─ Ok  ──► publish TaskStopped
+//!   │       │          ├─ RestartPolicy::Never     → exit
+//!   │       │          ├─ RestartPolicy::OnFailure → exit
+//!   │       │          └─ RestartPolicy::Always    → reset delay, continue
+//!   │       │
+//!   │       └─ Err ──► publish TaskFailed{ task, error, attempt }
+//!   │                  ├─ RestartPolicy::Never     → exit
+//!   │                  └─ RestartPolicy::OnFailure/Always:
+//!   │                       ├─ compute delay = backoff.next(prev_delay)
+//!   │                       ├─ publish BackoffScheduled{ delay, attempt }
+//!   │                       ├─ sleep(delay) (cancellable)
+//!   │                       └─ continue
+//!   │
+//!   └─ exit conditions:
+//!        - runtime_token cancelled (OS signal)
+//!        - RestartPolicy forbids continuation
+//!        - semaphore closed
+//! }
+//! ```
 //!
 //! ## Features
-//!
 //! | Area              | Description                                                            | Key types / traits                     |
 //! |-------------------|------------------------------------------------------------------------|----------------------------------------|
-//! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscriber`]                         |
+//! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscribe`]                          |
 //! | **Policies**      | Configure restart/backoff strategies for tasks.                        | [`RestartPolicy`], [`BackoffPolicy`]   |
 //! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`]                         |
 //! | **Errors**        | Typed errors for orchestration and task execution.                     | [`TaskError`], [`RuntimeError`]        |
@@ -105,42 +99,39 @@
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
 //! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
 //!
-//!```rust
+//! ## Example
+//! ```rust
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
-//! #[cfg(feature = "logging")]
-//! use taskvisor::LogWriter;
-//! #[cfg(feature = "logging")]
-//! use taskvisor::Subscribe;
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut cfg = Config::default();
 //!     cfg.timeout = Duration::from_secs(5);
 //!
-//!     // Build supervisor with/without logging subscriber depending on features.
-//!     let s = {
+//!     // Build supervisor (with or without subscribers)
+//!     let subs = {
 //!         #[cfg(feature = "logging")]
 //!         {
-//!             let subs: Vec<std::sync::Arc<dyn Subscribe>> =
-//!                 vec![std::sync::Arc::new(LogWriter)];
-//!             Supervisor::new(cfg.clone(), subs)
+//!             use taskvisor::{Subscribe, LogWriter};
+//!             vec![std::sync::Arc::new(LogWriter) as std::sync::Arc<dyn Subscribe>]
 //!         }
 //!         #[cfg(not(feature = "logging"))]
 //!         {
-//!             Supervisor::new(cfg.clone(), Vec::new())
+//!             Vec::new()
 //!         }
 //!     };
+//!     let sup = Supervisor::new(cfg.clone(), subs);
 //!
-//!     // Define a simple task with a cancellation token.
+//!     // Define a simple task
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
 //!         if ctx.is_cancelled() { return Ok(()); }
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     // Build a specification for the task.
+//!     // Build specification
 //!     let spec = TaskSpec::new(
 //!         hello,
 //!         RestartPolicy::Never,
@@ -148,7 +139,7 @@
 //!         Some(Duration::from_secs(5)),
 //!     );
 //!
-//!     s.run(vec![spec]).await?;
+//!     sup.run(vec![spec]).await?;
 //!     Ok(())
 //! }
 //! ```
@@ -167,6 +158,7 @@ pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
 pub use policies::BackoffPolicy;
+pub use policies::JitterPolicy;
 pub use policies::RestartPolicy;
 pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};

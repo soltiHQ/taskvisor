@@ -55,26 +55,20 @@ impl RuntimeError {
 pub enum TaskError {
     /// Task execution exceeded its timeout duration.
     #[error("timed out after {timeout:?}")]
-    Timeout {
-        /// The timeout duration that was exceeded.
-        timeout: Duration,
-    },
+    Timeout { timeout: Duration },
 
     /// Non-recoverable fatal error (should not be retried).
     #[error("fatal error (no retry): {error}")]
-    Fatal {
-        /// The underlying error message.
-        error: String,
-    },
+    Fatal { error: String },
 
     /// Task execution failed but may succeed if retried.
     #[error("execution failed: {error}")]
-    Fail {
-        /// The underlying error message.
-        error: String,
-    },
+    Fail { error: String },
 
-    /// Task was cancelled due to parent context shutdown.
+    /// Task was cancelled due to shutdown or parent cancellation.
+    ///
+    /// Returned when task detects `CancellationToken::is_cancelled()` and exits gracefully.
+    /// This is **not an error** in traditional sense, but signals intentional termination.
     #[error("context cancelled")]
     Canceled,
 }

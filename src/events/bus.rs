@@ -1,27 +1,45 @@
 //! # Event bus for broadcasting runtime events.
 //!
-//! [`Bus`] is a wrapper around [`tokio::sync::broadcast`] that allows task actors
-//! and the supervisor to broadcast [`Event`]s to multiple subscribers simultaneously.
+//! [`Bus`] is a thin wrapper around [`tokio::sync::broadcast`] that provides
+//! non-blocking event publishing from multiple sources (actors, runner, supervisor).
 //!
-//! ## Key characteristics:
-//! - **Broadcast semantics**: all active subscribers receive a clone of each event
-//! - **Non-persistent**: events are lost if there are no active subscribers
-//! - **Bounded capacity**: old events are dropped when the channel is full
-//! - **Multiple subscribers**: any number of receivers can subscribe independently
+//! ## Architecture
+//! ```text
+//! Publishers (many):                 Subscriber (one):
+//!   Actor 1 ──┐
+//!   Actor 2 ──┼──────► Bus ───────► subscriber_listener ────► SubscriberSet
+//!   Actor N ──┤  (broadcast chan)     (in Supervisor)
+//!   Runner  ──┘
+//! ```
 //!
-//! ## Usage:
-//! - [`Bus::publish`] broadcasts an event to all current subscribers (non-blocking)
-//! - [`Bus::subscribe`] creates a new receiver that will receive all future events
+//! taskvisor uses a single subscriber (`Supervisor::subscriber_listener`) that fans out events
+//! to multiple user-defined subscribers via [`SubscriberSet`](crate::SubscriberSet).
 //!
-//! This is used internally by the [`Supervisor`](crate::core::Supervisor)
+//! ## Rules
+//! - **Non-blocking publish**: `publish()` never blocks, returns immediately
+//! - **Bounded capacity**: ring buffer of fixed size (oldest events dropped on overflow)
+//! - **Single ring buffer**: all publishers write to the same buffer
+//! - **Lagged detection**: slow subscribers receive `RecvError::Lagged` on overflow
+//! - **No persistence**: events are lost if no active subscribers exist
+//!
+//! ## Capacity behavior
+//! When the channel reaches capacity and new events are published:
+//! - Ring buffer fills up (capacity events)
+//! - Oldest events are overwritten by new events
+//! - Subscriber receives `RecvError::Lagged(n)` indicating n missed events
 
 use super::event::Event;
 use tokio::sync::broadcast;
 
 /// Broadcast channel for runtime events.
 ///
-/// Wrapper over [`tokio::sync::broadcast`] that provides `publish`/`subscribe` methods
-/// for broadcasting [`Event`]s to multiple concurrent subscribers.
+/// Thin wrapper over [`tokio::sync::broadcast`] that provides `publish`/`subscribe` API.
+/// Multiple publishers can publish concurrently; subscribers receive all events.
+///
+/// ### Rules
+/// - **Non-blocking**: `publish()` returns immediately
+/// - **Fire-and-forget**: no delivery guarantees
+/// - **Cloneable**: cheap to clone (Arc-wrapped Sender)
 #[derive(Clone)]
 pub struct Bus {
     tx: broadcast::Sender<Event>,
@@ -30,32 +48,37 @@ pub struct Bus {
 impl Bus {
     /// Creates a new bus with the given channel capacity.
     ///
-    /// # Parameters
-    /// - `capacity`: maximum number of events that can be buffered in the channel.
-    ///   When capacity is exceeded, the oldest unsent events are dropped.
+    /// ### Notes
+    /// - Capacity is **shared** across all subscribers (not per-subscriber)
+    /// - When full, oldest buffered events are dropped
+    /// - Minimum capacity is 1 (enforced)
     pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         let (tx, _rx) = broadcast::channel(capacity);
         Self { tx }
     }
 
     /// Publishes an event to all active subscribers.
     ///
-    /// The event is cloned and sent to each subscriber independently.
-    /// If there are no active subscribers, the event is dropped silently.
-    /// This is intentional as the system can operate without subscribers.
+    /// - Moves event into the channel (not cloned at publish time)
+    /// - If no subscribers exist, event is dropped silently
+    /// - Returns immediately (non-blocking)
     pub fn publish(&self, ev: Event) {
         let _ = self.tx.send(ev);
     }
 
     /// Creates a new subscriber that will receive all future events.
     ///
-    /// Each call to `subscribe()` creates an independent receiver.
-    /// Multiple subscribers can exist simultaneously, each receiving
-    /// a clone of every published event.
+    /// - Each call creates an **independent** receiver
+    /// - Receiver gets events published **after** subscription
+    /// - Each subscriber receives a **clone** of every event (at recv() time)
+    /// - Multiple subscribers can coexist
     ///
-    /// # Returns
-    /// A new [`broadcast::Receiver<Event>`] that will receive all events
-    /// published after this subscription is created.
+    /// ### Slow subscribers
+    /// 1. Ring buffer fills to capacity
+    /// 2. Oldest events are overwritten by new events
+    /// 3. `recv()` returns `RecvError::Lagged(n)` where n = missed events
+    /// 4. Next `recv()` gets the next available event
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.tx.subscribe()
     }

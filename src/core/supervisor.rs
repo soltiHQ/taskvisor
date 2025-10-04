@@ -1,69 +1,45 @@
-//! # Supervisor: orchestrates task actors, fan-out delivery, and graceful shutdown.
+//! # Supervisor: orchestrates task actors and graceful shutdown.
 //!
-//! The [`Supervisor`] owns the event bus, a [`SubscriberSet`], and global runtime
-//! configuration. It spawns per-task actors, handles OS signals, and enforces a
-//! global concurrency cap via an optional semaphore.
+//! The [`Supervisor`] owns the runtime components (event bus, subscribers, alive tracker)
+//! and orchestrates task execution lifecycle from spawn to graceful termination.
 //!
-//! ## Key responsibilities
-//! - subscribe to the [`Bus`] and **fan-out** events via [`SubscriberSet`]
-//! - spawn task actors with restart/backoff/timeout policies
-//! - handle OS termination signals (SIGINT/SIGTERM/Ctrl-C)
-//! - perform graceful shutdown with a configurable [`Config::grace`]
+//! - Spawn task actors with execution policies from [`TaskSpec`]
+//! - Perform graceful shutdown with configurable grace period
+//! - Enforce global concurrency limits via optional semaphore
+//! - Track alive tasks for stuck detection during shutdown
+//! - Fan-out events to subscribers via [`SubscriberSet`]
+//! - Handle OS termination signals
 //!
-//! ## High-level architecture
+//! ## Architecture
 //! ```text
-//! Inputs to run():
-//!   Vec<TaskSpec>  ──►  Supervisor::run(cfg, subscribers, bus)
-//!
-//! Preparation:
-//!   - build_semaphore() from cfg.max_concurrent (None = unlimited)
-//!   - subscriber_listener():
-//!     Bus.subscribe() ─► update_alive_inline(&Event) ─► SubscriberSet::emit(&Event)
-//!
-//! Spawn actors:
-//!   TaskSpec[0]  TaskSpec[1]  ...  TaskSpec[N-1]
-//!       │            │                   │
-//!       └──► TaskActor::new(task, params, bus, global_sem)        (one per spec)
-//!                    └──► child CancellationToken = runtime_token.child_token()
-//!                         set.spawn(actor.run(child_token))
-//!
-//! Event flow (as wired here):
-//!   TaskActor ... ── publish(Event) ──► Bus ──► Supervisor listener ──► SubscriberSet::emit(&Event)
-//!                                                                  ┌─────────┬─────────┐
-//!                                                                  ▼         ▼         ▼
-//!                                                           [queue S1] [queue S2] ... [queue SN]
-//!                                                                  │         │         │
-//!                                                           worker S1 worker S2 ... worker SN
-//!                                                                  │         │         │
-//!                                                         sub.on_event(&Event) (per subscriber)
-//!
-//! Shutdown path:
-//!   shutdown::wait_for_shutdown_signal()
-//!             └─► Bus.publish(ShutdownRequested)
-//!             └─► runtime_token.cancel()   → propagates to child tokens
-//!             └─► wait_all_with_grace(cfg.grace):
-//!                    ├─ Ok (all joined)    → Bus.publish(AllStoppedWithin)
-//!                    └─ Timeout exceeded   → Bus.publish(GraceExceeded)
-//!                                            (supervisor.snapshot() for stuck tasks)
+//! TaskSpec[] ──► Supervisor::run()
+//!                     │
+//!                     ├──► spawn TaskActor per spec
+//!                     │         └──► publishes events to Bus
+//!                     │
+//!                     ├──► subscriber_listener()
+//!                     │         ├──► updates AliveTracker
+//!                     │         └──► fans out to SubscriberSet
+//!                     │
+//!                     └──► wait for:
+//!                           ├──► all actors exit (Ok)
+//!                           └──► OS signal → graceful shutdown
+//!                                 ├──► cancel all actors
+//!                                 ├──► wait up to grace period
+//!                                 └──► check stuck tasks (AliveTracker)
 //! ```
 //!
-//! - `Supervisor` spawns actors based on [`TaskSpec`].
-//! - `SubscriberSet` fans out [`Event`]s to all subscribers without awaiting them.
-//! - On OS signal, supervisor cancels all actors and waits up to [`Config::grace`].
+//! ## Rules
+//! - Alive tracking uses **sequence numbers** (handles out-of-order events)
+//! - Subscriber fan-out is **non-blocking** (per-subscriber queues)
+//! - Graceful shutdown waits **at most** `Config::grace` duration
+//! - Stuck tasks are reported via `RuntimeError::GraceExceeded`
+//! - Global concurrency limit applies across **all** actors
 //!
-//! ## Example
 //! ```rust
 //! use std::time::Duration;
+//! use taskvisor::{Config, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
 //! use tokio_util::sync::CancellationToken;
-//! use taskvisor::{
-//!     BackoffPolicy,
-//!     Config,
-//!     RestartPolicy,
-//!     Supervisor,
-//!     TaskFn,
-//!     TaskRef,
-//!     TaskSpec,
-//! };
 //!
 //! #[cfg(feature = "logging")]
 //! use taskvisor::LogWriter;
@@ -74,88 +50,98 @@
 //!     cfg.max_concurrent = 2;
 //!     cfg.grace = Duration::from_secs(5);
 //!
-//!     // Build subscribers (optional):
-//!     let subs = {
-//!         #[cfg(feature = "logging")]
-//!         { vec![std::sync::Arc::new(LogWriter::new()) as std::sync::Arc<_>] }
-//!         #[cfg(not(feature = "logging"))]
-//!         { Vec::new() }
-//!     };
-//!     let sup = Supervisor::new(cfg.clone(), subs);
-//!
-//!     let t1: TaskRef = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
+//!     let sup = Supervisor::new(cfg, { Vec::new() });
+//!     let task = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
 //!         while !ctx.is_cancelled() {
 //!             tokio::time::sleep(Duration::from_millis(250)).await;
 //!         }
 //!         Ok(())
 //!     });
+//!
 //!     let spec = TaskSpec::new(
-//!         t1,
+//!         task,
 //!         RestartPolicy::Never,
 //!         BackoffPolicy::default(),
 //!         Some(Duration::from_secs(2)),
 //!     );
+//!
 //!     sup.run(vec![spec]).await?;
 //!     Ok(())
 //! }
 //! ```
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::{
-    sync::{RwLock, Semaphore},
-    task::JoinSet,
-    time::timeout,
-};
+use tokio::{sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{
     actor::{TaskActor, TaskActorParams},
+    alive::AliveTracker,
     shutdown,
 };
-use crate::subscribers::{Subscribe, SubscriberSet};
-use crate::tasks::TaskSpec;
 use crate::{
     config::Config,
     error::RuntimeError,
-    events::Bus,
-    events::{Event, EventKind},
+    events::{Bus, Event, EventKind},
+    subscribers::{Subscribe, SubscriberSet},
+    tasks::TaskSpec,
 };
 
-/// Coordinates task actors, event delivery (via [`SubscriberSet`]), and graceful shutdown.
+/// Orchestrates task actors, event delivery, and graceful shutdown.
+///
+/// - Spawns and supervises task actors based on [`TaskSpec`]
+/// - Fans out events to subscribers (non-blocking)
+/// - Handles graceful shutdown on OS signals
+/// - Tracks alive tasks for stuck detection
+/// - Enforces global concurrency limits
 pub struct Supervisor {
     /// Global runtime configuration.
-    pub cfg: Config,
+    cfg: Config,
     /// Event bus shared with all actors.
-    pub bus: Bus,
+    bus: Bus,
     /// Fan-out set for subscribers.
-    pub subs: Arc<SubscriberSet>,
-    /// Set of alive task names.
-    alive: Arc<RwLock<HashSet<String>>>,
+    subs: Arc<SubscriberSet>,
+    /// Tracker of alive tasks for stuck detection.
+    alive: Arc<AliveTracker>,
 }
 
 impl Supervisor {
-    /// Creates a new supervisor with the given config and the provided subscribers.
-    ///
-    /// `subscribers` may be empty; fan-out will no-op in that case.
+    /// Creates a new supervisor with the given config and subscribers (maybe empty).
     pub fn new(cfg: Config, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         let bus = Bus::new(cfg.bus_capacity);
         let subs = Arc::new(SubscriberSet::new(subscribers, bus.clone()));
+
         Self {
             cfg,
             bus,
             subs,
-            alive: Arc::new(RwLock::new(HashSet::new())),
+            alive: Arc::new(AliveTracker::new()),
         }
     }
 
-    /// Runs the provided task specifications until either:
-    /// - all actors exit on their own, or
-    /// - a termination signal arrives → graceful shutdown (may end with `GraceExceeded`).
+    /// Runs task specifications until completion or shutdown signal.
+    ///
+    /// ### Exit conditions
+    /// - **All actors exit naturally** → returns `Ok(())`
+    /// - **OS signal received** → graceful shutdown:
+    ///   - Cancels all actors (via `runtime_token`)
+    ///   - Waits up to `Config::grace` for actors to finish
+    ///   - Returns `Ok(())` if all stopped within grace
+    ///   - Returns `Err(GraceExceeded)` with stuck task names otherwise
+    ///
+    /// ### Graceful shutdown flow
+    /// - Receive OS signal
+    /// - Publish `ShutdownRequested` event
+    /// - Cancel `runtime_token` (propagates to all actors)
+    /// - Wait up to `Config::grace` for actors to finish
+    /// - Check alive tracker for stuck tasks
+    /// - Return result
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         let semaphore = self.build_semaphore();
         let runtime_token = CancellationToken::new();
+
+        // Spawn listener before actors to avoid missing early events
         self.subscriber_listener();
 
         let mut set = JoinSet::new();
@@ -163,17 +149,27 @@ impl Supervisor {
         self.drive_shutdown(&mut set, &runtime_token).await
     }
 
-    /// Returns a sorted snapshot of currently alive tasks.
+    /// Returns sorted list of currently alive task names.
+    ///
+    /// Used internally during shutdown to detect stuck tasks.
+    /// May also be useful for external monitoring/debugging.
     pub async fn snapshot(&self) -> Vec<String> {
-        let g = self.alive.read().await;
-        let mut v: Vec<String> = g.iter().cloned().collect();
-        v.sort_unstable();
-        v
+        self.alive.snapshot().await
     }
 
-    /// Subscribes to the bus, updates alive inline, then fans out to subscribers.
+    // Check and return boolean task status (alive / not alive).
+    pub async fn is_alive(&self, name: &str) -> bool {
+        self.alive.is_alive(name).await
+    }
+
+    /// Spawns background task that:
+    /// 1. Subscribes to event bus
+    /// 2. Updates alive tracker (with sequence-based ordering)
+    /// 3. Fans out events to subscribers
     ///
-    /// Best-effort: subscriber queues may drop; alive set remains correct.
+    /// ### Rules
+    /// - Runs until bus is closed (when Supervisor is dropped)
+    /// - Handles `Lagged` errors gracefully (skips old events)
     fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
@@ -183,8 +179,9 @@ impl Supervisor {
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
-                        update_alive(&alive, &ev).await;
-                        set.emit(&ev);
+                        let arc_ev = Arc::new(ev);
+                        alive.update(&arc_ev).await;
+                        set.emit_arc(arc_ev);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -193,7 +190,9 @@ impl Supervisor {
         });
     }
 
-    /// Builds a global semaphore if `max_concurrent > 0`; otherwise no cap.
+    /// Builds global semaphore for concurrency limiting.
+    ///
+    /// Returns `None` if `max_concurrent == 0` (unlimited).
     fn build_semaphore(&self) -> Option<Arc<Semaphore>> {
         match self.cfg.max_concurrent {
             0 => None,
@@ -201,31 +200,31 @@ impl Supervisor {
         }
     }
 
-    /// Spawns task actors and adds them to the given join set.
+    /// Spawns one actor per task spec.
     fn spawn_task_actors(
         &self,
         set: &mut JoinSet<()>,
         runtime_token: &CancellationToken,
-        global_sem: &Option<Arc<Semaphore>>,
+        semaphore: &Option<Arc<Semaphore>>,
         tasks: Vec<TaskSpec>,
     ) {
         for spec in tasks {
             let actor = TaskActor::new(
-                spec.task.clone(),
-                TaskActorParams {
-                    restart: spec.restart,
-                    backoff: spec.backoff,
-                    timeout: spec.timeout,
-                },
                 self.bus.clone(),
-                global_sem.clone(),
+                spec.task().clone(),
+                TaskActorParams {
+                    restart: spec.restart(),
+                    backoff: spec.backoff(),
+                    timeout: spec.timeout(),
+                },
+                semaphore.clone(),
             );
             let child = runtime_token.child_token();
             set.spawn(actor.run(child));
         }
     }
 
-    /// Waits until either all actors finish or a shutdown signal is received.
+    /// Waits for either natural completion or shutdown signal.
     async fn drive_shutdown(
         &self,
         set: &mut JoinSet<()>,
@@ -243,11 +242,9 @@ impl Supervisor {
         }
     }
 
-    /// Waits for all actors to finish within the configured grace period.
+    /// Waits for all actors with grace period timeout.
     ///
-    /// Publishes [`EventKind::AllStoppedWithin`] on success, or
-    /// [`EventKind::GraceExceeded`] on timeout and returns
-    /// [`RuntimeError::GraceExceeded`] with the list of stuck tasks.
+    /// Publishes terminal event (`AllStoppedWithin` or `GraceExceeded`).
     async fn wait_all_with_grace(&self, set: &mut JoinSet<()>) -> Result<(), RuntimeError> {
         let grace = self.cfg.grace;
         let done = async { while set.join_next().await.is_some() {} };
@@ -264,23 +261,5 @@ impl Supervisor {
                 Err(RuntimeError::GraceExceeded { grace, stuck })
             }
         }
-    }
-}
-
-/// Update the authoritative alive set based on an incoming event.
-/// Only `TaskStarting` / `TaskStopped` affect the set.
-async fn update_alive(alive: &Arc<RwLock<HashSet<String>>>, ev: &Event) {
-    let name = match ev.task.as_deref() {
-        Some(n) => n,
-        None => return,
-    };
-    match ev.kind {
-        EventKind::TaskStarting => {
-            alive.write().await.insert(name.to_string());
-        }
-        EventKind::TaskStopped => {
-            alive.write().await.remove(name);
-        }
-        _ => {}
     }
 }

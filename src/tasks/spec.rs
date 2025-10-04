@@ -1,63 +1,75 @@
-//! # Task specification.
+//! # Task specification for supervised execution.
 //!
-//! This module defines [`TaskSpec`] — a configuration bundle that
-//! describes how a task should be executed under supervision
-//! (restart policy, backoff, timeout).
+//! Defines [`TaskSpec`] — a configuration bundle that describes how a task
+//! should be executed under supervision (restart policy, backoff, timeout).
+//!
+//! A spec can be created:
+//! - **Explicitly** with [`TaskSpec::new`] (full control)
+//! - **From config** with [`TaskSpec::with_defaults`] (inherit defaults)
+//!
+//! ## Rules
+//! - The spec is then passed to [`Supervisor::run`](crate::Supervisor::run) for execution.
 
-use std::fmt;
 use std::time::Duration;
 
-use crate::policies::BackoffPolicy;
-use crate::tasks::task_fn::TaskRef;
-use crate::{config::Config, policies::RestartPolicy};
+use crate::{
+    config::Config, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
+};
 
 /// # Specification for running a task under supervision.
 ///
-/// A [`TaskSpec`] bundles:
-/// - the task itself ([`TaskRef`])
-/// - restart policy ([`RestartPolicy`])
-/// - backoff polict ([`BackoffPolicy`])
-/// - optional execution timeout
+/// Bundles together:
+/// - The task itself ([`TaskRef`])
+/// - Restart policy ([`RestartPolicy`])
+/// - Backoff policy ([`BackoffPolicy`])
+/// - Optional execution timeout
 ///
 /// It can be created manually with [`TaskSpec::new`] or derived from a
 /// global [`Config`] via [`TaskSpec::from_task`].
 ///
-/// # Example
-/// ```
+/// ## Example
+/// ```rust
 /// use tokio_util::sync::CancellationToken;
 /// use taskvisor::{TaskSpec, TaskFn, Config, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
+/// use std::time::Duration;
 ///
 /// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
 ///     Ok::<(), TaskError>(())
 /// });
 ///
-/// // Build spec explicitly:
+/// // Explicit configuration:
 /// let spec = TaskSpec::new(
 ///     demo.clone(),
 ///     RestartPolicy::Never,
 ///     BackoffPolicy::default(),
 ///     None,
 /// );
-/// assert!(spec.timeout.is_none());
+/// assert!(spec.timeout().is_none());
 ///
-/// // Or derive from global config:
+/// // Inherit from global config:
 /// let cfg = Config::default();
-/// let spec2 = TaskSpec::from_task(demo, &cfg);
+/// let spec2 = TaskSpec::with_defaults(demo, &cfg);
 /// ```
 #[derive(Clone)]
 pub struct TaskSpec {
     /// Reference to the task to be executed.
-    pub task: TaskRef,
+    task: TaskRef,
     /// Policy controlling if/when the task should be restarted.
-    pub restart: RestartPolicy,
+    restart: RestartPolicy,
     /// Policy controlling delays between restarts.
-    pub backoff: BackoffPolicy,
+    backoff: BackoffPolicy,
     /// Optional timeout for the task execution.
-    pub timeout: Option<Duration>,
+    timeout: Option<Duration>,
 }
 
 impl TaskSpec {
     /// Creates a new task specification with explicit parameters.
+    ///
+    /// ### Parameters
+    /// - `task`: Task to execute
+    /// - `restart`: When to restart (never/always/on-failure)
+    /// - `backoff`: How to delay between retries
+    /// - `timeout`: Optional per-attempt timeout (`None` = no timeout)
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
@@ -72,25 +84,37 @@ impl TaskSpec {
         }
     }
 
-    /// Builds a task specification from a [`Config`], inheriting restart,
-    /// backoff, and timeout settings from global configuration.
-    pub fn from_task(task: TaskRef, cfg: &Config) -> Self {
+    /// Creates a task specification inheriting defaults from global config.
+    ///
+    /// ### Parameters
+    /// - `task`: Task to execute
+    /// - `cfg`: Config to inherit restart/backoff/timeout from
+    pub fn with_defaults(task: TaskRef, cfg: &Config) -> Self {
         Self {
             task,
             restart: cfg.restart,
             backoff: cfg.backoff,
-            timeout: (!cfg.timeout.is_zero()).then_some(cfg.timeout),
+            timeout: Some(cfg.timeout),
         }
     }
-}
 
-impl fmt::Debug for TaskSpec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TaskSpec")
-            .field("task", &self.task.name())
-            .field("restart", &self.restart)
-            .field("backoff", &self.backoff)
-            .field("timeout", &self.timeout)
-            .finish()
+    /// Returns reference to the task.
+    pub fn task(&self) -> &TaskRef {
+        &self.task
+    }
+
+    /// Returns the restart policy.
+    pub fn restart(&self) -> RestartPolicy {
+        self.restart
+    }
+
+    /// Returns the backoff policy.
+    pub fn backoff(&self) -> BackoffPolicy {
+        self.backoff
+    }
+
+    /// Returns the timeout, if configured.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 }

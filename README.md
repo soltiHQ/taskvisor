@@ -20,7 +20,7 @@
 #### Cargo.toml:
 ```toml
 [dependencies]
-taskvisor = "0.1"
+taskvisor = "0.0.4"
 ```
 
 > Optional features:
@@ -29,77 +29,99 @@ taskvisor = "0.1"
 
 ```toml
 [dependencies]
-taskvisor = { version = "0.1", features = ["logging", "events"] }
+taskvisor = { version = "0.0.4", features = ["logging", "events"] }
 ```
 
 ## 📝 Quick start
-This example shows how taskvisor handles task lifecycle: `execution`, `failure`, `restart with backoff`, and `graceful shutdown`.
+#### Minimal Example (No subscribers)
+```toml
+[dependencies]
+taskvisor = "0.0.4"
+```
 ```rust
+//! The simplest possible taskvisor usage demonstrating:
+//! - Task definition with proper cancellation handling
+//! - Basic supervisor setup
+//! - Graceful shutdown on Ctrl+C
+//! - No subscribers
+
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use taskvisor::*;
 
-use taskvisor::{
-    BackoffPolicy, 
-    Config, 
-    RestartPolicy, 
-    Supervisor,
-    TaskFn, 
-    TaskRef, 
-    TaskSpec, 
-    LogWriter, 
-    TaskError,
-};
-
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = Config {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    };
-
-    let sup = Supervisor::new(cfg.clone(), LogWriter);
-
-    // Simple task that occasionally fails to demonstrate restart behavior
-    let demo_task: TaskRef = TaskFn::arc("demo", |ctx: CancellationToken| async move {
+    let supervisor = Supervisor::new(Config::default(), vec![]);
+    
+    let task = TaskFn::arc("hello", |ctx: CancellationToken| async move {
         if ctx.is_cancelled() {
-            return Ok(());
+            return Err(TaskError::Canceled);
         }
-        println!("Task running...");
-        tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Fail 30% of the time to show a restart mechanism
-        if rand::random::<f32>() < 0.3 {
-            return Err(TaskError::Fail {
-                error: "Simulated failure".into()
-            });
-        }
-        println!("Task completed successfully");
+        println!("Hello from taskvisor!");
+        tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(())
     });
 
-    let spec = TaskSpec::new(
-        demo_task,
-        RestartPolicy::Always,                // Restart on both success and failure
-        BackoffPolicy {
-            first: Duration::from_secs(1),
-            max: Duration::from_secs(5),
-            factor: 2.0,                      // Exponential: 1s, 2s, 4s, 5s (capped)
-        },
-        None,                                 // No timeout
-    );
-
-    // Run until Ctrl+C
-    sup.run(vec![spec]).await?;
+    let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
+    supervisor.run(vec![spec]).await?;
     Ok(())
 }
 ```
 
-#### What this example shows:
-- how tasks are defined using `TaskFn::arc`
-- how `RestartPolicy::Always` keeps the task running continuously
-- how `BackoffPolicy` delays retries after failures
-- how `LogWriter` prints events to see what's happening
-- how Ctrl+C triggers graceful shutdown with a 5-second grace period
+#### Minimal Example (Embedded subscriber)
+```toml
+[dependencies]
+taskvisor = { version = "0.0.4", features = ["logging"] }
+```
+```rust
+//! # Minimal Example
+//!
+//! The simplest possible taskvisor usage demonstrating:
+//! - Task definition with proper cancellation handling
+//! - Built-in LogWriter subscriber for observability
+//! - Graceful shutdown on Ctrl+C
+
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use taskvisor::{
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, Subscribe, TaskError, TaskFn,
+    TaskSpec,
+};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Setup supervisor with LogWriter to see task lifecycle events
+    let subscribers: Vec<std::sync::Arc<dyn Subscribe>> = vec![
+        std::sync::Arc::new(LogWriter),
+    ];
+    let supervisor = Supervisor::new(Config::default(), subscribers);
+    
+    let task = TaskFn::arc("hello", |ctx: CancellationToken| async move {
+        if ctx.is_cancelled() {
+            return Err(TaskError::Canceled);
+        }
+
+        println!("Hello from taskvisor!");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    });
+
+    let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
+    supervisor.run(vec![spec]).await?;
+    Ok(())
+}
+```
+
+### More Examples
+Check out the [examples](./examples) directory for:
+- `task_patterns.rs`: Different restart strategies and patterns
+- `custom_subscriber.rs`: Building custom subscribers
+
+```bash
+    cargo run --example custom_subscriber --features=events
+    cargo run --example task_patterns --features=logging
+```
 
 ## 🤝 Contributing
 We're open to any new ideas and contributions.  
