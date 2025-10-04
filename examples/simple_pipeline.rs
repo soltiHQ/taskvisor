@@ -30,7 +30,7 @@ fn number_generator(tx: mpsc::Sender<u64>) -> TaskRef {
             loop {
                 if ctx.is_cancelled() {
                     println!("🔢 Generator: Shutting down");
-                    return Ok(());
+                    return Err(TaskError::Canceled);
                 }
 
                 let num = counter.fetch_add(1, Ordering::Relaxed);

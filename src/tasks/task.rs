@@ -40,13 +40,11 @@ pub type TaskRef = Arc<dyn Task>;
 /// - **Supervised** (by [`Supervisor`](crate::Supervisor))
 ///
 /// ## Rules
-///
 /// - **Stateless spawning**: `spawn(&self)` is `Fn`, not `FnMut` — no shared mutable state
 /// - **Fresh futures**: Each `spawn()` call creates a **new** independent future
 /// - **Cancellation**: Implementations **must** check `ctx.is_cancelled()` periodically
 ///
 /// ## Example
-///
 /// ```rust
 /// use std::future::Future;
 /// use std::pin::Pin;
@@ -62,11 +60,12 @@ pub type TaskRef = Arc<dyn Task>;
 ///
 ///     fn spawn(&self, ctx: CancellationToken) -> Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>> {
 ///         Box::pin(async move {
-///             while !ctx.is_cancelled() {
+///             loop {
+///                 if ctx.is_cancelled() {
+///                     return Err(TaskError::Canceled);
+///                 }
 ///                 // do work...
-///                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 ///             }
-///             Ok(())
 ///         })
 ///     }
 /// }
@@ -81,7 +80,7 @@ pub trait Task: Send + Sync + 'static {
     ///
     /// ### Cancellation requirements
     /// - The returned future **must** check `ctx.is_cancelled()` periodically and exit promptly.
-    /// - Failure to do so will prevent graceful shutdown and may result in stuck tasks.
+    /// - Return `Err(TaskError::Canceled)` for proper shutdown tracking.
     ///
     /// ### Stateless execution
     /// This method takes `&self` (not `&mut self`), meaning:

@@ -51,6 +51,7 @@ use tokio::{select, sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    TaskError,
     core::runner::run_once,
     events::{Bus, Event, EventKind},
     policies::{BackoffPolicy, RestartPolicy},
@@ -203,6 +204,9 @@ impl TaskActor {
                         RestartPolicy::OnFailure => break,
                         RestartPolicy::Never => break,
                     }
+                }
+                Err(TaskError::Canceled) => {
+                    break;
                 }
                 Err(e) => {
                     let should_retry = matches!(
