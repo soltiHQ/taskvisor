@@ -1,24 +1,26 @@
-//! # Task registry - event-driven task lifecycle manager.
+//! # Task registry — event-driven task lifecycle manager.
 //!
-//! Registry subscribes to Bus events and manages active tasks:
-//! - Listens for `TaskAddRequested` → spawns actor and adds to registry
-//! - Listens for `TaskRemoveRequested` → cancels and removes task
-//! - Listens for `ActorExhausted` / `ActorDead` → auto-cleanup finished tasks
+//! Subscribes to Bus and manages active task actors:
+//! - On `TaskAddRequested(spec)`  → spawn actor, insert handle, publish `TaskAdded`
+//! - On `TaskRemoveRequested(name)` → cancel token, await join, publish `TaskRemoved`
+//! - On `ActorExhausted(name)` / `ActorDead(name)` → remove handle, await join, publish `TaskRemoved`
+//! - On runtime shutdown (registry listener stops) → `cancel_all()` (cancel → join → `TaskRemoved` for each)
 //!
 //! ## Architecture
 //! ```text
 //! Bus → Registry.event_listener()
-//!         ├─► TaskAddRequested(spec) → spawn_and_register(spec)
-//!         ├─► TaskRemoveRequested(name) → cancel_and_remove(name)
-//!         ├─► ActorExhausted(name) → cleanup_task(name)
-//!         └─► ActorDead(name) → cleanup_task(name)
+//!         ├─► TaskAddRequested(spec)    → spawn_and_register(spec) → publish TaskAdded
+//!         ├─► TaskRemoveRequested(name) → cancel_and_remove(name)  → publish TaskRemoved
+//!         ├─► ActorExhausted(name)      → cleanup_task(name)       → publish TaskRemoved
+//!         └─► ActorDead(name)           → cleanup_task(name)       → publish TaskRemoved
 //! ```
 //!
 //! ## Rules
-//! - Registry owns the task handles (JoinHandle + CancellationToken)
-//! - Actor spawning happens inside registry (not in supervisor)
-//! - Cleanup is automatic via events (no polling needed)
-//! - All operations are event-driven (idempotent)
+//! - Registry owns JoinHandle + CancellationToken for each actor
+//! - Cleanup is event-driven (no polling) and idempotent (safe on duplicates/races)
+//! - Does **not** react to `TaskStopped` directly (cleanup happens on actor terminal events)
+//! - Publishes `TaskAdded`/`TaskRemoved` for observability
+//! - Exposes `wait_became_nonempty_once` / `wait_until_empty` via internal notifiers
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +38,7 @@ struct Handle {
     cancel: CancellationToken,
 }
 
+/// Event-driven registry of active task actors.
 pub struct Registry {
     tasks: RwLock<HashMap<String, Handle>>,
     bus: Bus,
@@ -46,6 +49,7 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Creates a new registry instance.
     pub fn new(
         bus: Bus,
         runtime_token: CancellationToken,
@@ -75,6 +79,7 @@ impl Registry {
         }
     }
 
+    /// One-shot wait until the registry becomes non-empty.
     pub async fn wait_became_nonempty_once(&self) {
         if !self.is_empty().await {
             return;
@@ -82,6 +87,7 @@ impl Registry {
         self.nonempty_notify.notified().await;
     }
 
+    /// Wait until the registry becomes empty.
     pub async fn wait_until_empty(&self) {
         if self.is_empty().await {
             return;
@@ -89,6 +95,7 @@ impl Registry {
         self.empty_notify.notified().await;
     }
 
+    /// Spawns the event listener task.
     pub fn spawn_listener(self: Arc<Self>) {
         let mut rx = self.bus.subscribe();
         let rt = self.runtime_token.clone();
@@ -116,6 +123,7 @@ impl Registry {
         });
     }
 
+    /// Handles incoming events.
     async fn handle_event(&self, event: &Event) {
         match event.kind {
             EventKind::TaskAddRequested => {
@@ -137,6 +145,7 @@ impl Registry {
         }
     }
 
+    /// Returns sorted list of active task names.
     pub async fn list(&self) -> Vec<String> {
         let tasks = self.tasks.read().await;
         let mut names: Vec<String> = tasks.keys().cloned().collect();
@@ -144,10 +153,12 @@ impl Registry {
         names
     }
 
+    /// Returns `true` if registry is empty.
     pub async fn is_empty(&self) -> bool {
         self.tasks.read().await.is_empty()
     }
 
+    /// Cancels all tasks in the registry: cancel → join → TaskRemoved.
     pub async fn cancel_all(&self) {
         let handles: Vec<(String, Handle)> = {
             let mut tasks = self.tasks.write().await;
@@ -155,19 +166,17 @@ impl Registry {
             self.empty_notify.notify_waiters();
             drained
         };
-
         for (_, h) in &handles {
             h.cancel.cancel();
         }
-
         for (name, h) in handles {
             self.join_and_report(&name, h.join).await;
         }
     }
 
+    /// Spawns an actor and registers its handle.
     async fn spawn_and_register(&self, spec: TaskSpec) {
         let task_name = spec.task().name().to_string();
-
         {
             let tasks = self.tasks.read().await;
             if tasks.contains_key(&task_name) {
@@ -181,6 +190,7 @@ impl Registry {
         }
 
         let task_token = self.runtime_token.child_token();
+
         let actor = TaskActor::new(
             self.bus.clone(),
             spec.task().clone(),
@@ -219,11 +229,13 @@ impl Registry {
         }
     }
 
+    /// Removes a task and cancels its token.
     async fn remove_task(&self, name: &str) {
         if let Some((handle, len_after)) = self.take_handle_with_len(name).await {
+            self.notify_after_remove(len_after);
+
             handle.cancel.cancel();
             self.join_and_report(name, handle.join).await;
-            self.notify_after_remove(len_after);
         } else {
             self.bus.publish(
                 Event::now(EventKind::TaskFailed)
@@ -233,13 +245,15 @@ impl Registry {
         }
     }
 
+    /// Cleanup finished task (called on ActorExhausted/ActorDead).
     async fn cleanup_task(&self, name: &str) {
         if let Some((handle, len_after)) = self.take_handle_with_len(name).await {
-            self.join_and_report(name, handle.join).await;
             self.notify_after_remove(len_after);
+            self.join_and_report(name, handle.join).await;
         }
     }
 
+    /// Atomically remove handle from registry and return it with the new length.
     async fn take_handle_with_len(&self, name: &str) -> Option<(Handle, usize)> {
         let mut tasks = self.tasks.write().await;
         let h = tasks.remove(name)?;
@@ -247,6 +261,7 @@ impl Registry {
         Some((h, len_after))
     }
 
+    /// Await join; report panic as ActorDead(actor_panic); always emit TaskRemoved.
     async fn join_and_report(&self, name: &str, join: JoinHandle<ActorExitReason>) {
         match join.await {
             Ok(_) => {}

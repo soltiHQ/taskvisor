@@ -5,8 +5,8 @@
 //! - [`RuntimeError`] — errors raised by the orchestration runtime itself.
 //! - [`TaskError`] — errors raised by individual task executions.
 //!
-//! Both types provide helper methods (`as_label`, `as_message`) for logging/metrics
-//! and additional utilities such as [`TaskError::is_retryable`].
+//! Both types provide helper methods `as_label` for metrics.
+//! [`TaskError`] has additional methods: `is_retryable()` and `is_fatal()`
 
 use std::time::Duration;
 use thiserror::Error;
@@ -39,10 +39,6 @@ pub enum RuntimeError {
         /// The missing task name.
         name: String,
     },
-
-    /// Control channel to the orchestrator is closed (supervisor shutting down).
-    #[error("supervisor control channel closed")]
-    ControlChannelClosed,
 }
 
 impl RuntimeError {
@@ -52,25 +48,6 @@ impl RuntimeError {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
-            RuntimeError::ControlChannelClosed => "runtime_control_channel_closed",
-        }
-    }
-
-    /// Returns a human-readable message with details about the error.
-    pub fn as_message(&self) -> String {
-        match self {
-            RuntimeError::GraceExceeded { grace, stuck } => {
-                format!("grace exceeded after {grace:?}; stuck tasks={stuck:?}")
-            }
-            RuntimeError::TaskAlreadyExists { name } => {
-                format!("task '{name}' already exists in registry")
-            }
-            RuntimeError::TaskNotFound { name } => {
-                format!("task '{name}' not found in registry")
-            }
-            RuntimeError::ControlChannelClosed => {
-                "supervisor control channel closed (shutting down?)".to_string()
-            }
         }
     }
 }
@@ -94,16 +71,15 @@ pub enum TaskError {
     #[error("execution failed: {error}")]
     Fail { error: String },
 
-    /// Task was cancelled due to shutdown or parent cancellation.
+    /// Task was canceled due to shut down or parent cancellation.
     ///
-    /// Returned when task detects `CancellationToken::is_cancelled()` and exits gracefully.
     /// This is **not an error** in traditional sense, but signals intentional termination.
-    #[error("context cancelled")]
+    #[error("context canceled")]
     Canceled,
 }
 
 impl TaskError {
-    /// Returns a short stable label (snake_case) for use in logs/metrics.
+    /// Returns a short stable label.
     pub fn as_label(&self) -> &'static str {
         match self {
             TaskError::Timeout { .. } => "task_timeout",
@@ -113,18 +89,21 @@ impl TaskError {
         }
     }
 
-    /// Returns a human-readable message with details about the error.
-    pub fn as_message(&self) -> String {
-        match self {
-            TaskError::Timeout { timeout } => format!("timeout: {timeout:?}"),
-            TaskError::Fatal { error } => format!("fatal: {error}"),
-            TaskError::Fail { error } => format!("error: {error}"),
-            TaskError::Canceled => "context cancelled".to_string(),
-        }
-    }
-
     /// Indicates whether the error type is safe to retry.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, TaskError::Fail { .. } | TaskError::Timeout { .. })
+        matches!(self, TaskError::Timeout { .. } | TaskError::Fail { .. })
+    }
+
+    /// Indicates whether the error is fatal.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, TaskError::Fatal { .. })
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for TaskError {
+    fn from(e: tokio::time::error::Elapsed) -> Self {
+        TaskError::Fail {
+            error: e.to_string(),
+        }
     }
 }

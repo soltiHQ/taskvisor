@@ -62,7 +62,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Global sequence counter for event ordering.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -87,7 +87,7 @@ pub enum EventKind {
     // === Task lifecycle events ===
     /// Task is starting execution.
     TaskStarting,
-    /// Task has stopped (finished or cancelled).
+    /// Task has stopped (finished or canceled).
     TaskStopped,
     /// Task failed with an error.
     TaskFailed,
@@ -114,7 +114,7 @@ pub enum EventKind {
     /// - `RestartPolicy::OnFailure` → task completed successfully (no more retries needed)
     ActorExhausted,
 
-    /// Actor terminated permanently due to fatal error.
+    /// Actor terminated permanently due to a fatal error.
     ///
     /// Emitted when:
     /// - Task returned `TaskError::Fatal`
@@ -129,8 +129,8 @@ pub enum EventKind {
 /// ## Fields
 ///
 /// - `seq`: Unique sequence number for ordering (monotonically increasing)
-/// - `at`: Wall-clock timestamp (may go backwards due to NTP, use for logging only)
-/// - `monotonic`: Monotonic timestamp (never goes backwards, use for interval measurements)
+/// - `at`: Wall-clock timestamp (may go backwards due to NTP; use for logging only)
+/// - `monotonic`: Monotonic timestamp (never goes backwards; use for interval measurements)
 /// - `kind`: Event classification
 /// - `task`, `error`, `attempt`, `timeout`, `delay`: Optional metadata
 #[derive(Clone)]
@@ -140,6 +140,8 @@ pub struct Event {
     pub seq: u64,
     /// Wall-clock timestamp (may go backwards, use for logging only).
     pub at: SystemTime,
+    /// Monotonic timestamp (never goes backwards, use for interval measurements).
+    pub monotonic: Instant,
     /// Task timeout (if relevant).
     pub timeout: Option<Duration>,
     /// Backoff delay before retry (if relevant).
@@ -156,7 +158,7 @@ pub struct Event {
     /// Task specification (private, used internally for TaskAddRequested).
     ///
     /// Only populated for `TaskAddRequested` events.
-    /// Registry extracts this to spawn the actor.
+    /// The registry extracts this to spawn the actor.
     pub(crate) spec: Option<crate::tasks::TaskSpec>,
 }
 
@@ -167,6 +169,7 @@ impl Event {
             seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
             kind,
             at: SystemTime::now(),
+            monotonic: Instant::now(),
             attempt: None,
             timeout: None,
             error: None,
@@ -211,6 +214,7 @@ impl Event {
     /// Emitted when a subscriber's queue is full and an event is dropped.
     pub fn subscriber_overflow(subscriber: &'static str, reason: &'static str) -> Self {
         Event::now(EventKind::SubscriberOverflow)
+            .with_task(subscriber)
             .with_error(format!("subscriber={subscriber} reason={reason}"))
     }
 
@@ -221,6 +225,16 @@ impl Event {
         Event::now(EventKind::SubscriberPanicked)
             .with_task(subscriber)
             .with_error(info)
+    }
+
+    /// True if this is a `SubscriberOverflow` event.
+    pub fn is_subscriber_overflow(&self) -> bool {
+        matches!(self.kind, EventKind::SubscriberOverflow)
+    }
+
+    /// True if this is a `SubscriberPanicked` event.
+    pub fn is_subscriber_panic(&self) -> bool {
+        matches!(self.kind, EventKind::SubscriberPanicked)
     }
 
     pub(crate) fn with_spec(mut self, spec: crate::tasks::TaskSpec) -> Self {

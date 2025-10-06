@@ -106,6 +106,7 @@
 //!
 //! ## Example
 //! ```rust
+//! use std::sync::Arc;
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
@@ -115,19 +116,17 @@
 //!     let mut cfg = Config::default();
 //!     cfg.timeout = Duration::from_secs(5);
 //!
-//!     // Build supervisor (with or without subscribers)
-//!     let subs = {
-//!         #[cfg(feature = "logging")]
-//!         {
-//!             use taskvisor::{Subscribe, LogWriter};
-//!             vec![std::sync::Arc::new(LogWriter) as std::sync::Arc<dyn Subscribe>]
-//!         }
-//!         #[cfg(not(feature = "logging"))]
-//!         {
-//!             Vec::new()
-//!         }
+//!     // Build subscribers (optional)
+//!     #[cfg(feature = "logging")]
+//!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = {
+//!         use taskvisor::LogWriter;
+//!         vec![Arc::new(LogWriter)]
 //!     };
-//!     let mut sup = Supervisor::new(cfg.clone(), subs);
+//!     #[cfg(not(feature = "logging"))]
+//!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = Vec::new();
+//!
+//!     // Create supervisor
+//!     let sup = Supervisor::new(cfg.clone(), subs);
 //!
 //!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
@@ -163,9 +162,7 @@ mod tasks;
 pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
-pub use policies::BackoffPolicy;
-pub use policies::JitterPolicy;
-pub use policies::RestartPolicy;
+pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
 pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 

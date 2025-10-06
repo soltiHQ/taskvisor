@@ -18,7 +18,7 @@
 //!     jitter: JitterPolicy::None,
 //! };
 //!
-//! // First attempt - uses 'first'
+//! // First attempt - uses 'first' (clamped to max)
 //! assert_eq!(backoff.next(None), Duration::from_millis(100));
 //!
 //! // Second attempt - multiplied by factor (100ms * 2.0 = 200ms)
@@ -68,28 +68,38 @@ impl Default for BackoffPolicy {
 impl BackoffPolicy {
     /// Computes the next delay based on the previous one.
     ///
-    /// - If `prev` is `None`, returns [`BackoffPolicy::first`].
+    /// - If `prev` is `None`, returns `first` **clamped to `max`**.
     /// - Otherwise multiplies the previous delay by [`BackoffPolicy::factor`], and caps it at [`BackoffPolicy::max`].
     ///
-    /// # Note
-    /// If `factor` is less than 1.0, delays will decrease over time (not typical for backoff).
-    /// If `factor` equals 1.0, delay remains constant at `first` (up to `max`).
-    /// If `factor` is greater than 1.0, delays grow exponentially (typical backoff behavior).
+    /// # Notes
+    /// - If `factor` is less than 1.0, delays decrease over time (not typical).
+    /// - If `factor` equals 1.0, delay remains constant at `first` (up to `max`).
+    /// - If `factor` is greater than 1.0, delays grow exponentially.
     pub fn next(&self, prev: Option<Duration>) -> Duration {
-        let base_delay = match prev {
+        let unclamped = match prev {
             None => self.first,
             Some(d) => {
-                let next = (d.as_secs_f64() * self.factor).min(self.max.as_secs_f64());
-                Duration::from_secs_f64(next)
+                let mul = d.as_secs_f64() * self.factor;
+                if !mul.is_finite() {
+                    self.max
+                } else {
+                    d.mul_f64(self.factor)
+                }
             }
         };
 
-        // Apply jitter to the computed delay
+        let base = if unclamped > self.max {
+            self.max
+        } else {
+            unclamped
+        };
         match self.jitter {
-            JitterPolicy::Decorrelated => self
-                .jitter
-                .apply_decorrelated(self.first, base_delay, self.max),
-            _ => self.jitter.apply(base_delay),
+            JitterPolicy::Decorrelated => {
+                let prev_for_jitter = prev.unwrap_or(self.first.min(self.max));
+                self.jitter
+                    .apply_decorrelated(self.first.min(self.max), prev_for_jitter, self.max)
+            }
+            _ => self.jitter.apply(base),
         }
     }
 }

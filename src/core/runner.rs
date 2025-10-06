@@ -21,7 +21,7 @@
 //! Timeout:
 //!   timeout exceeded → cancel child → publish TimeoutHit
 //!                                   → return Timeout error
-//!                                   → publish TaskFailed (ctx cancel)
+//!                                   → publish TaskFailed (timeout)
 //! ```
 //!
 //! ## Rules
@@ -71,12 +71,13 @@ pub async fn run_once<T: Task + ?Sized>(
     bus: &Bus,
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
+
     let res = if let Some(dur) = timeout.filter(|d| *d > Duration::ZERO) {
         match time::timeout(dur, task.spawn(child.clone())).await {
             Ok(r) => r,
             Err(_elapsed) => {
                 child.cancel();
-                publish_timeout(bus, task.name(), dur);
+                publish_timeout(bus, task.name(), dur, attempt);
                 Err(TaskError::Timeout { timeout: dur })
             }
         }
@@ -86,11 +87,11 @@ pub async fn run_once<T: Task + ?Sized>(
 
     match res {
         Ok(()) => {
-            publish_stopped(bus, task.name());
+            publish_stopped(bus, task.name(), attempt);
             Ok(())
         }
         Err(TaskError::Canceled) => {
-            publish_stopped(bus, task.name());
+            publish_stopped(bus, task.name(), attempt);
             Err(TaskError::Canceled)
         }
         Err(e) => {
@@ -101,8 +102,12 @@ pub async fn run_once<T: Task + ?Sized>(
 }
 
 /// Publishes `TaskStopped` event (success or graceful cancellation).
-fn publish_stopped(bus: &Bus, name: &str) {
-    bus.publish(Event::now(EventKind::TaskStopped).with_task(name));
+fn publish_stopped(bus: &Bus, name: &str, attempt: u64) {
+    bus.publish(
+        Event::now(EventKind::TaskStopped)
+            .with_task(name)
+            .with_attempt(attempt),
+    );
 }
 
 /// Publishes `TaskFailed` event with error details.
@@ -116,10 +121,11 @@ fn publish_failed(bus: &Bus, name: &str, attempt: u64, err: &TaskError) {
 }
 
 /// Publishes `TimeoutHit` event (always followed by `TaskFailed`).
-fn publish_timeout(bus: &Bus, name: &str, dur: Duration) {
+fn publish_timeout(bus: &Bus, name: &str, dur: Duration, attempt: u64) {
     bus.publish(
         Event::now(EventKind::TimeoutHit)
             .with_task(name)
-            .with_timeout(dur),
+            .with_timeout(dur)
+            .with_attempt(attempt),
     );
 }

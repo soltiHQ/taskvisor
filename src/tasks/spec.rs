@@ -16,7 +16,7 @@ use crate::{
     config::Config, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
 };
 
-/// # Specification for running a task under supervision.
+/// Specification for running a task under supervision.
 ///
 /// Bundles together:
 /// - The task itself ([`TaskRef`])
@@ -25,7 +25,7 @@ use crate::{
 /// - Optional execution timeout
 ///
 /// It can be created manually with [`TaskSpec::new`] or derived from a
-/// global [`Config`] via [`TaskSpec::from_task`].
+/// global [`Config`] via [`TaskSpec::with_defaults`].
 ///
 /// ## Example
 /// ```rust
@@ -49,16 +49,13 @@ use crate::{
 /// // Inherit from global config:
 /// let cfg = Config::default();
 /// let spec2 = TaskSpec::with_defaults(demo, &cfg);
+/// // `cfg.timeout = 0s` is treated as `None`
 /// ```
 #[derive(Clone)]
 pub struct TaskSpec {
-    /// Reference to the task to be executed.
     task: TaskRef,
-    /// Policy controlling if/when the task should be restarted.
     restart: RestartPolicy,
-    /// Policy controlling delays between restarts.
     backoff: BackoffPolicy,
-    /// Optional timeout for the task execution.
     timeout: Option<Duration>,
 }
 
@@ -86,6 +83,8 @@ impl TaskSpec {
 
     /// Creates a task specification inheriting defaults from global config.
     ///
+    /// Uses `Config::default_timeout()` so that `0s` in config is treated as `None`.
+    ///
     /// ### Parameters
     /// - `task`: Task to execute
     /// - `cfg`: Config to inherit restart/backoff/timeout from
@@ -94,13 +93,18 @@ impl TaskSpec {
             task,
             restart: cfg.restart,
             backoff: cfg.backoff,
-            timeout: Some(cfg.timeout),
+            timeout: cfg.default_timeout(),
         }
     }
 
     /// Returns reference to the task.
     pub fn task(&self) -> &TaskRef {
         &self.task
+    }
+
+    /// Convenience: returns the task name.
+    pub fn name(&self) -> &str {
+        self.task.name()
     }
 
     /// Returns the restart policy.
@@ -116,5 +120,23 @@ impl TaskSpec {
     /// Returns the timeout, if configured.
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+
+    /// Returns a new spec with updated timeout.
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Returns a new spec with updated backoff.
+    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    /// Returns a new spec with updated restart policy.
+    pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
+        self.restart = restart;
+        self
     }
 }

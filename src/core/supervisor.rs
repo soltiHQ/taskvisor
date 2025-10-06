@@ -121,24 +121,18 @@ use crate::{
 /// - Tracks alive tasks for stuck detection
 /// - Enforces global concurrency limits
 pub struct Supervisor {
-    /// Global runtime configuration.
     cfg: Config,
-    /// Event bus shared with all actors.
     bus: Bus,
-    /// Fan-out set for subscribers.
     subs: Arc<SubscriberSet>,
-    /// Tracker of alive tasks for stuck detection.
     alive: Arc<AliveTracker>,
-    /// Task registry for managing active tasks.
     registry: Arc<Registry>,
-    /// Runtime cancellation token (shared with registry).
     runtime_token: CancellationToken,
 }
 
 impl Supervisor {
     /// Creates a new supervisor with the given config and subscribers (maybe empty).
     pub fn new(cfg: Config, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
-        let bus = Bus::new(cfg.bus_capacity);
+        let bus = Bus::new(cfg.bus_capacity_clamped());
         let subs = Arc::new(SubscriberSet::new(subscribers, bus.clone()));
         let runtime_token = CancellationToken::new();
         let semaphore = Self::build_semaphore_static(&cfg);
@@ -157,14 +151,8 @@ impl Supervisor {
 
     /// Adds a new task to the supervisor at runtime.
     ///
-    /// Publishes `TaskAddRequested` event with spec to the bus.
+    /// Publishes `TaskAddRequested` with the spec to the bus.
     /// Registry listener will spawn the actor.
-    ///
-    /// ### Example
-    /// ```rust,ignore
-    /// let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
-    /// supervisor.add_task(spec).await?;
-    /// ```
     pub fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
         self.bus.publish(
             Event::now(EventKind::TaskAddRequested)
@@ -176,13 +164,8 @@ impl Supervisor {
 
     /// Removes a task from the supervisor at runtime.
     ///
-    /// Publishes `TaskRemoveRequested` event to the bus.
+    /// Publishes `TaskRemoveRequested` to the bus.
     /// Registry listener will cancel and remove the task.
-    ///
-    /// ### Example
-    /// ```rust,ignore
-    /// supervisor.remove_task("worker-1").await?;
-    /// ```
     pub fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
         self.bus
             .publish(Event::now(EventKind::TaskRemoveRequested).with_task(name));
@@ -190,32 +173,18 @@ impl Supervisor {
     }
 
     /// Returns a sorted list of currently active task names from the registry.
-    ///
-    /// ### Example
-    /// ```rust,ignore
-    /// let tasks = supervisor.list_tasks().await;
-    /// println!("Active tasks: {:?}", tasks);
-    /// ```
     pub async fn list_tasks(&self) -> Vec<String> {
         self.registry.list().await
     }
 
     /// Runs task specifications until completion or shutdown signal.
     ///
-    /// ### Flow
-    /// 1. Spawn subscriber listener (event fan-out)
-    /// 2. Spawn registry listener (task lifecycle management)
-    /// 3. Publish TaskAddRequested for initial tasks
-    /// 4. Wait for shutdown signal or all tasks to exit
-    /// 5. Perform graceful shutdown with grace period
-    ///
-    /// ### Exit conditions
-    /// - **All actors exit naturally** → returns `Ok(())`
-    /// - **OS signal received** → graceful shutdown:
-    ///   - Cancels `runtime_token` (propagates to all actors)
-    ///   - Waits up to `Config::grace` for actors to finish
-    ///   - Returns `Ok(())` if all stopped within grace
-    ///   - Returns `Err(GraceExceeded)` with stuck task names otherwise
+    /// Steps:
+    /// 1) Spawn subscriber listener (event fan-out)
+    /// 2) Spawn registry listener (task lifecycle management)
+    /// 3) Publish TaskAddRequested for initial tasks
+    /// 4) Optionally wait until registry becomes non-empty (if we added tasks)
+    /// 5) Wait for shutdown signal or all tasks to exit
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.subscriber_listener();
         self.registry.clone().spawn_listener();
@@ -228,31 +197,22 @@ impl Supervisor {
         if expected > 0 {
             self.registry.wait_became_nonempty_once().await;
         }
-
         self.drive_shutdown().await
     }
 
     /// Returns sorted list of currently alive task names.
-    ///
-    /// Used internally during shutdown to detect stuck tasks.
-    /// May also be useful for external monitoring/debugging.
     pub async fn snapshot(&self) -> Vec<String> {
         self.alive.snapshot().await
     }
 
-    /// Check and return boolean task status (alive / not alive).
+    /// Check whether a given task is currently alive.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.alive.is_alive(name).await
     }
 
-    /// Spawns background task that:
-    /// 1. Subscribes to event bus
-    /// 2. Updates alive tracker (with sequence-based ordering)
-    /// 3. Fans out events to subscribers
+    /// Subscribes to the bus and fans out events to the subscriber set.
     ///
-    /// ### Rules
-    /// - Runs until bus is closed (when Supervisor is dropped)
-    /// - Handles `Lagged` errors gracefully (skips old events)
+    /// Also updates the AliveTracker (sequence-aware) before fan-out.
     fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
@@ -272,10 +232,7 @@ impl Supervisor {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            bus.publish(
-                                Event::now(EventKind::TaskFailed)
-                                    .with_error("subscriber_listener_lagged")
-                            );
+                            bus.publish(Event::subscriber_overflow("supervisor_listener", "lagged"));
                             continue;
                         }
                     }
@@ -286,12 +243,9 @@ impl Supervisor {
 
     /// Builds global semaphore for concurrency limiting.
     ///
-    /// Returns `None` if `max_concurrent == 0` (unlimited).
+    /// Returns `None` if unlimited.
     fn build_semaphore_static(cfg: &Config) -> Option<Arc<Semaphore>> {
-        match cfg.max_concurrent {
-            0 => None,
-            n => Some(Arc::new(Semaphore::new(n))),
-        }
+        cfg.concurrency_limit().map(Semaphore::new).map(Arc::new)
     }
 
     /// Waits for either shutdown signal or natural completion of all tasks.
@@ -300,6 +254,7 @@ impl Supervisor {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::now(EventKind::ShutdownRequested));
                 self.runtime_token.cancel();
+
                 self.registry.cancel_all().await;
                 self.wait_all_with_grace().await
             }
@@ -316,7 +271,6 @@ impl Supervisor {
         use tokio::time::{Duration, sleep};
 
         let grace = self.cfg.grace;
-
         let done = async {
             loop {
                 if self.registry.is_empty().await {

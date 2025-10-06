@@ -14,14 +14,18 @@
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{TaskFn, TaskRef, TaskError};
 //! use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+//! use std::time::Duration;
 //!
 //! // Stateless task (no shared state):
 //! let simple: TaskRef = TaskFn::arc("simple", |ctx: CancellationToken| async move {
-//!     while !ctx.is_cancelled() {
-//!         println!("working...");
-//!         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+//!     loop {
+//!         tokio::select! {
+//!             _ = ctx.cancelled() => return Err(TaskError::Canceled),
+//!             _ = tokio::time::sleep(Duration::from_secs(1)) => {
+//!                 // do one unit of work...
+//!             }
+//!         }
 //!     }
-//!     Ok(())
 //! });
 //!
 //! // Stateful task (with Arc for shared state):
@@ -31,12 +35,15 @@
 //!     move |ctx: CancellationToken| {
 //!         let counter = counter.clone();
 //!         async move {
-//!             while !ctx.is_cancelled() {
-//!                 let n = counter.fetch_add(1, Ordering::Relaxed);
-//!                 println!("count: {}", n);
-//!                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+//!             loop {
+//!                 tokio::select! {
+//!                     _ = ctx.cancelled() => return Err(TaskError::Canceled),
+//!                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
+//!                         let n = counter.fetch_add(1, Ordering::Relaxed);
+//!                         let _ = n; // use n
+//!                     }
+//!                 }
 //!             }
-//!             Ok(())
 //!         }
 //!     }
 //! });
@@ -53,12 +60,14 @@ use crate::{
 
 /// Function-backed task implementation.
 ///
-/// Wraps a closure `F: Fn(CancellationToken) -> Future` that creates a fresh future on each [`spawn`](Task::spawn) call.
+/// Wraps a closure `F: Fn(CancellationToken) -> Future` that creates a fresh future on each
+/// [`spawn`](Task::spawn) call.
 ///
 /// ### Rules
-/// - Each spawn creates an independent future (no shared state)
-/// - For shared state, use `Arc<Mutex<T>>` explicitly in closure
-/// - Closure is no mutable self
+/// - Each `spawn()` creates an independent future (no implicit shared state).
+/// - For shared state, pass it explicitly via `Arc<...>` captured by the closure.
+/// - Closure has no mutable self (must implement `Fn`, not `FnMut`).
+#[derive(Debug)]
 pub struct TaskFn<F> {
     name: Cow<'static, str>,
     f: F,
@@ -90,7 +99,6 @@ impl<F> TaskFn<F> {
     /// use taskvisor::{TaskFn, TaskRef, TaskError};
     ///
     /// let t: TaskRef = TaskFn::arc("hello", |_ctx: CancellationToken| async {
-    ///     println!("Hello from task!");
     ///     Ok::<_, TaskError>(())
     /// });
     /// assert_eq!(t.name(), "hello");
@@ -108,6 +116,7 @@ where
     fn name(&self) -> &str {
         &self.name
     }
+
     fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture {
         let fut = (self.f)(ctx);
         Box::pin(fut)

@@ -13,10 +13,16 @@
 //! ```
 //!
 //! ## Rules
-//! - Only `TaskStarting` / `TaskStopped` / `TaskFailed` change alive state
-//! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**
-//! - Other events **update seq** but don't affect alive status
-//! - Events with `seq <= last_seq` are **rejected** (stale)
+//! - State toggles only on selected events (see below); all others just advance `last_seq`.
+//! - **Alive = true** on `TaskStarting`.
+//! - **Alive = false** on `TaskStopped`, `TaskFailed`, `ActorExhausted`, `ActorDead`, `TaskRemoved`.
+//! - Events with `seq <= last_seq` for the task are **rejected** (stale).
+//! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
+//!
+//! ### Note on `TaskRemoved`
+//! We keep the entry and only set `alive=false` while updating `last_seq`. This prevents a late,
+//! stale `TaskStarting` (with a lower `seq`) from resurrecting a removed task. If you need to
+//! reclaim memory, implement an explicit purge strategy outside the tracker.
 
 use crate::events::{Event, EventKind};
 use std::collections::HashMap;
@@ -38,9 +44,8 @@ struct TaskState {
 /// - Maintains authoritative state of which tasks are alive
 /// - Rejects stale events using sequence numbers
 ///
-/// ### Rules
-/// - **Ordering**: events with `seq <= last_seq` are rejected
-/// - **State changes**: alive=true or alive=false
+/// ### Ordering
+/// - Events are applied only if `ev.seq > last_seq` for the task.
 pub struct AliveTracker {
     state: RwLock<HashMap<String, TaskState>>,
 }
@@ -53,7 +58,10 @@ impl AliveTracker {
         }
     }
 
-    /// Updates task state if event is newer than last seen.
+    /// Updates task state if the event is newer than the last seen.
+    ///
+    /// Returns `true` if the **alive flag** changed, `false` otherwise (including
+    /// the case when only `last_seq` advanced or the event was rejected as stale).
     ///
     /// ### Ordering guarantees
     /// Events are applied only if `ev.seq > last_seq` for this task.
@@ -62,46 +70,38 @@ impl AliveTracker {
     /// update(TaskStopped, seq=100)  → alive=false, last_seq=100
     /// update(TaskStarting, seq=99)  → rejected (stale)
     /// ```
-    ///
-    /// ### State transitions
-    /// - `TaskStarting` → alive=true, update seq
-    /// - `TaskStopped` → alive=false, update seq
-    /// - `TaskFailed` → alive=false, update seq
-    /// - Other events → no state change, update seq only
     pub async fn update(&self, ev: &Event) -> bool {
         let name = match ev.task.as_deref() {
             Some(n) => n,
             None => return false,
         };
 
-        let mut state = self.state.write().await;
-        let entry = state.entry(name.to_string()).or_insert(TaskState {
+        let mut map = self.state.write().await;
+        let entry = map.entry(name.to_string()).or_insert(TaskState {
             last_seq: 0,
             alive: false,
         });
-
         if ev.seq <= entry.last_seq {
             return false;
         }
-        match ev.kind {
-            EventKind::TaskStarting => {
-                entry.last_seq = ev.seq;
-                entry.alive = true;
-                true
-            }
-            EventKind::TaskStopped | EventKind::TaskFailed => {
-                entry.last_seq = ev.seq;
-                entry.alive = false;
-                true
-            }
-            _ => {
-                entry.last_seq = ev.seq;
-                false
-            }
-        }
+
+        let next_alive = match ev.kind {
+            EventKind::TaskStarting => true,
+            EventKind::TaskStopped
+            | EventKind::TaskFailed
+            | EventKind::ActorExhausted
+            | EventKind::ActorDead
+            | EventKind::TaskRemoved => false,
+            _ => entry.alive,
+        };
+
+        let changed = next_alive != entry.alive;
+        entry.alive = next_alive;
+        entry.last_seq = ev.seq;
+        changed
     }
 
-    /// Returns sorted list of currently alive task names.
+    /// Returns a sorted list of currently alive task names.
     ///
     /// Used by [`Supervisor`](crate::Supervisor) to detect stuck tasks
     /// during graceful shutdown (tasks that didn't stop within grace period).
@@ -109,14 +109,13 @@ impl AliveTracker {
         let state = self.state.read().await;
         let mut alive: Vec<String> = state
             .iter()
-            .filter(|(_, ts)| ts.alive)
-            .map(|(name, _)| name.clone())
+            .filter_map(|(name, ts)| ts.alive.then(|| name.clone()))
             .collect();
         alive.sort_unstable();
         alive
     }
 
-    /// Returns true if task is currently alive
+    /// Returns true if the task is currently marked alive.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.state
             .read()
