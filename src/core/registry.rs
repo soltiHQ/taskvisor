@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{Notify, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -31,33 +31,22 @@ use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
 use crate::events::{Bus, Event, EventKind};
 use crate::tasks::TaskSpec;
 
-/// Handle to a running task actor.
 struct Handle {
-    /// Original task specification.
     spec: TaskSpec,
-    /// Join handle for the actor's execution.
     join: JoinHandle<ActorExitReason>,
-    /// Individual cancellation token for this task.
     cancel: CancellationToken,
 }
 
-impl Handle {
-    #[allow(dead_code)]
-    fn name(&self) -> &str {
-        self.spec.task().name()
-    }
-}
-
-/// Event-driven registry of active tasks.
 pub struct Registry {
     tasks: RwLock<HashMap<String, Handle>>,
     bus: Bus,
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
+    nonempty_notify: Notify,
+    empty_notify: Notify,
 }
 
 impl Registry {
-    /// Creates a new registry.
     pub fn new(
         bus: Bus,
         runtime_token: CancellationToken,
@@ -68,12 +57,39 @@ impl Registry {
             bus,
             runtime_token,
             semaphore,
+            nonempty_notify: Notify::new(),
+            empty_notify: Notify::new(),
         })
     }
 
-    /// Spawns event listener that manages task lifecycle.
-    ///
-    /// Call once during Supervisor init.
+    #[inline]
+    fn notify_after_insert(&self, was_empty: bool, len_after: usize) {
+        if was_empty && len_after == 1 {
+            self.nonempty_notify.notify_waiters();
+        }
+    }
+
+    #[inline]
+    fn notify_after_remove(&self, len_after: usize) {
+        if len_after == 0 {
+            self.empty_notify.notify_waiters();
+        }
+    }
+
+    pub async fn wait_became_nonempty_once(&self) {
+        if !self.is_empty().await {
+            return;
+        }
+        self.nonempty_notify.notified().await;
+    }
+
+    pub async fn wait_until_empty(&self) {
+        if self.is_empty().await {
+            return;
+        }
+        self.empty_notify.notified().await;
+    }
+
     pub fn spawn_listener(self: Arc<Self>) {
         let mut rx = self.bus.subscribe();
         let rt = self.runtime_token.clone();
@@ -101,7 +117,6 @@ impl Registry {
         });
     }
 
-    /// Handles incoming events.
     async fn handle_event(&self, event: &Event) {
         match event.kind {
             EventKind::TaskAddRequested => {
@@ -123,7 +138,6 @@ impl Registry {
         }
     }
 
-    /// Returns sorted list of active task names.
     pub async fn list(&self) -> Vec<String> {
         let tasks = self.tasks.read().await;
         let mut names: Vec<String> = tasks.keys().cloned().collect();
@@ -131,16 +145,16 @@ impl Registry {
         names
     }
 
-    /// Returns true if registry is empty.
     pub async fn is_empty(&self) -> bool {
         self.tasks.read().await.is_empty()
     }
 
-    /// Cancels all tasks in the registry: cancel → join → TaskRemoved.
     pub async fn cancel_all(&self) {
         let handles: Vec<(String, Handle)> = {
             let mut tasks = self.tasks.write().await;
-            tasks.drain().collect()
+            let drained = tasks.drain().collect::<Vec<_>>();
+            self.empty_notify.notify_waiters();
+            drained
         };
 
         for (_, h) in &handles {
@@ -152,7 +166,6 @@ impl Registry {
         }
     }
 
-    /// Spawns actor and adds to registry.
     async fn spawn_and_register(&self, spec: TaskSpec) {
         let task_name = spec.task().name().to_string();
 
@@ -169,7 +182,6 @@ impl Registry {
         }
 
         let task_token = self.runtime_token.child_token();
-
         let actor = TaskActor::new(
             self.bus.clone(),
             spec.task().clone(),
@@ -191,12 +203,16 @@ impl Registry {
         };
 
         let mut tasks = self.tasks.write().await;
-        if tasks.insert(task_name.clone(), handle).is_none() {
-            drop(tasks);
+        let was_empty = tasks.is_empty();
+        let inserted = tasks.insert(task_name.clone(), handle).is_none();
+        let len_after = tasks.len();
+        drop(tasks);
+
+        if inserted {
+            self.notify_after_insert(was_empty, len_after);
             self.bus
                 .publish(Event::now(EventKind::TaskAdded).with_task(&task_name));
         } else {
-            drop(tasks);
             self.bus.publish(
                 Event::now(EventKind::TaskFailed)
                     .with_task(&task_name)
@@ -205,11 +221,11 @@ impl Registry {
         }
     }
 
-    /// Removes task and cancels its token.
     async fn remove_task(&self, name: &str) {
-        if let Some(handle) = self.take_handle(name).await {
+        if let Some((handle, len_after)) = self.take_handle_with_len(name).await {
             handle.cancel.cancel();
             self.join_and_report(name, handle.join).await;
+            self.notify_after_remove(len_after);
         } else {
             self.bus.publish(
                 Event::now(EventKind::TaskFailed)
@@ -219,41 +235,32 @@ impl Registry {
         }
     }
 
-    /// Cleanup finished task (called on ActorExhausted/ActorDead).
     async fn cleanup_task(&self, name: &str) {
-        if let Some(handle) = self.take_handle(name).await {
-            // актёр уже должен быть завершён; ждём join и репортим
+        if let Some((handle, len_after)) = self.take_handle_with_len(name).await {
             self.join_and_report(name, handle.join).await;
+            self.notify_after_remove(len_after);
         }
     }
 
-    // ---------------------------
-    // Helpers (DRY)
-    // ---------------------------
-
-    /// Atomically remove handle from registry.
-    async fn take_handle(&self, name: &str) -> Option<Handle> {
+    async fn take_handle_with_len(&self, name: &str) -> Option<(Handle, usize)> {
         let mut tasks = self.tasks.write().await;
-        tasks.remove(name)
+        let h = tasks.remove(name)?;
+        let len_after = tasks.len();
+        Some((h, len_after))
     }
 
-    /// Await join, report panic as ActorDead(actor_panic), always emit TaskRemoved.
     async fn join_and_report(&self, name: &str, join: JoinHandle<ActorExitReason>) {
         match join.await {
-            Ok(_reason) => {}
-            Err(_je) => {
-                self.publish_actor_panic(name, "actor_panic").await;
+            Ok(_) => {}
+            Err(_) => {
+                self.bus.publish(
+                    Event::now(EventKind::ActorDead)
+                        .with_task(name)
+                        .with_error("actor_panic"),
+                );
             }
         }
         self.bus
             .publish(Event::now(EventKind::TaskRemoved).with_task(name));
-    }
-
-    async fn publish_actor_panic(&self, name: &str, code: &str) {
-        self.bus.publish(
-            Event::now(EventKind::ActorDead)
-                .with_task(name)
-                .with_error(code),
-        );
     }
 }

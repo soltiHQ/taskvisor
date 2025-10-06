@@ -217,18 +217,18 @@ impl Supervisor {
     ///   - Returns `Ok(())` if all stopped within grace
     ///   - Returns `Err(GraceExceeded)` with stuck task names otherwise
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
-        // Spawn listener before adding tasks to avoid missing events
         self.subscriber_listener();
-
-        // Spawn registry listener
         self.registry.clone().spawn_listener();
 
-        // Publish TaskAddRequested for initial tasks
+        let expected = tasks.len();
         for spec in tasks {
             self.add_task(spec)?;
         }
 
-        // Wait for shutdown signal or natural completion
+        if expected > 0 {
+            self.registry.wait_became_nonempty_once().await;
+        }
+
         self.drive_shutdown().await
     }
 
@@ -297,17 +297,13 @@ impl Supervisor {
     /// Waits for either shutdown signal or natural completion of all tasks.
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         tokio::select! {
-            _ = shutdown::wait_for_shutdown_signal() => {
+            _ = crate::core::shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::now(EventKind::ShutdownRequested));
                 self.runtime_token.cancel();
-
-                // Cancel all tasks in registry
                 self.registry.cancel_all().await;
-
                 self.wait_all_with_grace().await
             }
-            _ = self.wait_for_empty_registry() => {
-                // All tasks exited naturally
+            _ = self.registry.wait_until_empty() => {
                 Ok(())
             }
         }
