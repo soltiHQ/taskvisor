@@ -1,197 +1,181 @@
-//! # Custom Subscriber Example
+//! Custom subscriber example.
 //!
-//! Demonstrates how to implement custom subscribers for observability.
+//! Demonstrates how to implement and register a custom event subscriber.
 //!
-//! This example shows:
-//! - How to implement the Subscribe trait
-//! - Collecting metrics from task events
-//! - Proper async processing in subscribers
-//! - Single focused task with restart policy
+//! What it shows:
+//! - Implementing `Subscribe` and overriding `queue_capacity()`
+//! - Receiving and pattern-matching `EventKind`
+//! - Running a supervisor with subscribers attached
+//! - Emitting events from a couple of one-shot tasks
+//!
+//! Run with:
+//! `cargo run --example custom_subscriber --features events`
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy, Config, Event, EventKind, JitterPolicy, RestartPolicy, Subscribe, Supervisor,
-    TaskError, TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, Config, Event, EventKind, RestartPolicy, Subscribe, Supervisor, TaskError,
+    TaskFn, TaskRef, TaskSpec,
 };
 
-/// ================================================================================
-/// BUSINESS LOGIC LAYER
-/// ================================================================================
+/// A simple console subscriber that prints selected events.
+/// In real life, you could export metrics, ship logs, send alerts, etc.
+struct ConsoleSubscriber;
 
-/// Simulates a worker that occasionally fails to demonstrate restart behavior
-async fn worker(ctx: CancellationToken) -> Result<(), TaskError> {
-    if ctx.is_cancelled() {
-        return Err(TaskError::Canceled);
-    }
-
-    let job_id = rand::random::<u32>() % 100;
-
-    // Simulate work
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-
-    // Fail 25% of the time
-    if rand::random::<f32>() < 0.25 {
-        return Err(TaskError::Fail {
-            error: format!("Job #{job_id} processing error"),
-        });
-    }
-    Ok(())
-}
-
-/// ================================================================================
-/// CUSTOM SUBSCRIBER: METRICS COLLECTOR
-/// ================================================================================
-
-/// Metrics collector that tracks task execution statistics
-struct MetricsCollector {
-    total_starts: AtomicU64,
-    total_successes: AtomicU64,
-    total_failures: AtomicU64,
-    total_retries: AtomicU64,
-}
-
-impl MetricsCollector {
-    fn new() -> Self {
-        Self {
-            total_starts: AtomicU64::new(0),
-            total_successes: AtomicU64::new(0),
-            total_failures: AtomicU64::new(0),
-            total_retries: AtomicU64::new(0),
-        }
-    }
-
-    fn print_stats(&self) {
-        let starts = self.total_starts.load(Ordering::Relaxed);
-        let successes = self.total_successes.load(Ordering::Relaxed);
-        let failures = self.total_failures.load(Ordering::Relaxed);
-        let retries = self.total_retries.load(Ordering::Relaxed);
-
-        println!("\n📊 [Metrics] Current stats:");
-        println!("   • Total starts:    {}", starts);
-        println!("   • Total successes: {}", successes);
-        println!("   • Total failures:  {}", failures);
-        println!("   • Total retries:   {}", retries);
-
-        if starts > 0 {
-            let success_rate = (successes as f64 / starts as f64) * 100.0;
-            println!("   • Success rate:    {:.1}%\n", success_rate);
-        }
-    }
-}
-
-#[async_trait]
-impl Subscribe for MetricsCollector {
-    async fn on_event(&self, event: &Event) {
-        match event.kind {
+#[async_trait::async_trait]
+impl Subscribe for ConsoleSubscriber {
+    async fn on_event(&self, ev: &Event) {
+        match ev.kind {
             EventKind::TaskStarting => {
-                self.total_starts.fetch_add(1, Ordering::Relaxed);
-                println!(
-                    "📊 [Metrics] Task started (attempt #{})",
-                    event.attempt.unwrap_or(0)
-                );
+                if let (Some(task), Some(attempt)) = (ev.task.as_deref(), ev.attempt) {
+                    println!("[sub] starting: task={task} attempt={attempt}");
+                }
             }
             EventKind::TaskStopped => {
-                self.total_successes.fetch_add(1, Ordering::Relaxed);
-                println!("📊 [Metrics] Task succeeded");
-                self.print_stats();
+                if let Some(task) = ev.task.as_deref() {
+                    println!("[sub] stopped:  task={task}");
+                }
             }
             EventKind::TaskFailed => {
-                self.total_failures.fetch_add(1, Ordering::Relaxed);
-                println!(
-                    "📊 [Metrics] Task failed: {}",
-                    event.error.as_deref().unwrap_or("unknown")
-                );
+                let task = ev.task.as_deref().unwrap_or("<unknown>");
+                let attempt = ev.attempt.unwrap_or_default();
+                let err = ev.error.as_deref().unwrap_or("<no error>");
+                println!("[sub] failed:   task={task} attempt={attempt} err={err}");
+            }
+            EventKind::TimeoutHit => {
+                let task = ev.task.as_deref().unwrap_or("<unknown>");
+                let dur = ev.timeout.map(|d| format!("{d:?}")).unwrap_or_default();
+                println!("[sub] timeout:  task={task} timeout={dur}");
             }
             EventKind::BackoffScheduled => {
-                self.total_retries.fetch_add(1, Ordering::Relaxed);
-                println!(
-                    "📊 [Metrics] Retry scheduled (delay: {:?})",
-                    event.delay.unwrap_or_default()
-                );
+                let task = ev.task.as_deref().unwrap_or("<unknown>");
+                let delay = ev.delay.map(|d| format!("{d:?}")).unwrap_or_default();
+                let attempt = ev.attempt.unwrap_or_default();
+                let why = ev.error.as_deref().unwrap_or("");
+                println!("[sub] backoff:  task={task} delay={delay} after attempt={attempt} {why}");
+            }
+            EventKind::ActorExhausted => {
+                if let Some(task) = ev.task.as_deref() {
+                    println!("[sub] exhausted: task={task}");
+                }
+            }
+            EventKind::ActorDead => {
+                let task = ev.task.as_deref().unwrap_or("<unknown>");
+                let err = ev.error.as_deref().unwrap_or("<no error>");
+                println!("[sub] dead:     task={task} err={err}");
+            }
+            EventKind::TaskAdded => {
+                if let Some(task) = ev.task.as_deref() {
+                    println!("[sub] added:    task={task}");
+                }
+            }
+            EventKind::TaskRemoved => {
+                if let Some(task) = ev.task.as_deref() {
+                    println!("[sub] removed:  task={task}");
+                }
             }
             EventKind::ShutdownRequested => {
-                println!("📊 [Metrics] Shutdown signal received");
-                self.print_stats();
+                println!("[sub] shutdown requested");
             }
-            _ => {}
+            EventKind::AllStoppedWithin => {
+                println!("[sub] all stopped within grace");
+            }
+            EventKind::GraceExceeded => {
+                println!("[sub] grace exceeded");
+            }
+            // Noise we ignore in this demo:
+            EventKind::SubscriberPanicked
+            | EventKind::SubscriberOverflow
+            | EventKind::TaskAddRequested
+            | EventKind::TaskRemoveRequested => {}
         }
     }
 
     fn name(&self) -> &'static str {
-        "metrics-collector"
+        "console"
     }
 
+    // Make the per-subscriber queue a bit larger for the demo.
     fn queue_capacity(&self) -> usize {
-        512 // Smaller queue for metrics (fast processing)
+        1024
     }
 }
 
-/// ================================================================================
-/// TASKVISOR ABSTRACTION LAYER
-/// ================================================================================
+/// One-shot task that prints and exits successfully.
+fn oneshot_ok(name: &'static str) -> TaskSpec {
+    // Use an owned String inside the future to satisfy 'static bounds cleanly.
+    let tname = name.to_owned();
 
-fn create_worker_task() -> TaskSpec {
-    let task: TaskRef = TaskFn::arc("worker", |ctx| async move { worker(ctx).await });
+    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| {
+        let tname = tname.clone();
+        async move {
+            if ctx.is_cancelled() {
+                return Ok(());
+            }
+            println!("[{tname}] doing one-shot work...");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            println!("[{tname}] success");
+            Ok::<(), TaskError>(())
+        }
+    });
 
     TaskSpec::new(
         task,
-        RestartPolicy::Always, // Keep processing jobs continuously
-        BackoffPolicy {
-            first: Duration::from_millis(500),
-            max: Duration::from_secs(3),
-            factor: 1.5,
-            jitter: JitterPolicy::Equal,
-        },
-        Some(Duration::from_secs(5)), // Timeout per job
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        Some(Duration::from_secs(5)),
     )
 }
 
-/// ================================================================================
-/// MAIN: SUPERVISOR SETUP WITH CUSTOM SUBSCRIBER
-/// ================================================================================
+/// One-shot task that fails on purpose (to show TaskFailed / ActorExhausted).
+fn oneshot_fail(name: &'static str) -> TaskSpec {
+    let tname = name.to_owned();
 
-#[tokio::main]
+    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| {
+        let tname = tname.clone();
+        async move {
+            if ctx.is_cancelled() {
+                return Ok(());
+            }
+            println!("[{tname}] starting and will fail...");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            Err(TaskError::Fail {
+                error: "boom (demo failure)".to_string(),
+            })
+        }
+    });
+
+    // No restart, it'll fail once and exit; registry will clean it up.
+    TaskSpec::new(
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        Some(Duration::from_secs(2)),
+    )
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    println!("🚀 Custom Subscriber Demo");
-    println!("   Demonstrates metrics collection via custom subscriber");
-    println!("   Watch how MetricsCollector tracks task execution\n");
-    println!("   Press Ctrl+C for graceful shutdown\n");
-    println!("{}\n", "=".repeat(60));
+    println!("🔌 custom_subscriber demo (run with --features events)\n");
 
-    let config = Config {
-        grace: Duration::from_secs(3),
-        bus_capacity: 256,
-        ..Default::default()
-    };
+    // Basic config; no global concurrency limit; no default timeout (we set per-task).
+    let cfg = Config::default();
 
-    // Create custom subscriber
-    let metrics = Arc::new(MetricsCollector::new());
+    // Register our custom subscriber.
+    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(ConsoleSubscriber)];
 
-    // Setup subscribers list
-    let subscribers: Vec<Arc<dyn Subscribe>> = vec![
-        metrics, // Our custom metrics collector
-    ];
+    // Create supervisor with subscribers attached.
+    let sup = Supervisor::new(cfg, subs);
 
-    // Create supervisor
-    let supervisor = Supervisor::new(config, subscribers);
+    // Two one-shot tasks: one succeeds, one fails.
+    let tasks = vec![oneshot_ok("alpha"), oneshot_fail("bravo")];
 
-    // Define tasks
-    let tasks = vec![create_worker_task()];
+    // Run until all tasks complete (since both are one-shot, this will exit naturally).
+    sup.run(tasks).await?;
 
-    match supervisor.run(tasks).await {
-        Ok(()) => {
-            println!("\n✅ Shutdown completed gracefully");
-            Ok(())
-        }
-        Err(e) => {
-            println!("\n⚠️  Runtime error: {}", e);
-            Err(e.into())
-        }
-    }
+    println!("\n✅ finished");
+    Ok(())
 }
