@@ -33,7 +33,7 @@
 //!     BackoffPolicy::default(),
 //!     Some(Duration::from_secs(5)),
 //! );
-//! # let _ = spec; 
+//! # let _ = spec;
 //! ```
 
 mod r#impl;
