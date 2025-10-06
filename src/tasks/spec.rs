@@ -1,6 +1,6 @@
 //! # Task specification for supervised execution.
 //!
-//! Defines [`TaskSpec`] — a configuration bundle that describes how a task
+//! Defines [`TaskSpec`] a configuration bundle that describes how a task
 //! should be executed under supervision (restart policy, backoff, timeout).
 //!
 //! A spec can be created:

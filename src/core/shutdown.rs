@@ -1,6 +1,6 @@
 //! # Cross-platform OS signal handling.
 //!
-//! Provides [`wait_for_shutdown_signal`] — an async helper that completes when the process receives a termination signal.
+//! Provides [`wait_for_shutdown_signal`] an async helper that completes when the process receives a termination signal.
 //!
 //! ## Signals
 //! **Unix platforms:**

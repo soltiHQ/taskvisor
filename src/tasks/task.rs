@@ -2,19 +2,19 @@
 //!
 //! Defines the core [`Task`] trait for async, cancelable units of work.
 //!
-//! - **[`Task`]** — trait for implementing async tasks with cancellation support
-//! - **[`TaskRef`]** — shared handle (`Arc<dyn Task>`) for passing tasks across the runtime
-//! - **[`BoxTaskFuture`]** — type alias for boxed task futures
+//! - **[`Task`]** trait for implementing async tasks with cancellation support
+//! - **[`TaskRef`]** shared handle (`Arc<dyn Task>`) for passing tasks across the runtime
+//! - **[`BoxTaskFuture`]** type alias for boxed task futures
 //!
 //! ## Rules
-//! - The crate provides [`TaskFn`](crate::TaskFn) — a function-backed implementation that wraps closures as tasks.
+//! - The crate provides [`TaskFn`](crate::TaskFn) a function-backed implementation that wraps closures as tasks.
 //! - Tasks receive a [`CancellationToken`] and **must** observe cancellation at safe points.
 //!
 //! ## Return semantics
-//! - `Ok(())` — task completed successfully (restart policy applies).
-//! - `Err(TaskError::Canceled)` — cooperative shutdown (not considered a failure).
-//! - `Err(TaskError::Fail | TaskError::Timeout)` — retryable failures.
-//! - `Err(TaskError::Fatal)` — non-retryable, actor terminates as dead.
+//! - `Ok(())` task completed successfully (restart policy applies).
+//! - `Err(TaskError::Canceled)` cooperative shutdown (not considered a failure).
+//! - `Err(TaskError::Fail | TaskError::Timeout)` retryable failures.
+//! - `Err(TaskError::Fatal)` non-retryable, actor terminates as dead.
 
 use std::{future::Future, pin::Pin, sync::Arc};
 

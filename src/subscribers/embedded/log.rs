@@ -1,4 +1,4 @@
-//! # LogWriter — human-readable event printer.
+//! # LogWriter human-readable event printer.
 //!
 //! A minimal subscriber that prints incoming [`Event`]s to stdout.
 //! Useful for development, debugging, and demos.

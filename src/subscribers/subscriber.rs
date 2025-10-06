@@ -1,6 +1,6 @@
 //! # Event subscriber trait.
 //!
-//! Provides [`Subscribe`] — an extension point for plugging custom event handlers into the runtime.
+//! Provides [`Subscribe`] an extension point for plugging custom event handlers into the runtime.
 //!
 //! Each subscriber gets:
 //! - **Dedicated worker task** (runs independently)
@@ -77,7 +77,7 @@ pub trait Subscribe: Send + Sync + 'static {
     /// Returns the subscriber name used in logs/metrics and overflow/panic events.
     ///
     /// Prefer short, descriptive names (e.g., "metrics", "audit", "slack").
-    /// The default uses `type_name::<Self>()`, which can be verbose — override it when possible.
+    /// The default uses `type_name::<Self>()`, which can be verbose - override it when possible.
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }

@@ -2,9 +2,9 @@
 //!
 //! [`RestartPolicy`] determines whether a task should be restarted after it finishes or fails.
 //!
-//! - [`RestartPolicy::Never`] — the task runs once and is never restarted.
-//! - [`RestartPolicy::Always`] — the task is restarted unconditionally, regardless of exit reason.
-//! - [`RestartPolicy::OnFailure`] — the task is restarted only if it fails (default).
+//! - [`RestartPolicy::Never`] the task runs once and is never restarted.
+//! - [`RestartPolicy::Always`] the task is restarted unconditionally, regardless of exit reason.
+//! - [`RestartPolicy::OnFailure`] the task is restarted only if it fails (default).
 
 /// Policy controlling whether a task is restarted after completion or failure.
 #[derive(Clone, Copy, Debug)]

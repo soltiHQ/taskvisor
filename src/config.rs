@@ -1,6 +1,6 @@
 //! # Global runtime configuration.
 //!
-//! Provides [`Config`] — centralized settings for the supervisor runtime.
+//! Provides [`Config`] centralized settings for the supervisor runtime.
 //!
 //! Config is used in two ways:
 //! 1. **Supervisor creation**: `Supervisor::new(config, subscribers)`

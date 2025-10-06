@@ -2,8 +2,8 @@
 //!
 //! This module defines two main error enums:
 //!
-//! - [`RuntimeError`] — errors raised by the orchestration runtime itself.
-//! - [`TaskError`] — errors raised by individual task executions.
+//! - [`RuntimeError`] errors raised by the orchestration runtime itself.
+//! - [`TaskError`] errors raised by individual task executions.
 //!
 //! Both types provide helper methods `as_label` for metrics.
 //! [`TaskError`] has additional methods: `is_retryable()` and `is_fatal()`

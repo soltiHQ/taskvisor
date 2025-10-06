@@ -2,9 +2,9 @@
 //!
 //! This module groups the public task abstractions used by the runtime:
 //!
-//! - [`Task`] — async, cancelable unit of work (trait).
-//! - [`TaskFn`] — function-backed implementation that wraps closures.
-//! - [`TaskSpec`] — execution specification (restart/backoff/timeout).
+//! - [`Task`] async, cancelable unit of work (trait).
+//! - [`TaskFn`] function-backed implementation that wraps closures.
+//! - [`TaskSpec`] execution specification (restart/backoff/timeout).
 //!
 //! ## Overview
 //! ```text

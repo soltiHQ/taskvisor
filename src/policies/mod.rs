@@ -4,9 +4,9 @@
 //! and **how long** to wait between attempts.
 //!
 //! ## Contents
-//! - [`RestartPolicy`] — when to restart a task (never / on-failure / always)
-//! - [`BackoffPolicy`] — how retry delays evolve (first / factor / max + jitter)
-//! - [`JitterPolicy`]  — randomization strategy to avoid thundering herd
+//! - [`RestartPolicy`] when to restart a task (never / on-failure / always)
+//! - [`BackoffPolicy`] how retry delays evolve (first / factor / max + jitter)
+//! - [`JitterPolicy`]  randomization strategy to avoid thundering herd
 //!
 //! ## Quick wiring
 //! ```text

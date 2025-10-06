@@ -1,6 +1,6 @@
 //! # Function-backed task implementation.
 //!
-//! Provides [`TaskFn`] — a task implementation that wraps closures.
+//! Provides [`TaskFn`] a task implementation that wraps closures.
 //!
 //! ## Architecture
 //! ```text

@@ -1,4 +1,4 @@
-//! # Task registry — event-driven task lifecycle manager.
+//! # Task registry - event-driven task lifecycle manager.
 //!
 //! Subscribes to Bus and manages active task actors:
 //! - On `TaskAddRequested(spec)`  → spawn actor, insert handle, publish `TaskAdded`

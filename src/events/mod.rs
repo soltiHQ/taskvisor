@@ -5,8 +5,8 @@
 //! task actors, runner and subscriber workers.
 //!
 //! ## Contents
-//! - [`EventKind`], [`Event`] — event classification and payload metadata
-//! - [`Bus`] — thin wrapper over `tokio::sync::broadcast`
+//! - [`EventKind`], [`Event`] event classification and payload metadata
+//! - [`Bus`] thin wrapper over `tokio::sync::broadcast`
 //!
 //! ## Quick reference
 //! - **Publishers**: `Supervisor`, `Registry`, `TaskActor`, `runner::run_once`,

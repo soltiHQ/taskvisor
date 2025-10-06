@@ -2,9 +2,9 @@
 //!
 //! [`BackoffPolicy`] controls how retry delays grow after repeated failures.
 //! It is parameterized by:
-//! - [`BackoffPolicy::factor`] — the multiplicative growth factor;
-//! - [`BackoffPolicy::first`] — the initial delay;
-//! - [`BackoffPolicy::max`] — the maximum delay cap.
+//! - [`BackoffPolicy::factor`] the multiplicative growth factor;
+//! - [`BackoffPolicy::first`] the initial delay;
+//! - [`BackoffPolicy::max`] the maximum delay cap.
 //!
 //! # Example
 //! ```rust
@@ -35,9 +35,9 @@ use std::time::Duration;
 /// Retry backoff policy.
 ///
 /// Encapsulates parameters that determine how retry delays grow:
-/// - [`factor`] — multiplicative growth factor;
-/// - [`first`] — the initial delay;
-/// - [`max`] — the maximum delay cap.
+/// - [`factor`] multiplicative growth factor;
+/// - [`first`] the initial delay;
+/// - [`max`] the maximum delay cap.
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffPolicy {
     /// Initial delay before the first retry.

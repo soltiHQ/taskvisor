@@ -5,18 +5,18 @@
 //! is an internal building block that the supervisor wires together.
 //!
 //! ## Files & responsibilities
-//! - **supervisor.rs** — public facade; owns the runtime (Bus, Registry, SubscriberSet, AliveTracker),
+//! - **supervisor.rs**: public facade; owns the runtime (Bus, Registry, SubscriberSet, AliveTracker),
 //!   wires listeners, publishes control events (ShutdownRequested, TaskAddRequested, TaskRemoveRequested),
 //!   drives graceful shutdown.
-//! - **registry.rs** — event-driven task lifecycle: listens to Bus; on TaskAddRequested spawns a
+//! - **registry.rs**: event-driven task lifecycle: listens to Bus; on TaskAddRequested spawns a
 //!   `TaskActor`; on TaskRemoveRequested cancels & joins; on ActorExhausted/ActorDead cleans up;
 //!   publishes TaskAdded/TaskRemoved (and TaskFailed on internal errors like duplicates/lag).
-//! - **actor.rs** — per-task supervision loop (sequential attempts): applies Restart/Backoff/Timeout,
+//! - **actor.rs**: per-task supervision loop (sequential attempts): applies Restart/Backoff/Timeout,
 //!   calls `runner::run_once`, publishes TaskStarting/BackoffScheduled and terminal ActorExhausted/ActorDead.
-//! - **runner.rs** — executes ONE attempt with optional timeout and child token; publishes
+//! - **runner.rs**: executes ONE attempt with optional timeout and child token; publishes
 //!   TaskStopped / TaskFailed / TimeoutHit for observability.
-//! - **alive.rs** — sequence-aware “alive” state tracker (TaskStarting → alive=true; TaskStopped/TaskFailed → false).
-//! - **shutdown.rs** — cross-platform OS signal handling used by `Supervisor`.
+//! - **alive.rs**: sequence-aware “alive” state tracker (TaskStarting → alive=true; TaskStopped/TaskFailed → false).
+//! - **shutdown.rs**: cross-platform OS signal handling used by `Supervisor`.
 //!
 //! ## Event data-plane (who publishes & who consumes)
 //!
@@ -31,7 +31,7 @@
 //! - **Supervisor::subscriber_listener()** (single fan-out point)
 //!     - updates **AliveTracker** (sequence-based ordering)
 //!     - emits to **SubscriberSet** (per-subscriber mpsc queues)
-//! - **Registry** (its own listener) — reacts to management/terminal events listed above
+//! - **Registry** (its own listener): reacts to management/terminal events listed above
 //!
 //! ## Wiring (module-level flow)
 //! ```text

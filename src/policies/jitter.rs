@@ -3,10 +3,10 @@
 //! [`JitterPolicy`] adds randomness to backoff delays to prevent thundering herd effects
 //! when multiple tasks retry simultaneously.
 //!
-//! - [`JitterPolicy::None`] — no randomization, predictable delays
-//! - [`JitterPolicy::Full`] — random delay in [0, backoff_delay] (most aggressive)
-//! - [`JitterPolicy::Equal`] — delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
-//! - [`JitterPolicy::Decorrelated`] — stateful jitter based on previous delay (sophisticated)
+//! - [`JitterPolicy::None`] no randomization, predictable delays
+//! - [`JitterPolicy::Full`] random delay in [0, backoff_delay] (most aggressive)
+//! - [`JitterPolicy::Equal`] delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
+//! - [`JitterPolicy::Decorrelated`] stateful jitter based on previous delay (sophisticated)
 
 use rand::Rng;
 use std::time::Duration;

@@ -1,6 +1,6 @@
 //! # Non-blocking event fan-out to multiple subscribers.
 //!
-//! Provides [`SubscriberSet`] — distributes events to multiple subscribers
+//! Provides [`SubscriberSet`] distributes events to multiple subscribers
 //! concurrently without blocking the publisher.
 //!
 //! ## Architecture
