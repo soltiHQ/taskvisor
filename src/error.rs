@@ -13,8 +13,7 @@ use thiserror::Error;
 
 /// # Errors produced by the taskvisor runtime.
 ///
-/// These represent failures in the orchestration system itself,
-/// such as a shutdown sequence exceeding its grace period.
+/// These represent failures in the orchestration system itself.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RuntimeError {
@@ -26,6 +25,24 @@ pub enum RuntimeError {
         /// List of task names that did not shut down in time.
         stuck: Vec<String>,
     },
+
+    /// Attempted to add a task with a name that already exists in the registry.
+    #[error("task '{name}' already exists in registry")]
+    TaskAlreadyExists {
+        /// The duplicate task name.
+        name: String,
+    },
+
+    /// Attempted to remove a task that doesn't exist in the registry.
+    #[error("task '{name}' not found in registry")]
+    TaskNotFound {
+        /// The missing task name.
+        name: String,
+    },
+
+    /// Control channel to the orchestrator is closed (supervisor shutting down).
+    #[error("supervisor control channel closed")]
+    ControlChannelClosed,
 }
 
 impl RuntimeError {
@@ -33,6 +50,9 @@ impl RuntimeError {
     pub fn as_label(&self) -> &'static str {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
+            RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
+            RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
+            RuntimeError::ControlChannelClosed => "runtime_control_channel_closed",
         }
     }
 
@@ -41,6 +61,15 @@ impl RuntimeError {
         match self {
             RuntimeError::GraceExceeded { grace, stuck } => {
                 format!("grace exceeded after {grace:?}; stuck tasks={stuck:?}")
+            }
+            RuntimeError::TaskAlreadyExists { name } => {
+                format!("task '{name}' already exists in registry")
+            }
+            RuntimeError::TaskNotFound { name } => {
+                format!("task '{name}' not found in registry")
+            }
+            RuntimeError::ControlChannelClosed => {
+                "supervisor control channel closed (shutting down?)".to_string()
             }
         }
     }

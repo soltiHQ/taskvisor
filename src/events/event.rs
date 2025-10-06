@@ -1,11 +1,46 @@
 //! # Runtime events emitted by the supervisor and task actors.
 //!
-//! The [`EventKind`] enum classifies event types (shutdown, failures, retries, etc.).
-//! The [`Event`] struct carries additional metadata such as timestamps, task name, error messages, and backoff delays.
+//! The [`EventKind`] enum classifies event types across three categories:
+//! - **Lifecycle events**: task execution flow (starting, stopped, failed, timeout)
+//! - **Management events**: runtime task control (add, remove requests and confirmations)
+//! - **Terminal events**: actor final states (exhausted policy, dead)
+//!
+//! The [`Event`] struct carries additional metadata such as timestamps, task name,
+//! error messages, and backoff delays.
 //!
 //! ## Ordering guarantees
 //! Each event has a globally unique sequence number (`seq`) that increases monotonically.
-//! This guarantees that events can be ordered correctly even when delivered out-of-order through async channels.
+//! This guarantees that events can be ordered correctly even when delivered out-of-order
+//! through async channels.
+//!
+//! ## Event flow examples
+//!
+//! ### Task addition flow
+//! ```text
+//! Supervisor::add_task()
+//!   → TaskAddRequested
+//!   → [spawn actor]
+//!   → TaskAdded
+//!   → TaskStarting
+//! ```
+//!
+//! ### Task removal flow
+//! ```text
+//! Supervisor::remove_task()
+//!   → TaskRemoveRequested
+//!   → [cancel actor token]
+//!   → TaskStopped (with Canceled error)
+//!   → ActorExhausted
+//!   → TaskRemoved
+//! ```
+//!
+//! ### Actor exhaustion (RestartPolicy::Never)
+//! ```text
+//! TaskStarting
+//!   → TaskStopped
+//!   → ActorExhausted
+//!   → [auto-cleanup from registry]
+//! ```
 //!
 //! ## Example
 //! ```rust
@@ -35,18 +70,21 @@ static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
+    // === Subscriber events ===
     /// Subscriber panicked during event processing.
     SubscriberPanicked,
     /// Subscriber dropped an event (queue full or worker closed).
     SubscriberOverflow,
+
+    // === Shutdown events ===
     /// Shutdown requested (OS signal received).
     ShutdownRequested,
-    /// Task is scheduled to back off before retrying.
-    BackoffScheduled,
     /// All tasks stopped within the configured grace period.
     AllStoppedWithin,
     /// Grace period exceeded; some tasks did not stop in time.
     GraceExceeded,
+
+    // === Task lifecycle events ===
     /// Task is starting execution.
     TaskStarting,
     /// Task has stopped (finished or cancelled).
@@ -55,6 +93,33 @@ pub enum EventKind {
     TaskFailed,
     /// Task hit its configured timeout.
     TimeoutHit,
+    /// Task is scheduled to back off before retrying.
+    BackoffScheduled,
+
+    // === Runtime task management events ===
+    /// Request to add a new task to the supervisor.
+    TaskAddRequested,
+    /// Task was successfully added and spawned.
+    TaskAdded,
+    /// Request to remove a task from the supervisor.
+    TaskRemoveRequested,
+    /// Task was successfully removed from the supervisor.
+    TaskRemoved,
+
+    // === Actor terminal states ===
+    /// Actor exhausted its restart policy and will not restart.
+    ///
+    /// Emitted when:
+    /// - `RestartPolicy::Never` → task completed successfully
+    /// - `RestartPolicy::OnFailure` → task completed successfully (no more retries needed)
+    ActorExhausted,
+
+    /// Actor terminated permanently due to fatal error.
+    ///
+    /// Emitted when:
+    /// - Task returned `TaskError::Fatal`
+    /// - (Future) Max retries exceeded
+    ActorDead,
 }
 
 /// Runtime event with optional metadata.

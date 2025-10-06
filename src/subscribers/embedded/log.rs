@@ -10,8 +10,13 @@
 //! [003] [backoff] task=worker delay=2s after_attempt=1 err="connection refused"
 //! [004] [timeout] task=worker timeout=5s
 //! [005] [stopped] task=worker
-//! [006] [shutdown-requested]
-//! [007] [all-stopped-within-grace]
+//! [006] [actor-exhausted] task=worker reason=policy
+//! [007] [task-add-requested] task=new-worker
+//! [008] [task-added] task=new-worker
+//! [009] [task-remove-requested] task=old-worker
+//! [010] [task-removed] task=old-worker
+//! [011] [shutdown-requested]
+//! [012] [all-stopped-within-grace]
 //! ```
 //!
 //! ## Example
@@ -46,6 +51,7 @@ impl Subscribe for LogWriter {
         let seq = format!("[{:03}]", e.seq % 1000);
 
         match e.kind {
+            // === Shutdown events ===
             EventKind::GraceExceeded => {
                 println!("{} [grace-exceeded]", seq);
             }
@@ -55,6 +61,8 @@ impl Subscribe for LogWriter {
             EventKind::AllStoppedWithin => {
                 println!("{} [all-stopped-within-grace]", seq);
             }
+
+            // === Task lifecycle events ===
             EventKind::TaskStopped => {
                 println!(
                     "{} [stopped] task={}",
@@ -88,14 +96,6 @@ impl Subscribe for LogWriter {
                     e.error.as_deref().unwrap_or("none")
                 );
             }
-            EventKind::SubscriberOverflow => {
-                println!(
-                    "{} [subscriber-overflow] subscriber={} reason={}",
-                    seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.error.as_deref().unwrap_or("none")
-                );
-            }
             EventKind::TaskFailed => {
                 println!(
                     "{} [failed] task={} err={} attempt={}",
@@ -105,12 +105,69 @@ impl Subscribe for LogWriter {
                     e.attempt.unwrap_or(0)
                 );
             }
+
+            // === Subscriber events ===
+            EventKind::SubscriberOverflow => {
+                println!(
+                    "{} [subscriber-overflow] subscriber={} reason={}",
+                    seq,
+                    e.task.as_deref().unwrap_or("none"),
+                    e.error.as_deref().unwrap_or("none")
+                );
+            }
             EventKind::SubscriberPanicked => {
                 println!(
                     "{} [subscriber-panicked] subscriber={} info={}",
                     seq,
                     e.task.as_deref().unwrap_or("none"),
                     e.error.as_deref().unwrap_or("none")
+                );
+            }
+
+            // === Runtime task management events ===
+            EventKind::TaskAddRequested => {
+                println!(
+                    "{} [task-add-requested] task={}",
+                    seq,
+                    e.task.as_deref().unwrap_or("none")
+                );
+            }
+            EventKind::TaskAdded => {
+                println!(
+                    "{} [task-added] task={}",
+                    seq,
+                    e.task.as_deref().unwrap_or("none")
+                );
+            }
+            EventKind::TaskRemoveRequested => {
+                println!(
+                    "{} [task-remove-requested] task={}",
+                    seq,
+                    e.task.as_deref().unwrap_or("none")
+                );
+            }
+            EventKind::TaskRemoved => {
+                println!(
+                    "{} [task-removed] task={}",
+                    seq,
+                    e.task.as_deref().unwrap_or("none")
+                );
+            }
+
+            // === Actor terminal states ===
+            EventKind::ActorExhausted => {
+                println!(
+                    "{} [actor-exhausted] task={} reason=policy",
+                    seq,
+                    e.task.as_deref().unwrap_or("none")
+                );
+            }
+            EventKind::ActorDead => {
+                println!(
+                    "{} [actor-dead] task={} reason={}",
+                    seq,
+                    e.task.as_deref().unwrap_or("none"),
+                    e.error.as_deref().unwrap_or("fatal")
                 );
             }
         }
