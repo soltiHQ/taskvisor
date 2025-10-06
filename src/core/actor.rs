@@ -15,7 +15,12 @@
 //!
 //! If retry scheduled:
 //!   → BackoffScheduled → [sleep] → (next attempt with new seq)
-//! ```
+//!
+//! On exit:
+//!   → ActorExhausted (policy forbids restart)
+//!   → ActorDead (fatal error)
+//!   → (no event if Cancelled)
+//!```
 //!
 //! ## Architecture
 //! ```text
@@ -57,6 +62,31 @@ use crate::{
     policies::{BackoffPolicy, RestartPolicy},
     tasks::Task,
 };
+
+/// Reason why a task actor exited.
+///
+/// Used to determine what event to publish and whether to cleanup the task from registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorExitReason {
+    /// Actor exhausted its restart policy and will not restart.
+    ///
+    /// Occurs when:
+    /// - `RestartPolicy::Never` and task completed (success or failure)
+    /// - `RestartPolicy::OnFailure` and task completed successfully
+    PolicyExhausted,
+
+    /// Actor was cancelled due to shutdown signal or explicit removal.
+    ///
+    /// The task detected `CancellationToken::is_cancelled()` and exited gracefully.
+    Cancelled,
+
+    /// Actor died due to a fatal error that should not be retried.
+    ///
+    /// Occurs when:
+    /// - Task returned `TaskError::Fatal`
+    /// - (Future) Max retries exceeded
+    Fatal,
+}
 
 /// Configuration parameters for a task actor.
 ///
@@ -123,12 +153,21 @@ impl TaskActor {
     /// 5. If retry needed, publish `BackoffScheduled` and sleep
     /// 6. Repeat until exit condition
     ///
-    /// ### Exit conditions
-    /// The actor stops when:
-    /// - Task succeeds and restart policy forbids continuation
-    /// - Task fails and restart policy forbids retry
-    /// - `runtime_token` is cancelled (shutdown signal)
-    /// - Semaphore is closed (runtime shutdown in progress)
+    /// ### Exit conditions and return values
+    /// The actor stops and returns:
+    ///
+    /// **`ActorExitReason::PolicyExhausted`:**
+    /// - Task succeeded and `RestartPolicy::Never`
+    /// - Task succeeded and `RestartPolicy::OnFailure`
+    /// - Task failed and `RestartPolicy::Never`
+    ///
+    /// **`ActorExitReason::Cancelled`:**
+    /// - `runtime_token` was cancelled (shutdown signal or explicit removal)
+    /// - Task detected cancellation during backoff sleep
+    ///
+    /// **`ActorExitReason::Fatal`:**
+    /// - Task returned `TaskError::Fatal`
+    /// - (Future) Max retries exceeded
     ///
     /// ### Cancellation semantics
     /// - `runtime_token` is checked at **safe points** only:
@@ -154,32 +193,39 @@ impl TaskActor {
     /// - `BackoffScheduled`: retry scheduled (includes delay and attempt number)
     ///
     /// Subscribers can implement metrics, logging, alerting, etc.
-    pub async fn run(self, runtime_token: CancellationToken) {
+    pub async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let mut prev_delay: Option<Duration> = None;
         let mut attempt: u64 = 0;
 
         loop {
             if runtime_token.is_cancelled() {
-                break;
+                return ActorExitReason::Cancelled;
             }
-            let _guard = match &self.semaphore {
+            let permit = match &self.semaphore {
                 Some(sem) => {
-                    let permit_future = sem.clone().acquire_owned();
-                    tokio::pin!(permit_future);
-
+                    let fut = sem.clone().acquire_owned();
+                    tokio::pin!(fut);
                     select! {
-                        res = &mut permit_future => {
-                            match res {
-                                Ok(permit) => Some(permit),
-                                Err(_closed) => { break; }
+                        res = &mut fut => match res {
+                            Ok(p) => Some(p),
+                            Err(_closed) => {
+                                self.bus.publish(
+                                    Event::now(EventKind::ActorExhausted)
+                                        .with_task(self.task.name())
+                                        .with_error("semaphore_closed"),
+                                );
+                                return ActorExitReason::Cancelled;
                             }
-                        }
-                        _ = runtime_token.cancelled() => { break; }
+                        },
+                        _ = runtime_token.cancelled() => return ActorExitReason::Cancelled,
                     }
                 }
                 None => None,
             };
-
+            if runtime_token.is_cancelled() {
+                drop(permit);
+                return ActorExitReason::Cancelled;
+            }
             attempt += 1;
             self.bus.publish(
                 Event::now(EventKind::TaskStarting)
@@ -194,19 +240,35 @@ impl TaskActor {
                 &self.bus,
             )
             .await;
+            drop(permit);
 
             match res {
                 Ok(()) => {
                     prev_delay = None;
-
                     match self.params.restart {
                         RestartPolicy::Always => continue,
-                        RestartPolicy::OnFailure => break,
-                        RestartPolicy::Never => break,
+                        RestartPolicy::OnFailure | RestartPolicy::Never => {
+                            self.bus.publish(
+                                Event::now(EventKind::ActorExhausted)
+                                    .with_task(self.task.name())
+                                    .with_attempt(attempt)
+                                    .with_error("policy_exhausted_success"),
+                            );
+                            return ActorExitReason::PolicyExhausted;
+                        }
                     }
                 }
                 Err(TaskError::Canceled) => {
-                    break;
+                    return ActorExitReason::Cancelled;
+                }
+                Err(TaskError::Fatal { error: message }) => {
+                    self.bus.publish(
+                        Event::now(EventKind::ActorDead)
+                            .with_task(self.task.name())
+                            .with_attempt(attempt)
+                            .with_error(message),
+                    );
+                    return ActorExitReason::Fatal;
                 }
                 Err(e) => {
                     let should_retry = matches!(
@@ -214,7 +276,13 @@ impl TaskActor {
                         RestartPolicy::OnFailure | RestartPolicy::Always
                     );
                     if !should_retry {
-                        break;
+                        self.bus.publish(
+                            Event::now(EventKind::ActorExhausted)
+                                .with_task(self.task.name())
+                                .with_attempt(attempt)
+                                .with_error(e.to_string()),
+                        );
+                        return ActorExitReason::PolicyExhausted;
                     }
 
                     let delay = self.params.backoff.next(prev_delay);
@@ -232,7 +300,7 @@ impl TaskActor {
                     tokio::pin!(sleep);
                     select! {
                         _ = &mut sleep => {}
-                        _ = runtime_token.cancelled() => { break; }
+                        _ = runtime_token.cancelled() => { return ActorExitReason::Cancelled; }
                     }
                 }
             }

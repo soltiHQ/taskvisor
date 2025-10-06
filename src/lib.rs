@@ -15,10 +15,12 @@
 //!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
 //!            ▼                  ▼                  ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
-//! │         Supervisor (spawns actors, handles OS signals)            │
+//! │         Supervisor (runtime orchestrator)                         │
 //! │  - Bus (broadcast events)                                         │
 //! │  - AliveTracker (tracks task state with sequence numbers)         │
 //! │  - SubscriberSet (fans out to user subscribers)                   │
+//! │  - Registry (manages active tasks by name)                        │
+//! │  - Orchestrator (handles Add/Remove commands)                     │
 //! └──────┬──────────────────┬──────────────────┬───────────────┬──────┘
 //!        ▼                  ▼                  ▼               │
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
@@ -30,7 +32,7 @@
 //!      │ Events:          │ Events:          │ Events:         │
 //!      │ - TaskStarting   │ - TaskStarting   │ - TaskStarting  │
 //!      │ - TaskFailed     │ - TaskStopped    │ - TimeoutHit    │
-//!      │ - BackoffSched.  │ - ...            │ - ...           │
+//!      │ - BackoffSched.  │ - ActorExhausted │ - ...           │
 //!      │                  │                  │                 │
 //!      ▼                  ▼                  ▼                 ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
@@ -57,7 +59,7 @@
 //!
 //! ### Lifecycle
 //! ```text
-//! TaskSpec ──► Supervisor ──► TaskActor::run()
+//! TaskSpec ──► Supervisor ──► Orchestrator ──► TaskActor::run()
 //!
 //! loop {
 //!   ├─► attempt += 1
@@ -66,12 +68,12 @@
 //!   ├─► run_once(task, timeout, attempt)
 //!   │       │
 //!   │       ├─ Ok  ──► publish TaskStopped
-//!   │       │          ├─ RestartPolicy::Never     → exit
-//!   │       │          ├─ RestartPolicy::OnFailure → exit
+//!   │       │          ├─ RestartPolicy::Never     → ActorExhausted, exit
+//!   │       │          ├─ RestartPolicy::OnFailure → ActorExhausted, exit
 //!   │       │          └─ RestartPolicy::Always    → reset delay, continue
 //!   │       │
 //!   │       └─ Err ──► publish TaskFailed{ task, error, attempt }
-//!   │                  ├─ RestartPolicy::Never     → exit
+//!   │                  ├─ RestartPolicy::Never     → ActorExhausted, exit
 //!   │                  └─ RestartPolicy::OnFailure/Always:
 //!   │                       ├─ compute delay = backoff.next(prev_delay)
 //!   │                       ├─ publish BackoffScheduled{ delay, attempt }
@@ -79,10 +81,13 @@
 //!   │                       └─ continue
 //!   │
 //!   └─ exit conditions:
-//!        - runtime_token cancelled (OS signal)
-//!        - RestartPolicy forbids continuation
+//!        - runtime_token cancelled (OS signal or explicit remove)
+//!        - RestartPolicy forbids continuation → ActorExhausted
+//!        - Fatal error → ActorDead
 //!        - semaphore closed
 //! }
+//!
+//! On exit: actor cleanup removes from Registry (if PolicyExhausted/Fatal)
 //! ```
 //!
 //! ## Features
@@ -122,16 +127,16 @@
 //!             Vec::new()
 //!         }
 //!     };
-//!     let sup = Supervisor::new(cfg.clone(), subs);
+//!     let mut sup = Supervisor::new(cfg.clone(), subs);
 //!
-//!     // Define a simple task
+//!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
 //!         if ctx.is_cancelled() { return Ok(()); }
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     // Build specification
+//!     // Build specification - use RestartPolicy::Never for one-shot task
 //!     let spec = TaskSpec::new(
 //!         hello,
 //!         RestartPolicy::Never,
@@ -139,6 +144,7 @@
 //!         Some(Duration::from_secs(5)),
 //!     );
 //!
+//!     // Pass initial tasks to run() - they will be added by orchestrator
 //!     sup.run(vec![spec]).await?;
 //!     Ok(())
 //! }

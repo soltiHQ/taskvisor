@@ -5,13 +5,15 @@
 //! task execution, lifecycle management, and graceful shutdown.
 //!
 //! Internal modules:
-//! - [`runner`]: executes one attempt with timeout/cancellation and event publishing
-//! - [`supervisor`]: orchestrates actors, handles shutdown, global concurrency
-//! - [`actor`]: runs a single task with restart policy and backoff
-//! - [`shutdown`]: cross-platform shutdown signal handling
+//! - [`runner`]: executes one attempt with timeout/cancellation and event publishing;
+//! - [`supervisor`]: orchestrates actors, handles shutdown, global concurrency;
+//! - [`actor`]: runs a single task with restart policy and backoff;
+//! - [`shutdown`]: cross-platform shutdown signal handling;
+//! - [`registry`]: manage task lifecycle.
 
 mod actor;
 mod alive;
+mod registry;
 mod runner;
 mod shutdown;
 mod supervisor;

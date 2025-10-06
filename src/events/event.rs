@@ -133,7 +133,7 @@ pub enum EventKind {
 /// - `monotonic`: Monotonic timestamp (never goes backwards, use for interval measurements)
 /// - `kind`: Event classification
 /// - `task`, `error`, `attempt`, `timeout`, `delay`: Optional metadata
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Event {
     /// Globally unique, monotonically increasing sequence number.
     /// Used to determine event ordering across async boundaries.
@@ -152,6 +152,12 @@ pub struct Event {
     pub task: Option<String>,
     /// The kind of event.
     pub kind: EventKind,
+
+    /// Task specification (private, used internally for TaskAddRequested).
+    ///
+    /// Only populated for `TaskAddRequested` events.
+    /// Registry extracts this to spawn the actor.
+    pub(crate) spec: Option<crate::tasks::TaskSpec>,
 }
 
 impl Event {
@@ -166,6 +172,7 @@ impl Event {
             error: None,
             delay: None,
             task: None,
+            spec: None,
         }
     }
 
@@ -214,5 +221,10 @@ impl Event {
         Event::now(EventKind::SubscriberPanicked)
             .with_task(subscriber)
             .with_error(info)
+    }
+
+    pub(crate) fn with_spec(mut self, spec: crate::tasks::TaskSpec) -> Self {
+        self.spec = Some(spec);
+        self
     }
 }
