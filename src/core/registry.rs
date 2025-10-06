@@ -32,7 +32,6 @@ use crate::events::{Bus, Event, EventKind};
 use crate::tasks::TaskSpec;
 
 struct Handle {
-    spec: TaskSpec,
     join: JoinHandle<ActorExitReason>,
     cancel: CancellationToken,
 }
@@ -197,7 +196,6 @@ impl Registry {
         let join_handle = tokio::spawn(async move { actor.run(task_token_clone).await });
 
         let handle = Handle {
-            spec,
             join: join_handle,
             cancel: task_token,
         };

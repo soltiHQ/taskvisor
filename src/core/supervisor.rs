@@ -103,7 +103,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{alive::AliveTracker, registry::Registry, shutdown};
+use crate::core::{alive::AliveTracker, registry::Registry};
 use crate::{
     config::Config,
     error::RuntimeError,
@@ -306,17 +306,6 @@ impl Supervisor {
             _ = self.registry.wait_until_empty() => {
                 Ok(())
             }
-        }
-    }
-
-    /// Waits until registry becomes empty (all tasks finished naturally).
-    async fn wait_for_empty_registry(&self) {
-        use tokio::time::{Duration, sleep};
-        loop {
-            if self.registry.is_empty().await {
-                return;
-            }
-            sleep(Duration::from_millis(100)).await;
         }
     }
 
