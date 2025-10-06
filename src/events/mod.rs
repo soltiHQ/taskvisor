@@ -1,14 +1,20 @@
-//! # Event system for task lifecycle notifications
+//! Runtime events: types and broadcast bus.
 //!
-//! This module provides the core event infrastructure for taskvisor:
-//! - [`Event`] - runtime event with metadata (timestamp, task name, error, etc.)
-//! - [`EventKind`] - classification of event types (startup, failure, shutdown, etc.)
-//! - [`Bus`] - broadcast channel for publishing events to multiple subscribers
+//! This module groups the event **data model** and the **bus** used to
+//! publish/subscribe to runtime events emitted by the supervisor, registry,
+//! task actors, runner and subscriber workers.
 //!
-//! Events flow from task actors through the bus to all subscribers:
-//! ```text
-//! TaskActor → Bus.publish(Event) → broadcast → all subscribers
-//! ```
+//! ## Contents
+//! - [`EventKind`], [`Event`] — event classification and payload metadata
+//! - [`Bus`] — thin wrapper over `tokio::sync::broadcast`
+//!
+//! ## Quick reference
+//! - **Publishers**: `Supervisor`, `Registry`, `TaskActor`, `runner::run_once`,
+//!   `SubscriberSet` workers (overflow/panic).
+//! - **Consumers**: `Supervisor::subscriber_listener()` (fans out to `SubscriberSet`
+//!   and updates `AliveTracker`), and `Registry` (its own listener).
+//!
+//! See `core/mod.rs` for the system-level wiring diagram.
 
 mod bus;
 mod event;

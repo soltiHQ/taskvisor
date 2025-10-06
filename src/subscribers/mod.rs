@@ -1,59 +1,31 @@
-//! # Event subscribers for the taskvisor runtime (fire-and-forget).
+//! Subscriber infrastructure (fan-out & handlers).
 //!
-//! This module exposes the core extension point [`Subscribe`] and the composite
-//! fan-out [`SubscriberSet`]. Incoming [`Event`](crate::events::Event)s are
-//! **fanned out without awaiting** subscriber processing.
+//! This module exposes the subscriber extension points and the fan-out
+//! coordinator used by the runtime to deliver events to user-defined sinks.
 //!
-//! ## Architecture (fan-out, per-subscriber queues)
+//! ## Overview
 //! ```text
-//! Publisher ──► SubscriberSet::emit(&Event) ──(clone Arc<Event>)────┐
-//!                                                                  │
-//!                     ┌───────────────┬───────────────┬────────────┴─────┐
-//!                     ▼               ▼               ▼                  ▼
-//!                mpsc queue       mpsc queue      mpsc queue        mpsc queue
-//!                 (cap S1)         (cap S2)        (cap S3)          (cap SN)
-//!                     │               │               │                  │
-//!             worker_task S1   worker_task S2  worker_task S3    worker_task SN
-//!                     │               │               │                  │
-//!             sub.on_event()   sub.on_event()  sub.on_event()    sub.on_event()
+//! Bus (broadcast) ──► Supervisor::subscriber_listener
+//!                         ├─► AliveTracker::update()
+//!                         └─► SubscriberSet::emit{,_arc}()
+//!                                   ├─► [queue for S1] ──► worker ──► S1.on_event()
+//!                                   ├─► [queue for S2] ──► worker ──► S2.on_event()
+//!                                   └─► ...
 //! ```
 //!
-//! ### Delivery semantics
-//! - `emit(&Event)` returns immediately (no barrier per event).
-//! - Per-subscriber **FIFO** is preserved (queue order). No global ordering.
-//! - If a queue is **full**, the event is **dropped** for that subscriber (warn).
-//! - A panic inside a subscriber is **isolated**; it is logged and does not crash
-//!   the runtime or other subscribers.
-//!
-//! ### Shutdown semantics
-//! Call [`SubscriberSet::shutdown`] to close all queues and await worker tasks.
-//! Emitting after shutdown is not supported.
-//!
-//! ## Minimal example
-//! (Adapt the `Event` creation to your actual type.)
-//! ```rust
-//! // use taskvisor::subscribers::{Subscribe, SubscriberSet};
-//! // use taskvisor::events::Event;
-//! //
-//! // struct Metrics;
-//! // #[async_trait::async_trait]
-//! // impl Subscribe for Metrics {
-//! //     async fn on_event(&self, ev: &Event) {
-//! //         // export metrics here...
-//! //     }
-//! //     fn name(&self) -> &'static str { "metrics" }
-//! //     fn queue_capacity(&self) -> usize { 1024 }
-//! // }
-//! //
-//! // let set = SubscriberSet::new(vec![std::sync::Arc::new(Metrics) as _]);
-//! // // set.emit(&event);
-//! ```
+//! ## Contracts
+//! - [`Subscribe`] is the trait you implement to consume events.
+//! - [`SubscriberSet`] owns per-subscriber bounded queues and workers,
+//!   isolates panics, and reports overflow via internal events.
 
-mod embedded;
 mod subscriber;
 mod subscriber_set;
+
+#[cfg(feature = "logging")]
+mod embedded;
 
 pub use subscriber::Subscribe;
 pub use subscriber_set::SubscriberSet;
 
+#[cfg(feature = "logging")]
 pub use embedded::LogWriter;

@@ -20,7 +20,6 @@
 //! │  - AliveTracker (tracks task state with sequence numbers)         │
 //! │  - SubscriberSet (fans out to user subscribers)                   │
 //! │  - Registry (manages active tasks by name)                        │
-//! │  - Orchestrator (handles Add/Remove commands)                     │
 //! └──────┬──────────────────┬──────────────────┬───────────────┬──────┘
 //!        ▼                  ▼                  ▼               │
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
@@ -50,7 +49,7 @@
 //!                                            │
 //!                                  ┌─────────┼─────────┐
 //!                                  ▼         ▼         ▼
-//!                               worker1  worker2  workerN
+//!                                  worker1  worker2  workerN
 //!                                  │         │         │
 //!                                  ▼         ▼         ▼
 //!                             sub1.on   sub2.on   subN.on
@@ -59,7 +58,7 @@
 //!
 //! ### Lifecycle
 //! ```text
-//! TaskSpec ──► Supervisor ──► Orchestrator ──► TaskActor::run()
+//! TaskSpec ──► Supervisor ──► Registry ──► TaskActor::run()
 //!
 //! loop {
 //!   ├─► attempt += 1
@@ -126,7 +125,7 @@
 //!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = Vec::new();
 //!
 //!     // Create supervisor
-//!     let sup = Supervisor::new(cfg.clone(), subs);
+//!     let sup = Supervisor::new(cfg, subs);
 //!
 //!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
@@ -143,12 +142,11 @@
 //!         Some(Duration::from_secs(5)),
 //!     );
 //!
-//!     // Pass initial tasks to run() - they will be added by orchestrator
+//!     // Pass initial tasks to run() - they will be added by the registry listener
 //!     sup.run(vec![spec]).await?;
 //!     Ok(())
 //! }
 //! ```
-
 mod config;
 mod core;
 mod error;
