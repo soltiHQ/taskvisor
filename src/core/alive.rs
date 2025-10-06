@@ -107,11 +107,11 @@ impl AliveTracker {
     /// during graceful shutdown (tasks that didn't stop within grace period).
     pub async fn snapshot(&self) -> Vec<String> {
         let state = self.state.read().await;
-        let mut alive: Vec<String> = state
+        let alive: Vec<String> = state
             .iter()
-            .filter_map(|(name, ts)| ts.alive.then(|| name.clone()))
+            .filter(|(_, ts)| ts.alive)
+            .map(|(name, _)| name.clone())
             .collect();
-        alive.sort_unstable();
         alive
     }
 

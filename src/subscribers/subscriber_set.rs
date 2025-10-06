@@ -67,7 +67,7 @@ use std::sync::Arc;
 use futures::FutureExt;
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::events::{Bus, Event, EventKind};
+use crate::events::{Bus, Event};
 use crate::subscribers::Subscribe;
 
 /// Per-subscriber channel metadata.
