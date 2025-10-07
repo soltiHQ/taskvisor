@@ -24,8 +24,8 @@ taskvisor = "0.0.5"
 ```
 
 > Optional features:
->  - `logging` - enables the built-in [`LogWriter`], (demo logger);
->  - `events` - re-exports [`Event`] and [`EventKind`] or direct use in your code.
+>  - `logging` enables the built-in [`LogWriter`], (demo logger);
+>  - `events` re-exports [`Event`] and [`EventKind`] or direct use in your code.
 
 ```toml
 [dependencies]
@@ -62,7 +62,12 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
+    let spec = TaskSpec::new(
+        task, 
+        RestartPolicy::Always, 
+        BackoffPolicy::default(), 
+        None,
+    );
     supervisor.run(vec![spec]).await?;
     Ok(())
 }
@@ -82,8 +87,8 @@ anyhow = "1"
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use taskvisor::{
-    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, Subscribe, TaskError, TaskFn,
-    TaskSpec,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, 
+    Subscribe, TaskError, TaskFn, TaskSpec,
 };
 
 #[tokio::main]
@@ -104,7 +109,12 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
+    let spec = TaskSpec::new(
+        task, 
+        RestartPolicy::Always, 
+        BackoffPolicy::default(), 
+        None,
+    );
     supervisor.run(vec![spec]).await?;
     Ok(())
 }
@@ -125,14 +135,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use taskvisor::{
-    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, 
+    TaskFn, TaskRef, TaskSpec,
 };
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let supervisor = Arc::new(Supervisor::new(Config::default(), vec![]));
-
-    // Clone Arc once for use inside the controller closure
     let sup = supervisor.clone();
 
     let controller: TaskRef = TaskFn::arc("controller", move |ctx: CancellationToken| {
@@ -177,10 +186,10 @@ async fn main() -> anyhow::Result<()> {
 
 ### More Examples
 Check out the [examples](./examples) directory for:
-- `basic_one_shot.rs`: single one-shot task, graceful shutdown
-- `retry_with_backoff.rs`: retry loop with exponential backoff and jitter
-- `dynamic_add_remove.rs`: add/remove tasks at runtime via API
-- `custom_subscriber.rs`: custom subscriber reacting to events (requires --features events)
+- [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown
+- [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
+- [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
+- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events (requires --features events)
 
 ```bash
 # basic / retry / dynamic do not require extra features
