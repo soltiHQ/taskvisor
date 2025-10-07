@@ -82,13 +82,10 @@ impl JitterPolicy {
     /// If called on a non-`Decorrelated` policy, falls back to `apply(base)`.
     pub fn apply_decorrelated(&self, base: Duration, prev: Duration, max: Duration) -> Duration {
         if !matches!(self, JitterPolicy::Decorrelated) {
-            // Fallback to regular jitter over the *target* base delay.
             return self.apply(base);
         }
 
         let mut rng = rand::rng();
-
-        // Convert to milliseconds with clamping to avoid overflow.
         let base_ms = (base.as_millis().min(u128::from(u64::MAX))) as u64;
         let prev_ms = (prev.as_millis().min(u128::from(u64::MAX))) as u64;
         let max_ms = (max.as_millis().min(u128::from(u64::MAX))) as u64;
@@ -96,7 +93,6 @@ impl JitterPolicy {
         // Upper bound is min(prev*3, max), but never below base.
         let upper_bound = prev_ms.saturating_mul(3).min(max_ms);
         let clamped_upper = upper_bound.max(base_ms);
-
         if base_ms >= clamped_upper {
             return base;
         }

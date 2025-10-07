@@ -9,6 +9,7 @@
 //! [`TaskError`] has additional methods: `is_retryable()` and `is_fatal()`
 
 use std::time::Duration;
+
 use thiserror::Error;
 
 /// # Errors produced by the taskvisor runtime.

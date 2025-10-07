@@ -13,7 +13,10 @@
 use std::time::Duration;
 
 use crate::{
-    config::Config, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
+    config::Config,
+    policies::BackoffPolicy,
+    policies::RestartPolicy,
+    tasks::task::TaskRef,
 };
 
 /// Specification for running a task under supervision.

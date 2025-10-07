@@ -24,9 +24,11 @@
 //! stale `TaskStarting` (with a lower `seq`) from resurrecting a removed task. If you need to
 //! reclaim memory, implement an explicit purge strategy outside the tracker.
 
-use crate::events::{Event, EventKind};
 use std::collections::HashMap;
+
 use tokio::sync::RwLock;
+
+use crate::events::{Event, EventKind};
 
 /// Per-task state for ordering validation.
 #[derive(Debug, Clone)]

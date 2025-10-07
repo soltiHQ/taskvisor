@@ -28,9 +28,10 @@
 //! let sup = Supervisor::new(Config::default(), subs);
 //! ```
 
+use async_trait::async_trait;
+
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
-use async_trait::async_trait;
 
 /// Human-readable event printer for stdout.
 ///

@@ -29,8 +29,9 @@
 //! assert_eq!(backoff.next(Some(Duration::from_secs(20))), Duration::from_secs(10));
 //! ```
 
-use crate::policies::jitter::JitterPolicy;
 use std::time::Duration;
+
+use crate::policies::jitter::JitterPolicy;
 
 /// Retry backoff policy.
 ///

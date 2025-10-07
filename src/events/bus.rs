@@ -27,8 +27,9 @@
 //! - Receivers that fell behind observe `RecvError::Lagged(n)` on the next `recv()`,
 //!   indicating how many events were skipped.
 
-use super::event::Event;
 use tokio::sync::broadcast;
+
+use super::event::Event;
 
 /// Broadcast channel for runtime events.
 ///

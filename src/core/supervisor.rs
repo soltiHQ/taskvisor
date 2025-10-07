@@ -14,17 +14,14 @@
 //! ## Architecture
 //! ```text
 //! Supervisor::run()
-//!     │
 //!     ├──► subscriber_listener()
 //!     │         ├──► updates AliveTracker
 //!     │         └──► fans out to SubscriberSet
-//!     │
 //!     ├──► Registry.spawn_listener()
 //!     │         ├──► TaskAddRequested → spawn actor
 //!     │         ├──► TaskRemoveRequested → cancel task
 //!     │         ├──► ActorExhausted → cleanup
 //!     │         └──► ActorDead → cleanup
-//!     │
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
 //!           ├──► cancel all tasks
@@ -34,27 +31,21 @@
 //! ## Runtime task management
 //! ```text
 //! add_task(spec)
-//!     │
 //!     ├──► Bus.publish(TaskAddRequested + spec)
-//!     │
 //!     └──► Registry.event_listener
 //!           ├──► spawn actor
 //!           ├──► registry.insert(handle)
 //!           └──► Bus.publish(TaskAdded)
 //!
 //! remove_task(name)
-//!     │
 //!     ├──► Bus.publish(TaskRemoveRequested + name)
-//!     │
 //!     └──► Registry.event_listener
 //!           ├──► registry.remove(name) + cancel token
 //!           ├──► await actor finish
 //!           └──► Bus.publish(TaskRemoved)
 //!
 //! Actor finishes
-//!     │
 //!     ├──► Bus.publish(ActorExhausted/ActorDead)
-//!     │
 //!     └──► Registry.event_listener
 //!           ├──► registry.remove(name)
 //!           └──► Bus.publish(TaskRemoved)
@@ -70,8 +61,10 @@
 //! ## Example
 //! ```rust
 //! use std::time::Duration;
-//! use taskvisor::{Config, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
+//!
 //! use tokio_util::sync::CancellationToken;
+//!
+//! use taskvisor::{Config, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -99,11 +92,16 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::{
+    sync::Semaphore,
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{alive::AliveTracker, registry::Registry};
+use crate::core::{
+    alive::AliveTracker,
+    registry::Registry,
+};
 use crate::{
     config::Config,
     error::RuntimeError,

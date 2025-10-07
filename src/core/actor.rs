@@ -182,7 +182,6 @@ impl TaskActor {
                 &self.bus,
             )
             .await;
-
             drop(permit);
 
             match res {
