@@ -36,9 +36,9 @@ use crate::policies::jitter::JitterPolicy;
 /// Retry backoff policy.
 ///
 /// Encapsulates parameters that determine how retry delays grow:
-/// - [`factor`] multiplicative growth factor;
-/// - [`first`] the initial delay;
-/// - [`max`] the maximum delay cap.
+/// - [`BackoffPolicy::factor`] — multiplicative growth factor;
+/// - [`BackoffPolicy::first`] — the initial delay;
+/// - [`BackoffPolicy::max`] — the maximum delay cap.
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffPolicy {
     /// Initial delay before the first retry.
