@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
     BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef, TaskSpec,
+    Subscribe
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -28,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.bus_capacity = 256;
 
     // No subscribers here (keep demo focused)
-    let subs: Vec<Arc<dyn taskvisor::Subscribe>> = Vec::new();
+    let subs: Vec<Arc<dyn Subscribe>> = Vec::new();
 
     // 2) Create supervisor and wrap in Arc so we can use it from multiple tasks
     let sup = Arc::new(Supervisor::new(cfg, subs));
