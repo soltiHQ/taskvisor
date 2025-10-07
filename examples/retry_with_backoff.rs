@@ -30,8 +30,10 @@
 //! cargo run --example retry_with_backoff
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use taskvisor::{
     BackoffPolicy, Config, JitterPolicy, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec,
 };

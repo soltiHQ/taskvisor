@@ -1,25 +1,40 @@
 //! # Example: dynamic_add_remove
 //!
-//! Demonstrates adding and removing tasks at runtime via the supervisor.
+//! Dynamically add and remove tasks at runtime via the `Supervisor`.
 //!
-//! Key points:
-//! - Start the `Supervisor` (in its own task) with an initial task set.
-//! - From another async task (“controller”), add and remove tasks over time.
-//! - When the registry becomes empty, `Supervisor::run()` returns gracefully.
+//! Demonstrates how to:
+//! - Start the `Supervisor` (on a background task) with an initial task set.
+//! - From another async task (“controller”), add/remove tasks over time.
+//! - Let `Supervisor::run()` return naturally once the registry drains.
+//!
+//! ## Flow
+//! ```text
+//! main()
+//!   ├─► spawn Supervisor::run(initial_specs)
+//!   │     ├─► publish(TaskAddRequested ...)
+//!   │     ├─► Registry::spawn_listener()
+//!   │     └─► TaskActor::run() … publishes lifecycle events
+//!   │
+//!   └─► controller task
+//!         ├─► Supervisor.add_task(...)
+//!         ├─► Supervisor.remove_task(...)
+//!         └─► (repeat)
+//!
+//! When the registry becomes empty:
+//!   Supervisor::run() completes → main() joins the task and exits.
+//! ```
 //!
 //! ## Run
 //! ```bash
 //! cargo run --example dynamic_add_remove
 //! ```
 
-use std::sync::Arc;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-
+use std::{sync::Arc, time::Duration};
 use taskvisor::{
-    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef, TaskSpec,
-    Subscribe
+    BackoffPolicy, Config, RestartPolicy, Subscribe, Supervisor, TaskError, TaskFn, TaskRef,
+    TaskSpec,
 };
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

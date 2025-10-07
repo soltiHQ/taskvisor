@@ -1,25 +1,37 @@
-//! Custom subscriber example.
+//! # Example: custom_subscriber
 //!
-//! Demonstrates how to implement and register a custom event subscriber.
+//! Demonstrates how to build and attach a custom event subscriber.
 //!
-//! What it shows:
-//! - Implementing `Subscribe` and overriding `queue_capacity()`
-//! - Receiving and pattern-matching `EventKind`
-//! - Running a supervisor with subscribers attached
-//! - Emitting events from a couple of one-shot tasks
+//! Shows how to:
+//! - Implement the [`Subscribe`] trait.
+//! - Inspect [`Event`] / [`EventKind`] for task lifecycle metrics.
+//! - Wire the subscriber into [`Supervisor::new`].
 //!
-//! Run with:
-//! `cargo run --example custom_subscriber --features events`
+//! ## Flow
+//! ```text
+//! TaskSpec ──► Supervisor::run()
+//!     ├─► Bus.publish(TaskAddRequested)
+//!     ├─► Registry::spawn_listener()
+//!     ├─► TaskActor::run()
+//!     │     ├─► publish(TaskStarting/TaskStopped/TaskFailed/TimeoutHit/...)
+//!     │     └─► publish(ActorExhausted | ActorDead)
+//!     └─► subscriber_listener (in Supervisor)
+//!           ├─► AliveTracker.update()
+//!           └─► SubscriberSet.emit{,_arc}() ──► MySubscriber.on_event()
+//! ```
+//!
+//! ## Run
+//! Requires the `events` feature to export `Event`/`EventKind` types.
+//! ```bash
+//! cargo run --example custom_subscriber --features events
+//! ```
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio_util::sync::CancellationToken;
-
+use std::{sync::Arc, time::Duration};
 use taskvisor::{
     BackoffPolicy, Config, Event, EventKind, RestartPolicy, Subscribe, Supervisor, TaskError,
     TaskFn, TaskRef, TaskSpec,
 };
+use tokio_util::sync::CancellationToken;
 
 /// A simple console subscriber that prints selected events.
 /// In real life, you could export metrics, ship logs, send alerts, etc.
@@ -98,7 +110,6 @@ impl Subscribe for ConsoleSubscriber {
         "console"
     }
 
-    // Make the per-subscriber queue a bit larger for the demo.
     fn queue_capacity(&self) -> usize {
         1024
     }
@@ -107,17 +118,17 @@ impl Subscribe for ConsoleSubscriber {
 /// One-shot task that prints and exits successfully.
 fn oneshot_ok(name: &'static str) -> TaskSpec {
     // Use an owned String inside the future to satisfy 'static bounds cleanly.
-    let tname = name.to_owned();
+    let n = name.to_owned();
 
     let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| {
-        let tname = tname.clone();
+        let n = n.clone();
         async move {
             if ctx.is_cancelled() {
                 return Ok(());
             }
-            println!("[{tname}] doing one-shot work...");
+            println!("[{n}] doing one-shot work...");
             tokio::time::sleep(Duration::from_millis(300)).await;
-            println!("[{tname}] success");
+            println!("[{n}] success");
             Ok::<(), TaskError>(())
         }
     });
@@ -132,15 +143,15 @@ fn oneshot_ok(name: &'static str) -> TaskSpec {
 
 /// One-shot task that fails on purpose (to show TaskFailed / ActorExhausted).
 fn oneshot_fail(name: &'static str) -> TaskSpec {
-    let tname = name.to_owned();
+    let n = name.to_owned();
 
     let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| {
-        let tname = tname.clone();
+        let n = n.clone();
         async move {
             if ctx.is_cancelled() {
                 return Ok(());
             }
-            println!("[{tname}] starting and will fail...");
+            println!("[{n}] starting and will fail...");
             tokio::time::sleep(Duration::from_millis(250)).await;
             Err(TaskError::Fail {
                 error: "boom (demo failure)".to_string(),
@@ -176,6 +187,6 @@ async fn main() -> anyhow::Result<()> {
     // Run until all tasks complete (since both are one-shot, this will exit naturally).
     sup.run(tasks).await?;
 
-    println!("\n✅ finished");
+    println!("\nfinished");
     Ok(())
 }

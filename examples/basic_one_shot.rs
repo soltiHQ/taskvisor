@@ -67,6 +67,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Run supervisor with this task
     sup.run(vec![spec]).await?;
-
     Ok(())
 }
