@@ -6,7 +6,6 @@
 //! ## Architecture
 //! ```text
 //! Supervisor ──► Bus ──► subscriber_listener() ──► AliveTracker::update()
-//!                                                         │
 //!                                                         ▼
 //!                                              HashMap<String, TaskState>
 //!                                                  (name → {seq, alive})

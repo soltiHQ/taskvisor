@@ -15,13 +15,13 @@
 //! ```text
 //! Supervisor::run()
 //!     ├──► subscriber_listener()
-//!     │         ├──► updates AliveTracker
-//!     │         └──► fans out to SubscriberSet
+//!     │     ├──► updates AliveTracker
+//!     │     └──► fans out to SubscriberSet
 //!     ├──► Registry.spawn_listener()
-//!     │         ├──► TaskAddRequested → spawn actor
-//!     │         ├──► TaskRemoveRequested → cancel task
-//!     │         ├──► ActorExhausted → cleanup
-//!     │         └──► ActorDead → cleanup
+//!     │     ├──► TaskAddRequested → spawn actor
+//!     │     ├──► TaskRemoveRequested → cancel task
+//!     │     ├──► ActorExhausted → cleanup
+//!     │     └──► ActorDead → cleanup
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
 //!           ├──► cancel all tasks
