@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### Dynamic Tasks
+#### Dynamic Tasks Example
 ```toml
 [dependencies]
 taskvisor = "0.0.5"
