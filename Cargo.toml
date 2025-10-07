@@ -1,6 +1,6 @@
 [package]
 name = "taskvisor"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 
 description = "Event-driven task orchestration with restart, backoff, and user-defined subscribers"
@@ -28,13 +28,3 @@ thiserror = "2.0.16"
 anyhow = "1.0.100"
 futures = "0.3.31"
 rand = "0.10.0-rc.0"
-
-[[example]]
-name = "task_patterns"
-path = "examples/task_patterns.rs"
-required-features = ["logging"]
-
-[[example]]
-name = "custom_subscriber"
-path = "examples/custom_subscriber.rs"
-required-features = ["events"]

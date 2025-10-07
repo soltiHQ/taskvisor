@@ -1,4 +1,4 @@
-[![Minimum Rust 1.75](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://rust-lang.org)
+[![Minimum Rust 1.85](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-orange.svg)](./LICENSE)
 
@@ -11,39 +11,38 @@
 </div>
 
 ## 📖 Features
-- observe all lifecycle events (start/stop/failure/backoff/timeout/shutdown);
-- integrate with custom observers for logging, metrics, monitoring, ...;
-- enforce global concurrency limits and graceful shutdown on signals;
-- spawn supervised task actors with restart/backoff/timeout policies.
+- Observe lifecycle events (start / stop / failure / backoff / timeout / shutdown)
+- Plug custom subscribers for logging, metrics, alerting
+- Global concurrency limiting and graceful shutdown on OS signals
+- Supervised task actors with restart/backoff/timeout policies
 
 ## 📦 Installation
 #### Cargo.toml:
 ```toml
 [dependencies]
-taskvisor = "0.0.4"
+taskvisor = "0.0.5"
 ```
 
 > Optional features:
->  - `logging` - enables the built-in [`LogWriter`], which prints events to stdout _(for demo and debug)_;
->  - `events` - exports [`Event`] and [`EventKind`] types at the crate root for direct use.
+>  - `logging` enables the built-in [`LogWriter`], (demo logger);
+>  - `events` re-exports [`Event`] and [`EventKind`] or direct use in your code.
 
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.4", features = ["logging", "events"] }
+taskvisor = { version = "0.0.5", features = ["logging", "events"] }
 ```
 
 ## 📝 Quick start
 #### Minimal Example (No subscribers)
 ```toml
 [dependencies]
-taskvisor = "0.0.4"
+taskvisor = "0.0.5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+anyhow = "1"
 ```
 ```rust
-//! The simplest possible taskvisor usage demonstrating:
-//! - Task definition with proper cancellation handling
-//! - Basic supervisor setup
-//! - Graceful shutdown on Ctrl+C
-//! - No subscribers
+//! Minimal: single task, no subscribers.
 
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -63,7 +62,12 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
+    let spec = TaskSpec::new(
+        task, 
+        RestartPolicy::Always, 
+        BackoffPolicy::default(), 
+        None,
+    );
     supervisor.run(vec![spec]).await?;
     Ok(())
 }
@@ -72,21 +76,19 @@ async fn main() -> anyhow::Result<()> {
 #### Minimal Example (Embedded subscriber)
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.4", features = ["logging"] }
+taskvisor = { version = "0.0.5", features = ["logging"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+anyhow = "1"
 ```
 ```rust
-//! # Minimal Example
-//!
-//! The simplest possible taskvisor usage demonstrating:
-//! - Task definition with proper cancellation handling
-//! - Built-in LogWriter subscriber for observability
-//! - Graceful shutdown on Ctrl+C
+//! Minimal with built-in LogWriter subscriber.
 
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use taskvisor::{
-    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, Subscribe, TaskError, TaskFn,
-    TaskSpec,
+    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, 
+    Subscribe, TaskError, TaskFn, TaskSpec,
 };
 
 #[tokio::main]
@@ -107,7 +109,76 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let spec = TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None);
+    let spec = TaskSpec::new(
+        task, 
+        RestartPolicy::Always, 
+        BackoffPolicy::default(), 
+        None,
+    );
+    supervisor.run(vec![spec]).await?;
+    Ok(())
+}
+```
+
+### Dynamic Tasks
+```toml
+[dependencies]
+taskvisor = "0.0.5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+anyhow = "1"
+```
+```rust
+//! Demonstrates how a running task can add another task dynamically.
+
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use taskvisor::{
+    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, 
+    TaskFn, TaskRef, TaskSpec,
+};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let supervisor = Arc::new(Supervisor::new(Config::default(), vec![]));
+    let sup = supervisor.clone();
+
+    let controller: TaskRef = TaskFn::arc("controller", move |ctx: CancellationToken| {
+        let sup = sup.clone();
+        async move {
+            println!("[controller] preparing to start worker...");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let worker: TaskRef = TaskFn::arc("worker", |_ctx| async move {
+                println!("[worker] started");
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                println!("[worker] done");
+                Ok::<(), TaskError>(())
+            });
+
+            let worker_spec = TaskSpec::new(
+                worker,
+                RestartPolicy::Never,
+                BackoffPolicy::default(),
+                Some(Duration::from_secs(5)),
+            );
+
+            // Publish TaskAddRequested (handled by Registry)
+            let _ = sup.add_task(worker_spec);
+
+            println!("[controller] worker task requested!");
+            Ok(())
+        }
+    });
+
+    let spec = TaskSpec::new(
+        controller,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    );
+
     supervisor.run(vec![spec]).await?;
     Ok(())
 }
@@ -115,12 +186,19 @@ async fn main() -> anyhow::Result<()> {
 
 ### More Examples
 Check out the [examples](./examples) directory for:
-- `task_patterns.rs`: Different restart strategies and patterns
-- `custom_subscriber.rs`: Building custom subscribers
+- [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown
+- [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
+- [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
+- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events (requires --features events)
 
 ```bash
-    cargo run --example custom_subscriber --features=events
-    cargo run --example task_patterns --features=logging
+# basic / retry / dynamic do not require extra features
+cargo run --example basic_one_shot
+cargo run --example retry_with_backoff
+cargo run --example dynamic_add_remove
+
+# subscribers that inspect events need the 'events' feature
+cargo run --example custom_subscriber --features events
 ```
 
 ## 🤝 Contributing

@@ -2,19 +2,19 @@
 //!
 //! This module defines two main error enums:
 //!
-//! - [`RuntimeError`] — errors raised by the orchestration runtime itself.
-//! - [`TaskError`] — errors raised by individual task executions.
+//! - [`RuntimeError`] errors raised by the orchestration runtime itself.
+//! - [`TaskError`] errors raised by individual task executions.
 //!
-//! Both types provide helper methods (`as_label`, `as_message`) for logging/metrics
-//! and additional utilities such as [`TaskError::is_retryable`].
+//! Both types provide helper methods `as_label` for metrics.
+//! [`TaskError`] has additional methods: `is_retryable()` and `is_fatal()`
 
 use std::time::Duration;
+
 use thiserror::Error;
 
 /// # Errors produced by the taskvisor runtime.
 ///
-/// These represent failures in the orchestration system itself,
-/// such as a shutdown sequence exceeding its grace period.
+/// These represent failures in the orchestration system itself.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RuntimeError {
@@ -26,6 +26,20 @@ pub enum RuntimeError {
         /// List of task names that did not shut down in time.
         stuck: Vec<String>,
     },
+
+    /// Attempted to add a task with a name that already exists in the registry.
+    #[error("task '{name}' already exists in registry")]
+    TaskAlreadyExists {
+        /// The duplicate task name.
+        name: String,
+    },
+
+    /// Attempted to remove a task that doesn't exist in the registry.
+    #[error("task '{name}' not found in registry")]
+    TaskNotFound {
+        /// The missing task name.
+        name: String,
+    },
 }
 
 impl RuntimeError {
@@ -33,15 +47,8 @@ impl RuntimeError {
     pub fn as_label(&self) -> &'static str {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
-        }
-    }
-
-    /// Returns a human-readable message with details about the error.
-    pub fn as_message(&self) -> String {
-        match self {
-            RuntimeError::GraceExceeded { grace, stuck } => {
-                format!("grace exceeded after {grace:?}; stuck tasks={stuck:?}")
-            }
+            RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
+            RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
         }
     }
 }
@@ -65,16 +72,15 @@ pub enum TaskError {
     #[error("execution failed: {error}")]
     Fail { error: String },
 
-    /// Task was cancelled due to shutdown or parent cancellation.
+    /// Task was canceled due to shut down or parent cancellation.
     ///
-    /// Returned when task detects `CancellationToken::is_cancelled()` and exits gracefully.
     /// This is **not an error** in traditional sense, but signals intentional termination.
-    #[error("context cancelled")]
+    #[error("context canceled")]
     Canceled,
 }
 
 impl TaskError {
-    /// Returns a short stable label (snake_case) for use in logs/metrics.
+    /// Returns a short stable label.
     pub fn as_label(&self) -> &'static str {
         match self {
             TaskError::Timeout { .. } => "task_timeout",
@@ -84,18 +90,21 @@ impl TaskError {
         }
     }
 
-    /// Returns a human-readable message with details about the error.
-    pub fn as_message(&self) -> String {
-        match self {
-            TaskError::Timeout { timeout } => format!("timeout: {timeout:?}"),
-            TaskError::Fatal { error } => format!("fatal: {error}"),
-            TaskError::Fail { error } => format!("error: {error}"),
-            TaskError::Canceled => "context cancelled".to_string(),
-        }
-    }
-
     /// Indicates whether the error type is safe to retry.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, TaskError::Fail { .. } | TaskError::Timeout { .. })
+        matches!(self, TaskError::Timeout { .. } | TaskError::Fail { .. })
+    }
+
+    /// Indicates whether the error is fatal.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, TaskError::Fatal { .. })
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for TaskError {
+    fn from(e: tokio::time::error::Elapsed) -> Self {
+        TaskError::Fail {
+            error: e.to_string(),
+        }
     }
 }

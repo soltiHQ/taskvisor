@@ -15,28 +15,38 @@
 //!
 //! If retry scheduled:
 //!   → BackoffScheduled → [sleep] → (next attempt with new seq)
-//! ```
+//!
+//! On exit:
+//!   → ActorExhausted (policy forbids restart)
+//!   → ActorDead (fatal error)
+//!   → (no event if canceled)
+//!```
 //!
 //! ## Architecture
 //! ```text
 //! TaskSpec ──► Supervisor ──► TaskActor::run()
 //!
 //! loop {
-//!   ├─► acquire semaphore
+//!   ├─► check cancellation (fast-path)
+//!   ├─► acquire semaphore (cancellable)
+//!   ├─► check cancellation (after acquire)
+//!   ├─► attempt += 1
 //!   ├─► publish TaskStarting
-//!   ├─► run_once() ─────► task.spawn()
-//!   │       │                  ▼
-//!   │       │            (one attempt)
-//!   │       ▼                  ▼
-//!   │     Ok/Err ──► publish TaskStopped/TaskFailed
-//!   │       ▼
+//!   ├─► run_once() ─► task.spawn()
+//!   │       │              ▼
+//!   │       │        (one attempt)
+//!   │       │              ▼
+//!   │       └─► runner publishes:
+//!   │             - TaskStopped (success)
+//!   │             - TaskFailed (error)
+//!   │             - TimeoutHit (timeout)
 //!   ├─► apply RestartPolicy
-//!   │     ├─► Never       → break
-//!   │     ├─► OnFailure   → break if Ok
-//!   │     └─► Always      → continue
-//!   └─► if retry:
+//!   │     ├─► Never       → publish ActorExhausted → break
+//!   │     ├─► OnFailure   → if success: publish ActorExhausted → break
+//!   │     └─► Always      → continue (on success)
+//!   └─► on retryable failure:
 //!        ├─► publish BackoffScheduled
-//!        └─► sleep(backoff_delay)
+//!        └─► sleep(backoff_delay) (cancellable)
 //! }
 //! ```
 //!
@@ -58,10 +68,32 @@ use crate::{
     tasks::Task,
 };
 
-/// Configuration parameters for a task actor.
+/// Reason why a task actor exited.
 ///
-/// These parameters are extracted from a [`TaskSpec`](crate::TaskSpec)
-/// by the [`Supervisor`](crate::Supervisor) when spawning actors.
+/// Used to determine what event to publish and whether to clean up the task from registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorExitReason {
+    /// Actor exhausted its restart policy and will not restart.
+    ///
+    /// Occurs when:
+    /// - `RestartPolicy::Never` and task completed (success or failure)
+    /// - `RestartPolicy::OnFailure` and task completed successfully
+    PolicyExhausted,
+
+    /// Actor was canceled due to shut down signal or explicit removal.
+    ///
+    /// The task detected `CancellationToken::is_cancelled()` and exited gracefully.
+    Cancelled,
+
+    /// Actor died due to a fatal error that should not be retried.
+    ///
+    /// Occurs when:
+    /// - Task returned `TaskError::Fatal`
+    /// - (Future) Max retries exceeded
+    Fatal,
+}
+
+/// Configuration parameters for a task actor.
 #[derive(Clone)]
 pub struct TaskActorParams {
     /// When to restart the task.
@@ -73,23 +105,10 @@ pub struct TaskActorParams {
 }
 
 /// Supervises execution of a single [`Task`] with retries, backoff, and event publishing.
-///
-/// ### Responsibilities
-/// - **Concurrency control**: Acquires semaphore permit before each attempt
-/// - **Graceful shutdown**: Responds to cancellation at safe points
-/// - **Event publishing**: Reports all lifecycle events to the bus
-/// - **Execution**: Runs the task via [`run_once`]
-/// - **Restart policy**: Supervises by the [`TaskActorParams`](crate::TaskActorParams)
-///
-/// ### Rules
-/// - Attempts run **sequentially** (never concurrent for one actor)
-/// - Cancellation is checked at **safe points** (semaphore acquire, backoff sleep)
-/// - Events are published with **monotonic sequence numbers** (ordering)
-/// - Backoff counter **resets on success** (healthy system assumption)
 pub struct TaskActor {
     /// Task to execute.
     pub task: Arc<dyn Task>,
-    /// Parameters for supervise task executions.
+    /// Parameters for supervised task executions.
     pub params: TaskActorParams,
     /// Internal event bus (used to publish lifecycle events).
     pub bus: Bus,
@@ -114,76 +133,45 @@ impl TaskActor {
     }
 
     /// Runs the actor until completion, restart exhaustion, or cancellation.
-    ///
-    /// This is the main actor loop. It will:
-    /// 1. Acquire semaphore permit (if configured)
-    /// 2. Publish `TaskStarting` event
-    /// 3. Execute one attempt via `run_once`
-    /// 4. Apply restart policy (defined in params)
-    /// 5. If retry needed, publish `BackoffScheduled` and sleep
-    /// 6. Repeat until exit condition
-    ///
-    /// ### Exit conditions
-    /// The actor stops when:
-    /// - Task succeeds and restart policy forbids continuation
-    /// - Task fails and restart policy forbids retry
-    /// - `runtime_token` is cancelled (shutdown signal)
-    /// - Semaphore is closed (runtime shutdown in progress)
-    ///
-    /// ### Cancellation semantics
-    /// - `runtime_token` is checked at **safe points** only:
-    ///   - Before semaphore acquisition
-    ///   - During semaphore acquisition (cancellable wait)
-    ///   - During backoff sleep (cancellable wait)
-    /// - Task execution receives a **child token** that gets cancelled on timeout
-    /// - Cancellation during backoff **aborts sleep** immediately
-    ///
-    /// ### Backoff semantics
-    /// - First retry uses `BackoffPolicy::first` delay
-    /// - Subsequent retries multiply previous delay by `factor`
-    /// - Delays are capped at `BackoffPolicy::max`
-    /// - Jitter is applied according to `BackoffPolicy::jitter`
-    /// - Attempt counter **never resets** (monotonic lifetime counter)
-    ///
-    /// ### Observability
-    /// All lifecycle events are published to the bus for subscribers to process:
-    /// - `TaskStarting`: attempt started (includes attempt number)
-    /// - `TaskStopped`: attempt succeeded
-    /// - `TaskFailed`: attempt failed (includes error)
-    /// - `TimeoutHit`: attempt timed out
-    /// - `BackoffScheduled`: retry scheduled (includes delay and attempt number)
-    ///
-    /// Subscribers can implement metrics, logging, alerting, etc.
-    pub async fn run(self, runtime_token: CancellationToken) {
+    pub async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let mut prev_delay: Option<Duration> = None;
         let mut attempt: u64 = 0;
+        let task_name = self.task.name().to_string();
 
         loop {
             if runtime_token.is_cancelled() {
-                break;
+                return ActorExitReason::Cancelled;
             }
-            let _guard = match &self.semaphore {
+            let permit = match &self.semaphore {
                 Some(sem) => {
-                    let permit_future = sem.clone().acquire_owned();
-                    tokio::pin!(permit_future);
-
+                    let fut = sem.clone().acquire_owned();
+                    tokio::pin!(fut);
                     select! {
-                        res = &mut permit_future => {
-                            match res {
-                                Ok(permit) => Some(permit),
-                                Err(_closed) => { break; }
+                        res = &mut fut => match res {
+                            Ok(p) => Some(p),
+                            Err(_closed) => {
+                                self.bus.publish(
+                                    Event::now(EventKind::ActorExhausted)
+                                        .with_task(&task_name)
+                                        .with_error("semaphore_closed")
+                                );
+                                return ActorExitReason::Cancelled;
                             }
-                        }
-                        _ = runtime_token.cancelled() => { break; }
+                        },
+                        _ = runtime_token.cancelled() => return ActorExitReason::Cancelled,
                     }
                 }
                 None => None,
             };
+            if runtime_token.is_cancelled() {
+                drop(permit);
+                return ActorExitReason::Cancelled;
+            }
 
             attempt += 1;
             self.bus.publish(
                 Event::now(EventKind::TaskStarting)
-                    .with_task(self.task.name())
+                    .with_task(&task_name)
                     .with_attempt(attempt),
             );
             let res = run_once(
@@ -194,35 +182,61 @@ impl TaskActor {
                 &self.bus,
             )
             .await;
+            drop(permit);
 
             match res {
                 Ok(()) => {
                     prev_delay = None;
 
                     match self.params.restart {
-                        RestartPolicy::Always => continue,
-                        RestartPolicy::OnFailure => break,
-                        RestartPolicy::Never => break,
+                        RestartPolicy::Always => {
+                            continue;
+                        }
+                        RestartPolicy::OnFailure | RestartPolicy::Never => {
+                            self.bus.publish(
+                                Event::now(EventKind::ActorExhausted)
+                                    .with_task(&task_name)
+                                    .with_attempt(attempt)
+                                    .with_error("policy_exhausted_success"),
+                            );
+                            return ActorExitReason::PolicyExhausted;
+                        }
                     }
                 }
+                Err(e) if e.is_fatal() => {
+                    self.bus.publish(
+                        Event::now(EventKind::ActorDead)
+                            .with_task(&task_name)
+                            .with_attempt(attempt)
+                            .with_error(e.to_string()),
+                    );
+                    return ActorExitReason::Fatal;
+                }
                 Err(TaskError::Canceled) => {
-                    break;
+                    return ActorExitReason::Cancelled;
                 }
                 Err(e) => {
-                    let should_retry = matches!(
+                    let policy_allows_retry = matches!(
                         self.params.restart,
                         RestartPolicy::OnFailure | RestartPolicy::Always
                     );
-                    if !should_retry {
-                        break;
+                    let error_is_retryable = e.is_retryable();
+
+                    if !(policy_allows_retry && error_is_retryable) {
+                        self.bus.publish(
+                            Event::now(EventKind::ActorExhausted)
+                                .with_task(&task_name)
+                                .with_attempt(attempt)
+                                .with_error(e.to_string()),
+                        );
+                        return ActorExitReason::PolicyExhausted;
                     }
 
                     let delay = self.params.backoff.next(prev_delay);
                     prev_delay = Some(delay);
-
                     self.bus.publish(
                         Event::now(EventKind::BackoffScheduled)
-                            .with_task(self.task.name())
+                            .with_task(&task_name)
                             .with_delay(delay)
                             .with_attempt(attempt)
                             .with_error(e.to_string()),
@@ -231,8 +245,10 @@ impl TaskActor {
                     let sleep = time::sleep(delay);
                     tokio::pin!(sleep);
                     select! {
-                        _ = &mut sleep => {}
-                        _ = runtime_token.cancelled() => { break; }
+                        _ = &mut sleep => {},
+                        _ = runtime_token.cancelled() => {
+                            return ActorExitReason::Cancelled;
+                        }
                     }
                 }
             }

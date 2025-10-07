@@ -15,10 +15,11 @@
 //!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
 //!            ▼                  ▼                  ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
-//! │         Supervisor (spawns actors, handles OS signals)            │
+//! │         Supervisor (runtime orchestrator)                         │
 //! │  - Bus (broadcast events)                                         │
 //! │  - AliveTracker (tracks task state with sequence numbers)         │
 //! │  - SubscriberSet (fans out to user subscribers)                   │
+//! │  - Registry (manages active tasks by name)                        │
 //! └──────┬──────────────────┬──────────────────┬───────────────┬──────┘
 //!        ▼                  ▼                  ▼               │
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
@@ -30,7 +31,7 @@
 //!      │ Events:          │ Events:          │ Events:         │
 //!      │ - TaskStarting   │ - TaskStarting   │ - TaskStarting  │
 //!      │ - TaskFailed     │ - TaskStopped    │ - TimeoutHit    │
-//!      │ - BackoffSched.  │ - ...            │ - ...           │
+//!      │ - BackoffSched.  │ - ActorExhausted │ - ...           │
 //!      │                  │                  │                 │
 //!      ▼                  ▼                  ▼                 ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
@@ -48,7 +49,7 @@
 //!                                            │
 //!                                  ┌─────────┼─────────┐
 //!                                  ▼         ▼         ▼
-//!                               worker1  worker2  workerN
+//!                                  worker1  worker2  workerN
 //!                                  │         │         │
 //!                                  ▼         ▼         ▼
 //!                             sub1.on   sub2.on   subN.on
@@ -57,7 +58,7 @@
 //!
 //! ### Lifecycle
 //! ```text
-//! TaskSpec ──► Supervisor ──► TaskActor::run()
+//! TaskSpec ──► Supervisor ──► Registry ──► TaskActor::run()
 //!
 //! loop {
 //!   ├─► attempt += 1
@@ -66,12 +67,12 @@
 //!   ├─► run_once(task, timeout, attempt)
 //!   │       │
 //!   │       ├─ Ok  ──► publish TaskStopped
-//!   │       │          ├─ RestartPolicy::Never     → exit
-//!   │       │          ├─ RestartPolicy::OnFailure → exit
+//!   │       │          ├─ RestartPolicy::Never     → ActorExhausted, exit
+//!   │       │          ├─ RestartPolicy::OnFailure → ActorExhausted, exit
 //!   │       │          └─ RestartPolicy::Always    → reset delay, continue
 //!   │       │
 //!   │       └─ Err ──► publish TaskFailed{ task, error, attempt }
-//!   │                  ├─ RestartPolicy::Never     → exit
+//!   │                  ├─ RestartPolicy::Never     → ActorExhausted, exit
 //!   │                  └─ RestartPolicy::OnFailure/Always:
 //!   │                       ├─ compute delay = backoff.next(prev_delay)
 //!   │                       ├─ publish BackoffScheduled{ delay, attempt }
@@ -79,10 +80,13 @@
 //!   │                       └─ continue
 //!   │
 //!   └─ exit conditions:
-//!        - runtime_token cancelled (OS signal)
-//!        - RestartPolicy forbids continuation
+//!        - runtime_token cancelled (OS signal or explicit remove)
+//!        - RestartPolicy forbids continuation → ActorExhausted
+//!        - Fatal error → ActorDead
 //!        - semaphore closed
 //! }
+//!
+//! On exit: actor cleanup removes from Registry (if PolicyExhausted/Fatal)
 //! ```
 //!
 //! ## Features
@@ -101,6 +105,7 @@
 //!
 //! ## Example
 //! ```rust
+//! use std::sync::Arc;
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
 //! use taskvisor::{BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
@@ -110,28 +115,26 @@
 //!     let mut cfg = Config::default();
 //!     cfg.timeout = Duration::from_secs(5);
 //!
-//!     // Build supervisor (with or without subscribers)
-//!     let subs = {
-//!         #[cfg(feature = "logging")]
-//!         {
-//!             use taskvisor::{Subscribe, LogWriter};
-//!             vec![std::sync::Arc::new(LogWriter) as std::sync::Arc<dyn Subscribe>]
-//!         }
-//!         #[cfg(not(feature = "logging"))]
-//!         {
-//!             Vec::new()
-//!         }
+//!     // Build subscribers (optional)
+//!     #[cfg(feature = "logging")]
+//!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = {
+//!         use taskvisor::LogWriter;
+//!         vec![Arc::new(LogWriter)]
 //!     };
-//!     let sup = Supervisor::new(cfg.clone(), subs);
+//!     #[cfg(not(feature = "logging"))]
+//!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = Vec::new();
 //!
-//!     // Define a simple task
+//!     // Create supervisor
+//!     let sup = Supervisor::new(cfg, subs);
+//!
+//!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
 //!         if ctx.is_cancelled() { return Ok(()); }
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     // Build specification
+//!     // Build specification - use RestartPolicy::Never for one-shot task
 //!     let spec = TaskSpec::new(
 //!         hello,
 //!         RestartPolicy::Never,
@@ -139,11 +142,11 @@
 //!         Some(Duration::from_secs(5)),
 //!     );
 //!
+//!     // Pass initial tasks to run() - they will be added by the registry listener
 //!     sup.run(vec![spec]).await?;
 //!     Ok(())
 //! }
 //! ```
-
 mod config;
 mod core;
 mod error;
@@ -157,9 +160,7 @@ mod tasks;
 pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
-pub use policies::BackoffPolicy;
-pub use policies::JitterPolicy;
-pub use policies::RestartPolicy;
+pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
 pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
