@@ -92,16 +92,10 @@
 
 use std::sync::Arc;
 
-use tokio::{
-    sync::Semaphore,
-    time::timeout,
-};
+use tokio::{sync::Semaphore, time::timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{
-    alive::AliveTracker,
-    registry::Registry,
-};
+use crate::core::{alive::AliveTracker, registry::Registry};
 use crate::{
     config::Config,
     error::RuntimeError,
