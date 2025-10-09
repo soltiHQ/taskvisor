@@ -190,6 +190,22 @@ impl TaskActor {
 
                     match self.params.restart {
                         RestartPolicy::Always => {
+                            if let Some(d) = self.params.backoff.success_delay {
+                                self.bus.publish(
+                                    Event::now(EventKind::BackoffScheduled)
+                                        .with_task(&task_name)
+                                        .with_attempt(attempt)
+                                        .with_delay(d),
+                                );
+                                let sleep = time::sleep(d);
+                                tokio::pin!(sleep);
+                                select! {
+                                    _ = &mut sleep => {},
+                                    _ = runtime_token.cancelled() => {
+                                        return ActorExitReason::Cancelled;
+                                    }
+                                }
+                            }
                             continue;
                         }
                         RestartPolicy::OnFailure | RestartPolicy::Never => {

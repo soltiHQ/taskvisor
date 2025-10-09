@@ -81,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max: Duration::from_secs(2),
         factor: 2.0,
         jitter: JitterPolicy::Equal,
+        success_delay: Some(Duration::from_secs(1)),
     };
 
     // 6. Create spec: retry on failure
