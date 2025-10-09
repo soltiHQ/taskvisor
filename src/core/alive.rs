@@ -73,7 +73,9 @@ impl AliveTracker {
     /// update(TaskStarting, seq=99)  → ignored (stale)
     /// ```
     pub async fn update(&self, ev: &Event) -> bool {
-        let Some(name) = ev.task.as_deref() else { return false; };
+        let Some(name) = ev.task.as_deref() else {
+            return false;
+        };
         let mut map = self.state.write().await;
 
         if matches!(ev.kind, EventKind::TaskRemoved) {
