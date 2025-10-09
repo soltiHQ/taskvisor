@@ -202,7 +202,7 @@ fn oneshot_fail(name: &'static str) -> TaskSpec {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    println!("🔌 custom_subscriber demo (run with --features events)\n");
+    println!("custom_subscriber demo (run with --features events)\n");
 
     let cfg = Config::default();
     let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(ConsoleSubscriber)];
