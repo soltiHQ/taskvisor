@@ -27,8 +27,6 @@
 //!
 //! ## Example
 //! ```rust
-//! # #[cfg(feature = "events")]
-//! # {
 //! use async_trait::async_trait;
 //! // Import from the crate root: these are re-exported when the "events" feature is enabled.
 //! use taskvisor::{Subscribe, Event, EventKind};
@@ -46,7 +44,6 @@
 //!     fn name(&self) -> &'static str { "metrics" }      // prefer short, descriptive names
 //!     fn queue_capacity(&self) -> usize { 2048 }        // larger buffer for metrics
 //! }
-//! # }
 //! ```
 
 use async_trait::async_trait;

@@ -33,8 +33,6 @@
 //!
 //! ## Example
 //! ```rust
-//! # #[cfg(feature = "events")]
-//! # {
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
 //! use taskvisor::{Subscribe, Event};
@@ -59,7 +57,6 @@
 //!     fn name(&self) -> &'static str { "alerts" }
 //! }
 //! // In Supervisor: let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Metrics), Arc::new(Alerts)];
-//! # }
 //! ```
 
 use std::sync::Arc;
