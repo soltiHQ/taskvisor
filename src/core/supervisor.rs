@@ -147,7 +147,7 @@ impl Supervisor {
     /// Registry listener will spawn the actor.
     pub fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
         self.bus.publish(
-            Event::now(EventKind::TaskAddRequested)
+            Event::new(EventKind::TaskAddRequested)
                 .with_task(spec.task().name())
                 .with_spec(spec),
         );
@@ -160,7 +160,7 @@ impl Supervisor {
     /// Registry listener will cancel and remove the task.
     pub fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
         self.bus
-            .publish(Event::now(EventKind::TaskRemoveRequested).with_task(name));
+            .publish(Event::new(EventKind::TaskRemoveRequested).with_task(name));
         Ok(())
     }
 
@@ -226,9 +226,9 @@ impl Supervisor {
                         set.emit_arc(arc_ev);
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        let e = Event::now(EventKind::SubscriberOverflow)
+                        let e = Event::new(EventKind::SubscriberOverflow)
                             .with_task("subscriber_listener")
-                            .with_error(format!("lagged({skipped})"));
+                            .with_reason(format!("lagged({skipped})"));
 
                         let arc_e = Arc::new(e);
                         alive.update(&arc_e).await;
@@ -253,7 +253,7 @@ impl Supervisor {
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         tokio::select! {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
-                self.bus.publish(Event::now(EventKind::ShutdownRequested));
+                self.bus.publish(Event::new(EventKind::ShutdownRequested));
                 self.registry.cancel_all().await;
                 let res = self.wait_all_with_grace().await;
                 self.runtime_token.cancel();
@@ -281,11 +281,11 @@ impl Supervisor {
 
         match timeout(grace, done).await {
             Ok(_) => {
-                self.bus.publish(Event::now(EventKind::AllStoppedWithin));
+                self.bus.publish(Event::new(EventKind::AllStoppedWithin));
                 Ok(())
             }
             Err(_) => {
-                self.bus.publish(Event::now(EventKind::GraceExceeded));
+                self.bus.publish(Event::new(EventKind::GraceExceeded));
                 let stuck = self.snapshot().await;
                 Err(RuntimeError::GraceExceeded { grace, stuck })
             }

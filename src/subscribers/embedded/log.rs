@@ -6,8 +6,8 @@
 //! ## Example output
 //! ```text
 //! [001] [starting] task=worker attempt=1
-//! [002] [failed] task=worker err="connection refused" attempt=1
-//! [003] [backoff] task=worker delay=2s after_attempt=1 err="connection refused"
+//! [002] [failed] task=worker reason="connection refused" attempt=1
+//! [003] [backoff] task=worker source=failure delay=2s after_attempt=1 reason="connection refused"
 //! [004] [timeout] task=worker timeout=5s
 //! [005] [stopped] task=worker
 //! [006] [actor-exhausted] task=worker reason=policy
@@ -21,29 +21,23 @@
 //!
 //! ## Example
 //! ```rust,ignore
-//! use taskvisor::{Supervisor, Config, Subscribe, LogWriter};
+//! use taskvisor::{Supervisor, Config, Subscribe};
+//! use taskvisor::subscribers::log_writer::LogWriter;
 //! use std::sync::Arc;
 //!
-//! let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter)];
+//! let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter::default())];
 //! let sup = Supervisor::new(Config::default(), subs);
 //! ```
 
-use async_trait::async_trait;
-
-use crate::events::{Event, EventKind};
+use crate::events::{BackoffSource, Event, EventKind};
 use crate::subscribers::Subscribe;
+use async_trait::async_trait;
 
 /// Human-readable event printer for stdout.
 ///
-/// Prints each event with sequence number and relevant metadata.
-/// Useful for development, debugging, and understanding event flow.
-///
-/// ## Output format
-/// `[seq] [event-type] key=value ...`
-///
-/// ## Notes
-/// - Unit struct, create with `LogWriter` (no constructor needed)
-/// - Implements `Default` for convenience
+/// Prints `[seq] [event-type] key=value ...` with relevant metadata.
+/// Useful for debugging, demos, or understanding supervisor flow.
+#[derive(Default)]
 pub struct LogWriter;
 
 #[async_trait]
@@ -51,124 +45,139 @@ impl Subscribe for LogWriter {
     async fn on_event(&self, e: &Event) {
         let seq = format!("[{:03}]", e.seq % 1000);
 
-        match e.kind {
-            // === Shutdown events ===
-            EventKind::GraceExceeded => {
-                println!("{} [grace-exceeded]", seq);
+        fn fmt_ms(ms: Option<u32>) -> String {
+            match ms {
+                Some(v) if v >= 1000 && v % 1000 == 0 => format!("{}s", v / 1000),
+                Some(v) if v >= 1000 => format!("{:.1}s", v as f64 / 1000.0),
+                Some(v) => format!("{}ms", v),
+                None => "0ms".to_string(),
             }
+        }
+        fn or<'a>(s: Option<&'a str>, def: &'a str) -> &'a str {
+            s.unwrap_or(def)
+        }
+
+        match e.kind {
+            // === Shutdown ===
             EventKind::ShutdownRequested => {
                 println!("{} [shutdown-requested]", seq);
             }
             EventKind::AllStoppedWithin => {
                 println!("{} [all-stopped-within-grace]", seq);
             }
+            EventKind::GraceExceeded => {
+                println!("{} [grace-exceeded]", seq);
+            }
 
-            // === Task lifecycle events ===
-            EventKind::TaskStopped => {
-                println!(
-                    "{} [stopped] task={}",
-                    seq,
-                    e.task.as_deref().unwrap_or("none")
-                );
-            }
-            EventKind::TimeoutHit => {
-                println!(
-                    "{} [timeout] task={} timeout={:?}",
-                    seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.timeout.unwrap_or_default()
-                );
-            }
+            // === Task lifecycle ===
             EventKind::TaskStarting => {
                 println!(
                     "{} [starting] task={} attempt={}",
                     seq,
-                    e.task.as_deref().unwrap_or("none"),
+                    or(e.task.as_deref(), "none"),
                     e.attempt.unwrap_or(0)
                 );
             }
-            EventKind::BackoffScheduled => {
-                println!(
-                    "{} [backoff] task={} delay={:?} after_attempt={} err={}",
-                    seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.delay.unwrap_or_default(),
-                    e.attempt.unwrap_or(0),
-                    e.error.as_deref().unwrap_or("none")
-                );
+            EventKind::TaskStopped => {
+                println!("{} [stopped] task={}", seq, or(e.task.as_deref(), "none"));
             }
             EventKind::TaskFailed => {
                 println!(
-                    "{} [failed] task={} err={} attempt={}",
+                    "{} [failed] task={} reason=\"{}\" attempt={}",
                     seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.error.as_deref().unwrap_or("none"),
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown"),
                     e.attempt.unwrap_or(0)
                 );
             }
+            EventKind::TimeoutHit => {
+                println!(
+                    "{} [timeout] task={} timeout={}",
+                    seq,
+                    or(e.task.as_deref(), "none"),
+                    fmt_ms(e.timeout_ms)
+                );
+            }
+            EventKind::BackoffScheduled => {
+                let src = match e.backoff_source {
+                    Some(BackoffSource::Success) => "success",
+                    Some(BackoffSource::Failure) => "failure",
+                    None => "unknown",
+                };
+                println!(
+                    "{} [backoff] task={} source={} delay={} after_attempt={} reason=\"{}\"",
+                    seq,
+                    or(e.task.as_deref(), "none"),
+                    src,
+                    fmt_ms(e.delay_ms),
+                    e.attempt.unwrap_or(0),
+                    or(e.reason.as_deref(), "none")
+                );
+            }
 
-            // === Subscriber events ===
+            // === Subscribers ===
             EventKind::SubscriberOverflow => {
                 println!(
-                    "{} [subscriber-overflow] subscriber={} reason={}",
+                    "{} [subscriber-overflow] subscriber={} reason=\"{}\"",
                     seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.error.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
                 );
             }
             EventKind::SubscriberPanicked => {
                 println!(
-                    "{} [subscriber-panicked] subscriber={} info={}",
+                    "{} [subscriber-panicked] subscriber={} info=\"{}\"",
                     seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.error.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
                 );
             }
 
-            // === Runtime task management events ===
+            // === Management ===
             EventKind::TaskAddRequested => {
                 println!(
                     "{} [task-add-requested] task={}",
                     seq,
-                    e.task.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none")
                 );
             }
             EventKind::TaskAdded => {
                 println!(
                     "{} [task-added] task={}",
                     seq,
-                    e.task.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none")
                 );
             }
             EventKind::TaskRemoveRequested => {
                 println!(
                     "{} [task-remove-requested] task={}",
                     seq,
-                    e.task.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none")
                 );
             }
             EventKind::TaskRemoved => {
                 println!(
                     "{} [task-removed] task={}",
                     seq,
-                    e.task.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none")
                 );
             }
 
-            // === Actor terminal states ===
+            // === Terminals ===
             EventKind::ActorExhausted => {
                 println!(
-                    "{} [actor-exhausted] task={} reason=policy",
+                    "{} [actor-exhausted] task={} reason=\"{}\"",
                     seq,
-                    e.task.as_deref().unwrap_or("none")
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "policy")
                 );
             }
             EventKind::ActorDead => {
                 println!(
-                    "{} [actor-dead] task={} reason={}",
+                    "{} [actor-dead] task={} reason=\"{}\"",
                     seq,
-                    e.task.as_deref().unwrap_or("none"),
-                    e.error.as_deref().unwrap_or("fatal")
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "fatal")
                 );
             }
         }

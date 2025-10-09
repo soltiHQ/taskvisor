@@ -20,4 +20,4 @@ mod bus;
 mod event;
 
 pub use bus::Bus;
-pub use event::{Event, EventKind};
+pub use event::{BackoffSource, Event, EventKind};

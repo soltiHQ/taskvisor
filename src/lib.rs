@@ -167,7 +167,7 @@ pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 // Optional: expose event types.
 // Enable with: `--features events`
 #[cfg(feature = "events")]
-pub use crate::events::{Event, EventKind};
+pub use crate::events::{BackoffSource, Event, EventKind};
 
 // Optional: expose a simple built-in logger subscriber (demo/reference).
 // Enable with: `--features logging`

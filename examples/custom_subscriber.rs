@@ -13,7 +13,7 @@
 //!     ├─► Bus.publish(TaskAddRequested)
 //!     ├─► Registry::spawn_listener()
 //!     ├─► TaskActor::run()
-//!     │     ├─► publish(TaskStarting/TaskStopped/TaskFailed/TimeoutHit/...)
+//!     │     ├─► publish(TaskStarting / TaskStopped / TaskFailed / TimeoutHit / ...)
 //!     │     └─► publish(ActorExhausted | ActorDead)
 //!     └─► subscriber_listener (in Supervisor)
 //!           ├─► AliveTracker.update()
@@ -21,74 +21,107 @@
 //! ```
 //!
 //! ## Run
-//! Requires the `events` feature to export `Event`/`EventKind` types.
+//! Requires the `events` feature to export [`Event`] and [`EventKind`].
 //! ```bash
 //! cargo run --example custom_subscriber --features events
 //! ```
 
 use std::{sync::Arc, time::Duration};
 use taskvisor::{
-    BackoffPolicy, Config, Event, EventKind, RestartPolicy, Subscribe, Supervisor, TaskError,
-    TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, BackoffSource, Config, Event, EventKind, RestartPolicy, Subscribe, Supervisor,
+    TaskError, TaskFn, TaskRef, TaskSpec,
 };
 use tokio_util::sync::CancellationToken;
 
 /// A simple console subscriber that prints selected events.
-/// In real life, you could export metrics, ship logs, send alerts, etc.
+/// In real life, you could export metrics, ship logs, or trigger alerts.
 struct ConsoleSubscriber;
 
 #[async_trait::async_trait]
 impl Subscribe for ConsoleSubscriber {
     async fn on_event(&self, ev: &Event) {
         match ev.kind {
+            // === Lifecycle ===
             EventKind::TaskStarting => {
-                if let (Some(task), Some(attempt)) = (ev.task.as_deref(), ev.attempt) {
-                    println!("[sub] starting: task={task} attempt={attempt}");
-                }
+                println!(
+                    "[sub] starting: task={} attempt={}",
+                    ev.task.as_deref().unwrap_or("<unknown>"),
+                    ev.attempt.unwrap_or(0)
+                );
             }
             EventKind::TaskStopped => {
-                if let Some(task) = ev.task.as_deref() {
-                    println!("[sub] stopped:  task={task}");
-                }
+                println!(
+                    "[sub] stopped:  task={}",
+                    ev.task.as_deref().unwrap_or("<unknown>")
+                );
             }
             EventKind::TaskFailed => {
-                let task = ev.task.as_deref().unwrap_or("<unknown>");
-                let attempt = ev.attempt.unwrap_or_default();
-                let err = ev.error.as_deref().unwrap_or("<no error>");
-                println!("[sub] failed:   task={task} attempt={attempt} err={err}");
+                println!(
+                    "[sub] failed:   task={} attempt={} reason={}",
+                    ev.task.as_deref().unwrap_or("<unknown>"),
+                    ev.attempt.unwrap_or(0),
+                    ev.reason.as_deref().unwrap_or("<none>")
+                );
             }
             EventKind::TimeoutHit => {
-                let task = ev.task.as_deref().unwrap_or("<unknown>");
-                let dur = ev.timeout.map(|d| format!("{d:?}")).unwrap_or_default();
-                println!("[sub] timeout:  task={task} timeout={dur}");
+                let dur = ev
+                    .timeout_ms
+                    .map(|v| format!("{}ms", v))
+                    .unwrap_or_default();
+                println!(
+                    "[sub] timeout:  task={} timeout={}",
+                    ev.task.as_deref().unwrap_or("<unknown>"),
+                    dur
+                );
             }
             EventKind::BackoffScheduled => {
-                let task = ev.task.as_deref().unwrap_or("<unknown>");
-                let delay = ev.delay.map(|d| format!("{d:?}")).unwrap_or_default();
-                let attempt = ev.attempt.unwrap_or_default();
-                let why = ev.error.as_deref().unwrap_or("");
-                println!("[sub] backoff:  task={task} delay={delay} after attempt={attempt} {why}");
+                let delay = ev.delay_ms.map(|v| format!("{}ms", v)).unwrap_or_default();
+                let src = match ev.backoff_source {
+                    Some(BackoffSource::Success) => "success",
+                    Some(BackoffSource::Failure) => "failure",
+                    None => "unknown",
+                };
+                println!(
+                    "[sub] backoff:  task={} delay={} after_attempt={} source={} reason={}",
+                    ev.task.as_deref().unwrap_or("<unknown>"),
+                    delay,
+                    ev.attempt.unwrap_or(0),
+                    src,
+                    ev.reason.as_deref().unwrap_or("<none>")
+                );
             }
+
+            // === Actor terminal ===
             EventKind::ActorExhausted => {
-                if let Some(task) = ev.task.as_deref() {
-                    println!("[sub] exhausted: task={task}");
-                }
+                println!(
+                    "[sub] exhausted: task={} reason={}",
+                    ev.task.as_deref().unwrap_or("<unknown>"),
+                    ev.reason.as_deref().unwrap_or("<policy>")
+                );
             }
             EventKind::ActorDead => {
-                let task = ev.task.as_deref().unwrap_or("<unknown>");
-                let err = ev.error.as_deref().unwrap_or("<no error>");
-                println!("[sub] dead:     task={task} err={err}");
+                println!(
+                    "[sub] dead:     task={} reason={}",
+                    ev.task.as_deref().unwrap_or("<unknown>"),
+                    ev.reason.as_deref().unwrap_or("<fatal>")
+                );
             }
+
+            // === Management ===
             EventKind::TaskAdded => {
-                if let Some(task) = ev.task.as_deref() {
-                    println!("[sub] added:    task={task}");
-                }
+                println!(
+                    "[sub] added:    task={}",
+                    ev.task.as_deref().unwrap_or("<unknown>")
+                );
             }
             EventKind::TaskRemoved => {
-                if let Some(task) = ev.task.as_deref() {
-                    println!("[sub] removed:  task={task}");
-                }
+                println!(
+                    "[sub] removed:  task={}",
+                    ev.task.as_deref().unwrap_or("<unknown>")
+                );
             }
+
+            // === Shutdown ===
             EventKind::ShutdownRequested => {
                 println!("[sub] shutdown requested");
             }
@@ -98,7 +131,8 @@ impl Subscribe for ConsoleSubscriber {
             EventKind::GraceExceeded => {
                 println!("[sub] grace exceeded");
             }
-            // Noise we ignore in this demo:
+
+            // === Ignored ===
             EventKind::SubscriberPanicked
             | EventKind::SubscriberOverflow
             | EventKind::TaskAddRequested
@@ -117,7 +151,6 @@ impl Subscribe for ConsoleSubscriber {
 
 /// One-shot task that prints and exits successfully.
 fn oneshot_ok(name: &'static str) -> TaskSpec {
-    // Use an owned String inside the future to satisfy 'static bounds cleanly.
     let n = name.to_owned();
 
     let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| {
@@ -141,7 +174,7 @@ fn oneshot_ok(name: &'static str) -> TaskSpec {
     )
 }
 
-/// One-shot task that fails on purpose (to show TaskFailed / ActorExhausted).
+/// One-shot task that fails on purpose (to demonstrate TaskFailed / ActorExhausted).
 fn oneshot_fail(name: &'static str) -> TaskSpec {
     let n = name.to_owned();
 
@@ -159,7 +192,6 @@ fn oneshot_fail(name: &'static str) -> TaskSpec {
         }
     });
 
-    // No restart, it'll fail once and exit; registry will clean it up.
     TaskSpec::new(
         task,
         RestartPolicy::Never,
@@ -172,19 +204,11 @@ fn oneshot_fail(name: &'static str) -> TaskSpec {
 async fn main() -> anyhow::Result<()> {
     println!("🔌 custom_subscriber demo (run with --features events)\n");
 
-    // Basic config; no global concurrency limit; no default timeout (we set per-task).
     let cfg = Config::default();
-
-    // Register our custom subscriber.
     let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(ConsoleSubscriber)];
-
-    // Create supervisor with subscribers attached.
     let sup = Supervisor::new(cfg, subs);
 
-    // Two one-shot tasks: one succeeds, one fails.
     let tasks = vec![oneshot_ok("alpha"), oneshot_fail("bravo")];
-
-    // Run until all tasks complete (since both are one-shot, this will exit naturally).
     sup.run(tasks).await?;
 
     println!("\nfinished");
