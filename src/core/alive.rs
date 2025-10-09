@@ -79,6 +79,7 @@ impl AliveTracker {
         let mut map = self.state.write().await;
 
         if matches!(ev.kind, EventKind::TaskRemoved) {
+            #[allow(clippy::collapsible_if)]
             if let Some(st) = map.get(name) {
                 if ev.seq <= st.last_seq {
                     return false;
