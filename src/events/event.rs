@@ -102,8 +102,6 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `monotonic`: creation timestamp
-    /// (Note: detailed stuck-task names are reported via `RuntimeError::GraceExceeded`,
-    /// not embedded in the event.)
     GraceExceeded,
 
     // === Task lifecycle events ===
