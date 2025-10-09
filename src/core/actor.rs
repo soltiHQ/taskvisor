@@ -134,14 +134,15 @@ impl TaskActor {
 
     /// Runs the actor until completion, restart exhaustion, or cancellation.
     pub async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
+        let task_name: Arc<str> = Arc::from(self.task.name().to_owned());
         let mut prev_delay: Option<Duration> = None;
         let mut attempt: u32 = 0;
-        let task_name = self.task.name().to_string();
 
         loop {
             if runtime_token.is_cancelled() {
                 return ActorExitReason::Cancelled;
             }
+
             let permit = match &self.semaphore {
                 Some(sem) => {
                     let fut = sem.clone().acquire_owned();
@@ -152,7 +153,7 @@ impl TaskActor {
                             Err(_closed) => {
                                 self.bus.publish(
                                     Event::new(EventKind::ActorExhausted)
-                                        .with_task(&task_name)
+                                        .with_task(task_name.clone())
                                         .with_attempt(attempt)
                                         .with_reason("semaphore_closed")
                                 );
@@ -172,7 +173,7 @@ impl TaskActor {
             attempt += 1;
             self.bus.publish(
                 Event::new(EventKind::TaskStarting)
-                    .with_task(&task_name)
+                    .with_task(task_name.clone())
                     .with_attempt(attempt),
             );
             let res = run_once(
@@ -195,7 +196,7 @@ impl TaskActor {
                                 self.bus.publish(
                                     Event::new(EventKind::BackoffScheduled)
                                         .with_backoff_success()
-                                        .with_task(&task_name)
+                                        .with_task(task_name.clone())
                                         .with_attempt(attempt)
                                         .with_delay(d),
                                 );
@@ -213,7 +214,7 @@ impl TaskActor {
                         RestartPolicy::OnFailure | RestartPolicy::Never => {
                             self.bus.publish(
                                 Event::new(EventKind::ActorExhausted)
-                                    .with_task(&task_name)
+                                    .with_task(task_name.clone())
                                     .with_attempt(attempt)
                                     .with_reason("policy_exhausted_success"),
                             );
@@ -224,7 +225,7 @@ impl TaskActor {
                 Err(e) if e.is_fatal() => {
                     self.bus.publish(
                         Event::new(EventKind::ActorDead)
-                            .with_task(&task_name)
+                            .with_task(task_name.clone())
                             .with_attempt(attempt)
                             .with_reason(e.to_string()),
                     );
@@ -243,7 +244,7 @@ impl TaskActor {
                     if !(policy_allows_retry && error_is_retryable) {
                         self.bus.publish(
                             Event::new(EventKind::ActorExhausted)
-                                .with_task(&task_name)
+                                .with_task(task_name.clone())
                                 .with_attempt(attempt)
                                 .with_reason(e.to_string()),
                         );
@@ -255,7 +256,7 @@ impl TaskActor {
                     self.bus.publish(
                         Event::new(EventKind::BackoffScheduled)
                             .with_backoff_failure()
-                            .with_task(&task_name)
+                            .with_task(task_name.clone())
                             .with_delay(delay)
                             .with_attempt(attempt)
                             .with_reason(e.to_string()),

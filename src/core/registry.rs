@@ -182,7 +182,7 @@ impl Registry {
             if tasks.contains_key(&task_name) {
                 self.bus.publish(
                     Event::new(EventKind::TaskFailed)
-                        .with_task(&task_name)
+                        .with_task(task_name)
                         .with_reason("task_already_exists"),
                 );
                 return;
@@ -219,11 +219,11 @@ impl Registry {
         if inserted {
             self.notify_after_insert(was_empty, len_after);
             self.bus
-                .publish(Event::new(EventKind::TaskAdded).with_task(&task_name));
+                .publish(Event::new(EventKind::TaskAdded).with_task(task_name));
         } else {
             self.bus.publish(
                 Event::new(EventKind::TaskFailed)
-                    .with_task(&task_name)
+                    .with_task(task_name)
                     .with_reason("task_already_exists_race"),
             );
         }

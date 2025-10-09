@@ -28,6 +28,7 @@
 //! assert_eq!(ev.reason.as_deref(), Some("boom"));
 //! ```
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, SystemTime};
 
@@ -216,11 +217,11 @@ pub struct Event {
     /// Backoff delay before next attempt in milliseconds (compact).
     pub delay_ms: Option<u32>,
     /// Human-readable reason (errors, overflow details, etc.).
-    pub reason: Option<String>,
+    pub reason: Option<Arc<str>>,
     /// Attempt count (starting from 1).
     pub attempt: Option<u32>,
     /// Name of the task, if applicable.
-    pub task: Option<String>,
+    pub task: Option<Arc<str>>,
     /// Event classification.
     pub kind: EventKind,
     /// Source for backoff scheduling (success vs failure).
@@ -249,15 +250,15 @@ impl Event {
 
     /// Attaches a human-readable reason.
     #[inline]
-    pub fn with_reason(mut self, msg: impl Into<String>) -> Self {
-        self.reason = Some(msg.into());
+    pub fn with_reason(mut self, reason: impl Into<Arc<str>>) -> Self {
+        self.reason = Some(reason.into());
         self
     }
 
     /// Attaches a task name.
     #[inline]
-    pub fn with_task(mut self, name: impl Into<String>) -> Self {
-        self.task = Some(name.into());
+    pub fn with_task(mut self, task: impl Into<Arc<str>>) -> Self {
+        self.task = Some(task.into());
         self
     }
 
