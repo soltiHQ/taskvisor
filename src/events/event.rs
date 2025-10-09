@@ -72,53 +72,131 @@ static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 pub enum EventKind {
     // === Subscriber events ===
     /// Subscriber panicked during event processing.
+    ///
+    /// Sets:
+    /// - `task`: subscriber name
+    /// - `error`: panic info/message
+    /// - `monotonic`: creation timestamp
     SubscriberPanicked,
     /// Subscriber dropped an event (queue full or worker closed).
+    ///
+    /// Sets:
+    /// - `task`: subscriber name
+    /// - `error`: reason string (e.g., "full", "closed")
+    /// - `monotonic`: creation timestamp
     SubscriberOverflow,
 
     // === Shutdown events ===
     /// Shutdown requested (OS signal received).
+    /// Shutdown requested (OS signal observed).
+    ///
+    /// Sets:
+    /// - `monotonic`: creation timestamp
     ShutdownRequested,
-    /// All tasks stopped within the configured grace period.
+    /// All tasks stopped within configured grace period.
+    ///
+    /// Sets:
+    /// - `monotonic`: creation timestamp
     AllStoppedWithin,
     /// Grace period exceeded; some tasks did not stop in time.
+    ///
+    /// Sets:
+    /// - `monotonic`: creation timestamp
+    /// (Note: detailed stuck-task names are reported via `RuntimeError::GraceExceeded`,
+    /// not embedded in the event.)
     GraceExceeded,
 
     // === Task lifecycle events ===
-    /// Task is starting execution.
+    /// Task is starting an attempt.
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `attempt`: attempt number (1-based, monotonic per actor)
+    /// - `monotonic`: creation timestamp
     TaskStarting,
-    /// Task has stopped (finished or canceled).
+    /// Task has stopped (finished successfully **or** was cancelled gracefully).
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `monotonic`: creation timestamp
     TaskStopped,
-    /// Task failed with an error.
+    /// Task failed with a (non-fatal) error for this attempt.
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `attempt`: attempt number
+    /// - `error`: error message (from `TaskError`)
+    /// - `monotonic`: creation timestamp
     TaskFailed,
-    /// Task hit its configured timeout.
+    /// Task exceeded its configured timeout for this attempt.
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `timeout`: configured attempt timeout
+    /// - `monotonic`: creation timestamp
     TimeoutHit,
-    /// Task is scheduled to back off before retrying.
+    /// Retry scheduled after a failed attempt.
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `attempt`: attempt number (of the failed attempt)
+    /// - `delay`: backoff delay before next attempt
+    /// - `error`: last failure’s message (cause of the retry)
+    /// - `monotonic`: creation timestamp
     BackoffScheduled,
 
     // === Runtime task management events ===
     /// Request to add a new task to the supervisor.
+    ///
+    /// Sets:
+    /// - `task`: logical task name
+    /// - `spec` (private, internal): `TaskSpec` to spawn
+    /// - `monotonic`: creation timestamp
     TaskAddRequested,
-    /// Task was successfully added and spawned.
+    /// Task was successfully added (actor spawned and registered).
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `monotonic`: creation timestamp
     TaskAdded,
     /// Request to remove a task from the supervisor.
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `monotonic`: creation timestamp
     TaskRemoveRequested,
-    /// Task was successfully removed from the supervisor.
+    /// Task was removed from the supervisor (after join/cleanup).
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `monotonic`: creation timestamp
     TaskRemoved,
 
     // === Actor terminal states ===
     /// Actor exhausted its restart policy and will not restart.
     ///
     /// Emitted when:
-    /// - `RestartPolicy::Never` → task completed successfully
-    /// - `RestartPolicy::OnFailure` → task completed successfully (no more retries needed)
+    /// - `RestartPolicy::Never` → task completed (success or handled case)
+    /// - `RestartPolicy::OnFailure` → task completed successfully
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `attempt`: last attempt number
+    /// - `error`: optional error message
+    /// - `monotonic`: creation timestamp
     ActorExhausted,
 
-    /// Actor terminated permanently due to a fatal error.
+    // Actor terminated permanently due to a fatal error.
     ///
     /// Emitted when:
     /// - Task returned `TaskError::Fatal`
-    /// - (Future) Max retries exceeded
+    /// - (Future) max retries exceeded
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `attempt`: last attempt number
+    /// - `error`: fatal error message
+    /// - `monotonic`: creation timestamp
     ActorDead,
 }
 
