@@ -68,7 +68,7 @@ pub async fn run_once<T: Task + ?Sized>(
     task: &T,
     parent: &CancellationToken,
     timeout: Option<Duration>,
-    attempt: u64,
+    attempt: u32,
     bus: &Bus,
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
@@ -88,11 +88,11 @@ pub async fn run_once<T: Task + ?Sized>(
 
     match res {
         Ok(()) => {
-            publish_stopped(bus, task.name(), attempt);
+            publish_stopped(bus, task.name());
             Ok(())
         }
         Err(TaskError::Canceled) => {
-            publish_stopped(bus, task.name(), attempt);
+            publish_stopped(bus, task.name());
             Err(TaskError::Canceled)
         }
         Err(e) => {
@@ -103,28 +103,24 @@ pub async fn run_once<T: Task + ?Sized>(
 }
 
 /// Publishes `TaskStopped` event (success or graceful cancellation).
-fn publish_stopped(bus: &Bus, name: &str, attempt: u64) {
-    bus.publish(
-        Event::now(EventKind::TaskStopped)
-            .with_task(name)
-            .with_attempt(attempt),
-    );
+fn publish_stopped(bus: &Bus, name: &str) {
+    bus.publish(Event::new(EventKind::TaskStopped).with_task(name));
 }
 
 /// Publishes `TaskFailed` event with error details.
-fn publish_failed(bus: &Bus, name: &str, attempt: u64, err: &TaskError) {
+fn publish_failed(bus: &Bus, name: &str, attempt: u32, err: &TaskError) {
     bus.publish(
-        Event::now(EventKind::TaskFailed)
+        Event::new(EventKind::TaskFailed)
             .with_task(name)
             .with_attempt(attempt)
-            .with_error(err.to_string()),
+            .with_reason(err.to_string()),
     );
 }
 
 /// Publishes `TimeoutHit` event (always followed by `TaskFailed`).
-fn publish_timeout(bus: &Bus, name: &str, dur: Duration, attempt: u64) {
+fn publish_timeout(bus: &Bus, name: &str, dur: Duration, attempt: u32) {
     bus.publish(
-        Event::now(EventKind::TimeoutHit)
+        Event::new(EventKind::TimeoutHit)
             .with_task(name)
             .with_timeout(dur)
             .with_attempt(attempt),

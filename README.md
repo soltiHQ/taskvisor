@@ -25,11 +25,10 @@ taskvisor = "0.0.6"
 
 > Optional features:
 >  - `logging` enables the built-in [`LogWriter`], (demo logger);
->  - `events` re-exports [`Event`] and [`EventKind`] or direct use in your code.
 
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.6", features = ["logging", "events"] }
+taskvisor = { version = "0.0.6", features = ["logging"] }
 ```
 
 ## 📝 Quick start
@@ -189,16 +188,14 @@ Check out the [examples](./examples) directory for:
 - [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown
 - [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
 - [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
-- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events (requires --features events)
+- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events
 
 ```bash
 # basic / retry / dynamic do not require extra features
 cargo run --example basic_one_shot
 cargo run --example retry_with_backoff
 cargo run --example dynamic_add_remove
-
-# subscribers that inspect events need the 'events' feature
-cargo run --example custom_subscriber --features events
+cargo run --example custom_subscriber
 ```
 
 ## 🤝 Contributing

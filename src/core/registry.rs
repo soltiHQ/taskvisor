@@ -110,8 +110,8 @@ impl Registry {
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             me.bus.publish(
-                                Event::now(EventKind::TaskFailed)
-                                    .with_error("registry_listener_lagged")
+                                Event::new(EventKind::TaskFailed)
+                                    .with_reason("registry_listener_lagged")
                             );
                             continue;
                         }
@@ -181,9 +181,9 @@ impl Registry {
             let tasks = self.tasks.read().await;
             if tasks.contains_key(&task_name) {
                 self.bus.publish(
-                    Event::now(EventKind::TaskFailed)
-                        .with_task(&task_name)
-                        .with_error("task_already_exists"),
+                    Event::new(EventKind::TaskFailed)
+                        .with_task(task_name)
+                        .with_reason("task_already_exists"),
                 );
                 return;
             }
@@ -219,12 +219,12 @@ impl Registry {
         if inserted {
             self.notify_after_insert(was_empty, len_after);
             self.bus
-                .publish(Event::now(EventKind::TaskAdded).with_task(&task_name));
+                .publish(Event::new(EventKind::TaskAdded).with_task(task_name));
         } else {
             self.bus.publish(
-                Event::now(EventKind::TaskFailed)
-                    .with_task(&task_name)
-                    .with_error("task_already_exists_race"),
+                Event::new(EventKind::TaskFailed)
+                    .with_task(task_name)
+                    .with_reason("task_already_exists_race"),
             );
         }
     }
@@ -238,9 +238,9 @@ impl Registry {
             self.join_and_report(name, handle.join).await;
         } else {
             self.bus.publish(
-                Event::now(EventKind::TaskFailed)
+                Event::new(EventKind::TaskFailed)
                     .with_task(name)
-                    .with_error("task_not_found"),
+                    .with_reason("task_not_found"),
             );
         }
     }
@@ -267,13 +267,13 @@ impl Registry {
             Ok(_) => {}
             Err(_) => {
                 self.bus.publish(
-                    Event::now(EventKind::ActorDead)
+                    Event::new(EventKind::ActorDead)
                         .with_task(name)
-                        .with_error("actor_panic"),
+                        .with_reason("actor_panic"),
                 );
             }
         }
         self.bus
-            .publish(Event::now(EventKind::TaskRemoved).with_task(name));
+            .publish(Event::new(EventKind::TaskRemoved).with_task(name));
     }
 }

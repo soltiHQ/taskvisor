@@ -160,14 +160,10 @@ mod tasks;
 pub use config::Config;
 pub use core::Supervisor;
 pub use error::{RuntimeError, TaskError};
+pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
 pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
-
-// Optional: expose event types.
-// Enable with: `--features events`
-#[cfg(feature = "events")]
-pub use crate::events::{Event, EventKind};
 
 // Optional: expose a simple built-in logger subscriber (demo/reference).
 // Enable with: `--features logging`
