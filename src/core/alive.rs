@@ -59,40 +59,45 @@ impl AliveTracker {
         }
     }
 
-    /// Updates task state if the event is newer than the last seen.
+    /// Updates the tracked state for a task if the incoming event is newer than the last one observed.
     ///
-    /// Returns `true` if the **alive flag** changed, `false` otherwise (including
-    /// the case when only `last_seq` advanced or the event was rejected as stale).
+    /// Removes the task entry entirely when receiving [`EventKind::TaskRemoved`].
+    /// Returns `true` if the **alive flag** changed; returns `false` otherwise,
+    /// including when only `last_seq` advanced or the event was ignored as stale.
     ///
     /// ### Ordering guarantees
-    /// Events are applied only if `ev.seq > last_seq` for this task.
-    /// This prevents out-of-order events from corrupting state:
+    /// Events are applied strictly in sequence order — only if `ev.seq > last_seq`
+    /// for this task. This prevents out-of-order updates from corrupting state:
     /// ```text
-    /// update(TaskStopped, seq=100)  → alive=false, last_seq=100
-    /// update(TaskStarting, seq=99)  → rejected (stale)
+    /// update(TaskStopped,  seq=100) → alive=false, last_seq=100
+    /// update(TaskStarting, seq=99)  → ignored (stale)
     /// ```
     pub async fn update(&self, ev: &Event) -> bool {
-        let name = match ev.task.as_deref() {
-            Some(n) => n,
-            None => return false,
-        };
-
+        let Some(name) = ev.task.as_deref() else { return false; };
         let mut map = self.state.write().await;
+
+        if matches!(ev.kind, EventKind::TaskRemoved) {
+            if let Some(st) = map.get(name) {
+                if ev.seq <= st.last_seq {
+                    return false;
+                }
+            }
+            return map.remove(name).is_some();
+        }
         let entry = map.entry(name.to_string()).or_insert(TaskState {
             last_seq: 0,
             alive: false,
         });
+
         if ev.seq <= entry.last_seq {
             return false;
         }
-
         let next_alive = match ev.kind {
             EventKind::TaskStarting => true,
             EventKind::TaskStopped
             | EventKind::TaskFailed
             | EventKind::ActorExhausted
-            | EventKind::ActorDead
-            | EventKind::TaskRemoved => false,
+            | EventKind::ActorDead => false,
             _ => entry.alive,
         };
 
