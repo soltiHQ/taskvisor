@@ -213,7 +213,6 @@ impl TaskActor {
                         RestartPolicy::OnFailure | RestartPolicy::Never => {
                             self.bus.publish(
                                 Event::new(EventKind::ActorExhausted)
-                                    .with_backoff_failure()
                                     .with_task(&task_name)
                                     .with_attempt(attempt)
                                     .with_reason("policy_exhausted_success"),
