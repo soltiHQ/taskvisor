@@ -92,7 +92,7 @@
 
 use std::sync::Arc;
 
-use tokio::{sync::Semaphore, time::timeout};
+use tokio::{sync::Semaphore, sync::broadcast, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{alive::AliveTracker, registry::Registry};
@@ -202,31 +202,40 @@ impl Supervisor {
         self.alive.is_alive(name).await
     }
 
-    /// Subscribes to the bus and fans out events to the subscriber set.
+    /// Listens to the internal event bus and fans out each received [`Event`] to all active subscribers.
     ///
-    /// Also updates the AliveTracker (sequence-aware) before fan-out.
+    /// The listener also updates the [`AliveTracker`] before fan-out to keep
+    /// the latest per-task state in sync.
+    ///
+    /// On `Lagged`, it creates a [`EventKind::SubscriberOverflow`] event and
+    /// emits it **directly to subscribers**, bypassing the bus — to avoid
+    /// reinforcing backpressure loops while still reporting the loss.
+    ///
+    /// The loop terminates only when the broadcast channel is closed.
     fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
         let alive = Arc::clone(&self.alive);
-        let rt = self.runtime_token.clone();
-        let bus = self.bus.clone();
 
         tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    _ = rt.cancelled() => break,
-                    msg = rx.recv() => match msg {
-                        Ok(ev) => {
-                            let arc_ev = Arc::new(ev);
-                            alive.update(&arc_ev).await;
-                            set.emit_arc(arc_ev);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            bus.publish(Event::subscriber_overflow("supervisor_listener", "lagged"));
-                            continue;
-                        }
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let arc_ev = Arc::new(ev);
+                        alive.update(&arc_ev).await;
+                        set.emit_arc(arc_ev);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        let e = Event::now(EventKind::SubscriberOverflow)
+                            .with_task("subscriber_listener")
+                            .with_error(format!("lagged({skipped})"));
+
+                        let arc_e = Arc::new(e);
+                        alive.update(&arc_e).await;
+                        set.emit_arc(arc_e);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
                     }
                 }
             }
@@ -245,14 +254,12 @@ impl Supervisor {
         tokio::select! {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::now(EventKind::ShutdownRequested));
-                self.runtime_token.cancel();
-
                 self.registry.cancel_all().await;
-                self.wait_all_with_grace().await
+                let res = self.wait_all_with_grace().await;
+                self.runtime_token.cancel();
+                res
             }
-            _ = self.registry.wait_until_empty() => {
-                Ok(())
-            }
+            _ = self.registry.wait_until_empty() => { Ok(()) }
         }
     }
 
