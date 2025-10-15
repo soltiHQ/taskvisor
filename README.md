@@ -20,7 +20,7 @@
 #### Cargo.toml:
 ```toml
 [dependencies]
-taskvisor = "0.0.6"
+taskvisor = "0.0.7"
 ```
 
 > Optional features:
@@ -28,14 +28,14 @@ taskvisor = "0.0.6"
 
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.6", features = ["logging"] }
+taskvisor = { version = "0.0.7", features = ["logging"] }
 ```
 
 ## 📝 Quick start
 #### Minimal Example (No subscribers)
 ```toml
 [dependencies]
-taskvisor = "0.0.6"
+taskvisor = "0.0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 #### Minimal Example (Embedded subscriber)
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.6", features = ["logging"] }
+taskvisor = { version = "0.0.7", features = ["logging"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
 #### Dynamic Tasks Example
 ```toml
 [dependencies]
-taskvisor = "0.0.6"
+taskvisor = "0.0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
