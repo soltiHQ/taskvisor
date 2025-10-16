@@ -184,8 +184,8 @@ impl SubscriberSet {
 
     /// Gracefully shuts down all subscriber workers.
     ///
-    /// 1) Drops all channel senders (workers observe channel closure),
-    /// 2) Awaits all worker tasks to finish.
+    /// - Drops all channel senders (workers observe channel closure),
+    /// - Awaits all worker tasks to finish.
     pub async fn shutdown(self) {
         drop(self.channels);
 

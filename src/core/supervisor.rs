@@ -220,8 +220,7 @@ impl Supervisor {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
-                        let arc_ev = Arc::new(ev);
+                    Ok(arc_ev) => {
                         alive.update(&arc_ev).await;
                         set.emit_arc(arc_ev);
                     }
