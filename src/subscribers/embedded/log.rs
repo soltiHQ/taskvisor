@@ -62,7 +62,7 @@ impl Subscribe for LogWriter {
             EventKind::ShutdownRequested => {
                 println!("{} [shutdown-requested]", seq);
             }
-            EventKind::AllStoppedWithin => {
+            EventKind::AllStoppedWithinGrace => {
                 println!("{} [all-stopped-within-grace]", seq);
             }
             EventKind::GraceExceeded => {

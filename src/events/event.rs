@@ -70,7 +70,7 @@ pub enum EventKind {
     /// Sets:
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
-    AllStoppedWithin,
+    AllStoppedWithinGrace,
 
     /// Grace period exceeded; some tasks did not stop in time.
     ///

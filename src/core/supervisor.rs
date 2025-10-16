@@ -265,7 +265,7 @@ impl Supervisor {
 
     /// Waits for all tasks in registry with grace period timeout.
     ///
-    /// Publishes terminal event (`AllStoppedWithin` or `GraceExceeded`).
+    /// Publishes terminal event (`AllStoppedWithinGrace` or `GraceExceeded`).
     async fn wait_all_with_grace(&self) -> Result<(), RuntimeError> {
         use tokio::time::{Duration, sleep};
 
@@ -281,7 +281,8 @@ impl Supervisor {
 
         match timeout(grace, done).await {
             Ok(_) => {
-                self.bus.publish(Event::new(EventKind::AllStoppedWithin));
+                self.bus
+                    .publish(Event::new(EventKind::AllStoppedWithinGrace));
                 Ok(())
             }
             Err(_) => {

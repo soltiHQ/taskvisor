@@ -83,7 +83,7 @@
 //! ```text
 //! OS signal → Supervisor publishes ShutdownRequested → cancel runtime_token
 //! → Registry.cancel_all(): cancel each task, await join, publish TaskRemoved
-//! → Supervisor.wait_all_with_grace(): AllStoppedWithin OR GraceExceeded{grace, stuck}
+//! → Supervisor.wait_all_with_grace(): AllStoppedWithinGrace OR GraceExceeded{grace, stuck}
 //! ```
 //!
 //! ## Notes

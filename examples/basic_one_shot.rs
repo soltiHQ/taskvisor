@@ -18,7 +18,7 @@
 //!     │     ├─► publish(TaskStopped)
 //!     │     └─► publish(ActorExhausted)
 //!     └─► Supervisor::drive_shutdown()
-//!          ├─► publish(AllStoppedWithin)
+//!          ├─► publish(AllStoppedWithinGrace)
 //!          └─► exit
 //! ```
 //!
