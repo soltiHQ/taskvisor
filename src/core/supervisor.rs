@@ -281,7 +281,8 @@ impl Supervisor {
 
         match timeout(grace, done).await {
             Ok(_) => {
-                self.bus.publish(Event::new(EventKind::AllStoppedWithinGrace));
+                self.bus
+                    .publish(Event::new(EventKind::AllStoppedWithinGrace));
                 Ok(())
             }
             Err(_) => {
