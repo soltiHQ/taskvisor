@@ -115,7 +115,7 @@ impl Config {
 impl Default for Config {
     /// Default configuration:
     ///
-    /// - `grace = 30s` (reasonable graceful shutdown window)
+    /// - `grace = 60s` (reasonable graceful shutdown window)
     /// - `max_concurrent = 0` (unlimited)
     /// - `bus_capacity = 1024` (good baseline)
     /// - `timeout = 0s` (no timeout)
@@ -123,7 +123,7 @@ impl Default for Config {
     /// - `backoff = BackoffPolicy::default()` (exponential backoff)
     fn default() -> Self {
         Self {
-            grace: Duration::from_secs(30),
+            grace: Duration::from_secs(60),
             max_concurrent: 0,
             bus_capacity: 1024,
             timeout: Duration::from_secs(0),

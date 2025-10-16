@@ -26,19 +26,25 @@ pub enum RuntimeError {
         /// List of task names that did not shut down in time.
         stuck: Vec<String>,
     },
-
     /// Attempted to add a task with a name that already exists in the registry.
     #[error("task '{name}' already exists in registry")]
     TaskAlreadyExists {
         /// The duplicate task name.
         name: String,
     },
-
     /// Attempted to remove a task that doesn't exist in the registry.
     #[error("task '{name}' not found in registry")]
     TaskNotFound {
         /// The missing task name.
         name: String,
+    },
+    /// Timeout waiting for task removal confirmation.
+    #[error("timeout waiting for task '{name}' removal after {timeout:?}")]
+    TaskRemoveTimeout {
+        /// Task which timeout on cancel.
+        name: String,
+        // Task timeout duration.
+        timeout: Duration,
     },
 }
 
@@ -49,6 +55,7 @@ impl RuntimeError {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
+            RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
         }
     }
 }

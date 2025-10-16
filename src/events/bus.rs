@@ -27,6 +27,8 @@
 //! - Receivers that fell behind observe `RecvError::Lagged(n)` on the next `recv()`,
 //!   indicating how many events were skipped.
 
+use std::sync::Arc;
+
 use tokio::sync::broadcast;
 
 use super::event::Event;
@@ -42,7 +44,7 @@ use super::event::Event;
 /// - **Cloneable**: cheap to clone (internally holds an `Arc`-backed sender).
 #[derive(Clone, Debug)]
 pub struct Bus {
-    tx: broadcast::Sender<Event>,
+    tx: broadcast::Sender<Arc<Event>>,
 }
 
 impl Bus {
@@ -54,15 +56,16 @@ impl Bus {
     /// - The minimum capacity is 1 (clamped).
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        let (tx, _rx) = broadcast::channel::<Event>(capacity);
+        let (tx, _rx) = broadcast::channel::<Arc<Event>>(capacity);
         Self { tx }
     }
 
     /// Publishes an event to all active subscribers.
-    ///
-    /// - Takes ownership of the event; the broadcast channel clones it for each receiver.
-    /// - If there are no receivers, the event is dropped (this function still returns immediately).
     pub fn publish(&self, ev: Event) {
+        let _ = self.tx.send(Arc::new(ev));
+    }
+
+    pub fn publish_arc(&self, ev: Arc<Event>) {
         let _ = self.tx.send(ev);
     }
 
@@ -71,14 +74,7 @@ impl Bus {
     /// - Each call creates an **independent** receiver.
     /// - A receiver only gets events **sent after** it subscribes.
     /// - Slow receivers get `RecvError::Lagged(n)` and skip over missed items.
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
         self.tx.subscribe()
-    }
-
-    /// Publishes a borrowed event by cloning it.
-    ///
-    /// Shorthand for `publish(ev.clone())`, useful when you already have a reference.
-    pub fn publish_ref(&self, ev: &Event) {
-        let _ = self.tx.send(ev.clone());
     }
 }

@@ -90,8 +90,7 @@
 //! }
 //! ```
 
-use std::sync::Arc;
-
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, sync::broadcast, time::timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -202,6 +201,34 @@ impl Supervisor {
         self.alive.is_alive(name).await
     }
 
+    /// Cancel a task by name and wait for confirmation (`TaskRemoved`).
+    pub async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.cancel_with_timeout(name, self.cfg.grace).await
+    }
+
+    /// Cancel with explicit timeout.
+    pub async fn cancel_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let exists_before = {
+            let tasks = self.registry.list().await;
+            tasks.contains(&name.to_string())
+        };
+        if !exists_before {
+            return Ok(false);
+        }
+
+        let mut rx = self.bus.subscribe();
+        self.bus.publish(
+            Event::new(EventKind::TaskRemoveRequested)
+                .with_task(name)
+                .with_reason("manual_cancel"),
+        );
+        self.wait_task_removed(&mut rx, name, wait_for).await
+    }
+
     /// Listens to the internal event bus and fans out each received [`Event`] to all active subscribers.
     ///
     /// The listener also updates the [`AliveTracker`] before fan-out to keep
@@ -220,8 +247,7 @@ impl Supervisor {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
-                        let arc_ev = Arc::new(ev);
+                    Ok(arc_ev) => {
                         alive.update(&arc_ev).await;
                         set.emit_arc(arc_ev);
                     }
@@ -289,6 +315,60 @@ impl Supervisor {
                 self.bus.publish(Event::new(EventKind::GraceExceeded));
                 let stuck = self.snapshot().await;
                 Err(RuntimeError::GraceExceeded { grace, stuck })
+            }
+        }
+    }
+
+    async fn wait_task_removed(
+        &self,
+        rx: &mut broadcast::Receiver<Arc<Event>>,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let target = name.to_string();
+        let start = tokio::time::Instant::now();
+        let mut last_poll = tokio::time::Instant::now();
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            if start.elapsed() >= wait_for {
+                return Err(RuntimeError::TaskRemoveTimeout {
+                    name: target,
+                    timeout: wait_for,
+                });
+            }
+            if last_poll.elapsed() >= poll_interval {
+                let tasks = self.registry.list().await;
+                if !tasks.contains(&target) {
+                    return Ok(true);
+                }
+                last_poll = tokio::time::Instant::now();
+            }
+
+            let recv_timeout = poll_interval
+                .checked_sub(last_poll.elapsed())
+                .unwrap_or(Duration::from_millis(10));
+
+            match tokio::time::timeout(recv_timeout, rx.recv()).await {
+                Ok(Ok(ev))
+                    if matches!(ev.kind, EventKind::TaskRemoved)
+                        && ev.task.as_deref() == Some(&target) =>
+                {
+                    return Ok(true);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                    let tasks = self.registry.list().await;
+                    return Ok(!tasks.contains(&target));
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                    let tasks = self.registry.list().await;
+                    if !tasks.contains(&target) {
+                        return Ok(true);
+                    }
+                    last_poll = tokio::time::Instant::now();
+                }
+                Err(_elapsed) => {}
             }
         }
     }

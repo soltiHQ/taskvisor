@@ -79,22 +79,26 @@ impl AliveTracker {
         let mut map = self.state.write().await;
 
         if matches!(ev.kind, EventKind::TaskRemoved) {
-            #[allow(clippy::collapsible_if)]
-            if let Some(st) = map.get(name) {
-                if ev.seq <= st.last_seq {
-                    return false;
+            return match map.entry(name.to_string()) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    if ev.seq <= entry.get().last_seq {
+                        false
+                    } else {
+                        entry.remove();
+                        true
+                    }
                 }
-            }
-            return map.remove(name).is_some();
+                std::collections::hash_map::Entry::Vacant(_) => false,
+            };
         }
         let entry = map.entry(name.to_string()).or_insert(TaskState {
             last_seq: 0,
             alive: false,
         });
-
         if ev.seq <= entry.last_seq {
             return false;
         }
+
         let next_alive = match ev.kind {
             EventKind::TaskStarting => true,
             EventKind::TaskStopped
