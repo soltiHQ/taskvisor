@@ -189,6 +189,7 @@ Check out the [examples](./examples) directory for:
 - [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
 - [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
 - [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events
+- [task_cancel.rs](examples/task_cancel.rs): task cancellation from outside 
 
 ```bash
 # basic / retry / dynamic do not require extra features
@@ -196,6 +197,7 @@ cargo run --example basic_one_shot
 cargo run --example retry_with_backoff
 cargo run --example dynamic_add_remove
 cargo run --example custom_subscriber
+cargo run --example task_cancel --features logging
 ```
 
 ## 🤝 Contributing
