@@ -88,9 +88,7 @@ impl AliveTracker {
                         true
                     }
                 }
-                std::collections::hash_map::Entry::Vacant(_) => {
-                    false
-                }
+                std::collections::hash_map::Entry::Vacant(_) => false,
             };
         }
         let entry = map.entry(name.to_string()).or_insert(TaskState {

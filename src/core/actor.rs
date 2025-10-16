@@ -57,7 +57,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::{select, sync::Semaphore, time};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -147,7 +147,8 @@ impl TaskActor {
                 Some(sem) => {
                     let fut = sem.clone().acquire_owned();
                     tokio::pin!(fut);
-                    select! {
+
+                    tokio::select! {
                         res = &mut fut => match res {
                             Ok(p) => Some(p),
                             Err(_closed) => {
@@ -176,6 +177,7 @@ impl TaskActor {
                     .with_task(task_name.clone())
                     .with_attempt(attempt),
             );
+
             let res = run_once(
                 self.task.as_ref(),
                 &runtime_token,
@@ -200,13 +202,8 @@ impl TaskActor {
                                         .with_attempt(attempt)
                                         .with_delay(d),
                                 );
-                                let sleep = time::sleep(d);
-                                tokio::pin!(sleep);
-                                select! {
-                                    _ = &mut sleep => {},
-                                    _ = runtime_token.cancelled() => {
-                                        return ActorExitReason::Cancelled;
-                                    }
+                                if !Self::sleep_cancellable(d, &runtime_token).await {
+                                    return ActorExitReason::Cancelled;
                                 }
                             }
                             continue;
@@ -253,6 +250,7 @@ impl TaskActor {
 
                     let delay = self.params.backoff.next(prev_delay);
                     prev_delay = Some(delay);
+
                     self.bus.publish(
                         Event::new(EventKind::BackoffScheduled)
                             .with_backoff_failure()
@@ -261,17 +259,21 @@ impl TaskActor {
                             .with_attempt(attempt)
                             .with_reason(e.to_string()),
                     );
-
-                    let sleep = time::sleep(delay);
-                    tokio::pin!(sleep);
-                    select! {
-                        _ = &mut sleep => {},
-                        _ = runtime_token.cancelled() => {
-                            return ActorExitReason::Cancelled;
-                        }
+                    if !Self::sleep_cancellable(delay, &runtime_token).await {
+                        return ActorExitReason::Cancelled;
                     }
                 }
             }
+        }
+    }
+
+    async fn sleep_cancellable(duration: Duration, token: &CancellationToken) -> bool {
+        let sleep = tokio::time::sleep(duration);
+        tokio::pin!(sleep);
+
+        tokio::select! {
+            _ = &mut sleep => true,
+            _ = token.cancelled() => false,
         }
     }
 }
