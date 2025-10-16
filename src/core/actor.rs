@@ -9,7 +9,7 @@
 //! ## Event flow
 //! For each attempt, the actor publishes:
 //! ```text
-//! TaskStarting → [task execution] → TaskStopped (success)
+//! TaskStarting → [task execution] → TaskStopped (success/cancel)
 //!                                 → TimeoutHit (timeout)
 //!                                 → TaskFailed (error)
 //!
@@ -19,7 +19,7 @@
 //! On exit:
 //!   → ActorExhausted (policy forbids restart)
 //!   → ActorDead (fatal error)
-//!   → (no event if canceled)
+//!   → (no terminal event if cancelled - runner already published TaskStopped)
 //!```
 //!
 //! ## Architecture
@@ -27,26 +27,29 @@
 //! TaskSpec ──► Supervisor ──► TaskActor::run()
 //!
 //! loop {
-//!   ├─► check cancellation (fast-path)
-//!   ├─► acquire semaphore (cancellable)
+//!   ├─► check cancellation (fast-path with runtime_token)
+//!   ├─► acquire semaphore (cancellable with runtime_token)
 //!   ├─► check cancellation (after acquire)
+//!   ├─► create child_token (isolated per attempt)
 //!   ├─► attempt += 1
 //!   ├─► publish TaskStarting
-//!   ├─► run_once() ─► task.spawn()
+//!   ├─► run_once(child_token) ─► task.spawn()
 //!   │       │              ▼
 //!   │       │        (one attempt)
 //!   │       │              ▼
 //!   │       └─► runner publishes:
-//!   │             - TaskStopped (success)
+//!   │             - TaskStopped (success/cancel)
 //!   │             - TaskFailed (error)
 //!   │             - TimeoutHit (timeout)
+//!   ├─► drop permit (release semaphore)
+//!   ├─► child_token goes out of scope
 //!   ├─► apply RestartPolicy
 //!   │     ├─► Never       → publish ActorExhausted → break
 //!   │     ├─► OnFailure   → if success: publish ActorExhausted → break
 //!   │     └─► Always      → continue (on success)
 //!   └─► on retryable failure:
 //!        ├─► publish BackoffScheduled
-//!        └─► sleep(backoff_delay) (cancellable)
+//!        └─► sleep(backoff_delay) with runtime_token (cancellable)
 //! }
 //! ```
 //!
@@ -54,6 +57,7 @@
 //! - Attempts run **sequentially** within one actor (never parallel)
 //! - Attempt counter **increments on each spawn** (monotonic, never resets)
 //! - Events have **monotonic sequence numbers** (ordering guarantees)
+//! - Each attempt gets its own **child_token** for isolation
 
 use std::{sync::Arc, time::Duration};
 
@@ -133,6 +137,10 @@ impl TaskActor {
     }
 
     /// Runs the actor until completion, restart exhaustion, or cancellation.
+    ///
+    /// We run each attempt under a **child** cancellation token so that cancelling the
+    /// current attempt (including backoff sleep) results in a clean exit without
+    /// restarting, even with `RestartPolicy::Always`.
     pub async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let task_name: Arc<str> = Arc::from(self.task.name().to_owned());
         let mut prev_delay: Option<Duration> = None;
@@ -142,7 +150,6 @@ impl TaskActor {
             if runtime_token.is_cancelled() {
                 return ActorExitReason::Cancelled;
             }
-
             let permit = match &self.semaphore {
                 Some(sem) => {
                     let fut = sem.clone().acquire_owned();
@@ -161,7 +168,9 @@ impl TaskActor {
                                 return ActorExitReason::Cancelled;
                             }
                         },
-                        _ = runtime_token.cancelled() => return ActorExitReason::Cancelled,
+                        _ = runtime_token.cancelled() => {
+                            return ActorExitReason::Cancelled;
+                        }
                     }
                 }
                 None => None,
@@ -171,23 +180,23 @@ impl TaskActor {
                 return ActorExitReason::Cancelled;
             }
 
+            let child = runtime_token.child_token();
             attempt += 1;
             self.bus.publish(
                 Event::new(EventKind::TaskStarting)
                     .with_task(task_name.clone())
                     .with_attempt(attempt),
             );
-
             let res = run_once(
                 self.task.as_ref(),
-                &runtime_token,
+                &child,
                 self.params.timeout,
                 attempt,
                 &self.bus,
             )
             .await;
-            drop(permit);
 
+            drop(permit);
             match res {
                 Ok(()) => {
                     prev_delay = None;
@@ -267,6 +276,10 @@ impl TaskActor {
         }
     }
 
+    /// Sleep helper that can be interrupted by a cancellation token.
+    ///
+    /// Returns `true` if sleep completed, `false` if cancelled.
+    #[inline]
     async fn sleep_cancellable(duration: Duration, token: &CancellationToken) -> bool {
         let sleep = tokio::time::sleep(duration);
         tokio::pin!(sleep);
