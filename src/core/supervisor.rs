@@ -203,8 +203,7 @@ impl Supervisor {
 
     /// Cancel a task by name and wait for confirmation (`TaskRemoved`).
     pub async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.cancel_with_timeout(name, self.cfg.grace)
-            .await
+        self.cancel_with_timeout(name, self.cfg.grace).await
     }
 
     /// Cancel with explicit timeout.
