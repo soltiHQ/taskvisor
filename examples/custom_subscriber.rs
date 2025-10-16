@@ -125,7 +125,7 @@ impl Subscribe for ConsoleSubscriber {
             EventKind::ShutdownRequested => {
                 println!("[sub] shutdown requested");
             }
-            EventKind::AllStoppedWithin => {
+            EventKind::AllStoppedWithinGrace => {
                 println!("[sub] all stopped within grace");
             }
             EventKind::GraceExceeded => {
