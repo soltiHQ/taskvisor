@@ -190,6 +190,7 @@ Check out the [examples](./examples) directory for:
 - [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
 - [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events
 - [task_cancel.rs](examples/task_cancel.rs): task cancellation from outside 
+- [basic_controller.rs](examples/basic_controller.rs): invoke task inside controller
 
 ```bash
 # basic / retry / dynamic do not require extra features
@@ -198,6 +199,7 @@ cargo run --example retry_with_backoff
 cargo run --example dynamic_add_remove
 cargo run --example custom_subscriber
 cargo run --example task_cancel --features logging
+cargo run --example basic_controller --features controller
 ```
 
 ## 🤝 Contributing

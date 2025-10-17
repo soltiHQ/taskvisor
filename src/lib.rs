@@ -104,7 +104,7 @@
 //!
 //! ## Optional features
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
-//! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
+//! - `controller`:  exports [`controller`] and [`controllerConfig`] for invoke task inside controller with additional rules.
 //!
 //! ## Example
 //! ```rust
@@ -151,6 +151,7 @@
 //! }
 //! ```
 mod config;
+mod controller;
 mod core;
 mod error;
 mod events;
@@ -172,3 +173,8 @@ pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 // Enable with: `--features logging`
 #[cfg(feature = "logging")]
 pub use subscribers::LogWriter;
+
+// Optional: expose a task manager process with high-level controller task.
+// Enable with: `--features controller`
+#[cfg(feature = "controller")]
+pub use controller::{ControllerConfig, controller};
