@@ -17,11 +17,6 @@
 //! - **Alive = false** on `TaskStopped`, `TaskFailed`, `ActorExhausted`, `ActorDead`, `TaskRemoved`.
 //! - Events with `seq <= last_seq` for the task are **rejected** (stale).
 //! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
-//!
-//! ### Note on `TaskRemoved`
-//! We keep the entry and only set `alive=false` while updating `last_seq`. This prevents a late,
-//! stale `TaskStarting` (with a lower `seq`) from resurrecting a removed task. If you need to
-//! reclaim memory, implement an explicit purge strategy outside the tracker.
 
 use std::collections::HashMap;
 
