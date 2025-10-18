@@ -151,7 +151,7 @@
 //! }
 //! ```
 mod config;
-mod controller;
+pub mod controller;
 mod core;
 mod error;
 mod events;
@@ -176,5 +176,5 @@ pub use subscribers::LogWriter;
 
 // Optional: expose a task manager process with high-level controller task.
 // Enable with: `--features controller`
-#[cfg(feature = "controller")]
-pub use controller::{ControllerConfig, controller};
+//#[cfg(feature = "controller")]
+//pub use controller::{ControllerConfig, controller};
