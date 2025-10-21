@@ -147,7 +147,9 @@ impl Controller {
             (SlotStatus::Running { .. }, Admission::Replace) => {
                 slot.queue.push_front(task_spec);
 
-                slot.status = SlotStatus::Terminating { cancelled_at: Instant::now() };
+                slot.status = SlotStatus::Terminating {
+                    cancelled_at: Instant::now(),
+                };
                 if let Err(e) = sup.remove_task(&slot_name) {
                     eprintln!("[controller] failed to cancel task '{slot_name}': {e}");
                 };
@@ -168,9 +170,7 @@ impl Controller {
     /// Handles bus events (TaskStopped, TaskRemoved).
     async fn handle_event(&self, event: Arc<Event>) {
         match event.kind {
-            EventKind::ActorExhausted
-            | EventKind::ActorDead
-            | EventKind::TaskRemoved => {
+            EventKind::ActorExhausted | EventKind::ActorDead | EventKind::TaskRemoved => {
                 self.on_task_finished(&event).await;
             }
             _ => {}
@@ -182,11 +182,17 @@ impl Controller {
     /// IMPORTANT: Each slot is keyed by task name.
     /// TODO: maybe add `slot_name` with task_name as default.
     async fn on_task_finished(&self, event: &Event) {
-        let Some(task_name) = event.task.as_deref() else { return };
-        let Some(sup) = self.supervisor.upgrade() else { return };
+        let Some(task_name) = event.task.as_deref() else {
+            return;
+        };
+        let Some(sup) = self.supervisor.upgrade() else {
+            return;
+        };
 
         let mut slots = self.slots.write().await;
-        let Some(slot) = slots.get_mut(task_name) else { return };
+        let Some(slot) = slots.get_mut(task_name) else {
+            return;
+        };
 
         if matches!(slot.status, SlotStatus::Idle) {
             return;
@@ -198,7 +204,9 @@ impl Controller {
                 eprintln!("[controller] failed to start next task '{task_name}': {e}");
                 return;
             }
-            slot.status = SlotStatus::Running { started_at: Instant::now() };
+            slot.status = SlotStatus::Running {
+                started_at: Instant::now(),
+            };
         }
     }
 }
