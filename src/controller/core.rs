@@ -172,6 +172,7 @@ impl Controller {
     /// Handles a terminal event (`ActorExhausted`, `ActorDead`, or `TaskRemoved`).
     ///
     /// IMPORTANT: Each slot is keyed by task name.
+    /// TODO: maybe add `slot_name` with task_name as default.
     async fn on_task_finished(&self, event: &Event) {
         let Some(task_name) = event.task.as_deref() else { return };
         let Some(sup) = self.supervisor.upgrade() else { return };
