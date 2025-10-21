@@ -87,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
 
         println!("[main] submitting build (Queue)");
         sup.submit(ControllerSpec::new(
-            "build",
             Admission::Queue,
             make_task("build", 800),
         ))
@@ -95,7 +94,6 @@ async fn main() -> anyhow::Result<()> {
 
         println!("[main] submitting test (DropIfRunning)");
         sup.submit(ControllerSpec::new(
-            "test",
             Admission::DropIfRunning,
             make_task("test", 600),
         ))
@@ -103,7 +101,6 @@ async fn main() -> anyhow::Result<()> {
 
         println!("[main] submitting deploy (Replace)");
         sup.submit(ControllerSpec::new(
-            "deploy",
             Admission::Replace,
             make_task("deploy", 1000),
         ))

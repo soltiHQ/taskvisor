@@ -44,7 +44,6 @@ impl ControllerHandle {
 /// Each slot can run at most one task at a time. New submissions are handled
 /// according to the configured admission policy.
 pub struct Controller {
-    #[allow(dead_code)]
     config: ControllerConfig,
     supervisor: Weak<Supervisor>,
     bus: Bus,
