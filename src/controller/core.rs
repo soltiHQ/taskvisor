@@ -114,6 +114,12 @@ impl Controller {
     }
 
     /// Handles a new task submission.
+    ///
+    // Replace semantics:
+    // - Enqueue the new spec at the head (latest-wins).
+    // - If slot was Running -> transition to Terminating and request remove once.
+    // - If already Terminating -> do NOT call remove again; just update the head.
+    // - The next task actually starts in `on_task_finished` upon terminal event.
     async fn handle_submission(&self, spec: ControllerSpec) {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
@@ -140,15 +146,17 @@ impl Controller {
             }
             (SlotStatus::Running { .. }, Admission::Replace) => {
                 slot.queue.push_front(task_spec);
-                slot.status = SlotStatus::Terminating {
-                    cancelled_at: Instant::now(),
-                };
+
+                slot.status = SlotStatus::Terminating { cancelled_at: Instant::now() };
                 if let Err(e) = sup.remove_task(&slot_name) {
                     eprintln!("[controller] failed to cancel task '{slot_name}': {e}");
-                }
+                };
             }
             (SlotStatus::Running { .. }, Admission::Queue) => {
                 slot.queue.push_back(task_spec);
+            }
+            (SlotStatus::Terminating { .. }, Admission::Replace) => {
+                slot.queue.push_front(task_spec);
             }
             (SlotStatus::Terminating { .. }, _) => {
                 slot.queue.push_back(task_spec);
@@ -183,8 +191,8 @@ impl Controller {
         if matches!(slot.status, SlotStatus::Idle) {
             return;
         }
-
         slot.status = SlotStatus::Idle;
+
         if let Some(next_spec) = slot.queue.pop_front() {
             if let Err(e) = sup.add_task(next_spec) {
                 eprintln!("[controller] failed to start next task '{task_name}': {e}");
