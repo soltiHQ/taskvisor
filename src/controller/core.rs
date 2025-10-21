@@ -132,6 +132,14 @@ impl Controller {
         let slot_arc = self.get_or_create_slot(&slot_name);
         let mut slot = slot_arc.lock().await;
 
+        if slot.queue.len() >= self.config.slot_capacity {
+            eprintln!(
+                "[controller] slot '{}' queue full ({}/{}), dropping submission",
+                slot_name, slot.queue.len(), self.config.slot_capacity
+            );
+            return;
+        }
+
         match (&slot.status, admission) {
             (SlotStatus::Idle, _) => {
                 if let Err(e) = sup.add_task(task_spec) {
@@ -143,20 +151,26 @@ impl Controller {
                 };
             }
             (SlotStatus::Running { .. }, Admission::Replace) => {
-                slot.queue.push_front(task_spec);
+                if let Some(head) = slot.queue.front_mut() {
+                    *head = task_spec;
+                } else {
+                    slot.queue.push_front(task_spec);
+                }
 
-                slot.status = SlotStatus::Terminating {
-                    cancelled_at: Instant::now(),
-                };
+                slot.status = SlotStatus::Terminating { cancelled_at: Instant::now() };
                 if let Err(e) = sup.remove_task(&slot_name) {
                     eprintln!("[controller] failed to cancel task '{slot_name}': {e}");
-                };
+                }
             }
             (SlotStatus::Running { .. }, Admission::Queue) => {
                 slot.queue.push_back(task_spec);
             }
             (SlotStatus::Terminating { .. }, Admission::Replace) => {
-                slot.queue.push_front(task_spec);
+                if let Some(head) = slot.queue.front_mut() {
+                    *head = task_spec;
+                } else {
+                    slot.queue.push_front(task_spec);
+                }
             }
             (SlotStatus::Terminating { .. }, _) => {
                 slot.queue.push_back(task_spec);
@@ -204,6 +218,10 @@ impl Controller {
             slot.status = SlotStatus::Running {
                 started_at: Instant::now(),
             };
+        }
+        if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
+            drop(slot);
+            self.slots.remove(task_name);
         }
     }
 
