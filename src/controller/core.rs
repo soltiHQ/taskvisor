@@ -160,25 +160,28 @@ impl Controller {
     /// Handles bus events (TaskStopped, TaskRemoved).
     async fn handle_event(&self, event: Arc<Event>) {
         match event.kind {
-            EventKind::TaskStopped | EventKind::TaskRemoved => {
+            EventKind::ActorExhausted
+            | EventKind::ActorDead
+            | EventKind::TaskRemoved => {
                 self.on_task_finished(&event).await;
             }
             _ => {}
         }
     }
 
-    /// Called when a task finishes (stopped or removed).
+    /// Handles a terminal event (`ActorExhausted`, `ActorDead`, or `TaskRemoved`).
+    ///
+    /// IMPORTANT: Each slot is keyed by task name.
     async fn on_task_finished(&self, event: &Event) {
-        let Some(task_name) = event.task.as_deref() else {
-            return;
-        };
-        let Some(sup) = self.supervisor.upgrade() else {
-            return;
-        };
+        let Some(task_name) = event.task.as_deref() else { return };
+        let Some(sup) = self.supervisor.upgrade() else { return };
+
         let mut slots = self.slots.write().await;
-        let Some(slot) = slots.get_mut(task_name) else {
+        let Some(slot) = slots.get_mut(task_name) else { return };
+
+        if matches!(slot.status, SlotStatus::Idle) {
             return;
-        };
+        }
 
         slot.status = SlotStatus::Idle;
         if let Some(next_spec) = slot.queue.pop_front() {
@@ -186,9 +189,7 @@ impl Controller {
                 eprintln!("[controller] failed to start next task '{task_name}': {e}");
                 return;
             }
-            slot.status = SlotStatus::Running {
-                started_at: Instant::now(),
-            };
+            slot.status = SlotStatus::Running { started_at: Instant::now() };
         }
     }
 }
