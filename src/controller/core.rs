@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -48,8 +48,8 @@ pub struct Controller {
     supervisor: Weak<Supervisor>,
     bus: Bus,
 
-    // Internal state (protected by RwLock).
-    slots: RwLock<HashMap<String, SlotState>>,
+    // Concurrent slots map.
+    slots: DashMap<String, Arc<Mutex<SlotState>>>,
 
     // Submission queue.
     tx: mpsc::Sender<ControllerSpec>,
@@ -65,7 +65,7 @@ impl Controller {
             config,
             supervisor: Arc::downgrade(supervisor),
             bus,
-            slots: RwLock::new(HashMap::new()),
+            slots: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
         })
@@ -129,10 +129,8 @@ impl Controller {
         let admission = spec.admission;
         let task_spec = spec.task_spec;
 
-        let mut slots = self.slots.write().await;
-        let slot = slots
-            .entry(slot_name.clone())
-            .or_insert_with(SlotState::new);
+        let slot_arc = self.get_or_create_slot(&slot_name);
+        let mut slot = slot_arc.lock().await;
 
         match (&slot.status, admission) {
             (SlotStatus::Idle, _) => {
@@ -188,11 +186,10 @@ impl Controller {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
-
-        let mut slots = self.slots.write().await;
-        let Some(slot) = slots.get_mut(task_name) else {
+        let Some(slot_arc) = self.slots.get(task_name).map(|e| e.clone()) else {
             return;
         };
+        let mut slot = slot_arc.lock().await;
 
         if matches!(slot.status, SlotStatus::Idle) {
             return;
@@ -208,5 +205,13 @@ impl Controller {
                 started_at: Instant::now(),
             };
         }
+    }
+
+    #[inline]
+    fn get_or_create_slot(&self, slot_name: &str) -> Arc<Mutex<SlotState>> {
+        self.slots
+            .entry(slot_name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(SlotState::new())))
+            .clone()
     }
 }
