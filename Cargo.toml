@@ -15,7 +15,7 @@ categories = ["asynchronous", "concurrency", "development-tools"]
 [features]
 default = []
 logging = []
-events = []
+controller = []
 
 [package.metadata.docs.rs]
 features = ["logging", "events"]

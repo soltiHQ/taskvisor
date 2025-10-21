@@ -101,6 +101,7 @@
 
 mod actor;
 mod alive;
+mod builder;
 mod registry;
 mod runner;
 mod shutdown;
