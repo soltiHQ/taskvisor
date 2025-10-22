@@ -112,10 +112,10 @@
 
 mod admission;
 mod config;
-mod error;
-mod spec;
 mod core;
+mod error;
 mod slot;
+mod spec;
 
 pub use admission::ControllerAdmission;
 pub use config::ControllerConfig;
