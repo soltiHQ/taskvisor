@@ -91,10 +91,10 @@
 //! ```
 
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::Semaphore, sync::broadcast, time::timeout};
+use tokio::{sync::OnceCell, sync::broadcast, time::timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{alive::AliveTracker, registry::Registry};
+use crate::core::{alive::AliveTracker, builder::SupervisorBuilder, registry::Registry};
 use crate::{
     config::Config,
     error::RuntimeError,
@@ -118,26 +118,51 @@ pub struct Supervisor {
     alive: Arc<AliveTracker>,
     registry: Arc<Registry>,
     runtime_token: CancellationToken,
+
+    #[cfg(feature = "controller")]
+    pub(super) controller: OnceCell<Arc<crate::controller::Controller>>,
 }
 
 impl Supervisor {
-    /// Creates a new supervisor with the given config and subscribers (maybe empty).
-    pub fn new(cfg: Config, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
-        let bus = Bus::new(cfg.bus_capacity_clamped());
-        let subs = Arc::new(SubscriberSet::new(subscribers, bus.clone()));
-        let runtime_token = CancellationToken::new();
-        let semaphore = Self::build_semaphore_static(&cfg);
-
-        let registry = Registry::new(bus.clone(), runtime_token.clone(), semaphore);
-
+    /// Internal constructor used by builder (not public API).
+    pub(crate) fn new_internal(
+        cfg: Config,
+        bus: Bus,
+        subs: Arc<SubscriberSet>,
+        alive: Arc<AliveTracker>,
+        registry: Arc<Registry>,
+        runtime_token: CancellationToken,
+    ) -> Self {
         Self {
             cfg,
             bus,
             subs,
-            alive: Arc::new(AliveTracker::new()),
+            alive,
             registry,
             runtime_token,
+
+            #[cfg(feature = "controller")]
+            controller: OnceCell::new(),
         }
+    }
+
+    /// Creates a new supervisor with the given config and subscribers (maybe empty).
+    pub fn new(cfg: Config, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
+        Self::builder(cfg).with_subscribers(subscribers).build()
+    }
+
+    /// Creates a builder for constructing a Supervisor.
+    ///
+    /// ## Example
+    /// ```rust
+    /// use taskvisor::{Config, Supervisor};
+    ///
+    /// let sup = Supervisor::builder(Config::default())
+    ///     .with_subscribers(vec![])
+    ///     .build();
+    /// ```
+    pub fn builder(cfg: Config) -> SupervisorBuilder {
+        SupervisorBuilder::new(cfg)
     }
 
     /// Adds a new task to the supervisor at runtime.
@@ -229,6 +254,43 @@ impl Supervisor {
         self.wait_task_removed(&mut rx, name, wait_for).await
     }
 
+    /// Submits a task to the controller (if enabled).
+    ///
+    /// Returns an error if:
+    /// - Controller feature is disabled
+    /// - Controller is not configured
+    /// - Submission queue is full (use `try_submit` for non-blocking)
+    ///
+    /// Requires the `controller` feature flag.
+    #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
+    pub async fn submit(
+        &self,
+        spec: crate::controller::ControllerSpec,
+    ) -> Result<(), crate::controller::ControllerError> {
+        match self.controller.get() {
+            Some(ctrl) => ctrl.handle().submit(spec).await,
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
+    }
+
+    /// Tries to submit a task without blocking.
+    ///
+    /// Returns `TrySubmitError::Full` if the queue is full.
+    ///
+    /// Requires the `controller` feature flag.
+    #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
+    pub fn try_submit(
+        &self,
+        spec: crate::controller::ControllerSpec,
+    ) -> Result<(), crate::controller::ControllerError> {
+        match self.controller.get() {
+            Some(ctrl) => ctrl.handle().try_submit(spec),
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
+    }
+
     /// Listens to the internal event bus and fans out each received [`Event`] to all active subscribers.
     ///
     /// The listener also updates the [`AliveTracker`] before fan-out to keep
@@ -266,13 +328,6 @@ impl Supervisor {
                 }
             }
         });
-    }
-
-    /// Builds global semaphore for concurrency limiting.
-    ///
-    /// Returns `None` if unlimited.
-    fn build_semaphore_static(cfg: &Config) -> Option<Arc<Semaphore>> {
-        cfg.concurrency_limit().map(Semaphore::new).map(Arc::new)
     }
 
     /// Waits for either shutdown signal or natural completion of all tasks.

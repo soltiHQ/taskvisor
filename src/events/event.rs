@@ -191,6 +191,30 @@ pub enum EventKind {
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     ActorDead,
+
+    #[cfg(feature = "controller")]
+    /// Controller submission rejected (queue full, add failed, etc).
+    ///
+    /// Sets:
+    /// - `task`: slot name
+    /// - `reason`: rejection reason ("queue_full", "add_failed: ...", etc)
+    ControllerRejected,
+
+    #[cfg(feature = "controller")]
+    /// Task submitted successfully to controller slot.
+    ///
+    /// Sets:
+    /// - `task`: slot name
+    /// - `reason`: "admission={admission} status={status} depth={N}"
+    ControllerSubmitted,
+
+    #[cfg(feature = "controller")]
+    /// Slot transitioned state (Running → Terminating, etc).
+    ///
+    /// Sets:
+    /// - `task`: slot name
+    /// - `reason`: "running→terminating" (Replace), "terminating→idle", etc
+    ControllerSlotTransition,
 }
 
 /// Reason for schedule the next run/backoff.

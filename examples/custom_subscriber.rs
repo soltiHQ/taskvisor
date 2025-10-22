@@ -133,10 +133,7 @@ impl Subscribe for ConsoleSubscriber {
             }
 
             // === Ignored ===
-            EventKind::SubscriberPanicked
-            | EventKind::SubscriberOverflow
-            | EventKind::TaskAddRequested
-            | EventKind::TaskRemoveRequested => {}
+            _ => {}
         }
     }
 

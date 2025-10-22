@@ -15,7 +15,7 @@ categories = ["asynchronous", "concurrency", "development-tools"]
 [features]
 default = []
 logging = []
-events = []
+controller = []
 
 [package.metadata.docs.rs]
 features = ["logging", "events"]
@@ -28,3 +28,4 @@ thiserror = "2.0.16"
 anyhow = "1.0.100"
 futures = "0.3.31"
 rand = "0.9.2"
+dashmap = "6.1.0"
