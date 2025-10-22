@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Error returned by [`Supervisor::submit`](crate::Supervisor::submit).
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitError {
+pub enum ControllerError {
     /// Controller is not configured (builder didn't call `with_controller`).
     #[error("controller not configured")]
     NotConfigured,

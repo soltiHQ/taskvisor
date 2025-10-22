@@ -267,10 +267,10 @@ impl Supervisor {
     pub async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
-    ) -> Result<(), crate::controller::SubmitError> {
+    ) -> Result<(), crate::controller::ControllerError> {
         match self.controller.get() {
             Some(ctrl) => ctrl.handle().submit(spec).await,
-            None => Err(crate::controller::SubmitError::NotConfigured),
+            None => Err(crate::controller::ControllerError::NotConfigured),
         }
     }
 
@@ -284,10 +284,10 @@ impl Supervisor {
     pub fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,
-    ) -> Result<(), crate::controller::SubmitError> {
+    ) -> Result<(), crate::controller::ControllerError> {
         match self.controller.get() {
             Some(ctrl) => ctrl.handle().try_submit(spec),
-            None => Err(crate::controller::SubmitError::NotConfigured),
+            None => Err(crate::controller::ControllerError::NotConfigured),
         }
     }
 

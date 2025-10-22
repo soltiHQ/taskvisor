@@ -180,6 +180,36 @@ impl Subscribe for LogWriter {
                     or(e.reason.as_deref(), "fatal")
                 );
             }
+
+            #[cfg(feature = "controller")]
+            EventKind::ControllerRejected => {
+                println!(
+                    "{} [controller-rejected] slot={} reason=\"{}\"",
+                    seq,
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
+                );
+            }
+
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSubmitted => {
+                println!(
+                    "{} [controller-submitted] slot={} {}",
+                    seq,
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "")
+                );
+            }
+
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSlotTransition => {
+                println!(
+                    "{} [controller-transition] slot={} transition=\"{}\"",
+                    seq,
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
+                );
+            }
         }
     }
 

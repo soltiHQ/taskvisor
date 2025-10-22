@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync;
 
 use crate::{
     config::Config,
@@ -88,14 +89,12 @@ impl SupervisorBuilder {
         let semaphore = self
             .cfg
             .concurrency_limit()
-            .map(tokio::sync::Semaphore::new)
+            .map(sync::Semaphore::new)
             .map(Arc::new);
 
         let registry = Registry::new(bus.clone(), runtime_token.clone(), semaphore);
-
         let alive = Arc::new(AliveTracker::new());
 
-        // Use internal constructor
         let sup = Arc::new(Supervisor::new_internal(
             self.cfg,
             bus.clone(),
@@ -105,14 +104,13 @@ impl SupervisorBuilder {
             runtime_token.clone(),
         ));
 
-        // Initialize controller if configured
         #[cfg(feature = "controller")]
         if let Some(ctrl_cfg) = self.controller_config {
-            let controller = crate::controller::Controller::new(ctrl_cfg, &sup, bus);
+            let controller = crate::controller::Controller::new(ctrl_cfg, &sup, bus.clone());
 
-            let _ = sup.controller.set(controller);
+            let _ = sup.controller.set(Arc::clone(&controller));
+            controller.run(runtime_token.clone());
         }
-
         sup
     }
 }

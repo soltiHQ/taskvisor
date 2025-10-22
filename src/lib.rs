@@ -18,7 +18,7 @@
 //!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
 //!            ▼                  ▼                  ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
-//! │         Supervisor (runtime orchestrator)                         │
+//! │  Supervisor (runtime orchestrator)                                │
 //! │  - Bus (broadcast events)                                         │
 //! │  - AliveTracker (tracks task state with sequence numbers)         │
 //! │  - SubscriberSet (fans out to user subscribers)                   │
@@ -104,7 +104,7 @@
 //!
 //! ## Optional features
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
-//! - `events`:  exports [`Event`] and [`EventKind`] for advanced integrations.
+//! - `controller`:  exposes controller runtime and admission types.
 //!
 //! ## Example
 //! ```rust
@@ -122,13 +122,16 @@
 //!     #[cfg(feature = "logging")]
 //!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = {
 //!         use taskvisor::LogWriter;
-//!         vec![Arc::new(LogWriter)]
+//!         vec![Arc::new(LogWriter::default())]
 //!     };
 //!     #[cfg(not(feature = "logging"))]
 //!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = Vec::new();
 //!
 //!     // Create supervisor
-//!     let sup = Supervisor::new(cfg, subs);
+//!     let sup = taskvisor::Supervisor::builder(cfg)
+//!         .with_subscribers(subs)
+//!         // .with_controller(ControllerConfig { ... })  // if feature = "controller"
+//!         .build();
 //!
 //!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
@@ -151,13 +154,13 @@
 //! }
 //! ```
 mod config;
-pub mod controller;
 mod core;
 mod error;
 mod events;
 mod policies;
 mod subscribers;
 mod tasks;
+
 // ---- Public re-exports ----
 
 pub use config::Config;
@@ -167,6 +170,13 @@ pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
 pub use subscribers::{Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
+
+// Optional: expose a controller object.
+// Enable with: `--features controller`
+#[cfg(feature = "controller")]
+mod controller;
+#[cfg(feature = "controller")]
+pub use controller::{ControllerAdmission, ControllerConfig, ControllerError, ControllerSpec};
 
 // Optional: expose a simple built-in logger subscriber (demo/reference).
 // Enable with: `--features logging`

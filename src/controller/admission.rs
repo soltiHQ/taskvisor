@@ -15,7 +15,7 @@
 
 /// Policy controlling how new submissions are handled when a slot is busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Admission {
+pub enum ControllerAdmission {
     /// Skip task if already running.
     ///
     /// Use when:

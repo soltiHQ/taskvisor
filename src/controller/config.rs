@@ -7,7 +7,7 @@ pub struct ControllerConfig {
     pub queue_capacity: usize,
 
     /// Capacity of the slots.
-    pub slot_capacity: usize
+    pub slot_capacity: usize,
 }
 
 impl Default for ControllerConfig {
