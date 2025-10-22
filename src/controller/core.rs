@@ -234,7 +234,9 @@ impl Controller {
 
     /// Handles bus events (terminal only).
     async fn handle_event(&self, event: Arc<Event>) {
-        if event.kind == EventKind::TaskRemoved { self.on_task_finished(&event).await }
+        if event.kind == EventKind::TaskRemoved {
+            self.on_task_finished(&event).await
+        }
     }
 
     /// Handles `TaskRemoved` for a task; frees the slot and optionally starts the queued next.

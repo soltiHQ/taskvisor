@@ -10,27 +10,6 @@ use crate::{
 use super::{alive::AliveTracker, registry::Registry, supervisor::Supervisor};
 
 /// Builder for constructing a Supervisor with optional features.
-///
-/// ## Example
-/// ```rust
-/// use taskvisor::{Config, Supervisor};
-///
-/// // Without controller
-/// let sup = Supervisor::builder(Config::default())
-///     .with_subscribers(vec![])
-///     .build();
-///
-/// // With controller (requires "controller" feature)
-/// #[cfg(feature = "controller")]
-/// {
-///     use taskvisor::controller::ControllerConfig;
-///
-///     let sup = Supervisor::builder(Config::default())
-///         .with_subscribers(vec![])
-///         .with_controller(ControllerConfig::default())
-///         .build();
-/// }
-/// ```
 pub struct SupervisorBuilder {
     cfg: Config,
     subscribers: Vec<Arc<dyn Subscribe>>,
