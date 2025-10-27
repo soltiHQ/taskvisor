@@ -187,11 +187,13 @@ async fn main() -> anyhow::Result<()> {
 ### Controller Feature
 When the controller feature is enabled, Taskvisor gains a dedicated Controller layer 
 that manages task admission and scheduling before tasks are handed to the Supervisor.
+
 ```toml
 # Cargo.toml
 [dependencies]
 taskvisor = { version = "0.0.8", features = ["controller"] }
 ```
+
 ```text
 submit(ControllerSpec)
           ▼
@@ -206,6 +208,43 @@ submit(ControllerSpec)
           ▼
       Task Actors
 ```
+
+```rust
+use std::{sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
+use taskvisor::{
+    Supervisor, ControllerConfig, ControllerSpec,
+    TaskFn, TaskSpec, RestartPolicy, BackoffPolicy, TaskError,
+};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let sup = Supervisor::builder(Default::default())
+        .with_controller(ControllerConfig::new())
+        .build();
+
+    let sup_bg = Arc::clone(&sup);
+    tokio::spawn(async move { let _ = sup_bg.run(vec![]).await; });
+
+    let spec = TaskSpec::new(
+        TaskFn::arc("job", |ctx: CancellationToken| async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if ctx.is_cancelled() { return Ok(()); }
+            Ok::<(), TaskError>(())
+        }),
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    );
+
+    sup.submit(ControllerSpec::queue(spec.clone())).await?;
+    sup.submit(ControllerSpec::queue(spec)).await?;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+```
+
 #### Admission modes:
 - `DropIfRunning` discard if a task with the same name is still active.
 - `Replace` cancel and replace the running task.
