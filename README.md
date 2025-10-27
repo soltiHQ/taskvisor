@@ -29,14 +29,14 @@ taskvisor = "0.0.7"
 
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.7", features = ["logging"] }
+taskvisor = { version = "0.0.8", features = ["logging"] }
 ```
 
 ## 📝 Quick start
 #### Minimal Example (No subscribers)
 ```toml
 [dependencies]
-taskvisor = "0.0.7"
+taskvisor = "0.0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
 #### Minimal Example (Embedded subscriber)
 ```toml
 [dependencies]
-taskvisor = { version = "0.0.7", features = ["logging"] }
+taskvisor = { version = "0.0.8", features = ["logging"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
@@ -123,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
 #### Dynamic Tasks Example
 ```toml
 [dependencies]
-taskvisor = "0.0.7"
+taskvisor = "0.0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
@@ -183,6 +183,34 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+### Controller Feature
+When the controller feature is enabled, Taskvisor gains a dedicated Controller layer 
+that manages task admission and scheduling before tasks are handed to the Supervisor.
+```toml
+# Cargo.toml
+[dependencies]
+taskvisor = { version = "0.0.8", features = ["controller"] }
+```
+```text
+submit(ControllerSpec)
+          ▼
+   ┌──────────────┐
+   │  Controller  │  ← Admission control (Drop / Replace / Queue)
+   └──────┬───────┘
+          ▼
+   ┌──────────────┐
+   │  Supervisor  │
+   │  spawns task │
+   └──────┬───────┘
+          ▼
+      Task Actors
+```
+#### Admission modes:
+- `DropIfRunning` discard if a task with the same name is still active.
+- `Replace` cancel and replace the running task.
+- `Queue` enqueue until the slot becomes free.
+__The controller uses an internal async queue (mpsc) to serialize submissions and integrates with the global concurrency limit of Supervisor.__
 
 ### More Examples
 Check out the [examples](./examples) directory for:
