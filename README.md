@@ -20,7 +20,7 @@
 #### Cargo.toml:
 ```toml
 [dependencies]
-taskvisor = "0.0.7"
+taskvisor = "0.0.8"
 ```
 
 > Optional features:
