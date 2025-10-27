@@ -18,7 +18,7 @@ logging = []
 controller = []
 
 [package.metadata.docs.rs]
-features = ["logging", "events"]
+features = ["logging", "controller"]
 
 [dependencies]
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
