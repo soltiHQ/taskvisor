@@ -10,8 +10,8 @@
 //! ### Overview
 //! ```text
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-//!     │   TaskSpec   │ … │   TaskSpec   │ … │   TaskSpec   │
-//!     │(user task #1)│ … │(user task #2)│ … │(user task #3)│
+//!     │   TaskSpec   │   │   TaskSpec   │   │   TaskSpec   │
+//!     │(user task #1)│   │(user task #2)│   │(user task #3)│
 //!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
 //!            ▼                  ▼                  ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
@@ -37,7 +37,7 @@
 //! ┌───────────────────────────────────────────────────────────────────┐
 //! │                        Bus (broadcast channel)                    │
 //! │                  (capacity: Config::bus_capacity)                 │
-//! └─────────────────────────────────┬─────────────────────────────────┘
+//!└─────────────────────────────────┬─────────────────────────────────┘
 //!                                   ▼
 //!                       ┌────────────────────────┐
 //!                       │  subscriber_listener   │
@@ -46,11 +46,9 @@
 //!                           ▼                ▼
 //!                    AliveTracker     SubscriberSet
 //!                  (sequence-based)   (per-sub queues)
-//!                                            │
 //!                                  ┌─────────┼─────────┐
 //!                                  ▼         ▼         ▼
 //!                                  worker1  worker2  workerN
-//!                                  │         │         │
 //!                                  ▼         ▼         ▼
 //!                             sub1.on   sub2.on   subN.on
 //!                              _event()  _event()  _event()
@@ -67,12 +65,12 @@
 //!   ├─► run_once(task, timeout, attempt)
 //!   │       │
 //!   │       ├─ Ok  ──► publish TaskStopped
-//!   │       │          ├─ RestartPolicy::Never     → ActorExhausted, exit
-//!   │       │          ├─ RestartPolicy::OnFailure → ActorExhausted, exit
-//!   │       │          └─ RestartPolicy::Always    → reset delay, continue
+//!   │       │          ├─ RestartPolicy::Never     ─► ActorExhausted, exit
+//!   │       │          ├─ RestartPolicy::OnFailure ─► ActorExhausted, exit
+//!   │       │          └─ RestartPolicy::Always    ─► reset delay, continue
 //!   │       │
 //!   │       └─ Err ──► publish TaskFailed{ task, error, attempt }
-//!   │                  ├─ RestartPolicy::Never     → ActorExhausted, exit
+//!   │                  ├─ RestartPolicy::Never     ─► ActorExhausted, exit
 //!   │                  └─ RestartPolicy::OnFailure/Always:
 //!   │                       ├─ compute delay = backoff.next(prev_delay)
 //!   │                       ├─ publish BackoffScheduled{ delay, attempt }
@@ -81,8 +79,8 @@
 //!   │
 //!   └─ exit conditions:
 //!        - runtime_token cancelled (OS signal or explicit remove)
-//!        - RestartPolicy forbids continuation → ActorExhausted
-//!        - Fatal error → ActorDead
+//!        - RestartPolicy forbids continuation ─► ActorExhausted
+//!        - Fatal error ─► ActorDead
 //!        - semaphore closed
 //! }
 //!
