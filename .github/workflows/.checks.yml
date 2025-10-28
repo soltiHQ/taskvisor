@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run fmt
-        uses: ./.github/actions/taskfile
+        uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/fmt }
 
   test:
@@ -32,7 +32,7 @@ jobs:
         with: { job_name: test }
 
       - name: Run Job
-        uses: ./.github/actions/taskfile
+        uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/test }
 
       - name: Put Cache
@@ -51,7 +51,7 @@ jobs:
         with: { job_name: clippy }
 
       - name: Run Job
-        uses: ./.github/actions/taskfile
+        uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/clippy }
 
       - name: Put Cache
