@@ -2,16 +2,6 @@ name: Checks
 
 on: { workflow_call: {} }
 
-permissions: {
-  contents: read,
-  actions: write
-}
-
-env:
-  CI: "true"
-  RUST_BACKTRACE: "1"
-  CARGO_TERM_COLOR: "always"
-
 jobs:
   fmt:
     runs-on: ${{ vars.RUNS_ON }}
