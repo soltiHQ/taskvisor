@@ -1,6 +1,3 @@
-#![doc(html_no_source)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
-
 //! # taskvisor
 //!
 //! **Taskvisor** is a lightweight task orchestration library for Rust.

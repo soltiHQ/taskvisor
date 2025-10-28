@@ -263,7 +263,6 @@ impl Supervisor {
     ///
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
@@ -280,7 +279,6 @@ impl Supervisor {
     ///
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,

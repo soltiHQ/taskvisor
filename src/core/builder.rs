@@ -46,7 +46,6 @@ impl SupervisorBuilder {
     ///
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
         self
