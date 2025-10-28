@@ -95,3 +95,13 @@ tasks:
       - task: _cargo/tool
         vars:
           CMD: "test --all --all-features"
+
+  cargo/docs:
+    desc: Run 'rustdoc'.
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: >-
+            +nightly rustdoc --lib -Zrustdoc-map --features "logging controller"
+            --offline -Zunstable-options -Zrustdoc-scrape-examples
+            --config 'build.rustdocflags=["--cfg","docsrs","-Z","unstable-options","--cap-lints","warn"]'
