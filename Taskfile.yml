@@ -4,7 +4,7 @@ vars:
   git_root:
     sh: git rev-parse --show-toplevel
 
-  rust_version: "1.90"
+  rust_version: "1.90.0"
   cache_dir: ".cache"
 
 tasks:
@@ -59,7 +59,7 @@ tasks:
       - cmd: mkdir -p "{{.git_root}}/{{.cache_dir}}"
       - task: _docker/run
         vars:
-          IMAGE: "rust:{{.rust_version}}-slim"
+          IMAGE: "ghcr.io/soltihq/cargo-tools:{{.rust_version}}"
           CMD: "{{.CMD}}"
           MOUNT_DIR: "."
           VOLUMES:
@@ -67,6 +67,8 @@ tasks:
           ENVS:
             - "CARGO_TARGET_DIR=/tmp/{{.cache_dir}}/target"
             - "CARGO_HOME=/tmp/{{.cache_dir}}/cargo"
+            - "RUSTUP_TOOLCHAIN={{.rust_version}}"
+            - "RUSTUP_NO_UPDATE_CHECK=1"
             - "CARGO_INCREMENTAL=0"
 
   # ================================================#
@@ -78,18 +80,18 @@ tasks:
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add rustfmt && cargo fmt --check --verbose"
+          CMD: "fmt --check --verbose"
 
   cargo/clippy:
     desc: Run 'cargo clippy'.
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "rustup component add clippy && cargo clippy --all --all-features -- -D warnings"
+          CMD: "clippy --all --all-features -- -D warnings"
 
   cargo/test:
     desc: Run 'cargo test'.
     cmds:
       - task: _cargo/tool
         vars:
-          CMD: "cargo test --all --all-features"
+          CMD: "test --all --all-features"
