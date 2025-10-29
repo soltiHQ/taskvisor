@@ -116,12 +116,12 @@ Optional Controller (feature-gated):
 ### Runtime flow
 - You write `TaskFn` (async closure)
 - Wrap it in `TaskSpec` (+ policies)
-- Pass to `Supervisor` directly OR through `Controller` __[feature]__
+- Pass to `Supervisor` directly OR through `Controller`
   - Registry spawns `TaskActor` per task
-  - `TaskActor` runs `TaskSpec` ─► emits `Event` to `Bus`
+  - `TaskActor` runs `TaskSpec` and emits `Event` to `Bus`
   - `Bus` fans out to `Subscribe` implementations
 
-`Controller` __[feature]__ is alternative entry point: wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
+`Controller` is alternative entry point: wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
 
 ## Optional features
 | Feature       | Description                                                             |
