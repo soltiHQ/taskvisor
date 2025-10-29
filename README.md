@@ -26,7 +26,7 @@ Use it for long-lived jobs, controllers, or background workers that must stay al
 
 ## Why Taskvisor?
 Async systems grow fast: tasks, loops, background jobs, controllers.    
-Eventually you need structure: who runs what, what happens on failure, how to restart safely, and how to observe it all.  
+Eventually you need structure: who runs what, what happens on failure, how to restart safely, and how to observe it all.
 Taskvisor provides that structure: a small, event-driven supervision layer that keeps async work supervised and transparent.
 
 ## Quick example
@@ -63,6 +63,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### More Examples
+Check out the [examples](./examples) directory for:
+- [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown
+- [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
+- [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
+- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events
+- [task_cancel.rs](examples/task_cancel.rs): task cancellation from outside
+- [controller.rs](examples/controller.rs): examples with `controller` feature
+
+```bash
+# basic / retry / dynamic do not require extra features
+cargo run --example basic_one_shot
+cargo run --example retry_with_backoff
+cargo run --example dynamic_add_remove
+cargo run --example custom_subscriber
+cargo run --example task_cancel --features logging
+cargo run --example controller --features controller
+```
+
 ## Key features
 - **[Supervisor](./src/core/supervisor.rs)** supervises async tasks, tracks their lifecycle, handles add/remove requests, and drives graceful shutdown.
 - **[Registry](./src/core/registry.rs)** coordinates task actors, spawning and removing them in response to runtime events.
@@ -89,7 +108,7 @@ TaskFn (your async code + required context handling)
                   └─► Subscribe implementations (your metrics/logs)
 
 Optional Controller (feature-gated):
-   ControllerSpec → Controller → Supervisor.add_task(TaskSpec)
+   ControllerSpec ─► Controller ─► Supervisor.add_task(TaskSpec)
    (admission policies: Queue/Replace/DropIfRunning)
 ```
 
@@ -97,9 +116,9 @@ Optional Controller (feature-gated):
 - You write `TaskFn` (async closure)
 - Wrap it in `TaskSpec` (+ policies)
 - Pass to `Supervisor` directly OR through `Controller` __[feature]__
-- Registry spawns `TaskActor` per task
-- `TaskActor` runs `TaskSpec` → emits `Event` to `Bus`
-- `Bus` fans out to `Subscribe` implementations
+  - Registry spawns `TaskActor` per task
+  - `TaskActor` runs `TaskSpec` ─► emits `Event` to `Bus`
+  - `Bus` fans out to `Subscribe` implementations
 
 `Controller` __[feature]__ is alternative entry point: wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
 
@@ -109,13 +128,6 @@ Optional Controller (feature-gated):
 | `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) |
 | `logging`     | Enables the built-in `LogWriter`, (demo logger)                         |
 
-###### -----------------
-
-## 📖 Features
-- Observe lifecycle events (start / stop / failure / backoff / timeout / shutdown)
-- Plug custom subscribers for logging, metrics, alerting
-- Global concurrency limiting and graceful shutdown on OS signals
-- Supervised task actors with restart/backoff/timeout policies
 
 ## 📦 Installation
 #### Cargo.toml:
@@ -124,33 +136,12 @@ Optional Controller (feature-gated):
 taskvisor = "0.0.9"
 ```
 
-> Optional features:
->  - `logging` enables the built-in [`LogWriter`], (demo logger);
->  - `controller` enables the slot-based [`Controller`] with admission policies.
-
 ```toml
 [dependencies]
 taskvisor = { version = "0.0.9", features = ["logging", "controller"] }
 ```
 
-### More Examples
-Check out the [examples](./examples) directory for:
-- [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown
-- [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
-- [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
-- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events
-- [task_cancel.rs](examples/task_cancel.rs): task cancellation from outside
-- [controller.rs](examples/controller.rs): examples with `controller` feature
 
-```bash
-# basic / retry / dynamic do not require extra features
-cargo run --example basic_one_shot
-cargo run --example retry_with_backoff
-cargo run --example dynamic_add_remove
-cargo run --example custom_subscriber
-cargo run --example task_cancel --features logging
-cargo run --example controller --features controller
-```
 
 ## 🤝 Contributing
 We're open to any new ideas and contributions.  
