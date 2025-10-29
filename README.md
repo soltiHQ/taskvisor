@@ -64,35 +64,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### More Examples
-Check out the [examples](./examples) directory for:
-- [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown
-- [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter
-- [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API
-- [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events
-- [task_cancel.rs](examples/task_cancel.rs): task cancellation from outside
-- [controller.rs](examples/controller.rs): examples with `controller` feature
+| Example                                                 | Description                                    |
+|---------------------------------------------------------|------------------------------------------------|
+| [basic_one_shot.rs](examples/basic_one_shot.rs)         | Single one-shot task, graceful shutdown        |
+| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter |
+| [dynamic_add_remove.rs](examples/dynamic_add_remove.rs) | Add/Remove tasks at runtime via API            |
+| [custom_subscriber.rs](examples/custom_subscriber.rs)   | Custom subscriber reacting to events           |
+| [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 |
+| [controller.rs](examples/controller.rs)                 | Examples with `controller` feature             |
 
 ```bash
-# basic / retry / dynamic do not require extra features
 cargo run --example basic_one_shot
 cargo run --example retry_with_backoff
 cargo run --example dynamic_add_remove
 cargo run --example custom_subscriber
+
 cargo run --example task_cancel --features logging
 cargo run --example controller --features controller
 ```
 
 ## Key features
-- **[Supervisor](./src/core/supervisor.rs)** supervises async tasks, tracks their lifecycle, handles add/remove requests, and drives graceful shutdown.
+- **[Supervisor](./src/core/supervisor.rs)** manage async tasks, tracks lifecycle, handles add/remove requests, and drives graceful shutdown.
 - **[Registry](./src/core/registry.rs)** coordinates task actors, spawning and removing them in response to runtime events.
 - **[TaskActor](./src/core/actor.rs)** per-task execution loop applying restart, backoff, and timeout policies for each run.
 - **[TaskSpec](./src/tasks/spec.rs)** declarative task definition combining restart behavior, backoff strategy, and optional timeout.
 - **[TaskFn](./src/tasks/impl/func.rs)** lightweight adapter turning async closures into supervised tasks.
-- **[RestartPolicy](./src/policies/restart.rs)** / **[BackoffPolicy](./src/policies/backoff.rs)** configurable restart control and retry delay strategies (`Never`, `Always`, `OnFailure`; constant/exponential/jittered).
+- **[RestartPolicy](./src/policies/restart.rs)** / **[BackoffPolicy](./src/policies/backoff.rs)** configurable restart control and retry delay strategies.
 - **[Bus](./src/events/bus.rs)** broadcast channel delivering structured runtime events to subscribers and the controller.
-- **[Event](./src/events/event.rs)** typed event model carrying sequence numbers, timestamps, and contextual metadata for deterministic ordering.
+- **[Event](./src/events/event.rs)** typed event model.
 - **[Subscribe](./src/subscribers/subscriber.rs)** extension point for custom event consumers, each with its own bounded queue and worker.
-- **[Controller](./src/controller/mod.rs)** *(feature = `controller`)* slot-based orchestrator with admission policies: `Queue`, `Replace`, and `DropIfRunning`.
+- **[Controller](./src/controller/mod.rs)** *(feature = `controller`)* slot-based orchestrator with admissions: `Queue`, `Replace`, and `DropIfRunning`.
 
 ### Runtime diagram
 ```text
