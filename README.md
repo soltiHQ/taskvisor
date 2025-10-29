@@ -30,7 +30,7 @@ Eventually you need structure: who runs what, what happens on failure, how to re
 Taskvisor provides that structure: a small, event-driven supervision layer that keeps async work supervised and transparent.
 
 ## Quick example
-Runs forever, restarts automatically on each completion, and emits lifecycle events.
+Runs forever, restarts automatically on each completion, and emits lifecycle events:
 ```rust
 use tokio_util::sync::CancellationToken;
 
@@ -84,7 +84,7 @@ cargo run --example controller --features controller
 ```
 
 ## Key features
-- **[Supervisor](./src/core/supervisor.rs)** manage async tasks, tracks lifecycle, handles add/remove requests, and drives graceful shutdown.
+- **[Supervisor](./src/core/supervisor.rs)** manage async tasks, tracks lifecycle, handles requests, and drives graceful shutdown.
 - **[Registry](./src/core/registry.rs)** coordinates task actors, spawning and removing them in response to runtime events.
 - **[TaskActor](./src/core/actor.rs)** per-task execution loop applying restart, backoff, and timeout policies for each run.
 - **[TaskSpec](./src/tasks/spec.rs)** declarative task definition combining restart behavior, backoff strategy, and optional timeout.
@@ -121,14 +121,14 @@ Optional Controller (feature-gated):
   - `TaskActor` runs `TaskSpec` and emits `Event` to `Bus`
   - `Bus` fans out to `Subscribe` implementations
 
-`Controller` is alternative entry point: wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
+`Controller` is alternative entry point:  
+wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
 
 ## Optional features
 | Feature       | Description                                                             |
 |---------------|-------------------------------------------------------------------------|
 | `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) |
-| `logging`     | Enables the built-in `LogWriter`, (demo logger)                         |
-
+| `logging`     | Enables the built-in `LogWriter`, _demo_ logger                         |
 
 ## 📦 Installation
 #### Cargo.toml:
