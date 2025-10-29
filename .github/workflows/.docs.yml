@@ -1,0 +1,12 @@
+name: Docs
+
+on: { workflow_call: {} }
+
+jobs:
+  docs:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run docs gen
+        uses: soltiHQ/actions/taskfile@main
+        with: { command: cargo/docs }
