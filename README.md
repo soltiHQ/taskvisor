@@ -5,7 +5,7 @@
 # Taskvisor
 > Helps you build resilient, event-driven async systems in Rust.
 
-It's a small runtime that watches over your background tasks restarting, tracking, and signaling what happens.
+It's a small orchestrator that watches over your background tasks restarting, tracking, and signaling what happens.
 ```text
  ┌────────────┐     runs & restarts    ┌──────────────┐
  │   Tasks    │ ◄───────────────────── │  Supervisor  │
@@ -90,7 +90,7 @@ cargo run --example {{ example_name }} --features {{ features}}
 
 ### Runtime diagram
 ```text
-TaskFn (your async code + required context handling)
+TaskFn (your async code with CancellationToken)
    ├─► wrapped in TaskSpec
    │   (RestartPolicy + BackoffPolicy + timeout)
    └─► passed to Supervisor
@@ -106,22 +106,11 @@ Optional Controller (feature-gated):
    (admission policies: Queue/Replace/DropIfRunning)
 ```
 
-### Runtime flow
-- You write `TaskFn` (async closure)
-- Wrap it in `TaskSpec` (+ policies)
-- Pass to `Supervisor` directly OR through `Controller`
-  - Registry spawns `TaskActor` per task
-  - `TaskActor` runs `TaskSpec` and emits `Event` to `Bus`
-  - `Bus` fans out to `Subscribe` implementations
-
-`Controller` is alternative entry point:  
-wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
-
 ## Optional features
-| Feature       | Description                                                             |
-|---------------|-------------------------------------------------------------------------|
-| `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) |
-| `logging`     | Enables the built-in `LogWriter`, _demo_ logger                         |
+| Feature       | Description                                                             | Use when                          |
+|---------------|-------------------------------------------------------------------------|-----------------------------------|
+| `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) | Need admission control            |
+| `logging`     | Enables the built-in `LogWriter`, _demo_ logger                         | Quick debugging (not production)  |
 
 ## Contributing
 We're open to any new ideas and contributions.  
