@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### More Examples
 ```bash
-cargo run --example {{ example_name }} --features {{ features}}
+cargo run --example {{ example_name }} --features {{ features }}
 ```
 | Example                                                 | Description                                    | Features   |
 |---------------------------------------------------------|------------------------------------------------|------------|
