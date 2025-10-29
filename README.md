@@ -74,11 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | [controller.rs](examples/controller.rs)                 | Examples with `controller` feature             |
 
 ```bash
-cargo run --example basic_one_shot
-cargo run --example retry_with_backoff
-cargo run --example dynamic_add_remove
-cargo run --example custom_subscriber
-
+cargo run --example {{ example_name }}
 cargo run --example task_cancel --features logging
 cargo run --example controller --features controller
 ```
@@ -130,20 +126,6 @@ wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
 | `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) |
 | `logging`     | Enables the built-in `LogWriter`, _demo_ logger                         |
 
-## 📦 Installation
-#### Cargo.toml:
-```toml
-[dependencies]
-taskvisor = "0.0.9"
-```
-
-```toml
-[dependencies]
-taskvisor = { version = "0.0.9", features = ["logging", "controller"] }
-```
-
-
-
-## 🤝 Contributing
+## Contributing
 We're open to any new ideas and contributions.  
 Found a bug? Have an idea? We welcome pull requests and issues.
