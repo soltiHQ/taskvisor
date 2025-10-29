@@ -107,10 +107,10 @@ Optional Controller (feature-gated):
 ```
 
 ## Optional features
-| Feature       | Description                                                             | Use when                          |
-|---------------|-------------------------------------------------------------------------|-----------------------------------|
-| `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) | Need admission control            |
-| `logging`     | Enables the built-in `LogWriter`, _demo_ logger                         | Quick debugging (not production)  |
+| Feature       | Description                                                             | Use when                   |
+|---------------|-------------------------------------------------------------------------|----------------------------|
+| `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) | Need admission control     |
+| `logging`     | Enables the built-in `LogWriter`, _demo_ logger                         | Debugging (not production) |
 
 ## Contributing
 We're open to any new ideas and contributions.  
