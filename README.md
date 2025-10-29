@@ -64,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### More Examples
+```bash
+cargo run --example {{ example_name }} --features {{ features}}
+```
 | Example                                                 | Description                                    | Features   |
 |---------------------------------------------------------|------------------------------------------------|------------|
 | [basic_one_shot.rs](examples/basic_one_shot.rs)         | Single one-shot task, graceful shutdown        | -          |
@@ -72,12 +75,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | [custom_subscriber.rs](examples/custom_subscriber.rs)   | Custom subscriber reacting to events           | -          |
 | [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 | logging    |
 | [controller.rs](examples/controller.rs)                 | Examples with `controller` feature             | controller |
-
-```bash
-cargo run --example {{ example_name }}
-cargo run --example task_cancel --features logging
-cargo run --example controller --features controller
-```
 
 ## Key features
 - **[Supervisor](./src/core/supervisor.rs)** manage async tasks, tracks lifecycle, handles requests, and drives graceful shutdown.
