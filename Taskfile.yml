@@ -103,5 +103,5 @@ tasks:
         vars:
           CMD: >-
             +nightly rustdoc --lib -Zrustdoc-map --features "logging controller"
-            --offline -Zunstable-options -Zrustdoc-scrape-examples
+            -Zunstable-options -Zrustdoc-scrape-examples
             --config 'build.rustdocflags=["--cfg","docsrs","-Z","unstable-options","--cap-lints","warn"]'
