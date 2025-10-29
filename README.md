@@ -64,14 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### More Examples
-| Example                                                 | Description                                    |
-|---------------------------------------------------------|------------------------------------------------|
-| [basic_one_shot.rs](examples/basic_one_shot.rs)         | Single one-shot task, graceful shutdown        |
-| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter |
-| [dynamic_add_remove.rs](examples/dynamic_add_remove.rs) | Add/Remove tasks at runtime via API            |
-| [custom_subscriber.rs](examples/custom_subscriber.rs)   | Custom subscriber reacting to events           |
-| [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 |
-| [controller.rs](examples/controller.rs)                 | Examples with `controller` feature             |
+| Example                                                 | Description                                    | Features   |
+|---------------------------------------------------------|------------------------------------------------|------------|
+| [basic_one_shot.rs](examples/basic_one_shot.rs)         | Single one-shot task, graceful shutdown        | -          |
+| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter | -          |
+| [dynamic_add_remove.rs](examples/dynamic_add_remove.rs) | Add/Remove tasks at runtime via API            | -          |
+| [custom_subscriber.rs](examples/custom_subscriber.rs)   | Custom subscriber reacting to events           | -          |
+| [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 | logging    |
+| [controller.rs](examples/controller.rs)                 | Examples with `controller` feature             | controller |
 
 ```bash
 cargo run --example {{ example_name }}
