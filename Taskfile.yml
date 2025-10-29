@@ -77,6 +77,7 @@ tasks:
 
   cargo/fmt:
     desc: Run 'cargo fmt'.
+    silent: true
     cmds:
       - task: _cargo/tool
         vars:
@@ -84,6 +85,7 @@ tasks:
 
   cargo/clippy:
     desc: Run 'cargo clippy'.
+    silent: true
     cmds:
       - task: _cargo/tool
         vars:
@@ -91,6 +93,7 @@ tasks:
 
   cargo/test:
     desc: Run 'cargo test'.
+    silent: true
     cmds:
       - task: _cargo/tool
         vars:
@@ -98,6 +101,7 @@ tasks:
 
   cargo/docs:
     desc: Run 'rustdoc'.
+    silent: true
     cmds:
       - task: _cargo/tool
         vars:
@@ -105,3 +109,23 @@ tasks:
             +nightly rustdoc --lib -Zrustdoc-map --features "logging controller"
             -Zunstable-options -Zrustdoc-scrape-examples
             --config 'build.rustdocflags=["--cfg","docsrs","-Z","unstable-options","--cap-lints","warn"]'
+
+  cargo/audit:
+    desc: Run 'audit'.
+    silent: true
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "audit"
+
+  # ================================================#
+  # ----------------------MANUAL--------------------#
+  # ================================================#
+
+  cargo/audit/fix:
+    desc: Run 'audit' with auto fix
+    silent: true
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "audit fix"
