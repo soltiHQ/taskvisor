@@ -2,23 +2,13 @@ name: Checks
 
 on: { workflow_call: {} }
 
-permissions: {
-  contents: read,
-  actions: write
-}
-
-env:
-  CI: "true"
-  RUST_BACKTRACE: "1"
-  CARGO_TERM_COLOR: "always"
-
 jobs:
   fmt:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v4
       - name: Run fmt
-        uses: ./.github/actions/taskfile
+        uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/fmt }
 
   test:
@@ -32,7 +22,7 @@ jobs:
         with: { job_name: test }
 
       - name: Run Job
-        uses: ./.github/actions/taskfile
+        uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/test }
 
       - name: Put Cache
@@ -51,7 +41,7 @@ jobs:
         with: { job_name: clippy }
 
       - name: Run Job
-        uses: ./.github/actions/taskfile
+        uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/clippy }
 
       - name: Put Cache
