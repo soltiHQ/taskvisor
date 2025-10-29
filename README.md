@@ -64,24 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### More Examples
-| Example                                                 | Description                                    |
-|---------------------------------------------------------|------------------------------------------------|
-| [basic_one_shot.rs](examples/basic_one_shot.rs)         | Single one-shot task, graceful shutdown        |
-| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter |
-| [dynamic_add_remove.rs](examples/dynamic_add_remove.rs) | Add/Remove tasks at runtime via API            |
-| [custom_subscriber.rs](examples/custom_subscriber.rs)   | Custom subscriber reacting to events           |
-| [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 |
-| [controller.rs](examples/controller.rs)                 | Examples with `controller` feature             |
-
-```bash
-cargo run --example basic_one_shot
-cargo run --example retry_with_backoff
-cargo run --example dynamic_add_remove
-cargo run --example custom_subscriber
-
-cargo run --example task_cancel --features logging
-cargo run --example controller --features controller
-```
+| Description                                                                                             | Command                                              |
+|---------------------------------------------------------------------------------------------------------|------------------------------------------------------|
+| [basic_one_shot.rs](examples/basic_one_shot.rs): single one-shot task, graceful shutdown                | cargo run --example basic_one_shot                   |
+| [retry_with_backoff.rs](examples/retry_with_backoff.rs): retry loop with exponential backoff and jitter | cargo run --example retry_with_backoff               |
+| [dynamic_add_remove.rs](examples/dynamic_add_remove.rs): add/remove tasks at runtime via API            | cargo run --example dynamic_add_remove               |
+| [custom_subscriber.rs](examples/custom_subscriber.rs): custom subscriber reacting to events             | cargo run --example custom_subscriber                |
+| [task_cancel.rs](examples/task_cancel.rs): task cancellation from outside                               | cargo run --example task_cancel --features logging   |
+| [controller.rs](examples/controller.rs): examples with `controller` feature                             | cargo run --example controller --features controller |
 
 ## Key features
 - **[Supervisor](./src/core/supervisor.rs)** manage async tasks, tracks lifecycle, handles add/remove requests, and drives graceful shutdown.
