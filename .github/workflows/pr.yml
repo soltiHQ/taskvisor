@@ -18,9 +18,13 @@ jobs:
     name: Docs
     uses: ./.github/workflows/.docs.yml
 
+  audit:
+    name: Audit
+    uses: ./.github/workflows/.audit.yml
+
   pr-check:
     name: Pr Check
-    needs: docs
+    needs: [docs, audit]
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - name: All checks passed
