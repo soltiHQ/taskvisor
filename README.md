@@ -2,13 +2,114 @@
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-orange.svg)](./LICENSE)
 
-# taskvisor
-> Event-driven task orchestration library for Rust.
+# Taskvisor
+> Helps you build resilient, event-driven async systems in Rust.
+
+It's a small runtime that watches over your background tasks restarting, tracking, and signaling what happens.
+```text
+ ┌────────────┐     runs & restarts    ┌──────────────┐
+ │   Tasks    │ ◄───────────────────── │  Supervisor  │
+ └────────────┘                        └──────┬───────┘
+                                              ▼
+                                         emits events
+                                              ▼
+                                       ┌──────────────┐
+                                       │ Subscribers  │ ◄─ your listeners
+                                       └──────────────┘
+```
+Use it for long-lived jobs, controllers, or background workers that must stay alive, observable, and restart safely.
 
 <div>
   <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
   <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
 </div>
+
+## Why Taskvisor?
+Async systems grow fast: tasks, loops, background jobs, controllers.    
+Eventually you need structure: who runs what, what happens on failure, how to restart safely, and how to observe it all.  
+Taskvisor provides that structure: a small, event-driven supervision layer that keeps async work supervised and transparent.
+
+## Quick example
+Runs forever, restarts automatically on each completion, and emits lifecycle events.
+```rust
+use tokio_util::sync::CancellationToken;
+
+use taskvisor::{
+    Supervisor, TaskFn, TaskSpec, Config, TaskRef,
+    TaskError, RestartPolicy, BackoffPolicy,
+};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sup = Supervisor::new(Config::default(), Vec::new());
+    
+    let ping: TaskRef = TaskFn::arc("ping", |ctx: CancellationToken| async move {
+        if ctx.is_cancelled() {
+            return Err(TaskError::Canceled);
+        }
+
+        println!("[ping] pong");
+        Ok(())
+    });
+    let spec = TaskSpec::new(
+        ping,
+        RestartPolicy::Always,
+        BackoffPolicy::default(),
+        None,
+    );
+
+    sup.run(vec![spec]).await?;
+    Ok(())
+}
+```
+
+## Key features
+- **[Supervisor](./src/core/supervisor.rs)** supervises async tasks, tracks their lifecycle, handles add/remove requests, and drives graceful shutdown.
+- **[Registry](./src/core/registry.rs)** coordinates task actors, spawning and removing them in response to runtime events.
+- **[TaskActor](./src/core/actor.rs)** per-task execution loop applying restart, backoff, and timeout policies for each run.
+- **[TaskSpec](./src/tasks/spec.rs)** declarative task definition combining restart behavior, backoff strategy, and optional timeout.
+- **[TaskFn](./src/tasks/impl/func.rs)** lightweight adapter turning async closures into supervised tasks.
+- **[RestartPolicy](./src/policies/restart.rs)** / **[BackoffPolicy](./src/policies/backoff.rs)** configurable restart control and retry delay strategies (`Never`, `Always`, `OnFailure`; constant/exponential/jittered).
+- **[Bus](./src/events/bus.rs)** broadcast channel delivering structured runtime events to subscribers and the controller.
+- **[Event](./src/events/event.rs)** typed event model carrying sequence numbers, timestamps, and contextual metadata for deterministic ordering.
+- **[Subscribe](./src/subscribers/subscriber.rs)** extension point for custom event consumers, each with its own bounded queue and worker.
+- **[Controller](./src/controller/mod.rs)** *(feature = `controller`)* slot-based orchestrator with admission policies: `Queue`, `Replace`, and `DropIfRunning`.
+
+### Runtime diagram
+```text
+TaskFn (your async code + required context handling)
+   ├─► wrapped in TaskSpec
+   │   (RestartPolicy + BackoffPolicy + timeout)
+   └─► passed to Supervisor
+           ├─► spawns Registry
+           │      └─► creates TaskActor per task
+           │             └─► runs TaskSpec in loop
+           │                    └─► publishes Event to Bus
+           └─► Bus distributes events to:
+                  └─► Subscribe implementations (your metrics/logs)
+
+Optional Controller (feature-gated):
+   ControllerSpec → Controller → Supervisor.add_task(TaskSpec)
+   (admission policies: Queue/Replace/DropIfRunning)
+```
+
+### Runtime flow
+- You write `TaskFn` (async closure)
+- Wrap it in `TaskSpec` (+ policies)
+- Pass to `Supervisor` directly OR through `Controller` __[feature]__
+- Registry spawns `TaskActor` per task
+- `TaskActor` runs `TaskSpec` → emits `Event` to `Bus`
+- `Bus` fans out to `Subscribe` implementations
+
+`Controller` __[feature]__ is alternative entry point: wraps `TaskSpec` with admission policy, then calls `Supervisor.add_task()`
+
+## Optional features
+| Feature       | Description                                                             |
+|---------------|-------------------------------------------------------------------------|
+| `controller`  | Enables slot-based orchestration (`Controller`, `ControllerSpec`, etc.) |
+| `logging`     | Enables the built-in `LogWriter`, (demo logger)                         |
+
+###### -----------------
 
 ## 📖 Features
 - Observe lifecycle events (start / stop / failure / backoff / timeout / shutdown)
@@ -31,225 +132,6 @@ taskvisor = "0.0.9"
 [dependencies]
 taskvisor = { version = "0.0.9", features = ["logging", "controller"] }
 ```
-
-## 📝 Quick start
-#### Minimal Example (No subscribers)
-```toml
-[dependencies]
-taskvisor = "0.0.9"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-anyhow = "1"
-```
-```rust
-//! Minimal: single task, no subscribers.
-
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use taskvisor::*;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let supervisor = Supervisor::new(Config::default(), vec![]);
-    
-    let task = TaskFn::arc("hello", |ctx: CancellationToken| async move {
-        if ctx.is_cancelled() {
-            return Err(TaskError::Canceled);
-        }
-
-        println!("Hello from taskvisor!");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok(())
-    });
-
-    let spec = TaskSpec::new(
-        task, 
-        RestartPolicy::Always, 
-        BackoffPolicy::default(), 
-        None,
-    );
-    supervisor.run(vec![spec]).await?;
-    Ok(())
-}
-```
-
-#### Minimal Example (Embedded subscriber)
-```toml
-[dependencies]
-taskvisor = { version = "0.0.9", features = ["logging"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-anyhow = "1"
-```
-```rust
-//! Minimal with built-in LogWriter subscriber.
-
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use taskvisor::{
-    BackoffPolicy, Config, LogWriter, RestartPolicy, Supervisor, 
-    Subscribe, TaskError, TaskFn, TaskSpec,
-};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Setup supervisor with LogWriter to see task lifecycle events
-    let subscribers: Vec<std::sync::Arc<dyn Subscribe>> = vec![
-        std::sync::Arc::new(LogWriter),
-    ];
-    let supervisor = Supervisor::new(Config::default(), subscribers);
-    
-    let task = TaskFn::arc("hello", |ctx: CancellationToken| async move {
-        if ctx.is_cancelled() {
-            return Err(TaskError::Canceled);
-        }
-
-        println!("Hello from taskvisor!");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok(())
-    });
-
-    let spec = TaskSpec::new(
-        task, 
-        RestartPolicy::Always, 
-        BackoffPolicy::default(), 
-        None,
-    );
-    supervisor.run(vec![spec]).await?;
-    Ok(())
-}
-```
-
-#### Dynamic Tasks Example
-```toml
-[dependencies]
-taskvisor = "0.0.9"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-anyhow = "1"
-```
-```rust
-//! Demonstrates how a running task can add another task dynamically.
-
-use std::sync::Arc;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use taskvisor::{
-    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, 
-    TaskFn, TaskRef, TaskSpec,
-};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let supervisor = Arc::new(Supervisor::new(Config::default(), vec![]));
-    let sup = supervisor.clone();
-
-    let controller: TaskRef = TaskFn::arc("controller", move |ctx: CancellationToken| {
-        let sup = sup.clone();
-        async move {
-            println!("[controller] preparing to start worker...");
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            let worker: TaskRef = TaskFn::arc("worker", |_ctx| async move {
-                println!("[worker] started");
-                tokio::time::sleep(Duration::from_millis(400)).await;
-                println!("[worker] done");
-                Ok::<(), TaskError>(())
-            });
-
-            let worker_spec = TaskSpec::new(
-                worker,
-                RestartPolicy::Never,
-                BackoffPolicy::default(),
-                Some(Duration::from_secs(5)),
-            );
-
-            // Publish TaskAddRequested (handled by Registry)
-            let _ = sup.add_task(worker_spec);
-
-            println!("[controller] worker task requested!");
-            Ok(())
-        }
-    });
-
-    let spec = TaskSpec::new(
-        controller,
-        RestartPolicy::Never,
-        BackoffPolicy::default(),
-        None,
-    );
-
-    supervisor.run(vec![spec]).await?;
-    Ok(())
-}
-```
-
-### Controller Feature
-When the controller feature is enabled, Taskvisor gains a dedicated Controller layer 
-that manages task admission and scheduling before tasks are handed to the Supervisor.
-
-```toml
-# Cargo.toml
-[dependencies]
-taskvisor = { version = "0.0.9", features = ["controller"] }
-```
-
-```text
-submit(ControllerSpec)
-          ▼
-   ┌──────────────┐
-   │  Controller  │  ← Admission control (Drop / Replace / Queue)
-   └──────┬───────┘
-          ▼
-   ┌──────────────┐
-   │  Supervisor  │
-   │  spawns task │
-   └──────┬───────┘
-          ▼
-      Task Actors
-```
-
-```rust
-use std::{sync::Arc, time::Duration};
-use tokio_util::sync::CancellationToken;
-use taskvisor::{
-    Supervisor, ControllerConfig, ControllerSpec,
-    TaskFn, TaskSpec, RestartPolicy, BackoffPolicy, TaskError,
-};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let sup = Supervisor::builder(Default::default())
-        .with_controller(ControllerConfig::new())
-        .build();
-
-    let sup_bg = Arc::clone(&sup);
-    tokio::spawn(async move { let _ = sup_bg.run(vec![]).await; });
-
-    let spec = TaskSpec::new(
-        TaskFn::arc("job", |ctx: CancellationToken| async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            if ctx.is_cancelled() { return Ok(()); }
-            Ok::<(), TaskError>(())
-        }),
-        RestartPolicy::Never,
-        BackoffPolicy::default(),
-        None,
-    );
-
-    sup.submit(ControllerSpec::queue(spec.clone())).await?;
-    sup.submit(ControllerSpec::queue(spec)).await?;
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok(())
-}
-```
-
-#### Admission modes:
-- `DropIfRunning` discard if a task with the same name is still active.
-- `Replace` cancel and replace the running task.
-- `Queue` enqueue until the slot becomes free.
-__The controller uses an internal async queue (mpsc) to serialize submissions and integrates with the global concurrency limit of Supervisor.__
 
 ### More Examples
 Check out the [examples](./examples) directory for:

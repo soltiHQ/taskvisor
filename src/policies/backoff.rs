@@ -64,7 +64,7 @@ impl Default for BackoffPolicy {
             first: Duration::from_millis(100),
             max: Duration::from_secs(30),
             jitter: JitterPolicy::None,
-            success_delay: None,
+            success_delay: Some(Duration::from_secs(1)),
             factor: 1.0,
         }
     }
