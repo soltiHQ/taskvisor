@@ -1,169 +1,105 @@
-//! # Example: Controller Demo
-//! Visual demonstration of the controller’s slot-based admission model.
+//! # Controller Example
 //!
-//! ```text
-//!         ┌───────────────┐
-//!         │  application  │
-//!         │ (user submits)│
-//!         └───────┬───────┘
-//!            submit(...)
-//!                 ▼
-//!         ┌───────────────────┐
-//!         │    controller     │
-//!         │ (admission logic) │
-//!         └───────┬───────────┘
-//!            publishes events
-//!                 ▼
-//!         ┌───────────────────┐
-//!         │    supervisor     │
-//!         │  (orchestrator)   │
-//!         └───────┬───────────┘
-//!             spawns actors
-//!                 ▼
-//!         ┌───────────────────┐
-//!         │    task actor     │
-//!         │ (run / retry loop)│
-//!         └───────────────────┘
-//! ```
-//!
-//! Demonstrates the controller's admission policies:
-//! - Queue: tasks execute sequentially (same slot name)
-//! - Replace: new submission cancels running task (latest wins)
-//! - DropIfRunning: new submission ignored if slot busy
-//!
-//! Shows how controller events are published and can be observed via `LogWriter`.
+//! Shows how to use Controller with three admission policies:
+//! - Queue: tasks run one by one
+//! - Replace: cancels running task, starts new one
+//! - DropIfRunning: ignores new tasks if slot is busy
 //!
 //! ## Run
 //! ```bash
-//! cargo run --example basic_controller --features "controller,logging"
+//! cargo run --example controller --features "controller"
 //! ```
-#[cfg(not(feature = "controller"))]
-compile_error!(
-    "This example requires the 'controller' feature. Run with: --features controller,logging"
-);
 
-#[cfg(not(feature = "logging"))]
-compile_error!(
-    "This example requires the 'logging' feature. Run with: --features controller,logging"
-);
+#[cfg(not(feature = "controller"))]
+compile_error!("error");
 
 use std::{sync::Arc, time::Duration};
+use taskvisor::{
+    BackoffPolicy, Config, ControllerConfig, ControllerSpec, RestartPolicy, Supervisor, TaskError,
+    TaskFn, TaskRef, TaskSpec,
+};
 use tokio_util::sync::CancellationToken;
 
-use taskvisor::LogWriter;
-use taskvisor::{
-    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef, TaskSpec,
-};
-use taskvisor::{ControllerConfig, ControllerSpec};
+fn make_spec(name: &'static str, duration_ms: u64) -> TaskSpec {
+    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
+        println!("{:>6}[{name}] started", "");
 
-/// Creates a task that simulates work.
-fn make_worker(name: &'static str, work_ms: u64) -> TaskSpec {
-    let task_name = name.to_string();
+        let start = tokio::time::Instant::now();
+        let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
 
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| {
-        let name = task_name.clone();
-
-        async move {
-            println!("[{name}] started (work={work_ms}ms)");
-            let start = tokio::time::Instant::now();
-
-            loop {
-                if ctx.is_cancelled() {
-                    println!("[{name}] cancelled after {:?}", start.elapsed());
-                    return Ok::<(), TaskError>(());
-                }
-                if start.elapsed().as_millis() >= work_ms as u128 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::pin!(sleep);
+        tokio::select! {
+            _ = &mut sleep => {
+                println!("{:>6}[{name}] completed in {:?}", "", start.elapsed());
+                Ok(())
             }
-
-            println!("[{name}] completed in {:?}", start.elapsed());
-            Ok(())
+            _ = ctx.cancelled() => {
+                println!("{:>6}[{name}] cancelled after {:?}", "", start.elapsed());
+                Err(TaskError::Canceled)
+            }
         }
     });
-    TaskSpec::new(
-        task,
-        RestartPolicy::Never,
-        BackoffPolicy::default(),
-        Some(Duration::from_secs(10)),
-    )
+    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    println!("=== Controller Demo ===\n");
-
     let sup = Supervisor::builder(Config::default())
-        .with_subscribers(vec![Arc::new(LogWriter::default())])
-        .with_controller(ControllerConfig {
-            queue_capacity: 100,
-            slot_capacity: 10,
-        })
+        .with_controller(ControllerConfig::default())
         .build();
 
-    // Spawn supervisor in background
-    let sup_clone = Arc::clone(&sup);
-    let sup_task = tokio::spawn(async move {
-        if let Err(e) = sup_clone.run(vec![]).await {
-            eprintln!("Supervisor error: {e}");
-        }
+    let runner = Arc::clone(&sup);
+    tokio::spawn(async move {
+        let _ = runner.run(vec![]).await;
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sup.wait_ready().await;
 
-    // === Demo 1: Queue Policy (sequential execution in the SAME slot) ===
-    println!("\n--- Demo 1: Queue Policy (sequential execution) ---");
-    sup.submit(ControllerSpec::queue(make_worker("build", 500)))
-        .await?;
-    sup.submit(ControllerSpec::queue(make_worker("build", 500)))
-        .await?;
-    sup.submit(ControllerSpec::queue(make_worker("build", 500)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    // ============================================================
+    // Demo -> Queue: Tasks execute one after another
+    // ============================================================
+    println!("Demo 1: Queue Policy");
+    println!(" └► Submit 3 tasks with same name: they run sequentially");
 
-    // === Demo 2: Replace Policy (cancel current and start latest on terminal) ===
-    println!("\n--- Demo 2: Replace Policy (cancel and restart) ---");
-    sup.submit(ControllerSpec::replace(make_worker("deploy", 1000)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    sup.submit(ControllerSpec::replace(make_worker("deploy", 1000)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    sup.submit(ControllerSpec::replace(make_worker("deploy", 1000)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
-    // === Demo 3: DropIfRunning Policy (ignore if busy) ===
-    println!("\n--- Demo 3: DropIfRunning Policy (ignore if busy) ---");
-    sup.submit(ControllerSpec::drop_if_running(make_worker("health", 800)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // These will be ignored (same slot is running)
-    sup.submit(ControllerSpec::drop_if_running(make_worker("health", 800)))
-        .await?;
-    sup.submit(ControllerSpec::drop_if_running(make_worker("health", 800)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // After slot is idle, this will execute
-    sup.submit(ControllerSpec::drop_if_running(make_worker("health", 800)))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // === Demo 4: Queue Full (rejections) ===
-    println!("\n--- Demo 4: Queue Full (rejection) ---");
-    // Same slot "batch": slot_capacity = 10 → 2 submissions will be rejected.
-    for _ in 1..=12 {
-        sup.submit(ControllerSpec::queue(make_worker("batch", 200)))
-            .await?;
+    for i in 1..=3 {
+        let spec = make_spec("job-in-queue", 800);
+        sup.submit(ControllerSpec::queue(spec)).await?;
     }
-    tokio::time::sleep(Duration::from_secs(4)).await;
 
-    println!("\n--- Demo Complete ---");
-    drop(sup);
-    let _ = sup_task.await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    println!();
+
+    // ============================================================
+    // Demo -> Replace: New task cancels running one
+    // ============================================================
+    println!("Demo 2: Replace Policy");
+    println!(" └► Submit task, wait 500ms, submit another: first gets cancelled");
+
+    let task_1 = make_spec("job-replace", 6000);
+    let task_2 = make_spec("job-replace", 500);
+
+    sup.submit(ControllerSpec::replace(task_1)).await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    sup.submit(ControllerSpec::replace(task_2)).await?;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    println!();
+
+    // ============================================================
+    // Demo -> DropIfRunning: Ignores(skip) new tasks while busy
+    // ============================================================
+    println!("Demo 3: DropIfRunning Policy");
+    println!(" └► Submit task & submit another while first is running: second is ignored");
+
+    let task_1 = make_spec("job-drop-if-running", 1000);
+    let task_2 = make_spec("job-drop-if-running", 10000);
+
+    sup.submit(ControllerSpec::drop_if_running(task_1)).await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    sup.submit(ControllerSpec::drop_if_running(task_2)).await?;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    println!();
+
+    println!("Done");
     Ok(())
 }
