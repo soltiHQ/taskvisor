@@ -67,13 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```bash
 cargo run --example {{ example_name }} --features {{ features }}
 ```
-| Example                                                 | Description                                    | Features   |
-|---------------------------------------------------------|------------------------------------------------|------------|
-| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter | -          |
-| [dynamic_add_remove.rs](examples/dynamic_add_remove.rs) | Add/Remove tasks at runtime via API            | -          |
-| [subscriber.rs](examples/subscriber.rs)                 | Custom subscriber reacting to events           | -          |
-| [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 | logging    |
-| [controller.rs](examples/controller.rs)                 | Tasks example with additional admissions       | controller |
+| Example                                                 | Description                                         | Features   |
+|---------------------------------------------------------|-----------------------------------------------------|------------|
+| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter      | -          |
+| [subscriber.rs](examples/subscriber.rs)                 | Custom subscriber reacting to events                | -          |
+| [control.rs](examples/control.rs)                       | Tasks add/remove/cancel while supervisor is running | -          |
+| [controller.rs](examples/controller.rs)                 | Tasks example with additional admissions            | controller |
 
 ## Key features
 - **[Supervisor](./src/core/supervisor.rs)** manage async tasks, tracks lifecycle, handles requests, and drives graceful shutdown.
