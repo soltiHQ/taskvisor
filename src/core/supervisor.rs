@@ -91,7 +91,7 @@
 //! ```
 
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::OnceCell, sync::broadcast, time::timeout};
+use tokio::{sync::Notify, sync::OnceCell, sync::broadcast, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{alive::AliveTracker, builder::SupervisorBuilder, registry::Registry};
@@ -117,6 +117,7 @@ pub struct Supervisor {
     subs: Arc<SubscriberSet>,
     alive: Arc<AliveTracker>,
     registry: Arc<Registry>,
+    ready: Arc<Notify>,
     runtime_token: CancellationToken,
 
     #[cfg(feature = "controller")]
@@ -140,6 +141,7 @@ impl Supervisor {
             alive,
             registry,
             runtime_token,
+            ready: Arc::new(Notify::new()),
 
             #[cfg(feature = "controller")]
             controller: OnceCell::new(),
@@ -163,6 +165,11 @@ impl Supervisor {
     /// ```
     pub fn builder(cfg: Config) -> SupervisorBuilder {
         SupervisorBuilder::new(cfg)
+    }
+
+    /// Waits until supervisor is fully initialized and ready to accept submissions.
+    pub async fn wait_ready(&self) {
+        self.ready.notified().await;
     }
 
     /// Adds a new task to the supervisor at runtime.
@@ -196,20 +203,21 @@ impl Supervisor {
     /// Runs task specifications until completion or shutdown signal.
     ///
     /// Steps:
-    /// 1) Spawn subscriber listener (event fan-out)
-    /// 2) Spawn registry listener (task lifecycle management)
-    /// 3) Publish TaskAddRequested for initial tasks
-    /// 4) Optionally wait until registry becomes non-empty (if we added tasks)
-    /// 5) Wait for shutdown signal or all tasks to exit
+    /// - Spawn subscriber listener (event fan-out)
+    /// - Spawn registry listener (task lifecycle management)
+    /// - Notify waiters: ready for submit jobs
+    /// - Publish TaskAddRequested for initial tasks
+    /// - Optionally wait until registry becomes non-empty (if we added tasks)
+    /// - Wait for shutdown signal or all tasks to exit
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.subscriber_listener();
         self.registry.clone().spawn_listener();
+        self.ready.notify_waiters();
 
         let expected = tasks.len();
         for spec in tasks {
             self.add_task(spec)?;
         }
-
         if expected > 0 {
             self.registry.wait_became_nonempty_once().await;
         }
