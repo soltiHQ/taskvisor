@@ -72,12 +72,12 @@ pub enum TaskError {
     Timeout { timeout: Duration },
 
     /// Non-recoverable fatal error (should not be retried).
-    #[error("fatal error (no retry): {error}")]
-    Fatal { error: String },
+    #[error("fatal error (no retry): {reason}")]
+    Fatal { reason: String },
 
     /// Task execution failed but may succeed if retried.
-    #[error("execution failed: {error}")]
-    Fail { error: String },
+    #[error("execution failed: {reason}")]
+    Fail { reason: String },
 
     /// Task was canceled due to shut down or parent cancellation.
     ///
@@ -111,7 +111,7 @@ impl TaskError {
 impl From<tokio::time::error::Elapsed> for TaskError {
     fn from(e: tokio::time::error::Elapsed) -> Self {
         TaskError::Fail {
-            error: e.to_string(),
+            reason: e.to_string(),
         }
     }
 }
