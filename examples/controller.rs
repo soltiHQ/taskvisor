@@ -20,6 +20,28 @@ use taskvisor::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn make_spec(name: &'static str, duration_ms: u64) -> TaskSpec {
+    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
+        println!("{:>6}[{name}] started", "");
+
+        let start = tokio::time::Instant::now();
+        let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
+
+        tokio::pin!(sleep);
+        tokio::select! {
+            _ = &mut sleep => {
+                println!("{:>6}[{name}] completed in {:?}", "", start.elapsed());
+                Ok(())
+            }
+            _ = ctx.cancelled() => {
+                println!("{:>6}[{name}] cancelled after {:?}", "", start.elapsed());
+                Err(TaskError::Canceled)
+            }
+        }
+    });
+    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let sup = Supervisor::builder(Config::default())
@@ -80,26 +102,4 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Done");
     Ok(())
-}
-
-fn make_spec(name: &'static str, duration_ms: u64) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
-        println!("{:>6}[{name}] started", "");
-
-        let start = tokio::time::Instant::now();
-        let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
-
-        tokio::pin!(sleep);
-        tokio::select! {
-            _ = &mut sleep => {
-                println!("{:>6}[{name}] completed in {:?}", "", start.elapsed());
-                Ok(())
-            }
-            _ = ctx.cancelled() => {
-                println!("{:>6}[{name}] cancelled after {:?}", "", start.elapsed());
-                Err(TaskError::Canceled)
-            }
-        }
-    });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
 }

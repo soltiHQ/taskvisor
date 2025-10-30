@@ -71,7 +71,7 @@ cargo run --example {{ example_name }} --features {{ features }}
 |---------------------------------------------------------|------------------------------------------------|------------|
 | [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter | -          |
 | [dynamic_add_remove.rs](examples/dynamic_add_remove.rs) | Add/Remove tasks at runtime via API            | -          |
-| [custom_subscriber.rs](examples/custom_subscriber.rs)   | Custom subscriber reacting to events           | -          |
+| [subscriber.rs](examples/subscriber.rs)                 | Custom subscriber reacting to events           | -          |
 | [task_cancel.rs](examples/task_cancel.rs)               | Task cancellation from outside                 | logging    |
 | [controller.rs](examples/controller.rs)                 | Tasks example with additional admissions       | controller |
 

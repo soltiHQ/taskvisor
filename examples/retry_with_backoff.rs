@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if attempt <= 2 {
             println!("[flaky] simulated failure #{attempt}");
             Err(taskvisor::TaskError::Fail {
-                error: format!("boom #{attempt}"),
+                reason: format!("boom #{attempt}"),
             })
         } else {
             println!("[flaky] success on attempt {attempt}");
