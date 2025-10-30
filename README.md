@@ -69,7 +69,6 @@ cargo run --example {{ example_name }} --features {{ features }}
 ```
 | Example                                                 | Description                                         | Features   |
 |---------------------------------------------------------|-----------------------------------------------------|------------|
-| [retry_with_backoff.rs](examples/retry_with_backoff.rs) | Retry loop with exponential backoff and jitter      | -          |
 | [subscriber.rs](examples/subscriber.rs)                 | Custom subscriber reacting to events                | -          |
 | [control.rs](examples/control.rs)                       | Tasks add/remove/cancel while supervisor is running | -          |
 | [controller.rs](examples/controller.rs)                 | Tasks example with additional admissions            | controller |
