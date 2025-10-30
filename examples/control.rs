@@ -34,7 +34,6 @@ async fn main() -> anyhow::Result<()> {
 
     sup.add_task(make_worker("worker-A"))?;
     tokio::time::sleep(Duration::from_secs(1)).await;
-
     let tasks = sup.list_tasks().await;
     println!(" ─► Active tasks: {tasks:?}");
 
@@ -45,7 +44,6 @@ async fn main() -> anyhow::Result<()> {
 
     sup.add_task(make_worker("worker-B"))?;
     tokio::time::sleep(Duration::from_secs(1)).await;
-
     let tasks = sup.list_tasks().await;
     println!(" ─► Active tasks: {tasks:?}");
 
@@ -56,7 +54,6 @@ async fn main() -> anyhow::Result<()> {
 
     sup.remove_task("worker-A")?;
     tokio::time::sleep(Duration::from_millis(500)).await;
-
     let tasks = sup.list_tasks().await;
     println!(" ─► Active tasks: {tasks:?}");
 

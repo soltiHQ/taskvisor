@@ -11,7 +11,7 @@
 //! ```
 
 #[cfg(not(feature = "controller"))]
-compile_error!("Run with: cargo run --example controller --features controller,logging");
+compile_error!("error");
 
 use std::{sync::Arc, time::Duration};
 use taskvisor::{
