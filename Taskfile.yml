@@ -43,7 +43,7 @@ tasks:
         \
         --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw" \
         {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
-        {{if .ENVS}}{{range $env := .ENVS}}--env {{$env}} {{end}}{{end}} \
+        {{if .ENVS}}{{range $env := .ENVS}}--env "{{$env}}" {{end}}{{end}} \
         \
         --workdir /workspace \
         {{.IMAGE}} \
@@ -70,6 +70,7 @@ tasks:
             - "RUSTUP_TOOLCHAIN={{.rust_version}}"
             - "RUSTUP_NO_UPDATE_CHECK=1"
             - "CARGO_INCREMENTAL=0"
+            - "RUSTFLAGS=-D warnings"
 
   # ================================================#
   # ----------------------PUBLIC--------------------#
@@ -82,6 +83,14 @@ tasks:
       - task: _cargo/tool
         vars:
           CMD: "fmt --check --verbose"
+
+  cargo/check:
+    desc: Run 'cargo check'.
+    silent: true
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "check"
 
   cargo/clippy:
     desc: Run 'cargo clippy'.

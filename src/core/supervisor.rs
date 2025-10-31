@@ -91,8 +91,11 @@
 //! ```
 
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::Notify, sync::OnceCell, sync::broadcast, time::timeout};
+use tokio::{sync::Notify, sync::broadcast, time::timeout};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "controller")]
+use tokio::sync::OnceCell;
 
 use crate::core::{alive::AliveTracker, builder::SupervisorBuilder, registry::Registry};
 use crate::{
