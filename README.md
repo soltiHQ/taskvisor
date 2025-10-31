@@ -1,6 +1,17 @@
 [![Minimum Rust 1.85](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-orange.svg)](./LICENSE)
+#### Install
+```toml
+[dependencies]
+taskvisor = "0.0"
+```
+#### With features:
+```toml
+[dependencies]
+taskvisor = { version = "0.0", features = ["controller", "logging"] }
+```
+See [crates.io](https://crates.io/crates/taskvisor) for the latest version.
 
 # Taskvisor
 > Helps you build resilient, event-driven async systems in Rust.
