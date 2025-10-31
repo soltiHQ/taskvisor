@@ -11,6 +11,14 @@ jobs:
         uses: soltiHQ/actions/taskfile@main
         with: { command: cargo/fmt }
 
+  check:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run check
+        uses: soltiHQ/actions/taskfile@main
+        with: { command: cargo/check }
+
   test:
     runs-on: ${{ vars.RUNS_ON }}
     steps:

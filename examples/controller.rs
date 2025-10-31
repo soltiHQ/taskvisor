@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Demo 1: Queue Policy");
     println!(" └► Submit 3 tasks with same name: they run sequentially");
 
-    for i in 1..=3 {
+    for _ in 1..=3 {
         let spec = make_spec("job-in-queue", 800);
         sup.submit(ControllerSpec::queue(spec)).await?;
     }
