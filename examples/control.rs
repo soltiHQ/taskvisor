@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let sup = Arc::new(taskvisor::Supervisor::new(taskvisor::SupervisorConfig::default(), vec![]));
+    let sup = Arc::new(taskvisor::Supervisor::new(
+        taskvisor::SupervisorConfig::default(),
+        vec![],
+    ));
     let runner = Arc::clone(&sup);
     tokio::spawn(async move {
         let _ = runner.run(vec![]).await;
@@ -69,20 +72,26 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn make_worker(name: &'static str) -> taskvisor::TaskSpec {
-    let task: taskvisor::TaskRef = taskvisor::TaskFn::arc(name, move |ctx: CancellationToken| async move {
-        println!("{:>4}[{name}] started", "");
+    let task: taskvisor::TaskRef =
+        taskvisor::TaskFn::arc(name, move |ctx: CancellationToken| async move {
+            println!("{:>4}[{name}] started", "");
 
-        let mut counter = 0u32;
-        loop {
-            if ctx.is_cancelled() {
-                println!("{:>4}[{name}] cancelled", "");
-                return Err(taskvisor::TaskError::Canceled);
+            let mut counter = 0u32;
+            loop {
+                if ctx.is_cancelled() {
+                    println!("{:>4}[{name}] cancelled", "");
+                    return Err(taskvisor::TaskError::Canceled);
+                }
+
+                counter += 1;
+                println!("{:>4}[{name}] tick #{counter}", "");
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-
-            counter += 1;
-            println!("{:>4}[{name}] tick #{counter}", "");
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    });
-    taskvisor::TaskSpec::new(task, taskvisor::RestartPolicy::Always, taskvisor::BackoffPolicy::default(), None)
+        });
+    taskvisor::TaskSpec::new(
+        task,
+        taskvisor::RestartPolicy::Always,
+        taskvisor::BackoffPolicy::default(),
+        None,
+    )
 }
