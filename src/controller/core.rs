@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    admission::ControllerAdmission,
+    admission::AdmissionPolicy,
     config::ControllerConfig,
     error::ControllerError,
     slot::{SlotState, SlotStatus},
@@ -154,7 +154,7 @@ impl Controller {
                         .with_reason(format!("admission={:?} status=running", admission)),
                 );
             }
-            (SlotStatus::Running { .. }, ControllerAdmission::Replace) => {
+            (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
                 Self::replace_head_or_push(&mut slot, task_spec);
                 slot.status = SlotStatus::Terminating {
                     cancelled_at: Instant::now(),
@@ -177,7 +177,7 @@ impl Controller {
                         .with_reason(format!("admission=Replace depth={}", slot.queue.len())),
                 );
             }
-            (SlotStatus::Running { .. }, ControllerAdmission::Queue) => {
+            (SlotStatus::Running { .. }, AdmissionPolicy::Queue) => {
                 if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
                 }
@@ -188,7 +188,7 @@ impl Controller {
                         .with_reason(format!("admission=Queue depth={}", slot.queue.len())),
                 );
             }
-            (SlotStatus::Terminating { .. }, ControllerAdmission::Replace) => {
+            (SlotStatus::Terminating { .. }, AdmissionPolicy::Replace) => {
                 Self::replace_head_or_push(&mut slot, task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
@@ -199,7 +199,7 @@ impl Controller {
                         )),
                 );
             }
-            (SlotStatus::Terminating { .. }, ControllerAdmission::Queue) => {
+            (SlotStatus::Terminating { .. }, AdmissionPolicy::Queue) => {
                 if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
                 }
@@ -213,7 +213,7 @@ impl Controller {
                         )),
                 );
             }
-            (SlotStatus::Running { .. }, ControllerAdmission::DropIfRunning) => {}
+            (SlotStatus::Running { .. }, AdmissionPolicy::DropIfRunning) => {}
             _ => {
                 if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
