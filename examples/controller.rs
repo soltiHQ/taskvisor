@@ -16,11 +16,13 @@ compile_error!("error");
 use std::{sync::Arc, time::Duration};
 
 fn make_spec(name: &'static str, duration_ms: u64) -> taskvisor::TaskSpec {
-    let task: taskvisor::TaskRef = taskvisor::TaskFn::arc(name, move |ctx: tokio_util::sync::CancellationToken| async move {
-        println!("{:>6}[{name}] started", "");
+    let task: taskvisor::TaskRef = taskvisor::TaskFn::arc(
+        name,
+        move |ctx: tokio_util::sync::CancellationToken| async move {
+            println!("{:>6}[{name}] started", "");
 
-        let start = tokio::time::Instant::now();
-        let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
+            let start = tokio::time::Instant::now();
+            let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
 
         tokio::pin!(sleep);
         tokio::select! {
@@ -72,9 +74,11 @@ async fn main() -> anyhow::Result<()> {
     let task_1 = make_spec("job-replace", 6000);
     let task_2 = make_spec("job-replace", 500);
 
-    sup.submit(taskvisor::ControllerSpec::replace(task_1)).await?;
+    sup.submit(taskvisor::ControllerSpec::replace(task_1))
+        .await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    sup.submit(taskvisor::ControllerSpec::replace(task_2)).await?;
+    sup.submit(taskvisor::ControllerSpec::replace(task_2))
+        .await?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     println!();
@@ -88,9 +92,11 @@ async fn main() -> anyhow::Result<()> {
     let task_1 = make_spec("job-drop-if-running", 1000);
     let task_2 = make_spec("job-drop-if-running", 10000);
 
-    sup.submit(taskvisor::ControllerSpec::drop_if_running(task_1)).await?;
+    sup.submit(taskvisor::ControllerSpec::drop_if_running(task_1))
+        .await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
-    sup.submit(taskvisor::ControllerSpec::drop_if_running(task_2)).await?;
+    sup.submit(taskvisor::ControllerSpec::drop_if_running(task_2))
+        .await?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     println!();
