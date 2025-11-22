@@ -101,7 +101,7 @@
 //!
 //! - Configure via `Supervisor::builder(..).with_controller(ControllerConfig)`.
 //! - Submit via `sup.submit(ControllerSpec::{queue, replace, drop_if_running}(...))`.
-//! - Policies: [`ControllerAdmission`] = `Queue | Replace | DropIfRunning`.
+//! - Policies: [`AdmissionPolicy`] = `Queue | Replace | DropIfRunning`.
 //! - Controller emits `ControllerSubmitted`, `ControllerRejected`, and
 //!   `ControllerSlotTransition` (feature `"controller"`); readable with `"logging"`’s `LogWriter`.
 //!
@@ -117,7 +117,7 @@ mod error;
 mod slot;
 mod spec;
 
-pub use admission::ControllerAdmission;
+pub use admission::AdmissionPolicy;
 pub use config::ControllerConfig;
 pub use core::Controller;
 pub use error::ControllerError;

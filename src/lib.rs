@@ -169,7 +169,7 @@ pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 #[cfg(feature = "controller")]
 mod controller;
 #[cfg(feature = "controller")]
-pub use controller::{ControllerAdmission, ControllerConfig, ControllerError, ControllerSpec};
+pub use controller::{AdmissionPolicy, ControllerConfig, ControllerError, ControllerSpec};
 
 // Optional: expose a simple built-in logger subscriber (demo/reference).
 // Enable with: `--features logging`
