@@ -11,7 +11,6 @@
 //! ```bash
 //! cargo run --example control
 //! ```
-
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
