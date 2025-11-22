@@ -16,7 +16,6 @@
 //!     max: Duration::from_secs(10),
 //!     factor: 2.0,
 //!     jitter: JitterPolicy::None,
-//!     success_delay: None,
 //! };
 //!
 //! // First attempt - uses 'first' (clamped to max)
