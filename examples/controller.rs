@@ -37,7 +37,9 @@ fn make_spec(name: &'static str, duration_ms: u64) -> taskvisor::TaskSpec {
             }
         },
     );
-    taskvisor::TaskSpec::new(task, taskvisor::RestartPolicy::Never, taskvisor::BackoffPolicy::default(), None)
+    let policy = taskvisor::RestartPolicy::Never;
+    let backoff = taskvisor::BackoffPolicy::default();
+    taskvisor::TaskSpec::new(task, policy, backoff, None)
 }
 
 #[tokio::main(flavor = "current_thread")]
