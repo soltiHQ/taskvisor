@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let spec = TaskSpec::new(
         ping,
-        RestartPolicy::Always,
+        RestartPolicy::Always { interval: Some(std::time::Duration::from_secs(10)) },
         BackoffPolicy::default(),
         None,
     );
