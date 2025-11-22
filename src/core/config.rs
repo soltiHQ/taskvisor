@@ -1,6 +1,6 @@
 //! # Global runtime configuration.
 //!
-//! Provides [`Config`] centralized settings for the supervisor runtime.
+//! Provides [`SupervisorConfig`] centralized settings for the supervisor runtime.
 //!
 //! Config is used in two ways:
 //! 1. **Supervisor creation**: `Supervisor::new(config, subscribers)`
@@ -34,7 +34,7 @@ use crate::policies::{BackoffPolicy, RestartPolicy};
 /// All fields are public for flexibility. Prefer using helper accessors to avoid
 /// sprinkling sentinel checks (`0`) across the codebase.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct SupervisorConfig {
     /// Maximum time to wait for graceful shutdown before force-terminating.
     ///
     /// When a shutdown signal is received:
@@ -76,7 +76,7 @@ pub struct Config {
     pub timeout: Duration,
 }
 
-impl Config {
+impl SupervisorConfig {
     /// Returns the global concurrency limit as an `Option`.
     ///
     /// - `None` → unlimited (no semaphore)
@@ -112,7 +112,7 @@ impl Config {
     }
 }
 
-impl Default for Config {
+impl Default for SupervisorConfig {
     /// Default configuration:
     ///
     /// - `grace = 60s` (reasonable graceful shutdown window)

@@ -15,8 +15,8 @@ compile_error!("error");
 
 use std::{sync::Arc, time::Duration};
 use taskvisor::{
-    BackoffPolicy, Config, ControllerConfig, ControllerSpec, RestartPolicy, Supervisor, TaskError,
-    TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, ControllerSpec, RestartPolicy, Supervisor, SupervisorConfig,
+    TaskError, TaskFn, TaskRef, TaskSpec, ControllerConfig,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -44,7 +44,7 @@ fn make_spec(name: &'static str, duration_ms: u64) -> TaskSpec {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let sup = Supervisor::builder(Config::default())
+    let sup = Supervisor::builder(SupervisorConfig::default())
         .with_controller(ControllerConfig::default())
         .build();
 

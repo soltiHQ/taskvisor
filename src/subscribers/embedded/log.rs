@@ -21,12 +21,12 @@
 //!
 //! ## Example
 //! ```rust,ignore
-//! use taskvisor::{Supervisor, Config, Subscribe};
+//! use taskvisor::{Supervisor, SupervisorConfig, Subscribe};
 //! use taskvisor::subscribers::log_writer::LogWriter;
 //! use std::sync::Arc;
 //!
 //! let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter::default())];
-//! let sup = Supervisor::new(Config::default(), subs);
+//! let sup = Supervisor::new(SupervisorConfig::default(), subs);
 //! ```
 
 use crate::events::{BackoffSource, Event, EventKind};

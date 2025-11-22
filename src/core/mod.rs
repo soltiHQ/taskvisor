@@ -102,11 +102,11 @@
 mod actor;
 mod alive;
 mod builder;
+mod config;
 mod registry;
 mod runner;
 mod shutdown;
 mod supervisor;
-mod config;
 
+pub use config::SupervisorConfig;
 pub use supervisor::Supervisor;
-pub use config::Config;

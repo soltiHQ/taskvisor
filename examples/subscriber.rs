@@ -17,10 +17,6 @@ use std::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
-use taskvisor::{
-    BackoffPolicy, Config, Event, EventKind, RestartPolicy, Subscribe, Supervisor, TaskError,
-    TaskFn, TaskRef, TaskSpec,
-};
 use tokio_util::sync::CancellationToken;
 
 struct MetricsSubscriber {
@@ -47,16 +43,16 @@ impl MetricsSubscriber {
 }
 
 #[async_trait::async_trait]
-impl Subscribe for MetricsSubscriber {
-    async fn on_event(&self, ev: &Event) {
+impl taskvisor::Subscribe for MetricsSubscriber {
+    async fn on_event(&self, ev: &taskvisor::Event) {
         match ev.kind {
-            EventKind::TaskStarting => {
+            taskvisor::EventKind::TaskStarting => {
                 self.starts.fetch_add(1, Ordering::Relaxed);
             }
-            EventKind::TaskStopped => {
+            taskvisor::EventKind::TaskStopped => {
                 self.successes.fetch_add(1, Ordering::Relaxed);
             }
-            EventKind::TaskFailed => {
+            taskvisor::EventKind::TaskFailed => {
                 self.failures.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -70,31 +66,31 @@ impl Subscribe for MetricsSubscriber {
     }
 }
 
-fn make_spec() -> TaskSpec {
+fn make_spec() -> taskvisor::TaskSpec {
     let counter = Arc::new(AtomicU32::new(0));
 
-    let task: TaskRef = TaskFn::arc("flaky", move |ctx: CancellationToken| {
+    let task: taskvisor::TaskRef = taskvisor::TaskFn::arc("flaky", move |ctx: CancellationToken| {
         let counter = Arc::clone(&counter);
         async move {
             if ctx.is_cancelled() {
-                return Err(TaskError::Canceled);
+                return Err(taskvisor::TaskError::Canceled);
             }
 
             let attempt = counter.fetch_add(1, Ordering::Relaxed) + 1;
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             if attempt <= 4 {
-                return Err(TaskError::Fail {
+                return Err(taskvisor::TaskError::Fail {
                     reason: format!("attempt {attempt} failed"),
                 });
             }
             Ok(())
         }
     });
-    TaskSpec::new(
+    taskvisor::TaskSpec::new(
         task,
-        RestartPolicy::OnFailure,
-        BackoffPolicy::default(),
+        taskvisor::RestartPolicy::OnFailure,
+        taskvisor::BackoffPolicy::default(),
         None,
     )
 }
@@ -103,8 +99,8 @@ fn make_spec() -> TaskSpec {
 async fn main() -> anyhow::Result<()> {
     let metrics = Arc::new(MetricsSubscriber::new());
 
-    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(Config::default(), subs);
+    let subs: Vec<Arc<dyn taskvisor::Subscribe>> = vec![Arc::clone(&metrics) as Arc<dyn taskvisor::Subscribe>];
+    let sup = taskvisor::Supervisor::new(taskvisor::SupervisorConfig::default(), subs);
 
     sup.run(vec![make_spec()]).await?;
     metrics.print_stats();

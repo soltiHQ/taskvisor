@@ -36,7 +36,7 @@
 //!      ▼                  ▼                  ▼                 ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
 //! │                        Bus (broadcast channel)                    │
-//! │                  (capacity: Config::bus_capacity)                 │
+//! │              (capacity: SupervisorConfig::bus_capacity)           │
 //!└─────────────────────────────────┬─────────────────────────────────┘
 //!                                   ▼
 //!                       ┌────────────────────────┐
@@ -95,7 +95,7 @@
 //! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`]                         |
 //! | **Errors**        | Typed errors for orchestration and task execution.                     | [`TaskError`], [`RuntimeError`]        |
 //! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.           | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
-//! | **Configuration** | Centralize runtime settings.                                           | [`Config`]                             |
+//! | **Configuration** | Centralize runtime settings.                                           | [`SupervisorConfig`]                   |
 //!
 //! ## Optional features
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
@@ -106,11 +106,11 @@
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //! use tokio_util::sync::CancellationToken;
-//! use taskvisor::{BackoffPolicy, Config, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
+//! use taskvisor::{BackoffPolicy, SupervisorConfig, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut cfg = Config::default();
+//!     let mut cfg = SupervisorConfig::default();
 //!     cfg.timeout = Duration::from_secs(5);
 //!
 //!     // Build subscribers (optional)
@@ -157,7 +157,7 @@ mod tasks;
 
 // ---- Public re-exports ----
 
-pub use core::{Supervisor, Config};
+pub use core::{Supervisor, SupervisorConfig};
 pub use error::{RuntimeError, TaskError};
 pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};

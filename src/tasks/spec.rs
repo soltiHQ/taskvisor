@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use crate::{
-    core::Config, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
+    core::SupervisorConfig, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
 };
 
 /// Specification for running a task under supervision.
@@ -25,12 +25,12 @@ use crate::{
 /// - Optional execution timeout
 ///
 /// It can be created manually with [`TaskSpec::new`] or derived from a
-/// global [`Config`] via [`TaskSpec::with_defaults`].
+/// global [`SupervisorConfig`] via [`TaskSpec::with_defaults`].
 ///
 /// ## Example
 /// ```rust
 /// use tokio_util::sync::CancellationToken;
-/// use taskvisor::{TaskSpec, TaskFn, Config, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
+/// use taskvisor::{TaskSpec, TaskFn, SupervisorConfig, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
 /// use std::time::Duration;
 ///
 /// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
@@ -47,7 +47,7 @@ use crate::{
 /// assert!(spec.timeout().is_none());
 ///
 /// // Inherit from global config:
-/// let cfg = Config::default();
+/// let cfg = SupervisorConfig::default();
 /// let spec2 = TaskSpec::with_defaults(demo, &cfg);
 /// // `cfg.timeout = 0s` is treated as `None`
 /// ```
@@ -83,12 +83,12 @@ impl TaskSpec {
 
     /// Creates a task specification inheriting defaults from global config.
     ///
-    /// Uses `Config::default_timeout()` so that `0s` in config is treated as `None`.
+    /// Uses `SupervisorConfig::default_timeout()` so that `0s` in config is treated as `None`.
     ///
     /// ### Parameters
     /// - `task`: Task to execute
     /// - `cfg`: Config to inherit restart/backoff/timeout from
-    pub fn with_defaults(task: TaskRef, cfg: &Config) -> Self {
+    pub fn with_defaults(task: TaskRef, cfg: &SupervisorConfig) -> Self {
         Self {
             task,
             restart: cfg.restart,

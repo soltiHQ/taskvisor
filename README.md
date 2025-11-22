@@ -46,13 +46,13 @@ Runs forever, restarts automatically on each completion, and emits lifecycle eve
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    Supervisor, TaskFn, TaskSpec, Config, TaskRef,
+    Supervisor, TaskFn, TaskSpec, SupervisorConfig, TaskRef,
     TaskError, RestartPolicy, BackoffPolicy,
 };
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sup = Supervisor::new(Config::default(), Vec::new());
+    let sup = Supervisor::new(SupervisorConfig::default(), Vec::new());
     
     let ping: TaskRef = TaskFn::arc("ping", |ctx: CancellationToken| async move {
         if ctx.is_cancelled() {
