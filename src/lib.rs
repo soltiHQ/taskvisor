@@ -148,7 +148,6 @@
 //!     Ok(())
 //! }
 //! ```
-mod config;
 mod core;
 mod error;
 mod events;
@@ -158,8 +157,7 @@ mod tasks;
 
 // ---- Public re-exports ----
 
-pub use config::Config;
-pub use core::Supervisor;
+pub use core::{Supervisor, Config};
 pub use error::{RuntimeError, TaskError};
 pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};

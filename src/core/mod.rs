@@ -106,5 +106,7 @@ mod registry;
 mod runner;
 mod shutdown;
 mod supervisor;
+mod config;
 
 pub use supervisor::Supervisor;
+pub use config::Config;

@@ -2,11 +2,10 @@ use std::sync::Arc;
 use tokio::sync;
 
 use crate::{
-    config::Config,
+    core::Config,
     events::Bus,
     subscribers::{Subscribe, SubscriberSet},
 };
-
 use super::{alive::AliveTracker, registry::Registry, supervisor::Supervisor};
 
 /// Builder for constructing a Supervisor with optional features.
