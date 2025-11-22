@@ -202,8 +202,8 @@ impl TaskActor {
                     prev_delay = None;
 
                     match self.params.restart {
-                        RestartPolicy::Always => {
-                            if let Some(d) = self.params.backoff.success_delay {
+                        RestartPolicy::Always { interval } => {
+                            if let Some(d) = interval {
                                 self.bus.publish(
                                     Event::new(EventKind::BackoffScheduled)
                                         .with_backoff_success()
@@ -243,7 +243,7 @@ impl TaskActor {
                 Err(e) => {
                     let policy_allows_retry = matches!(
                         self.params.restart,
-                        RestartPolicy::OnFailure | RestartPolicy::Always
+                        RestartPolicy::OnFailure | RestartPolicy::Always { .. }
                     );
                     let error_is_retryable = e.is_retryable();
 

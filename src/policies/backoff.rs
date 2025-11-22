@@ -16,7 +16,6 @@
 //!     max: Duration::from_secs(10),
 //!     factor: 2.0,
 //!     jitter: JitterPolicy::None,
-//!     success_delay: None,
 //! };
 //!
 //! // First attempt - uses 'first' (clamped to max)
@@ -50,8 +49,6 @@ pub struct BackoffPolicy {
     pub factor: f64,
     /// Jitter policy to prevent thundering herd.
     pub jitter: JitterPolicy,
-    /// Delay to wait after a **successful** attempt.
-    pub success_delay: Option<Duration>,
 }
 
 impl Default for BackoffPolicy {
@@ -64,7 +61,6 @@ impl Default for BackoffPolicy {
             first: Duration::from_millis(100),
             max: Duration::from_secs(30),
             jitter: JitterPolicy::None,
-            success_delay: Some(Duration::from_secs(1)),
             factor: 1.0,
         }
     }
