@@ -17,6 +17,7 @@ use std::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 struct MetricsSubscriber {
@@ -69,24 +70,25 @@ impl taskvisor::Subscribe for MetricsSubscriber {
 fn make_spec() -> taskvisor::TaskSpec {
     let counter = Arc::new(AtomicU32::new(0));
 
-    let task: taskvisor::TaskRef = taskvisor::TaskFn::arc("flaky", move |ctx: CancellationToken| {
-        let counter = Arc::clone(&counter);
-        async move {
-            if ctx.is_cancelled() {
-                return Err(taskvisor::TaskError::Canceled);
-            }
+    let task: taskvisor::TaskRef =
+        taskvisor::TaskFn::arc("flaky", move |ctx: CancellationToken| {
+            let counter = Arc::clone(&counter);
+            async move {
+                if ctx.is_cancelled() {
+                    return Err(taskvisor::TaskError::Canceled);
+                }
 
-            let attempt = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            tokio::time::sleep(Duration::from_millis(100)).await;
+                let attempt = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                sleep(Duration::from_millis(100)).await;
 
-            if attempt <= 4 {
-                return Err(taskvisor::TaskError::Fail {
-                    reason: format!("attempt {attempt} failed"),
-                });
+                if attempt <= 4 {
+                    return Err(taskvisor::TaskError::Fail {
+                        reason: format!("attempt {attempt} failed"),
+                    });
+                }
+                Ok(())
             }
-            Ok(())
-        }
-    });
+        });
     taskvisor::TaskSpec::new(
         task,
         taskvisor::RestartPolicy::OnFailure,
@@ -99,7 +101,8 @@ fn make_spec() -> taskvisor::TaskSpec {
 async fn main() -> anyhow::Result<()> {
     let metrics = Arc::new(MetricsSubscriber::new());
 
-    let subs: Vec<Arc<dyn taskvisor::Subscribe>> = vec![Arc::clone(&metrics) as Arc<dyn taskvisor::Subscribe>];
+    let subs: Vec<Arc<dyn taskvisor::Subscribe>> =
+        vec![Arc::clone(&metrics) as Arc<dyn taskvisor::Subscribe>];
     let sup = taskvisor::Supervisor::new(taskvisor::SupervisorConfig::default(), subs);
 
     sup.run(vec![make_spec()]).await?;
