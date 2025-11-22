@@ -90,7 +90,7 @@ fn make_worker(name: &'static str) -> taskvisor::TaskSpec {
         });
     taskvisor::TaskSpec::new(
         task,
-        taskvisor::RestartPolicy::Always,
+        taskvisor::RestartPolicy::default(),
         taskvisor::BackoffPolicy::default(),
         None,
     )
