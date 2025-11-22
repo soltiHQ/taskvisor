@@ -14,14 +14,9 @@
 compile_error!("error");
 
 use std::{sync::Arc, time::Duration};
-use taskvisor::{
-    BackoffPolicy, ControllerSpec, RestartPolicy, Supervisor, SupervisorConfig,
-    TaskError, TaskFn, TaskRef, TaskSpec, ControllerConfig,
-};
-use tokio_util::sync::CancellationToken;
 
-fn make_spec(name: &'static str, duration_ms: u64) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
+fn make_spec(name: &'static str, duration_ms: u64) -> taskvisor::TaskSpec {
+    let task: taskvisor::TaskRef = taskvisor::TaskFn::arc(name, move |ctx: tokio_util::sync::CancellationToken| async move {
         println!("{:>6}[{name}] started", "");
 
         let start = tokio::time::Instant::now();
@@ -35,17 +30,17 @@ fn make_spec(name: &'static str, duration_ms: u64) -> TaskSpec {
             }
             _ = ctx.cancelled() => {
                 println!("{:>6}[{name}] cancelled after {:?}", "", start.elapsed());
-                Err(TaskError::Canceled)
+                Err(taskvisor::TaskError::Canceled)
             }
         }
     });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    taskvisor::TaskSpec::new(task, taskvisor::RestartPolicy::Never, taskvisor::BackoffPolicy::default(), None)
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let sup = Supervisor::builder(SupervisorConfig::default())
-        .with_controller(ControllerConfig::default())
+    let sup = taskvisor::Supervisor::builder(taskvisor::SupervisorConfig::default())
+        .with_controller(taskvisor::ControllerConfig::default())
         .build();
 
     let runner = Arc::clone(&sup);
@@ -62,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
     for _ in 1..=3 {
         let spec = make_spec("job-in-queue", 800);
-        sup.submit(ControllerSpec::queue(spec)).await?;
+        sup.submit(taskvisor::ControllerSpec::queue(spec)).await?;
     }
 
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -77,9 +72,9 @@ async fn main() -> anyhow::Result<()> {
     let task_1 = make_spec("job-replace", 6000);
     let task_2 = make_spec("job-replace", 500);
 
-    sup.submit(ControllerSpec::replace(task_1)).await?;
+    sup.submit(taskvisor::ControllerSpec::replace(task_1)).await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    sup.submit(ControllerSpec::replace(task_2)).await?;
+    sup.submit(taskvisor::ControllerSpec::replace(task_2)).await?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     println!();
@@ -93,9 +88,9 @@ async fn main() -> anyhow::Result<()> {
     let task_1 = make_spec("job-drop-if-running", 1000);
     let task_2 = make_spec("job-drop-if-running", 10000);
 
-    sup.submit(ControllerSpec::drop_if_running(task_1)).await?;
+    sup.submit(taskvisor::ControllerSpec::drop_if_running(task_1)).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
-    sup.submit(ControllerSpec::drop_if_running(task_2)).await?;
+    sup.submit(taskvisor::ControllerSpec::drop_if_running(task_2)).await?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     println!();
