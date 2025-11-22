@@ -11,16 +11,15 @@
 //! ```bash
 //! cargo run --example control
 //! ```
-
 use std::{sync::Arc, time::Duration};
-use taskvisor::{
-    BackoffPolicy, Config, RestartPolicy, Supervisor, TaskError, TaskFn, TaskRef, TaskSpec,
-};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let sup = Arc::new(Supervisor::new(Config::default(), vec![]));
+    let sup = Arc::new(taskvisor::Supervisor::new(
+        taskvisor::SupervisorConfig::default(),
+        vec![],
+    ));
     let runner = Arc::clone(&sup);
     tokio::spawn(async move {
         let _ = runner.run(vec![]).await;
@@ -72,21 +71,27 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn make_worker(name: &'static str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
-        println!("{:>4}[{name}] started", "");
+fn make_worker(name: &'static str) -> taskvisor::TaskSpec {
+    let task: taskvisor::TaskRef =
+        taskvisor::TaskFn::arc(name, move |ctx: CancellationToken| async move {
+            println!("{:>4}[{name}] started", "");
 
-        let mut counter = 0u32;
-        loop {
-            if ctx.is_cancelled() {
-                println!("{:>4}[{name}] cancelled", "");
-                return Err(TaskError::Canceled);
+            let mut counter = 0u32;
+            loop {
+                if ctx.is_cancelled() {
+                    println!("{:>4}[{name}] cancelled", "");
+                    return Err(taskvisor::TaskError::Canceled);
+                }
+
+                counter += 1;
+                println!("{:>4}[{name}] tick #{counter}", "");
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-
-            counter += 1;
-            println!("{:>4}[{name}] tick #{counter}", "");
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    });
-    TaskSpec::new(task, RestartPolicy::Always, BackoffPolicy::default(), None)
+        });
+    taskvisor::TaskSpec::new(
+        task,
+        taskvisor::RestartPolicy::Always,
+        taskvisor::BackoffPolicy::default(),
+        None,
+    )
 }

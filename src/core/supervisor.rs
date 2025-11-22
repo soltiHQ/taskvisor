@@ -64,11 +64,11 @@
 //!
 //! use tokio_util::sync::CancellationToken;
 //!
-//! use taskvisor::{Config, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
+//! use taskvisor::{SupervisorConfig, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let cfg = Config::default();
+//!     let cfg = SupervisorConfig::default();
 //!     let sup = Supervisor::new(cfg, Vec::new());
 //!
 //!     let task = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
@@ -99,7 +99,7 @@ use tokio::sync::OnceCell;
 
 use crate::core::{alive::AliveTracker, builder::SupervisorBuilder, registry::Registry};
 use crate::{
-    config::Config,
+    core::SupervisorConfig,
     error::RuntimeError,
     events::{Bus, Event, EventKind},
     subscribers::{Subscribe, SubscriberSet},
@@ -115,7 +115,7 @@ use crate::{
 /// - Tracks alive tasks for stuck detection
 /// - Enforces global concurrency limits
 pub struct Supervisor {
-    cfg: Config,
+    cfg: SupervisorConfig,
     bus: Bus,
     subs: Arc<SubscriberSet>,
     alive: Arc<AliveTracker>,
@@ -130,7 +130,7 @@ pub struct Supervisor {
 impl Supervisor {
     /// Internal constructor used by builder (not public API).
     pub(crate) fn new_internal(
-        cfg: Config,
+        cfg: SupervisorConfig,
         bus: Bus,
         subs: Arc<SubscriberSet>,
         alive: Arc<AliveTracker>,
@@ -152,7 +152,7 @@ impl Supervisor {
     }
 
     /// Creates a new supervisor with the given config and subscribers (maybe empty).
-    pub fn new(cfg: Config, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
+    pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
 
@@ -160,13 +160,13 @@ impl Supervisor {
     ///
     /// ## Example
     /// ```rust
-    /// use taskvisor::{Config, Supervisor};
+    /// use taskvisor::{SupervisorConfig, Supervisor};
     ///
-    /// let sup = Supervisor::builder(Config::default())
+    /// let sup = Supervisor::builder(SupervisorConfig::default())
     ///     .with_subscribers(vec![])
     ///     .build();
     /// ```
-    pub fn builder(cfg: Config) -> SupervisorBuilder {
+    pub fn builder(cfg: SupervisorConfig) -> SupervisorBuilder {
         SupervisorBuilder::new(cfg)
     }
 

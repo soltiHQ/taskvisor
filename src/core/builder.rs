@@ -1,17 +1,16 @@
 use std::sync::Arc;
 use tokio::sync;
 
+use super::{alive::AliveTracker, registry::Registry, supervisor::Supervisor};
 use crate::{
-    config::Config,
+    core::SupervisorConfig,
     events::Bus,
     subscribers::{Subscribe, SubscriberSet},
 };
 
-use super::{alive::AliveTracker, registry::Registry, supervisor::Supervisor};
-
 /// Builder for constructing a Supervisor with optional features.
 pub struct SupervisorBuilder {
-    cfg: Config,
+    cfg: SupervisorConfig,
     subscribers: Vec<Arc<dyn Subscribe>>,
 
     #[cfg(feature = "controller")]
@@ -20,7 +19,7 @@ pub struct SupervisorBuilder {
 
 impl SupervisorBuilder {
     /// Creates a new builder with the given configuration.
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: SupervisorConfig) -> Self {
         Self {
             cfg,
             subscribers: Vec::new(),
