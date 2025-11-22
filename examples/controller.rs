@@ -24,18 +24,19 @@ fn make_spec(name: &'static str, duration_ms: u64) -> taskvisor::TaskSpec {
             let start = tokio::time::Instant::now();
             let sleep = tokio::time::sleep(Duration::from_millis(duration_ms));
 
-        tokio::pin!(sleep);
-        tokio::select! {
-            _ = &mut sleep => {
-                println!("{:>6}[{name}] completed in {:?}", "", start.elapsed());
-                Ok(())
+            tokio::pin!(sleep);
+            tokio::select! {
+                _ = &mut sleep => {
+                    println!("{:>6}[{name}] completed in {:?}", "", start.elapsed());
+                    Ok(())
+                }
+                _ = ctx.cancelled() => {
+                    println!("{:>6}[{name}] cancelled after {:?}", "", start.elapsed());
+                    Err(taskvisor::TaskError::Canceled)
+                }
             }
-            _ = ctx.cancelled() => {
-                println!("{:>6}[{name}] cancelled after {:?}", "", start.elapsed());
-                Err(taskvisor::TaskError::Canceled)
-            }
-        }
-    });
+        },
+    );
     taskvisor::TaskSpec::new(task, taskvisor::RestartPolicy::Never, taskvisor::BackoffPolicy::default(), None)
 }
 
