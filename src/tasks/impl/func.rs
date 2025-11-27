@@ -1,6 +1,6 @@
 //! # Function-backed task implementation.
 //!
-//! Provides [`TaskFn`] a task implementation that wraps closures.
+//! Provides [`TaskFn`], a task implementation that wraps closures.
 //!
 //! ## Architecture
 //! ```text
@@ -39,8 +39,7 @@
 //!                 tokio::select! {
 //!                     _ = ctx.cancelled() => return Err(TaskError::Canceled),
 //!                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
-//!                         let n = counter.fetch_add(1, Ordering::Relaxed);
-//!                         let _ = n; // use n
+//!                         let _ = counter.fetch_add(1, Ordering::Relaxed);
 //!                     }
 //!                 }
 //!             }
@@ -49,7 +48,7 @@
 //! });
 //! ```
 
-use std::{borrow::Cow, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +68,9 @@ use crate::{
 /// - Closure has no mutable self (must implement `Fn`, not `FnMut`).
 #[derive(Debug)]
 pub struct TaskFn<F> {
-    name: Cow<'static, str>,
+    /// Task name used in logs / metrics.
+    name: String,
+    /// Factory closure that produces a new future per spawn.
     f: F,
 }
 
@@ -77,12 +78,12 @@ impl<F> TaskFn<F> {
     /// Creates a new function-backed task with the given name.
     ///
     /// ### Parameters
-    /// - `name`: Task name (for logging, metrics)
-    /// - `f`: Closure that creates a future when called
+    /// - `name`: Task name (for logging, metrics).
+    /// - `f`: Closure that creates a future when called.
     ///
     /// ### Notes
     /// Prefer [`TaskFn::arc`] when you need a [`TaskRef`](crate::TaskRef) immediately.
-    pub fn new(name: impl Into<Cow<'static, str>>, f: F) -> Self {
+    pub fn new(name: impl Into<String>, f: F) -> Self {
         Self {
             name: name.into(),
             f,
@@ -91,7 +92,7 @@ impl<F> TaskFn<F> {
 
     /// Creates the task and returns it as a shared handle (`Arc<dyn Task>`).
     ///
-    /// This is the most common way to create a TaskFn.
+    /// This is the most common way to create a `TaskFn`.
     ///
     /// ### Example
     /// ```rust
@@ -103,7 +104,7 @@ impl<F> TaskFn<F> {
     /// });
     /// assert_eq!(t.name(), "hello");
     /// ```
-    pub fn arc(name: impl Into<Cow<'static, str>>, f: F) -> Arc<Self> {
+    pub fn arc(name: impl Into<String>, f: F) -> Arc<Self> {
         Arc::new(Self::new(name, f))
     }
 }
