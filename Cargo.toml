@@ -1,6 +1,6 @@
 [package]
 name = "taskvisor"
-version = "0.0.12"
+version = "0.0.13"
 edition = "2024"
 
 description = "Event-driven task orchestration with restart, backoff, and user-defined subscribers"
