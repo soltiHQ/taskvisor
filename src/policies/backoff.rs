@@ -96,11 +96,160 @@ impl BackoffPolicy {
         };
         match self.jitter {
             JitterPolicy::Decorrelated => {
-                let prev_for_jitter = prev.unwrap_or(self.first.min(self.max));
                 self.jitter
-                    .apply_decorrelated(self.first.min(self.max), prev_for_jitter, self.max)
+                    .apply_decorrelated(self.first.min(self.max), base, self.max)
             }
             _ => self.jitter.apply(base),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_first_delay_no_jitter() {
+        let policy = BackoffPolicy {
+            first: Duration::from_millis(100),
+            max: Duration::from_secs(30),
+            factor: 2.0,
+            jitter: JitterPolicy::None,
+        };
+        assert_eq!(policy.next(None), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_exponential_growth_no_jitter() {
+        let policy = BackoffPolicy {
+            first: Duration::from_millis(100),
+            max: Duration::from_secs(30),
+            factor: 2.0,
+            jitter: JitterPolicy::None,
+        };
+
+        let d1 = policy.next(None);
+        assert_eq!(d1, Duration::from_millis(100));
+
+        let d2 = policy.next(Some(d1));
+        assert_eq!(d2, Duration::from_millis(200));
+
+        let d3 = policy.next(Some(d2));
+        assert_eq!(d3, Duration::from_millis(400));
+
+        let d4 = policy.next(Some(d3));
+        assert_eq!(d4, Duration::from_millis(800));
+    }
+
+    #[test]
+    fn test_first_exceeds_max() {
+        let policy = BackoffPolicy {
+            first: Duration::from_secs(10),
+            max: Duration::from_secs(5),
+            factor: 2.0,
+            jitter: JitterPolicy::None,
+        };
+        let d1 = policy.next(None);
+        assert_eq!(d1, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_monotonic_growth_with_equal_jitter() {
+        let policy = BackoffPolicy {
+            first: Duration::from_millis(100),
+            max: Duration::from_secs(30),
+            factor: 2.0,
+            jitter: JitterPolicy::Equal,
+        };
+
+        let mut prev = None;
+        let mut prev_delay = Duration::ZERO;
+
+        for i in 0..20 {
+            let delay = policy.next(prev);
+            if i > 5 {
+                assert!(
+                    delay >= Duration::from_millis(10),
+                    "iteration {}: delay {:?} is suspiciously low (prev: {:?})",
+                    i,
+                    delay,
+                    prev_delay
+                );
+            }
+            prev_delay = delay;
+            prev = Some(delay);
+        }
+    }
+
+    #[test]
+    fn test_decorrelated_jitter_no_negative_feedback() {
+        let policy = BackoffPolicy {
+            first: Duration::from_millis(100),
+            max: Duration::from_secs(30),
+            factor: 2.0,
+            jitter: JitterPolicy::Decorrelated,
+        };
+
+        let mut prev = None;
+        let mut min_seen = Duration::from_secs(999);
+        let mut max_seen = Duration::ZERO;
+        for i in 0..100 {
+            let delay = policy.next(prev);
+
+            min_seen = min_seen.min(delay);
+            max_seen = max_seen.max(delay);
+
+            assert!(
+                delay >= Duration::from_millis(50), // с запасом на jitter
+                "iteration {}: delay {:?} too low (min_seen: {:?})",
+                i,
+                delay,
+                min_seen
+            );
+            if i > 10 {
+                assert!(
+                    delay >= Duration::from_millis(200),
+                    "iteration {}: delay {:?} suspiciously low after warmup",
+                    i,
+                    delay
+                );
+            }
+            prev = Some(delay);
+        }
+        println!("Decorrelated stats: min={:?}, max={:?}", min_seen, max_seen);
+        assert!(
+            max_seen > min_seen * 3,
+            "Range too narrow for decorrelated jitter"
+        );
+    }
+
+    #[test]
+    fn test_full_jitter_bounds() {
+        let policy = BackoffPolicy {
+            first: Duration::from_millis(1000),
+            max: Duration::from_secs(30),
+            factor: 1.0,
+            jitter: JitterPolicy::Full,
+        };
+        for _ in 0..50 {
+            let delay = policy.next(Some(Duration::from_millis(1000)));
+            assert!(delay <= Duration::from_millis(1000));
+        }
+    }
+
+    #[test]
+    fn test_equal_jitter_bounds() {
+        let policy = BackoffPolicy {
+            first: Duration::from_millis(1000),
+            max: Duration::from_secs(30),
+            factor: 1.0, // constant base
+            jitter: JitterPolicy::Equal,
+        };
+        for _ in 0..50 {
+            let delay = policy.next(Some(Duration::from_millis(1000)));
+            assert!(delay >= Duration::from_millis(500));
+            assert!(delay <= Duration::from_millis(1000));
         }
     }
 }
