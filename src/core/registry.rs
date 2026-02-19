@@ -177,16 +177,15 @@ impl Registry {
     /// Spawns an actor and registers its handle.
     async fn spawn_and_register(&self, spec: TaskSpec) {
         let task_name = spec.task().name().to_string();
-        {
-            let tasks = self.tasks.read().await;
-            if tasks.contains_key(&task_name) {
-                self.bus.publish(
-                    Event::new(EventKind::TaskFailed)
-                        .with_task(task_name)
-                        .with_reason("task_already_exists"),
-                );
-                return;
-            }
+
+        let mut tasks = self.tasks.write().await;
+        if tasks.contains_key(&task_name) {
+            self.bus.publish(
+                Event::new(EventKind::TaskFailed)
+                    .with_task(task_name)
+                    .with_reason("task_already_exists"),
+            );
+            return;
         }
 
         let task_token = self.runtime_token.child_token();
@@ -210,23 +209,14 @@ impl Registry {
             cancel: task_token,
         };
 
-        let mut tasks = self.tasks.write().await;
         let was_empty = tasks.is_empty();
-        let inserted = tasks.insert(task_name.clone(), handle).is_none();
+        tasks.insert(task_name.clone(), handle);
         let len_after = tasks.len();
         drop(tasks);
 
-        if inserted {
-            self.notify_after_insert(was_empty, len_after);
-            self.bus
-                .publish(Event::new(EventKind::TaskAdded).with_task(task_name));
-        } else {
-            self.bus.publish(
-                Event::new(EventKind::TaskFailed)
-                    .with_task(task_name)
-                    .with_reason("task_already_exists_race"),
-            );
-        }
+        self.notify_after_insert(was_empty, len_after);
+        self.bus
+            .publish(Event::new(EventKind::TaskAdded).with_task(task_name));
     }
 
     /// Removes a task and cancels its token.

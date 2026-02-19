@@ -390,50 +390,38 @@ impl Supervisor {
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
         let target = name.to_string();
-        let start = tokio::time::Instant::now();
-        let mut last_poll = tokio::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
 
-        loop {
-            if start.elapsed() >= wait_for {
-                return Err(RuntimeError::TaskRemoveTimeout {
-                    name: target,
-                    timeout: wait_for,
-                });
-            }
-            if last_poll.elapsed() >= poll_interval {
-                let tasks = self.registry.list().await;
-                if !tasks.contains(&target) {
-                    return Ok(true);
-                }
-                last_poll = tokio::time::Instant::now();
-            }
-
-            let recv_timeout = poll_interval
-                .checked_sub(last_poll.elapsed())
-                .unwrap_or(Duration::from_millis(10));
-
-            match tokio::time::timeout(recv_timeout, rx.recv()).await {
-                Ok(Ok(ev))
-                    if matches!(ev.kind, EventKind::TaskRemoved)
-                        && ev.task.as_deref() == Some(&target) =>
-                {
-                    return Ok(true);
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(broadcast::error::RecvError::Closed)) => {
-                    let tasks = self.registry.list().await;
-                    return Ok(!tasks.contains(&target));
-                }
-                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                    let tasks = self.registry.list().await;
-                    if !tasks.contains(&target) {
+        let wait_for_event = async {
+            loop {
+                match rx.recv().await {
+                    Ok(ev)
+                        if matches!(ev.kind, EventKind::TaskRemoved)
+                            && ev.task.as_deref() == Some(target.as_str()) =>
+                    {
                         return Ok(true);
                     }
-                    last_poll = tokio::time::Instant::now();
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // We may have missed the TaskRemoved event; check the registry.
+                        let tasks = self.registry.list().await;
+                        if !tasks.contains(&target) {
+                            return Ok(true);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let tasks = self.registry.list().await;
+                        return Ok(!tasks.contains(&target));
+                    }
                 }
-                Err(_elapsed) => {}
             }
+        };
+
+        match timeout(wait_for, wait_for_event).await {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeError::TaskRemoveTimeout {
+                name: target,
+                timeout: wait_for,
+            }),
         }
     }
 }
