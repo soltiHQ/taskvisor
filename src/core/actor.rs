@@ -182,6 +182,7 @@ impl TaskActor {
 
             let child = runtime_token.child_token();
             attempt += 1;
+            
             self.bus.publish(
                 Event::new(EventKind::TaskStarting)
                     .with_task(task_name.clone())
