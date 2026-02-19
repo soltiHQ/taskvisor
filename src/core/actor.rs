@@ -143,8 +143,8 @@ impl TaskActor {
     /// restarting, even with `RestartPolicy::Always`.
     pub async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let task_name: Arc<str> = Arc::from(self.task.name().to_owned());
-        let mut prev_delay: Option<Duration> = None;
         let mut attempt: u32 = 0;
+        let mut backoff_attempt: u32 = 0;
 
         loop {
             if runtime_token.is_cancelled() {
@@ -199,7 +199,7 @@ impl TaskActor {
             drop(permit);
             match res {
                 Ok(()) => {
-                    prev_delay = None;
+                    backoff_attempt = 0;
 
                     match self.params.restart {
                         RestartPolicy::Always { interval } => {
@@ -257,8 +257,8 @@ impl TaskActor {
                         return ActorExitReason::PolicyExhausted;
                     }
 
-                    let delay = self.params.backoff.next(prev_delay);
-                    prev_delay = Some(delay);
+                    let delay = self.params.backoff.next(backoff_attempt);
+                    backoff_attempt += 1;
 
                     self.bus.publish(
                         Event::new(EventKind::BackoffScheduled)

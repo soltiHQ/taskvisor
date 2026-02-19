@@ -72,7 +72,7 @@
 //!   │       └─ Err ──► publish TaskFailed{ task, error, attempt }
 //!   │                  ├─ RestartPolicy::Never     ─► ActorExhausted, exit
 //!   │                  └─ RestartPolicy::OnFailure/Always:
-//!   │                       ├─ compute delay = backoff.next(prev_delay)
+//!   │                       ├─ compute delay = backoff.next(backoff_attempt)
 //!   │                       ├─ publish BackoffScheduled{ delay, attempt }
 //!   │                       ├─ sleep(delay) (cancellable)
 //!   │                       └─ continue

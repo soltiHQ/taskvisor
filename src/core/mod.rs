@@ -67,7 +67,7 @@
 //!     Err(Fatal)        → publish ActorDead & exit
 //!     Err(Canceled)     → exit (cooperative shutdown)
 //!     Err(Timeout/Fail) → if policy allows retry:
-//!                          - delay = backoff.next(prev); publish BackoffScheduled{delay}; sleep
+//!                          - delay = backoff.next(attempt); publish BackoffScheduled{delay}; sleep
 //!                          - else publish ActorExhausted & exit
 //!   }
 //! }
