@@ -108,10 +108,11 @@ impl Registry {
                     msg = rx.recv() => match msg {
                         Ok(ev) => me.handle_event(&ev).await,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             me.bus.publish(
-                                Event::new(EventKind::TaskFailed)
-                                    .with_reason("registry_listener_lagged")
+                                Event::new(EventKind::SubscriberOverflow)
+                                    .with_task("registry")
+                                    .with_reason(format!("registry_listener_lagged({})", n))
                             );
                             continue;
                         }

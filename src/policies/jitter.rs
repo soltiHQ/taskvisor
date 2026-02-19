@@ -68,7 +68,9 @@ impl JitterPolicy {
             JitterPolicy::None => delay,
             JitterPolicy::Full => self.full_jitter(delay),
             JitterPolicy::Equal => self.equal_jitter(delay),
-            JitterPolicy::Decorrelated => delay,
+            JitterPolicy::Decorrelated => {
+                panic!("Decorrelated jitter requires context; use apply_decorrelated() instead")
+            }
         }
     }
 
