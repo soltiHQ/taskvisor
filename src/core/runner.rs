@@ -191,9 +191,7 @@ mod tests {
                 assert_eq!(dur, Duration::from_millis(50));
             }
             Err(TaskError::Fail { reason }) => {
-                panic!(
-                    "timeout should return TaskError::Timeout, not TaskError::Fail: {reason}"
-                );
+                panic!("timeout should return TaskError::Timeout, not TaskError::Fail: {reason}");
             }
             other => {
                 panic!("expected TaskError::Timeout, got: {other:?}");
@@ -229,14 +227,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let parent = CancellationToken::new();
 
-        let _ = run_once(
-            &SlowTask,
-            &parent,
-            Some(Duration::from_millis(50)),
-            1,
-            &bus,
-        )
-        .await;
+        let _ = run_once(&SlowTask, &parent, Some(Duration::from_millis(50)), 1, &bus).await;
 
         let mut saw_timeout_hit = false;
         while let Ok(ev) = rx.try_recv() {
