@@ -13,7 +13,7 @@
 //! TaskSpec { restart: RestartPolicy, backoff: BackoffPolicy, timeout: Option<Duration> }
 //!      └─► core::actor::TaskActor uses:
 //!           - restart to decide continue/exit
-//!           - backoff.next(prev_delay) to schedule the next attempt
+//!           - backoff.next(attempt) to schedule the next attempt
 //! ```
 //!
 //! ## Defaults
