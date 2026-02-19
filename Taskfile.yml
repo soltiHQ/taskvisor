@@ -7,6 +7,9 @@ vars:
   rust_version: "1.90.0"
   cache_dir: ".cache"
 
+  # local repository image tag path (1.90.0-1)
+  image_patch: "-1"
+
 tasks:
   default:
     desc: Default task.
@@ -59,7 +62,7 @@ tasks:
       - cmd: mkdir -p "{{.git_root}}/{{.cache_dir}}"
       - task: _docker/run
         vars:
-          IMAGE: "ghcr.io/soltihq/cargo-tools:{{.rust_version}}"
+          IMAGE: "ghcr.io/soltihq/rust-ci:{{.rust_version}}{{.image_patch}}"
           CMD: "{{.CMD}}"
           MOUNT_DIR: "."
           VOLUMES:
