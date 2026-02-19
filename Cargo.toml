@@ -1,6 +1,6 @@
 [package]
 name = "taskvisor"
-version = "0.0.13"
+version = "0.0.14"
 edition = "2024"
 
 description = "Event-driven task orchestration with restart, backoff, and user-defined subscribers"
@@ -10,7 +10,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 keywords = ["async", "tasks", "supervisor", "backoff", "orchestration"]
-categories = ["asynchronous", "concurrency", "development-tools"]
+categories = ["asynchronous", "concurrency", "network-programming"]
 
 [features]
 default = []
