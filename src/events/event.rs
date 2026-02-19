@@ -259,7 +259,7 @@ impl Event {
     /// Creates a new event of the given kind with current timestamp and next sequence number.
     pub fn new(kind: EventKind) -> Self {
         Self {
-            seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
+            seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Release),
             kind,
             at: SystemTime::now(),
             attempt: None,
