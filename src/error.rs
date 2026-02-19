@@ -107,11 +107,3 @@ impl TaskError {
         matches!(self, TaskError::Fatal { .. })
     }
 }
-
-impl From<tokio::time::error::Elapsed> for TaskError {
-    fn from(e: tokio::time::error::Elapsed) -> Self {
-        TaskError::Fail {
-            reason: e.to_string(),
-        }
-    }
-}
