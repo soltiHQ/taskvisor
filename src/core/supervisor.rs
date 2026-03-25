@@ -284,7 +284,7 @@ impl Supervisor {
     ) -> Result<bool, RuntimeError> {
         let exists_before = {
             let tasks = self.registry.list().await;
-            tasks.contains(&name.to_string())
+            tasks.iter().any(|t| t == name)
         };
         if !exists_before {
             return Ok(false);
@@ -436,15 +436,14 @@ impl Supervisor {
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // We may have missed the TaskRemoved event; check the registry.
                         let tasks = self.registry.list().await;
-                        if !tasks.contains(&target) {
+                        if !tasks.iter().any(|t| t == &target) {
                             return Ok(true);
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         let tasks = self.registry.list().await;
-                        return Ok(!tasks.contains(&target));
+                        return Ok(!tasks.iter().any(|t| t == &target));
                     }
                 }
             }

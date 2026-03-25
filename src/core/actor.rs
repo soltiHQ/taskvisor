@@ -142,7 +142,7 @@ impl TaskActor {
     /// current attempt (including backoff sleep) results in a clean exit without
     /// restarting, even with `RestartPolicy::Always`.
     pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
-        let task_name: Arc<str> = Arc::from(self.task.name().to_owned());
+        let task_name: Arc<str> = Arc::from(self.task.name());
         let mut attempt: u32 = 0;
         let mut backoff_attempt: u32 = 0;
 

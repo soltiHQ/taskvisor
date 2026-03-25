@@ -286,8 +286,11 @@ impl Controller {
 
     #[inline]
     fn get_or_create_slot(&self, slot_name: &str) -> Arc<Mutex<SlotState>> {
+        if let Some(slot) = self.slots.get(slot_name) {
+            return slot.clone();
+        }
         self.slots
-            .entry(slot_name.to_string())
+            .entry(slot_name.to_owned())
             .or_insert_with(|| Arc::new(Mutex::new(SlotState::new())))
             .clone()
     }

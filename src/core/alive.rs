@@ -74,22 +74,22 @@ impl AliveTracker {
         let mut map = self.state.write().await;
 
         if matches!(ev.kind, EventKind::TaskRemoved) {
-            return match map.entry(name.to_string()) {
-                std::collections::hash_map::Entry::Occupied(entry) => {
-                    if ev.seq <= entry.get().last_seq {
-                        false
-                    } else {
-                        entry.remove();
-                        true
-                    }
+            return match map.get(name) {
+                Some(state) if ev.seq > state.last_seq => {
+                    map.remove(name);
+                    true
                 }
-                std::collections::hash_map::Entry::Vacant(_) => false,
+                _ => false,
             };
         }
-        let entry = map.entry(name.to_string()).or_insert(TaskState {
-            last_seq: 0,
-            alive: false,
-        });
+        let entry = if let Some(existing) = map.get_mut(name) {
+            existing
+        } else {
+            map.entry(name.to_owned()).or_insert(TaskState {
+                last_seq: 0,
+                alive: false,
+            })
+        };
         if ev.seq <= entry.last_seq {
             return false;
         }
