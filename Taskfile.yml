@@ -122,6 +122,14 @@ tasks:
             -Zunstable-options -Zrustdoc-scrape-examples
             --config 'build.rustdocflags=["--cfg","docsrs","-Z","unstable-options","--cap-lints","warn"]'
 
+  cargo/bench:
+    desc: Run 'cargo bench'.
+    silent: true
+    cmds:
+      - task: _cargo/tool
+        vars:
+          CMD: "bench --bench throughput"
+
   cargo/audit:
     desc: Run 'audit'.
     silent: true
