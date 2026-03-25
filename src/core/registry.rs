@@ -40,7 +40,7 @@ struct Handle {
 
 /// Event-driven registry of active task actors.
 pub struct Registry {
-    tasks: RwLock<HashMap<String, Handle>>,
+    tasks: RwLock<HashMap<Arc<str>, Handle>>,
     bus: Bus,
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
@@ -147,11 +147,16 @@ impl Registry {
     }
 
     /// Returns sorted list of active task names.
-    pub async fn list(&self) -> Vec<String> {
+    pub async fn list(&self) -> Vec<Arc<str>> {
         let tasks = self.tasks.read().await;
-        let mut names: Vec<String> = tasks.keys().cloned().collect();
+        let mut names: Vec<Arc<str>> = tasks.keys().cloned().collect();
         names.sort_unstable();
         names
+    }
+
+    /// Returns `true` if the registry contains a task with the given name.
+    pub async fn contains(&self, name: &str) -> bool {
+        self.tasks.read().await.contains_key(name)
     }
 
     /// Returns `true` if registry is empty.
@@ -161,7 +166,7 @@ impl Registry {
 
     /// Cancels all tasks in the registry: cancel → join → TaskRemoved.
     pub async fn cancel_all(&self) {
-        let handles: Vec<(String, Handle)> = {
+        let handles: Vec<(Arc<str>, Handle)> = {
             let mut tasks = self.tasks.write().await;
             let drained = tasks.drain().collect::<Vec<_>>();
             self.empty_notify.notify_waiters();
@@ -177,10 +182,10 @@ impl Registry {
 
     /// Spawns an actor and registers its handle.
     async fn spawn_and_register(&self, spec: TaskSpec) {
-        let task_name = spec.task().name().to_string();
+        let task_name: Arc<str> = Arc::from(spec.task().name());
 
         let mut tasks = self.tasks.write().await;
-        if tasks.contains_key(&task_name) {
+        if tasks.contains_key(&*task_name) {
             self.bus.publish(
                 Event::new(EventKind::TaskFailed)
                     .with_task(task_name)

@@ -349,6 +349,15 @@ impl Event {
         matches!(self.kind, EventKind::SubscriberPanicked)
     }
 
+    /// Returns `true` for internal diagnostic events.
+    #[inline]
+    pub fn is_internal_diagnostic(&self) -> bool {
+        matches!(
+            self.kind,
+            EventKind::SubscriberOverflow | EventKind::SubscriberPanicked
+        )
+    }
+
     #[inline]
     pub(crate) fn with_spec(mut self, spec: crate::tasks::TaskSpec) -> Self {
         self.spec = Some(spec);

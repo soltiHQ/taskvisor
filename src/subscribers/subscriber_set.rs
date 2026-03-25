@@ -112,6 +112,12 @@ impl SubscriberSet {
                 while let Some(ev) = rx.recv().await {
                     let fut = s.on_event(ev.as_ref());
 
+                    // SAFETY (unwind):
+                    // Each subscriber runs in its own worker task with its own mpsc channel:
+                    // a panic cannot corrupt another subscriber's state.
+                    //
+                    // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex will be poisoned, which is the expected Rust behavior.
+                    // The worker continues processing the next event after reporting the panic via SubscriberPanicked.
                     if let Err(panic_err) = std::panic::AssertUnwindSafe(fut).catch_unwind().await {
                         let info = {
                             let any = &*panic_err;
@@ -161,7 +167,7 @@ impl SubscriberSet {
     /// `SubscriberOverflow` **or** `SubscriberPanicked`, we do not publish further
     /// overflow diagnostics for it.
     pub fn emit_arc(&self, event: Arc<Event>) {
-        let is_internal_event = event.is_subscriber_overflow() || event.is_subscriber_panic();
+        let is_internal_event = event.is_internal_diagnostic();
 
         for channel in &self.channels {
             match channel.sender.try_send(Arc::clone(&event)) {

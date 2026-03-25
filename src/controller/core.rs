@@ -54,7 +54,7 @@ pub struct Controller {
     bus: Bus,
 
     // Concurrent slots map.
-    slots: DashMap<String, Arc<Mutex<SlotState>>>,
+    slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
 
     // Submission queue.
     tx: mpsc::Sender<ControllerSpec>,
@@ -128,7 +128,7 @@ impl Controller {
             return;
         };
 
-        let slot_name = spec.slot_name().to_string();
+        let slot_name: Arc<str> = Arc::from(spec.slot_name());
         let admission = spec.admission;
         let task_spec = spec.task_spec;
 
@@ -140,7 +140,7 @@ impl Controller {
                 if let Err(e) = sup.add_task(task_spec) {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
-                            .with_task(slot_name.as_str())
+                            .with_task(Arc::clone(&slot_name))
                             .with_reason(format!("add_failed: {}", e)),
                     );
                     return;
@@ -150,7 +150,7 @@ impl Controller {
                 };
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason(format!("admission={:?} status=running", admission)),
                 );
             }
@@ -161,19 +161,19 @@ impl Controller {
                 };
                 self.bus.publish(
                     Event::new(EventKind::ControllerSlotTransition)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason("running→terminating (replace)"),
                 );
                 if let Err(e) = sup.remove_task(&slot_name) {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
-                            .with_task(slot_name.as_str())
+                            .with_task(Arc::clone(&slot_name))
                             .with_reason(format!("remove_failed: {}", e)),
                     );
                 }
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason(format!("admission=Replace depth={}", slot.queue.len())),
                 );
             }
@@ -184,7 +184,7 @@ impl Controller {
                 slot.queue.push_back(task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason(format!("admission=Queue depth={}", slot.queue.len())),
                 );
             }
@@ -192,7 +192,7 @@ impl Controller {
                 Self::replace_head_or_push(&mut slot, task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason(format!(
                             "admission=Replace status=terminating depth={}",
                             slot.queue.len()
@@ -206,7 +206,7 @@ impl Controller {
                 slot.queue.push_back(task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason(format!(
                             "admission=Queue status=terminating depth={}",
                             slot.queue.len()
@@ -221,7 +221,7 @@ impl Controller {
                 slot.queue.push_back(task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
-                        .with_task(slot_name.as_str())
+                        .with_task(Arc::clone(&slot_name))
                         .with_reason(format!(
                             "admission={:?} depth={}",
                             admission,
@@ -286,8 +286,11 @@ impl Controller {
 
     #[inline]
     fn get_or_create_slot(&self, slot_name: &str) -> Arc<Mutex<SlotState>> {
+        if let Some(slot) = self.slots.get(slot_name) {
+            return slot.clone();
+        }
         self.slots
-            .entry(slot_name.to_string())
+            .entry(Arc::from(slot_name))
             .or_insert_with(|| Arc::new(Mutex::new(SlotState::new())))
             .clone()
     }

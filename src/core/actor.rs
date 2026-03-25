@@ -76,7 +76,7 @@ use crate::{
 ///
 /// Used to determine what event to publish and whether to clean up the task from registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActorExitReason {
+pub(crate) enum ActorExitReason {
     /// Actor exhausted its restart policy and will not restart.
     ///
     /// Occurs when:
@@ -99,30 +99,30 @@ pub enum ActorExitReason {
 
 /// Configuration parameters for a task actor.
 #[derive(Clone)]
-pub struct TaskActorParams {
+pub(crate) struct TaskActorParams {
     /// When to restart the task.
-    pub restart: RestartPolicy,
+    pub(crate) restart: RestartPolicy,
     /// How to compute retry delays.
-    pub backoff: BackoffPolicy,
+    pub(crate) backoff: BackoffPolicy,
     /// Optional per-attempt timeout (`None` = no timeout).
-    pub timeout: Option<Duration>,
+    pub(crate) timeout: Option<Duration>,
 }
 
 /// Supervises execution of a single [`Task`] with retries, backoff, and event publishing.
-pub struct TaskActor {
+pub(crate) struct TaskActor {
     /// Task to execute.
-    pub task: Arc<dyn Task>,
+    task: Arc<dyn Task>,
     /// Parameters for supervised task executions.
-    pub params: TaskActorParams,
+    params: TaskActorParams,
     /// Internal event bus (used to publish lifecycle events).
-    pub bus: Bus,
+    bus: Bus,
     /// Optional global tasks concurrency limiter.
-    pub semaphore: Option<Arc<Semaphore>>,
+    semaphore: Option<Arc<Semaphore>>,
 }
 
 impl TaskActor {
     /// Creates a new task actor.
-    pub fn new(
+    pub(crate) fn new(
         bus: Bus,
         task: Arc<dyn Task>,
         params: TaskActorParams,
@@ -141,8 +141,8 @@ impl TaskActor {
     /// We run each attempt under a **child** cancellation token so that cancelling the
     /// current attempt (including backoff sleep) results in a clean exit without
     /// restarting, even with `RestartPolicy::Always`.
-    pub async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
-        let task_name: Arc<str> = Arc::from(self.task.name().to_owned());
+    pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
+        let task_name: Arc<str> = Arc::from(self.task.name());
         let mut attempt: u32 = 0;
         let mut backoff_attempt: u32 = 0;
 

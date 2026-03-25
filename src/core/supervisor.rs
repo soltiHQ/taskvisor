@@ -210,7 +210,7 @@ impl Supervisor {
     }
 
     /// Returns a sorted list of currently active task names from the registry.
-    pub async fn list_tasks(&self) -> Vec<String> {
+    pub async fn list_tasks(&self) -> Vec<Arc<str>> {
         self.registry.list().await
     }
 
@@ -262,7 +262,7 @@ impl Supervisor {
     }
 
     /// Returns sorted list of currently alive task names.
-    pub async fn snapshot(&self) -> Vec<String> {
+    pub async fn snapshot(&self) -> Vec<Arc<str>> {
         self.alive.snapshot().await
     }
 
@@ -282,10 +282,7 @@ impl Supervisor {
         name: &str,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        let exists_before = {
-            let tasks = self.registry.list().await;
-            tasks.contains(&name.to_string())
-        };
+        let exists_before = self.registry.contains(name).await;
         if !exists_before {
             return Ok(false);
         }
@@ -423,28 +420,25 @@ impl Supervisor {
         name: &str,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        let target = name.to_string();
+        let target: Arc<str> = Arc::from(name);
 
         let wait_for_event = async {
             loop {
                 match rx.recv().await {
                     Ok(ev)
                         if matches!(ev.kind, EventKind::TaskRemoved)
-                            && ev.task.as_deref() == Some(target.as_str()) =>
+                            && ev.task.as_deref() == Some(&*target) =>
                     {
                         return Ok(true);
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // We may have missed the TaskRemoved event; check the registry.
-                        let tasks = self.registry.list().await;
-                        if !tasks.contains(&target) {
+                        if !self.registry.contains(&target).await {
                             return Ok(true);
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        let tasks = self.registry.list().await;
-                        return Ok(!tasks.contains(&target));
+                        return Ok(!self.registry.contains(&target).await);
                     }
                 }
             }
