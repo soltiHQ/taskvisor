@@ -115,7 +115,7 @@ where
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
     fn name(&self) -> &str {
-        &*self.name
+        &self.name
     }
 
     fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture {

@@ -132,7 +132,7 @@ impl Controller {
         let admission = spec.admission;
         let task_spec = spec.task_spec;
 
-        let slot_arc = self.get_or_create_slot(&*slot_name);
+        let slot_arc = self.get_or_create_slot(&slot_name);
         let mut slot = slot_arc.lock().await;
 
         match (&slot.status, admission) {
@@ -164,7 +164,7 @@ impl Controller {
                         .with_task(Arc::clone(&slot_name))
                         .with_reason("running→terminating (replace)"),
                 );
-                if let Err(e) = sup.remove_task(&*slot_name) {
+                if let Err(e) = sup.remove_task(&slot_name) {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(&slot_name))
@@ -178,7 +178,7 @@ impl Controller {
                 );
             }
             (SlotStatus::Running { .. }, AdmissionPolicy::Queue) => {
-                if self.reject_if_full(&*slot_name, slot.queue.len()) {
+                if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
                 }
                 slot.queue.push_back(task_spec);
@@ -200,7 +200,7 @@ impl Controller {
                 );
             }
             (SlotStatus::Terminating { .. }, AdmissionPolicy::Queue) => {
-                if self.reject_if_full(&*slot_name, slot.queue.len()) {
+                if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
                 }
                 slot.queue.push_back(task_spec);
@@ -215,7 +215,7 @@ impl Controller {
             }
             (SlotStatus::Running { .. }, AdmissionPolicy::DropIfRunning) => {}
             _ => {
-                if self.reject_if_full(&*slot_name, slot.queue.len()) {
+                if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
                 }
                 slot.queue.push_back(task_spec);
