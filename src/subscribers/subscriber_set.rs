@@ -167,7 +167,7 @@ impl SubscriberSet {
     /// `SubscriberOverflow` **or** `SubscriberPanicked`, we do not publish further
     /// overflow diagnostics for it.
     pub fn emit_arc(&self, event: Arc<Event>) {
-        let is_internal_event = event.is_subscriber_overflow() || event.is_subscriber_panic();
+        let is_internal_event = event.is_internal_diagnostic();
 
         for channel in &self.channels {
             match channel.sender.try_send(Arc::clone(&event)) {
