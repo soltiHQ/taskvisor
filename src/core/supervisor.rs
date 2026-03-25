@@ -13,19 +13,27 @@
 //!
 //! ## Architecture
 //! ```text
-//! Supervisor::run()
+//! Supervisor::start()           // non-blocking setup
 //!     ├──► subscriber_listener()
 //!     │     ├──► updates AliveTracker
 //!     │     └──► fans out to SubscriberSet
-//!     ├──► Registry.spawn_listener()
-//!     │     ├──► TaskAddRequested → spawn actor
-//!     │     ├──► TaskRemoveRequested → cancel task
-//!     │     ├──► ActorExhausted → cleanup
-//!     │     └──► ActorDead → cleanup
+//!     └──► Registry.spawn_listener()
+//!           ├──► TaskAddRequested → spawn actor
+//!           ├──► TaskRemoveRequested → cancel task
+//!           ├──► ActorExhausted → cleanup
+//!           └──► ActorDead → cleanup
+//!
+//! Supervisor::run(tasks)        // start() + block until shutdown
+//!     ├──► start()
+//!     ├──► add initial tasks
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
 //!           ├──► cancel all tasks
 //!           └──► wait_all_with_grace
+//!
+//! Supervisor::shutdown()        // explicit graceful stop
+//!     ├──► cancel all tasks
+//!     └──► wait_all_with_grace
 //! ```
 //!
 //! ## Runtime task management
@@ -90,6 +98,7 @@
 //! }
 //! ```
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Notify, sync::broadcast, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -122,6 +131,7 @@ pub struct Supervisor {
     registry: Arc<Registry>,
     ready: Arc<Notify>,
     runtime_token: CancellationToken,
+    started: AtomicBool,
 
     #[cfg(feature = "controller")]
     pub(super) controller: OnceCell<Arc<crate::controller::Controller>>,
@@ -145,6 +155,7 @@ impl Supervisor {
             registry,
             runtime_token,
             ready: Arc::new(Notify::new()),
+            started: AtomicBool::new(false),
 
             #[cfg(feature = "controller")]
             controller: OnceCell::new(),
@@ -203,19 +214,31 @@ impl Supervisor {
         self.registry.list().await
     }
 
+    /// Starts the supervisor event loop without blocking.
+    ///
+    /// Spawns:
+    /// - subscriber listener (event fan-out)
+    /// - registry listener (task lifecycle management)
+    ///
+    /// Use [`wait_ready`] after this to ensure readiness before submitting.
+    pub fn start(&self) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.subscriber_listener();
+        self.registry.clone().spawn_listener();
+        self.ready.notify_waiters();
+    }
+
     /// Runs task specifications until completion or shutdown signal.
     ///
     /// Steps:
-    /// - Spawn subscriber listener (event fan-out)
-    /// - Spawn registry listener (task lifecycle management)
-    /// - Notify waiters: ready for submit jobs
+    /// - Start event loop (via [`start`])
     /// - Publish TaskAddRequested for initial tasks
     /// - Optionally wait until registry becomes non-empty (if we added tasks)
     /// - Wait for shutdown signal or all tasks to exit
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
-        self.subscriber_listener();
-        self.registry.clone().spawn_listener();
-        self.ready.notify_waiters();
+        self.start();
 
         let expected = tasks.len();
         for spec in tasks {
@@ -225,6 +248,17 @@ impl Supervisor {
             self.registry.wait_became_nonempty_once().await;
         }
         self.drive_shutdown().await
+    }
+
+    /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
+    ///
+    /// Use this when embedding the supervisor (via [`start`]) instead of relying on the OS signal handler inside [`run`].
+    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
+        self.bus.publish(Event::new(EventKind::ShutdownRequested));
+        self.registry.cancel_all().await;
+        let res = self.wait_all_with_grace().await;
+        self.runtime_token.cancel();
+        res
     }
 
     /// Returns sorted list of currently alive task names.
