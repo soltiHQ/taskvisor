@@ -254,8 +254,7 @@ impl Supervisor {
     ///
     /// Use this when embedding the supervisor (via [`start`]) instead of relying on the OS signal handler inside [`run`].
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
-        self.bus
-            .publish(Event::new(EventKind::ShutdownRequested));
+        self.bus.publish(Event::new(EventKind::ShutdownRequested));
         self.registry.cancel_all().await;
         let res = self.wait_all_with_grace().await;
         self.runtime_token.cancel();
