@@ -184,8 +184,18 @@ impl Supervisor {
     }
 
     /// Waits until supervisor is fully initialized and ready to accept submissions.
+    ///
+    /// Uses register-before-check pattern: the `Notified` future is created
+    /// **before** checking `started`, so no notification is lost between
+    /// the check and the wait.
     pub async fn wait_ready(&self) {
-        self.ready.notified().await;
+        loop {
+            let notified = self.ready.notified();
+            if self.started.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Adds a new task to the supervisor at runtime.
@@ -285,6 +295,7 @@ impl Supervisor {
         self.registry.cancel_all().await;
         let res = self.wait_all_with_grace().await;
         self.runtime_token.cancel();
+        self.subs.close().await;
         res
     }
 
@@ -398,17 +409,23 @@ impl Supervisor {
     }
 
     /// Waits for either shutdown signal or natural completion of all tasks.
+    ///
+    /// Both paths cancel `runtime_token` (stops registry/subscriber listeners)
+    /// and drain subscriber queues via `subs.close()`.
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
-        tokio::select! {
+        let res = tokio::select! {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::new(EventKind::ShutdownRequested));
                 self.registry.cancel_all().await;
-                let res = self.wait_all_with_grace().await;
-                self.runtime_token.cancel();
-                res
+                self.wait_all_with_grace().await
             }
-            _ = self.registry.wait_until_empty() => { Ok(()) }
-        }
+            _ = self.registry.wait_until_empty() => {
+                Ok(())
+            }
+        };
+        self.runtime_token.cancel();
+        self.subs.close().await;
+        res
     }
 
     /// Waits for all tasks in registry with grace period timeout.

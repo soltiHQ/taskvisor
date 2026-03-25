@@ -7,11 +7,11 @@
 //! ```text
 //! emit(event)
 //!     │
-//!     ├──► [queue 1] ──► worker 1 ──► subscriber1.on_event().await
+//!     ├──► [queue 1] ──► worker 1 ──► subscriber1.on_event()
 //!     │    (bounded)         └──────► panic → SubscriberPanicked
-//!     ├──► [queue 2] ──► worker 2 ──► subscriber2.on_event().await
+//!     ├──► [queue 2] ──► worker 2 ──► subscriber2.on_event()
 //!     │    (bounded)
-//!     └──► [queue N] ──► worker N ──► subscriberN.on_event().await
+//!     └──► [queue N] ──► worker N ──► subscriberN.on_event()
 //!          (bounded)
 //! ```
 //!
@@ -24,7 +24,7 @@
 //!
 //! ## Panic handling
 //! Worker tasks use `AssertUnwindSafe` + `catch_unwind` to isolate panics:
-//! - The future returned by `on_event` is polled inside `catch_unwind` on each poll
+//! - `on_event` is called inside `catch_unwind`
 //! - Panic is caught and converted to `SubscriberPanicked` event
 //! - Worker continues processing next event
 //! - Other subscribers are unaffected
@@ -35,15 +35,13 @@
 //! ## Example
 //! ```rust
 //! use std::sync::Arc;
-//! use taskvisor::{Subscribe, BoxSubscriberFuture, Event};
+//! use taskvisor::{Subscribe, Event};
 //!
 //! struct Metrics;
 //!
 //! impl Subscribe for Metrics {
-//!     fn on_event<'a>(&'a self, _ev: &'a Event) -> BoxSubscriberFuture<'a> {
-//!         Box::pin(async {
-//!             // Process event asynchronously (won't block other subscribers)
-//!         })
+//!     fn on_event(&self, _ev: &Event) {
+//!         // Process event (won't block other subscribers — each has its own worker)
 //!     }
 //!     fn name(&self) -> &'static str { "metrics" }
 //! }
@@ -51,20 +49,15 @@
 //! struct Alerts;
 //!
 //! impl Subscribe for Alerts {
-//!     fn on_event<'a>(&'a self, _ev: &'a Event) -> BoxSubscriberFuture<'a> {
-//!         Box::pin(async {
-//!             // Process event independently
-//!         })
+//!     fn on_event(&self, _ev: &Event) {
+//!         // Process event independently
 //!     }
 //!     fn name(&self) -> &'static str { "alerts" }
 //! }
 //! // In Supervisor: let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Metrics), Arc::new(Alerts)];
 //! ```
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -77,28 +70,6 @@ struct SubscriberChannel {
     sender: mpsc::Sender<Arc<Event>>,
 }
 
-/// A future wrapper that catches panics during polling.
-///
-/// Wraps an inner future with `AssertUnwindSafe` and catches panics on each `poll()`.
-/// If the inner future panics, this future resolves to `Err(panic_payload)`.
-struct CatchUnwindFuture<F> {
-    inner: F,
-}
-
-impl<F: Future<Output = ()> + Unpin> Future for CatchUnwindFuture<F> {
-    type Output = Result<(), Box<dyn std::any::Any + Send>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let inner = &mut this.inner;
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Pin::new(inner).poll(cx))) {
-            Ok(Poll::Ready(())) => Poll::Ready(Ok(())),
-            Ok(Poll::Pending) => Poll::Pending,
-            Err(panic_err) => Poll::Ready(Err(panic_err)),
-        }
-    }
-}
-
 /// Fan-out coordinator for multiple event subscribers.
 ///
 /// Manages per-subscriber queues and worker tasks, providing:
@@ -106,9 +77,20 @@ impl<F: Future<Output = ()> + Unpin> Future for CatchUnwindFuture<F> {
 /// - **Isolation**: each subscriber has a dedicated queue and worker
 /// - **Panic safety**: panics are caught and reported, do not crash the runtime
 /// - **Overflow handling**: dropped events are reported via `SubscriberOverflow`
+///
+/// ## Shutdown
+/// Call [`close`](Self::close) to gracefully drain all subscriber queues.
+/// Workers finish processing remaining events before exiting.
 pub struct SubscriberSet {
-    channels: Vec<SubscriberChannel>,
-    workers: Vec<JoinHandle<()>>,
+    /// Per-subscriber senders. Wrapped in `Mutex` so [`close`](Self::close)
+    /// can drop them from `&self` (through `Arc`). The lock is uncontended
+    /// in the hot path — `emit_arc` is called from a single task
+    /// (`subscriber_listener`).
+    channels: std::sync::Mutex<Vec<SubscriberChannel>>,
+
+    /// Worker join handles. Taken once during [`close`](Self::close).
+    workers: std::sync::Mutex<Vec<JoinHandle<()>>>,
+
     bus: Bus,
 }
 
@@ -118,7 +100,7 @@ impl SubscriberSet {
     /// ### Per-subscriber setup
     /// - Bounded `mpsc` queue (capacity from [`Subscribe::queue_capacity`], clamped to >= 1)
     /// - Dedicated worker task (runs until the queue is closed)
-    /// - Panic isolation via `CatchUnwindFuture` (polls inner future inside `catch_unwind`)
+    /// - Panic isolation via `catch_unwind` around synchronous `on_event` call
     ///
     /// ### Notes
     /// - Workers start immediately and process events until shutdown
@@ -140,17 +122,17 @@ impl SubscriberSet {
                     // Each subscriber runs in its own worker task with its own mpsc channel:
                     // a panic cannot corrupt another subscriber's state.
                     //
-                    // `CatchUnwindFuture` wraps each poll in `catch_unwind(AssertUnwindSafe(...))`
-                    // so panics during any `.await` point inside `on_event` are caught.
+                    // `on_event` is synchronous, so a single `catch_unwind` call suffices.
                     //
                     // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex
                     // will be poisoned, which is the expected Rust behavior.
                     // The worker continues processing the next event after reporting
                     // the panic via SubscriberPanicked.
-                    let fut = s.on_event(ev.as_ref());
-                    let wrapped = CatchUnwindFuture { inner: fut };
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        s.on_event(ev.as_ref());
+                    }));
 
-                    if let Err(panic_err) = wrapped.await {
+                    if let Err(panic_err) = result {
                         let info = extract_panic_info(&panic_err);
                         bus_for_worker.publish(Event::subscriber_panicked(s.name(), info));
                     }
@@ -162,8 +144,8 @@ impl SubscriberSet {
         }
 
         Self {
-            channels,
-            workers,
+            channels: std::sync::Mutex::new(channels),
+            workers: std::sync::Mutex::new(workers),
             bus,
         }
     }
@@ -191,8 +173,9 @@ impl SubscriberSet {
     /// overflow diagnostics for it.
     pub fn emit_arc(&self, event: Arc<Event>) {
         let is_internal_event = event.is_internal_diagnostic();
+        let channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
 
-        for channel in &self.channels {
+        for channel in channels.iter() {
             match channel.sender.try_send(Arc::clone(&event)) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -211,14 +194,28 @@ impl SubscriberSet {
         }
     }
 
-    /// Gracefully shuts down all subscriber workers.
+    /// Gracefully closes all subscriber channels and waits for workers to drain.
     ///
-    /// - Drops all channel senders (workers observe channel closure),
-    /// - Awaits all worker tasks to finish.
-    pub async fn shutdown(self) {
-        drop(self.channels);
+    /// - Drops all channel senders (workers observe channel closure and drain remaining events)
+    /// - Awaits all worker tasks to finish processing
+    ///
+    /// Safe to call multiple times — subsequent calls are no-ops.
+    /// Safe to call through `Arc<Self>` (unlike the previous `shutdown(self)` which
+    /// required ownership and was unreachable through `Arc`).
+    pub async fn close(&self) {
+        // Drop senders — workers will see channel closed after draining.
+        {
+            let mut channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
+            channels.clear();
+        }
 
-        for h in self.workers {
+        // Take workers and await them.
+        let workers = {
+            let mut w = self.workers.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *w)
+        };
+
+        for h in workers {
             let _ = h.await;
         }
     }

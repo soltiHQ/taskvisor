@@ -24,7 +24,7 @@ mod subscriber_set;
 #[cfg(feature = "logging")]
 mod embedded;
 
-pub use subscriber::{BoxSubscriberFuture, Subscribe};
+pub use subscriber::Subscribe;
 pub use subscriber_set::SubscriberSet;
 
 #[cfg(feature = "logging")]

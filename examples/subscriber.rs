@@ -44,7 +44,7 @@ impl MetricsSubscriber {
 }
 
 impl taskvisor::Subscribe for MetricsSubscriber {
-    fn on_event<'a>(&'a self, ev: &'a taskvisor::Event) -> taskvisor::BoxSubscriberFuture<'a> {
+    fn on_event(&self, ev: &taskvisor::Event) {
         match ev.kind {
             taskvisor::EventKind::TaskStarting => {
                 self.starts.fetch_add(1, Ordering::Relaxed);
@@ -57,7 +57,6 @@ impl taskvisor::Subscribe for MetricsSubscriber {
             }
             _ => {}
         }
-        Box::pin(std::future::ready(()))
     }
     fn name(&self) -> &'static str {
         "metrics"

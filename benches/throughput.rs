@@ -29,7 +29,7 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy, BoxSubscriberFuture, Event, RestartPolicy, Subscribe, Supervisor,
+    BackoffPolicy, Event, RestartPolicy, Subscribe, Supervisor,
     SupervisorConfig, TaskFn, TaskRef, TaskSpec,
 };
 
@@ -78,9 +78,8 @@ impl CountingSubscriber {
 }
 
 impl Subscribe for CountingSubscriber {
-    fn on_event<'a>(&'a self, _ev: &'a Event) -> BoxSubscriberFuture<'a> {
+    fn on_event(&self, _ev: &Event) {
         self.count.fetch_add(1, Ordering::Relaxed);
-        Box::pin(std::future::ready(()))
     }
     fn name(&self) -> &'static str {
         "counter"
@@ -102,9 +101,7 @@ impl NoopSubscriber {
 }
 
 impl Subscribe for NoopSubscriber {
-    fn on_event<'a>(&'a self, _ev: &'a Event) -> BoxSubscriberFuture<'a> {
-        Box::pin(std::future::ready(()))
-    }
+    fn on_event(&self, _ev: &Event) {}
     fn name(&self) -> &'static str {
         self.id
     }

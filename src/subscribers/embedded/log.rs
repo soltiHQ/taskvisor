@@ -30,7 +30,7 @@
 //! ```
 
 use crate::events::{BackoffSource, Event, EventKind};
-use crate::subscribers::{BoxSubscriberFuture, Subscribe};
+use crate::subscribers::Subscribe;
 
 /// Human-readable event printer for stdout.
 ///
@@ -40,9 +40,8 @@ use crate::subscribers::{BoxSubscriberFuture, Subscribe};
 pub struct LogWriter;
 
 impl Subscribe for LogWriter {
-    fn on_event<'a>(&'a self, e: &'a Event) -> BoxSubscriberFuture<'a> {
+    fn on_event(&self, e: &Event) {
         self.print_event(e);
-        Box::pin(std::future::ready(()))
     }
 
     fn name(&self) -> &'static str {

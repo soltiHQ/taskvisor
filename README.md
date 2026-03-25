@@ -138,16 +138,15 @@ let spec = TaskSpec::new(task, RestartPolicy::OnFailure, backoff, Some(Duration:
 ```rust
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use taskvisor::{Subscribe, BoxSubscriberFuture, Event, EventKind};
+use taskvisor::{Subscribe, Event, EventKind};
 
 struct Metrics { failures: AtomicU64 }
 
 impl Subscribe for Metrics {
-    fn on_event<'a>(&'a self, event: &'a Event) -> BoxSubscriberFuture<'a> {
+    fn on_event(&self, event: &Event) {
         if matches!(event.kind, EventKind::TaskFailed) {
             self.failures.fetch_add(1, Ordering::Relaxed);
         }
-        Box::pin(std::future::ready(()))
     }
 }
 
