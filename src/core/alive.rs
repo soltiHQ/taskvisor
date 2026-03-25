@@ -7,7 +7,7 @@
 //! ```text
 //! Supervisor ──► Bus ──► subscriber_listener() ──► AliveTracker::update()
 //!                                                         ▼
-//!                                              HashMap<String, TaskState>
+//!                                              HashMap<Arc<str>, TaskState>
 //!                                                  (name → {seq, alive})
 //! ```
 //!
@@ -19,6 +19,7 @@
 //! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
@@ -43,7 +44,7 @@ struct TaskState {
 /// ### Ordering
 /// - Events are applied only if `ev.seq > last_seq` for the task.
 pub struct AliveTracker {
-    state: RwLock<HashMap<String, TaskState>>,
+    state: RwLock<HashMap<Arc<str>, TaskState>>,
 }
 
 impl AliveTracker {
@@ -85,7 +86,7 @@ impl AliveTracker {
         let entry = if let Some(existing) = map.get_mut(name) {
             existing
         } else {
-            map.entry(name.to_owned()).or_insert(TaskState {
+            map.entry(Arc::from(name)).or_insert(TaskState {
                 last_seq: 0,
                 alive: false,
             })
@@ -113,9 +114,9 @@ impl AliveTracker {
     ///
     /// Used by [`Supervisor`](crate::Supervisor) to detect stuck tasks
     /// during graceful shutdown (tasks that didn't stop within grace period).
-    pub async fn snapshot(&self) -> Vec<String> {
+    pub async fn snapshot(&self) -> Vec<Arc<str>> {
         let state = self.state.read().await;
-        let mut alive: Vec<String> = state
+        let mut alive: Vec<Arc<str>> = state
             .iter()
             .filter(|(_, ts)| ts.alive)
             .map(|(name, _)| name.clone())

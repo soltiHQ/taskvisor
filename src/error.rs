@@ -8,6 +8,7 @@
 //! Both types provide helper methods `as_label` for metrics.
 //! [`TaskError`] has additional methods: `is_retryable()` and `is_fatal()`
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -24,25 +25,25 @@ pub enum RuntimeError {
         /// The configured grace duration.
         grace: Duration,
         /// List of task names that did not shut down in time.
-        stuck: Vec<String>,
+        stuck: Vec<Arc<str>>,
     },
     /// Attempted to add a task with a name that already exists in the registry.
     #[error("task '{name}' already exists in registry")]
     TaskAlreadyExists {
         /// The duplicate task name.
-        name: String,
+        name: Arc<str>,
     },
     /// Attempted to remove a task that doesn't exist in the registry.
     #[error("task '{name}' not found in registry")]
     TaskNotFound {
         /// The missing task name.
-        name: String,
+        name: Arc<str>,
     },
     /// Timeout waiting for task removal confirmation.
     #[error("timeout waiting for task '{name}' removal after {timeout:?}")]
     TaskRemoveTimeout {
         /// Task which timeout on cancel.
-        name: String,
+        name: Arc<str>,
         // Task timeout duration.
         timeout: Duration,
     },

@@ -69,7 +69,7 @@ use crate::{
 #[derive(Debug)]
 pub struct TaskFn<F> {
     /// Task name used in logs / metrics.
-    name: String,
+    name: Arc<str>,
     /// Factory closure that produces a new future per spawn.
     f: F,
 }
@@ -83,7 +83,7 @@ impl<F> TaskFn<F> {
     ///
     /// ### Notes
     /// Prefer [`TaskFn::arc`] when you need a [`TaskRef`](crate::TaskRef) immediately.
-    pub fn new(name: impl Into<String>, f: F) -> Self {
+    pub fn new(name: impl Into<Arc<str>>, f: F) -> Self {
         Self {
             name: name.into(),
             f,
@@ -104,7 +104,7 @@ impl<F> TaskFn<F> {
     /// });
     /// assert_eq!(t.name(), "hello");
     /// ```
-    pub fn arc(name: impl Into<String>, f: F) -> Arc<Self> {
+    pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {
         Arc::new(Self::new(name, f))
     }
 }
@@ -115,7 +115,7 @@ where
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
     fn name(&self) -> &str {
-        &self.name
+        &*self.name
     }
 
     fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture {
