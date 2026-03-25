@@ -68,31 +68,35 @@ impl Registry {
     #[inline]
     fn notify_after_insert(&self, was_empty: bool, len_after: usize) {
         if was_empty && len_after == 1 {
-            self.nonempty_notify.notify_waiters();
+            self.nonempty_notify.notify_one();
         }
     }
 
     #[inline]
     fn notify_after_remove(&self, len_after: usize) {
         if len_after == 0 {
-            self.empty_notify.notify_waiters();
+            self.empty_notify.notify_one();
         }
     }
 
     /// One-shot wait until the registry becomes non-empty.
     pub async fn wait_became_nonempty_once(&self) {
-        if !self.is_empty().await {
-            return;
+        loop {
+            if !self.is_empty().await {
+                return;
+            }
+            self.nonempty_notify.notified().await;
         }
-        self.nonempty_notify.notified().await;
     }
 
     /// Wait until the registry becomes empty.
     pub async fn wait_until_empty(&self) {
-        if self.is_empty().await {
-            return;
+        loop {
+            if self.is_empty().await {
+                return;
+            }
+            self.empty_notify.notified().await;
         }
-        self.empty_notify.notified().await;
     }
 
     /// Spawns the event listener task.

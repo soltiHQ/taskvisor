@@ -388,19 +388,9 @@ impl Supervisor {
     ///
     /// Publishes terminal event (`AllStoppedWithinGrace` or `GraceExceeded`).
     async fn wait_all_with_grace(&self) -> Result<(), RuntimeError> {
-        use tokio::time::{Duration, sleep};
-
         let grace = self.cfg.grace;
-        let done = async {
-            loop {
-                if self.registry.is_empty().await {
-                    return;
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-        };
 
-        match timeout(grace, done).await {
+        match timeout(grace, self.registry.wait_until_empty()).await {
             Ok(_) => {
                 self.bus
                     .publish(Event::new(EventKind::AllStoppedWithinGrace));
