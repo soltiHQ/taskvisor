@@ -9,7 +9,7 @@
 //!
 //! ## Architecture
 //! ```text
-//! SubscriberSet ──► [bounded queue] ──► worker task ──► subscriber.on_event()
+//! SubscriberSet ──► [bounded queue] ──► worker task ──► subscriber.on_event().await
 //!                                    └─► panic caught → EventKind::SubscriberPanicked
 //! ```
 //!
@@ -27,18 +27,19 @@
 //!
 //! ## Example
 //! ```rust
-//! use async_trait::async_trait;
-//! // Import from the crate root: these are re-exported when the "events" feature is enabled.
-//! use taskvisor::{Subscribe, Event, EventKind};
+//! use std::pin::Pin;
+//! use std::future::Future;
+//! use taskvisor::{Subscribe, BoxSubscriberFuture, Event, EventKind};
 //!
 //! struct Metrics;
 //!
-//! #[async_trait]
 //! impl Subscribe for Metrics {
-//!     async fn on_event(&self, ev: &Event) {
-//!         if matches!(ev.kind, EventKind::TaskFailed) {
-//!             // export a metric, etc.
-//!         }
+//!     fn on_event<'a>(&'a self, ev: &'a Event) -> BoxSubscriberFuture<'a> {
+//!         Box::pin(async move {
+//!             if matches!(ev.kind, EventKind::TaskFailed) {
+//!                 // export a metric, await network calls, etc.
+//!             }
+//!         })
 //!     }
 //!
 //!     fn name(&self) -> &'static str { "metrics" }      // prefer short, descriptive names
@@ -46,9 +47,16 @@
 //! }
 //! ```
 
-use async_trait::async_trait;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::events::Event;
+
+/// Boxed future returned by [`Subscribe::on_event`].
+///
+/// Enables trait object safety (`dyn Subscribe`) while supporting async event handlers.
+/// Implementors wrap their async block with `Box::pin(async { ... })`.
+pub type BoxSubscriberFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 /// Event subscriber for runtime observability.
 ///
@@ -61,15 +69,22 @@ use crate::events::Event;
 /// - Use async I/O; avoid blocking the executor.
 /// - Handle errors internally; do not panic.
 /// - Slow processing affects only this subscriber's queue.
-#[async_trait]
+///
+/// ### Async design
+/// `on_event` returns [`BoxSubscriberFuture`], a pinned boxed future:
+/// - **Object-safe**: works with `Arc<dyn Subscribe>` (required for dynamic subscriber dispatch).
+/// - **No proc-macro**: no `#[async_trait]` crate needed; just `Box::pin(async { ... })`.
+/// - **Send bound**: required because worker tasks run on tokio's multi-thread runtime.
+/// - **Unified lifetime**: `&self` and `&event` share the same lifetime `'a`,
+///   so async blocks can capture both.
 pub trait Subscribe: Send + Sync + 'static {
-    /// Processes a single event.
+    /// Processes a single event asynchronously.
     ///
-    /// Called from a dedicated worker task, not in the publisher context.
+    /// Called from a dedicated async worker task, not in the publisher context.
     /// Events are delivered in FIFO order per subscriber.
     ///
     /// Panics are caught; the runtime publishes `EventKind::SubscriberPanicked`.
-    async fn on_event(&self, event: &Event);
+    fn on_event<'a>(&'a self, event: &'a Event) -> BoxSubscriberFuture<'a>;
 
     /// Returns the subscriber name used in logs/metrics and overflow/panic events.
     ///

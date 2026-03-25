@@ -22,10 +22,8 @@ features = ["logging", "controller"]
 
 [dependencies]
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
-async-trait = "0.1.89"
 tokio-util = "0.7.16"
 thiserror = "2.0.16"
 anyhow = "1.0.100"
-futures = "0.3.31"
 rand = "0.9.2"
 dashmap = "6.1.0"

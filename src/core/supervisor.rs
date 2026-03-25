@@ -25,7 +25,9 @@
 //!
 //! Supervisor::run(tasks)        // start() + block until shutdown
 //!     ├──► start()
+//!     ├──► subscribe to bus (before publishing!)
 //!     ├──► add initial tasks
+//!     ├──► wait for N TaskAdded confirmations
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
 //!           ├──► cancel all tasks
@@ -234,20 +236,45 @@ impl Supervisor {
     ///
     /// Steps:
     /// - Start event loop (via [`start`])
+    /// - Subscribe to bus **before** publishing (guarantees no missed events)
     /// - Publish TaskAddRequested for initial tasks
-    /// - Optionally wait until registry becomes non-empty (if we added tasks)
+    /// - Wait for N `TaskAdded` confirmations from registry listener
     /// - Wait for shutdown signal or all tasks to exit
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.start();
 
         let expected = tasks.len();
-        for spec in tasks {
-            self.add_task(spec)?;
-        }
         if expected > 0 {
-            self.registry.wait_became_nonempty_once().await;
+            let mut rx = self.bus.subscribe();
+            for spec in tasks {
+                self.add_task(spec)?;
+            }
+            self.wait_tasks_registered(&mut rx, expected).await;
         }
         self.drive_shutdown().await
+    }
+
+    /// Waits until registry listener confirms N tasks were registered.
+    ///
+    /// Subscribes to bus **before** publishing, so no `TaskAdded` events can be missed.
+    /// On `Lagged`, stops waiting — tasks were registered but we lost the events;
+    /// `drive_shutdown` will handle the rest.
+    async fn wait_tasks_registered(
+        &self,
+        rx: &mut broadcast::Receiver<Arc<Event>>,
+        expected: usize,
+    ) {
+        let mut registered = 0usize;
+        while registered < expected {
+            match rx.recv().await {
+                Ok(ev) if ev.kind == EventKind::TaskAdded => {
+                    registered += 1;
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.

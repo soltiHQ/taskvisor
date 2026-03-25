@@ -7,11 +7,11 @@
 //! ```text
 //! emit(event)
 //!     │
-//!     ├──► [queue 1] ──► worker 1 ──► subscriber1.on_event()
+//!     ├──► [queue 1] ──► worker 1 ──► subscriber1.on_event().await
 //!     │    (bounded)         └──────► panic → SubscriberPanicked
-//!     ├──► [queue 2] ──► worker 2 ──► subscriber2.on_event()
+//!     ├──► [queue 2] ──► worker 2 ──► subscriber2.on_event().await
 //!     │    (bounded)
-//!     └──► [queue N] ──► worker N ──► subscriberN.on_event()
+//!     └──► [queue N] ──► worker N ──► subscriberN.on_event().await
 //!          (bounded)
 //! ```
 //!
@@ -23,7 +23,8 @@
 //! - **Per-subscriber FIFO**: each subscriber sees events in order
 //!
 //! ## Panic handling
-//! Worker tasks use `catch_unwind` to isolate panics:
+//! Worker tasks use `AssertUnwindSafe` + `catch_unwind` to isolate panics:
+//! - The future returned by `on_event` is polled inside `catch_unwind` on each poll
 //! - Panic is caught and converted to `SubscriberPanicked` event
 //! - Worker continues processing next event
 //! - Other subscribers are unaffected
@@ -34,34 +35,37 @@
 //! ## Example
 //! ```rust
 //! use std::sync::Arc;
-//! use async_trait::async_trait;
-//! use taskvisor::{Subscribe, Event};
+//! use taskvisor::{Subscribe, BoxSubscriberFuture, Event};
 //!
 //! struct Metrics;
 //!
-//! #[async_trait]
 //! impl Subscribe for Metrics {
-//!     async fn on_event(&self, _ev: &Event) {
-//!         // Process event (won't block other subscribers)
+//!     fn on_event<'a>(&'a self, _ev: &'a Event) -> BoxSubscriberFuture<'a> {
+//!         Box::pin(async {
+//!             // Process event asynchronously (won't block other subscribers)
+//!         })
 //!     }
 //!     fn name(&self) -> &'static str { "metrics" }
 //! }
 //!
 //! struct Alerts;
 //!
-//! #[async_trait]
 //! impl Subscribe for Alerts {
-//!     async fn on_event(&self, _ev: &Event) {
-//!         // Process event independently
+//!     fn on_event<'a>(&'a self, _ev: &'a Event) -> BoxSubscriberFuture<'a> {
+//!         Box::pin(async {
+//!             // Process event independently
+//!         })
 //!     }
 //!     fn name(&self) -> &'static str { "alerts" }
 //! }
 //! // In Supervisor: let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Metrics), Arc::new(Alerts)];
 //! ```
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures::FutureExt;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::events::{Bus, Event};
@@ -71,6 +75,28 @@ use crate::subscribers::Subscribe;
 struct SubscriberChannel {
     name: &'static str,
     sender: mpsc::Sender<Arc<Event>>,
+}
+
+/// A future wrapper that catches panics during polling.
+///
+/// Wraps an inner future with `AssertUnwindSafe` and catches panics on each `poll()`.
+/// If the inner future panics, this future resolves to `Err(panic_payload)`.
+struct CatchUnwindFuture<F> {
+    inner: F,
+}
+
+impl<F: Future<Output = ()> + Unpin> Future for CatchUnwindFuture<F> {
+    type Output = Result<(), Box<dyn std::any::Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let inner = &mut this.inner;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Pin::new(inner).poll(cx))) {
+            Ok(Poll::Ready(())) => Poll::Ready(Ok(())),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(panic_err) => Poll::Ready(Err(panic_err)),
+        }
+    }
 }
 
 /// Fan-out coordinator for multiple event subscribers.
@@ -92,7 +118,7 @@ impl SubscriberSet {
     /// ### Per-subscriber setup
     /// - Bounded `mpsc` queue (capacity from [`Subscribe::queue_capacity`], clamped to >= 1)
     /// - Dedicated worker task (runs until the queue is closed)
-    /// - Panic isolation via `catch_unwind`
+    /// - Panic isolation via `CatchUnwindFuture` (polls inner future inside `catch_unwind`)
     ///
     /// ### Notes
     /// - Workers start immediately and process events until shutdown
@@ -110,25 +136,22 @@ impl SubscriberSet {
 
             let handle = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
-                    let fut = s.on_event(ev.as_ref());
-
                     // SAFETY (unwind):
                     // Each subscriber runs in its own worker task with its own mpsc channel:
                     // a panic cannot corrupt another subscriber's state.
                     //
-                    // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex will be poisoned, which is the expected Rust behavior.
-                    // The worker continues processing the next event after reporting the panic via SubscriberPanicked.
-                    if let Err(panic_err) = std::panic::AssertUnwindSafe(fut).catch_unwind().await {
-                        let info = {
-                            let any = &*panic_err;
-                            if let Some(msg) = any.downcast_ref::<&'static str>() {
-                                (*msg).to_string()
-                            } else if let Some(msg) = any.downcast_ref::<String>() {
-                                msg.clone()
-                            } else {
-                                "unknown panic".to_string()
-                            }
-                        };
+                    // `CatchUnwindFuture` wraps each poll in `catch_unwind(AssertUnwindSafe(...))`
+                    // so panics during any `.await` point inside `on_event` are caught.
+                    //
+                    // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex
+                    // will be poisoned, which is the expected Rust behavior.
+                    // The worker continues processing the next event after reporting
+                    // the panic via SubscriberPanicked.
+                    let fut = s.on_event(ev.as_ref());
+                    let wrapped = CatchUnwindFuture { inner: fut };
+
+                    if let Err(panic_err) = wrapped.await {
+                        let info = extract_panic_info(&panic_err);
                         bus_for_worker.publish(Event::subscriber_panicked(s.name(), info));
                     }
                 }
@@ -198,5 +221,17 @@ impl SubscriberSet {
         for h in self.workers {
             let _ = h.await;
         }
+    }
+}
+
+/// Extracts a human-readable message from a panic payload.
+fn extract_panic_info(panic_err: &Box<dyn std::any::Any + Send>) -> String {
+    let any = &**panic_err;
+    if let Some(msg) = any.downcast_ref::<&'static str>() {
+        (*msg).to_string()
+    } else if let Some(msg) = any.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }

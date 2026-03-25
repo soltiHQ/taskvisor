@@ -92,7 +92,7 @@
 //!
 //! ## Concurrency & scalability
 //!
-//! - `DashMap<String, Arc<Mutex<SlotState>>>` avoids global map lock contention.
+//! - `DashMap<Arc<str>, Arc<Mutex<SlotState>>>` avoids global map lock contention.
 //! - Per-slot `Mutex` ensures updates to one slot don’t block others.
 //!
 //! ---

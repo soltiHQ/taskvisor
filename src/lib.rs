@@ -161,7 +161,7 @@ pub use core::{Supervisor, SupervisorConfig};
 pub use error::{RuntimeError, TaskError};
 pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
-pub use subscribers::{Subscribe, SubscriberSet};
+pub use subscribers::{BoxSubscriberFuture, Subscribe, SubscriberSet};
 pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose a controller object.

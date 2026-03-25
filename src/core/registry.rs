@@ -20,7 +20,7 @@
 //! - Cleanup is event-driven (no polling) and idempotent (safe on duplicates/races)
 //! - Does **not** react to `TaskStopped` directly (cleanup happens on actor terminal events)
 //! - Publishes `TaskAdded`/`TaskRemoved` for observability
-//! - Exposes `wait_became_nonempty_once` / `wait_until_empty` via internal notifiers
+//! - Exposes `wait_until_empty` via internal notifier for shutdown coordination
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,7 +44,6 @@ pub struct Registry {
     bus: Bus,
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
-    nonempty_notify: Notify,
     empty_notify: Notify,
 }
 
@@ -60,16 +59,8 @@ impl Registry {
             bus,
             runtime_token,
             semaphore,
-            nonempty_notify: Notify::new(),
             empty_notify: Notify::new(),
         })
-    }
-
-    #[inline]
-    fn notify_after_insert(&self, was_empty: bool, len_after: usize) {
-        if was_empty && len_after == 1 {
-            self.nonempty_notify.notify_one();
-        }
     }
 
     #[inline]
@@ -79,23 +70,19 @@ impl Registry {
         }
     }
 
-    /// One-shot wait until the registry becomes non-empty.
-    pub async fn wait_became_nonempty_once(&self) {
-        loop {
-            if !self.is_empty().await {
-                return;
-            }
-            self.nonempty_notify.notified().await;
-        }
-    }
-
     /// Wait until the registry becomes empty.
+    ///
+    /// Uses the register-before-check pattern to avoid race conditions:
+    /// `notified()` is created **before** checking the condition,
+    /// but `.await`ed **after**. This ensures no notification is lost between
+    /// the check and the wait.
     pub async fn wait_until_empty(&self) {
         loop {
+            let notified = self.empty_notify.notified();
             if self.is_empty().await {
                 return;
             }
-            self.empty_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -219,12 +206,9 @@ impl Registry {
             cancel: task_token,
         };
 
-        let was_empty = tasks.is_empty();
         tasks.insert(task_name.clone(), handle);
-        let len_after = tasks.len();
         drop(tasks);
 
-        self.notify_after_insert(was_empty, len_after);
         self.bus
             .publish(Event::new(EventKind::TaskAdded).with_task(task_name));
     }
