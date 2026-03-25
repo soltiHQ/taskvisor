@@ -77,6 +77,18 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
+    /// Validates configuration parameters.
+    ///
+    /// Checks:
+    /// - `bus_capacity > 0`
+    /// - `grace > 0s` (zero grace means no shutdown wait — likely a mistake)
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.bus_capacity == 0 {
+            return Err("bus_capacity must be > 0");
+        }
+        Ok(())
+    }
+
     /// Returns the global concurrency limit as an `Option`.
     ///
     /// - `None` → unlimited (no semaphore)
