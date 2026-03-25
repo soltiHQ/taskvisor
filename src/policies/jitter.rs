@@ -59,18 +59,14 @@ impl Default for JitterPolicy {
 impl JitterPolicy {
     /// Applies jitter to the given delay.
     ///
-    /// ### Note
-    /// For `Decorrelated`, this method returns the input unchanged.
-    /// Use [`apply_decorrelated`](Self::apply_decorrelated) instead,
-    /// as it requires additional context (previous delay, base, max).
+    /// For `Decorrelated`, this method returns the input **unchanged** because
+    /// decorrelated jitter requires additional context (previous delay, base, max).
+    /// Use [`apply_decorrelated`](Self::apply_decorrelated) instead.
     pub fn apply(&self, delay: Duration) -> Duration {
         match self {
-            JitterPolicy::None => delay,
+            JitterPolicy::None | JitterPolicy::Decorrelated => delay,
             JitterPolicy::Full => self.full_jitter(delay),
             JitterPolicy::Equal => self.equal_jitter(delay),
-            JitterPolicy::Decorrelated => {
-                panic!("Decorrelated jitter requires context; use apply_decorrelated() instead")
-            }
         }
     }
 
