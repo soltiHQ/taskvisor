@@ -4,8 +4,9 @@
 //! should be executed under supervision (restart policy, backoff, timeout).
 //!
 //! A spec can be created:
-//! - **Explicitly** with [`TaskSpec::new`] (full control)
-//! - **From config** with [`TaskSpec::with_defaults`] (inherit defaults)
+//! - **Quick**: [`TaskSpec::once`] (run once, never restart) or [`TaskSpec::restartable`] (restart on failure)
+//! - **Explicit**: [`TaskSpec::new`] (full control over all parameters)
+//! - **From config**: [`TaskSpec::with_defaults`] (inherit defaults from [`SupervisorConfig`])
 //!
 //! ## Rules
 //! - The spec is then passed to [`Supervisor::run`](crate::Supervisor::run) for execution.
@@ -37,26 +38,46 @@ use crate::{
 ///     Ok::<(), TaskError>(())
 /// });
 ///
-/// // Explicit configuration:
+/// // Quick one-shot (most common):
+/// let spec = TaskSpec::once(demo.clone());
+///
+/// // Restartable with defaults:
+/// let spec = TaskSpec::restartable(demo.clone());
+///
+/// // Restartable with custom timeout (builder chain):
+/// let spec = TaskSpec::restartable(demo.clone())
+///     .with_timeout(Some(Duration::from_secs(30)));
+///
+/// // Full control:
 /// let spec = TaskSpec::new(
 ///     demo.clone(),
-///     RestartPolicy::Never,
+///     RestartPolicy::Always { interval: None },
 ///     BackoffPolicy::default(),
-///     None,
+///     Some(Duration::from_secs(5)),
 /// );
-/// assert!(spec.timeout().is_none());
 ///
 /// // Inherit from global config:
 /// let cfg = SupervisorConfig::default();
-/// let spec2 = TaskSpec::with_defaults(demo, &cfg);
-/// // `cfg.timeout = 0s` is treated as `None`
+/// let spec = TaskSpec::with_defaults(demo, &cfg);
 /// ```
 #[derive(Clone)]
+#[must_use]
 pub struct TaskSpec {
     task: TaskRef,
     restart: RestartPolicy,
     backoff: BackoffPolicy,
     timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for TaskSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskSpec")
+            .field("task", &self.task.name())
+            .field("restart", &self.restart)
+            .field("backoff", &self.backoff)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl TaskSpec {
@@ -78,6 +99,34 @@ impl TaskSpec {
             restart,
             backoff,
             timeout,
+        }
+    }
+
+    /// Creates a one-shot task that runs once and never restarts.
+    ///
+    /// Equivalent to `TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)`.
+    ///
+    /// Use builder methods (`.with_timeout()`, `.with_backoff()`) to customize further.
+    pub fn once(task: TaskRef) -> Self {
+        Self {
+            task,
+            restart: RestartPolicy::Never,
+            backoff: BackoffPolicy::default(),
+            timeout: None,
+        }
+    }
+
+    /// Creates a restartable task that restarts on failure with default backoff.
+    ///
+    /// Equivalent to `TaskSpec::new(task, RestartPolicy::OnFailure, BackoffPolicy::default(), None)`.
+    ///
+    /// Use builder methods (`.with_timeout()`, `.with_backoff()`, `.with_restart()`) to customize further.
+    pub fn restartable(task: TaskRef) -> Self {
+        Self {
+            task,
+            restart: RestartPolicy::OnFailure,
+            backoff: BackoffPolicy::default(),
+            timeout: None,
         }
     }
 

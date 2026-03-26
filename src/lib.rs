@@ -103,30 +103,11 @@
 //!
 //! ## Example
 //! ```rust
-//! use std::sync::Arc;
-//! use std::time::Duration;
-//! use tokio_util::sync::CancellationToken;
-//! use taskvisor::{BackoffPolicy, SupervisorConfig, RestartPolicy, Supervisor, TaskFn, TaskRef, TaskSpec};
+//! use taskvisor::prelude::*;
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut cfg = SupervisorConfig::default();
-//!     cfg.timeout = Duration::from_secs(5);
-//!
-//!     // Build subscribers (optional)
-//!     #[cfg(feature = "logging")]
-//!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = {
-//!         use taskvisor::LogWriter;
-//!         vec![Arc::new(LogWriter::default())]
-//!     };
-//!     #[cfg(not(feature = "logging"))]
-//!     let subs: Vec<Arc<dyn taskvisor::Subscribe>> = Vec::new();
-//!
-//!     // Create supervisor
-//!     let sup = taskvisor::Supervisor::builder(cfg)
-//!         .with_subscribers(subs)
-//!         // .with_controller(ControllerConfig { ... })  // if feature = "controller"
-//!         .build();
+//!     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
 //!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
@@ -135,15 +116,9 @@
 //!         Ok(())
 //!     });
 //!
-//!     // Build specification - use RestartPolicy::Never for one-shot task
-//!     let spec = TaskSpec::new(
-//!         hello,
-//!         RestartPolicy::Never,
-//!         BackoffPolicy::default(),
-//!         Some(Duration::from_secs(5)),
-//!     );
+//!     // One-shot task (runs once, never restarts)
+//!     let spec = TaskSpec::once(hello);
 //!
-//!     // Pass initial tasks to run() - they will be added by the registry listener
 //!     sup.run(vec![spec]).await?;
 //!     Ok(())
 //! }
@@ -152,6 +127,7 @@ mod core;
 mod error;
 mod events;
 mod policies;
+pub mod prelude;
 mod subscribers;
 mod tasks;
 
@@ -161,8 +137,8 @@ pub use core::{Supervisor, SupervisorConfig};
 pub use error::{RuntimeError, TaskError};
 pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
-pub use subscribers::{Subscribe, SubscriberSet};
-pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
+pub use subscribers::Subscribe;
+pub use tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose a controller object.
 // Enable with: `--features controller`

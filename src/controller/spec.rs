@@ -5,12 +5,22 @@ use crate::TaskSpec;
 ///
 /// Combines a slot name, admission policy, and the actual task specification.
 #[derive(Clone)]
+#[must_use]
 pub struct ControllerSpec {
     /// Admission policy.
     pub admission: AdmissionPolicy,
 
     /// Task specification to run.
     pub task_spec: TaskSpec,
+}
+
+impl std::fmt::Debug for ControllerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControllerSpec")
+            .field("admission", &self.admission)
+            .field("task_spec", &self.task_spec)
+            .finish()
+    }
 }
 
 impl ControllerSpec {

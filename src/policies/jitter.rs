@@ -8,7 +8,6 @@
 //! - [`JitterPolicy::Equal`] delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
 //! - [`JitterPolicy::Decorrelated`] stateful jitter based on previous delay (sophisticated)
 
-use rand::Rng;
 use std::time::Duration;
 
 /// Policy controlling randomization of retry delays.
@@ -83,7 +82,6 @@ impl JitterPolicy {
             return self.apply(base);
         }
 
-        let mut rng = rand::rng();
         let base_ms = (base.as_millis().min(u128::from(u64::MAX))) as u64;
         let prev_ms = (prev.as_millis().min(u128::from(u64::MAX))) as u64;
         let max_ms = (max.as_millis().min(u128::from(u64::MAX))) as u64;
@@ -95,23 +93,21 @@ impl JitterPolicy {
             return base;
         }
 
-        let jittered_ms = rng.random_range(base_ms..=clamped_upper);
+        let jittered_ms = fastrand::u64(base_ms..=clamped_upper);
         Duration::from_millis(jittered_ms)
     }
 
     /// Full jitter: random in [0, delay].
     fn full_jitter(&self, delay: Duration) -> Duration {
-        let mut rng = rand::rng();
         let ms = (delay.as_millis().min(u128::from(u64::MAX))) as u64;
         if ms == 0 {
             return Duration::ZERO;
         }
-        Duration::from_millis(rng.random_range(0..=ms))
+        Duration::from_millis(fastrand::u64(0..=ms))
     }
 
     /// Equal jitter: delay/2 + random[0, delay/2].
     fn equal_jitter(&self, delay: Duration) -> Duration {
-        let mut rng = rand::rng();
         let ms = (delay.as_millis().min(u128::from(u64::MAX))) as u64;
         if ms == 0 {
             return Duration::ZERO;
@@ -120,7 +116,7 @@ impl JitterPolicy {
         let jitter = if half == 0 {
             0
         } else {
-            rng.random_range(0..=half)
+            fastrand::u64(0..=half)
         };
         Duration::from_millis(half + jitter)
     }

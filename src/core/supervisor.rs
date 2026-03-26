@@ -139,6 +139,15 @@ pub struct Supervisor {
     pub(super) controller: OnceCell<Arc<crate::controller::Controller>>,
 }
 
+impl std::fmt::Debug for Supervisor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Supervisor")
+            .field("cfg", &self.cfg)
+            .field("started", &self.started.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl Supervisor {
     /// Internal constructor used by builder (not public API).
     pub(crate) fn new_internal(

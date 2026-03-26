@@ -364,3 +364,30 @@ impl Event {
         self
     }
 }
+
+impl std::fmt::Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Event");
+        d.field("seq", &self.seq);
+        d.field("kind", &self.kind);
+        if let Some(ref task) = self.task {
+            d.field("task", task);
+        }
+        if let Some(attempt) = self.attempt {
+            d.field("attempt", &attempt);
+        }
+        if let Some(ref reason) = self.reason {
+            d.field("reason", reason);
+        }
+        if let Some(timeout_ms) = self.timeout_ms {
+            d.field("timeout_ms", &timeout_ms);
+        }
+        if let Some(delay_ms) = self.delay_ms {
+            d.field("delay_ms", &delay_ms);
+        }
+        if let Some(ref src) = self.backoff_source {
+            d.field("backoff_source", src);
+        }
+        d.finish()
+    }
+}

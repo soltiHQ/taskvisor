@@ -37,13 +37,11 @@ fn make_spec(name: &'static str, duration_ms: u64) -> taskvisor::TaskSpec {
             }
         },
     );
-    let policy = taskvisor::RestartPolicy::Never;
-    let backoff = taskvisor::BackoffPolicy::default();
-    taskvisor::TaskSpec::new(task, policy, backoff, None)
+    taskvisor::TaskSpec::once(task)
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sup = taskvisor::Supervisor::builder(taskvisor::SupervisorConfig::default())
         .with_controller(taskvisor::ControllerConfig::default())
         .build();

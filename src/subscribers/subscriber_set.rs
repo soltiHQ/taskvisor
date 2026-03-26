@@ -81,7 +81,7 @@ struct SubscriberChannel {
 /// ## Shutdown
 /// Call [`close`](Self::close) to gracefully drain all subscriber queues.
 /// Workers finish processing remaining events before exiting.
-pub struct SubscriberSet {
+pub(crate) struct SubscriberSet {
     /// Per-subscriber senders. Wrapped in `Mutex` so [`close`](Self::close)
     /// can drop them from `&self` (through `Arc`). The lock is uncontended
     /// in the hot path — `emit_arc` is called from a single task
@@ -105,7 +105,7 @@ impl SubscriberSet {
     /// ### Notes
     /// - Workers start immediately and process events until shutdown
     #[must_use]
-    pub fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
+    pub(crate) fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
         let mut channels = Vec::with_capacity(subs.len());
         let mut workers = Vec::with_capacity(subs.len());
 
@@ -150,17 +150,6 @@ impl SubscriberSet {
         }
     }
 
-    /// Emits an event to all subscribers (clones the event).
-    ///
-    /// - Clones the event, wraps it in `Arc`, then calls [`emit_arc`](Self::emit_arc)
-    /// - Returns immediately (non-blocking)
-    ///
-    /// ### Notes
-    /// For hot paths, prefer [`emit_arc`](Self::emit_arc) to avoid cloning.
-    pub fn emit(&self, event: &Event) {
-        self.emit_arc(Arc::new(event.clone()));
-    }
-
     /// Emits a pre-allocated `Arc<Event>` to all subscribers.
     ///
     /// - Uses `try_send` (non-blocking)
@@ -171,7 +160,7 @@ impl SubscriberSet {
     /// Prevents infinite loops and event storms: if the **incoming** event is
     /// `SubscriberOverflow` **or** `SubscriberPanicked`, we do not publish further
     /// overflow diagnostics for it.
-    pub fn emit_arc(&self, event: Arc<Event>) {
+    pub(crate) fn emit_arc(&self, event: Arc<Event>) {
         let is_internal_event = event.is_internal_diagnostic();
         let channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -202,7 +191,7 @@ impl SubscriberSet {
     /// Safe to call multiple times — subsequent calls are no-ops.
     /// Safe to call through `Arc<Self>` (unlike the previous `shutdown(self)` which
     /// required ownership and was unreachable through `Arc`).
-    pub async fn close(&self) {
+    pub(crate) async fn close(&self) {
         // Drop senders — workers will see channel closed after draining.
         {
             let mut channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());

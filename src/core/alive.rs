@@ -43,7 +43,7 @@ struct TaskState {
 ///
 /// ### Ordering
 /// - Events are applied only if `ev.seq > last_seq` for the task.
-pub struct AliveTracker {
+pub(crate) struct AliveTracker {
     state: RwLock<HashMap<Arc<str>, TaskState>>,
 }
 

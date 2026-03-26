@@ -22,7 +22,7 @@ use super::{
 
 /// Handle for submitting tasks to the controller.
 #[derive(Clone)]
-pub struct ControllerHandle {
+pub(crate) struct ControllerHandle {
     tx: mpsc::Sender<ControllerSpec>,
 }
 
@@ -48,7 +48,7 @@ impl ControllerHandle {
 ///
 /// Each slot can run at most one task at a time. New submissions are handled
 /// according to the configured admission policy.
-pub struct Controller {
+pub(crate) struct Controller {
     config: ControllerConfig,
     supervisor: Weak<Supervisor>,
     bus: Bus,
@@ -97,13 +97,13 @@ impl Controller {
         });
     }
 
-    async fn run_inner(&self, token: CancellationToken) -> anyhow::Result<()> {
+    async fn run_inner(&self, token: CancellationToken) -> Result<(), ControllerError> {
         let mut rx = self
             .rx
             .write()
             .await
             .take()
-            .ok_or_else(|| anyhow::anyhow!("controller already running"))?;
+            .ok_or(ControllerError::AlreadyRunning)?;
 
         let mut bus_rx = self.bus.subscribe();
         loop {

@@ -43,7 +43,7 @@ use super::event::Event;
 /// - **Fire-and-forget**: no delivery or durability guarantees.
 /// - **Cloneable**: cheap to clone (internally holds an `Arc`-backed sender).
 #[derive(Clone, Debug)]
-pub struct Bus {
+pub(crate) struct Bus {
     tx: broadcast::Sender<Arc<Event>>,
 }
 
@@ -63,10 +63,6 @@ impl Bus {
     /// Publishes an event to all active subscribers.
     pub fn publish(&self, ev: Event) {
         let _ = self.tx.send(Arc::new(ev));
-    }
-
-    pub fn publish_arc(&self, ev: Arc<Event>) {
-        let _ = self.tx.send(ev);
     }
 
     /// Creates a new receiver that will observe subsequent events.
