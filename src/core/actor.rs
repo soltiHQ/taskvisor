@@ -249,8 +249,8 @@ impl TaskActor {
                         RestartPolicy::OnFailure | RestartPolicy::Always { .. }
                     );
                     let error_is_retryable = e.is_retryable();
-                    let retries_exhausted = self.params.max_retries > 0
-                        && backoff_attempt >= self.params.max_retries;
+                    let retries_exhausted =
+                        self.params.max_retries > 0 && backoff_attempt >= self.params.max_retries;
 
                     if !(policy_allows_retry && error_is_retryable) || retries_exhausted {
                         let reason = if retries_exhausted {
