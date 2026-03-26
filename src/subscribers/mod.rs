@@ -25,7 +25,7 @@ mod subscriber_set;
 mod embedded;
 
 pub use subscriber::Subscribe;
-pub use subscriber_set::SubscriberSet;
+pub(crate) use subscriber_set::SubscriberSet;
 
 #[cfg(feature = "logging")]
 pub use embedded::LogWriter;

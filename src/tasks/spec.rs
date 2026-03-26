@@ -51,7 +51,7 @@ use crate::{
 /// // Full control:
 /// let spec = TaskSpec::new(
 ///     demo.clone(),
-///     RestartPolicy::Always,
+///     RestartPolicy::Always { interval: None },
 ///     BackoffPolicy::default(),
 ///     Some(Duration::from_secs(5)),
 /// );
