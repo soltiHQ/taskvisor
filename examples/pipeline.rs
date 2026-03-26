@@ -43,7 +43,7 @@
 //! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
 //!
 //! ## Run
-//! 
+//!
 //! ```bash
 //! cargo run --example pipeline --features controller
 //! ```

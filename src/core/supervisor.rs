@@ -223,21 +223,6 @@ impl Supervisor {
         super::handle::SupervisorHandle::new(Arc::clone(self))
     }
 
-    /// Waits until supervisor is fully initialized and ready to accept submissions.
-    ///
-    /// Uses register-before-check pattern: the `Notified` future is created
-    /// **before** checking `started`, so no notification is lost between
-    /// the check and the wait.
-    pub(crate) async fn wait_ready(&self) {
-        loop {
-            let notified = self.ready.notified();
-            if self.started.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
     /// Adds a new task to the supervisor at runtime.
     ///
     /// Publishes `TaskAddRequested` with the spec to the bus.
