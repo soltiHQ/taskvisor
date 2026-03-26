@@ -27,17 +27,14 @@
 //!
 //! ## Example
 //! ```rust
-//! use async_trait::async_trait;
-//! // Import from the crate root: these are re-exported when the "events" feature is enabled.
 //! use taskvisor::{Subscribe, Event, EventKind};
 //!
 //! struct Metrics;
 //!
-//! #[async_trait]
 //! impl Subscribe for Metrics {
-//!     async fn on_event(&self, ev: &Event) {
+//!     fn on_event(&self, ev: &Event) {
 //!         if matches!(ev.kind, EventKind::TaskFailed) {
-//!             // export a metric, etc.
+//!             // update counters, push to channel, etc.
 //!         }
 //!     }
 //!
@@ -45,8 +42,6 @@
 //!     fn queue_capacity(&self) -> usize { 2048 }        // larger buffer for metrics
 //! }
 //! ```
-
-use async_trait::async_trait;
 
 use crate::events::Event;
 
@@ -58,18 +53,28 @@ use crate::events::Event;
 /// - **Panic isolation**: panics are caught and published as `SubscriberPanicked`.
 ///
 /// ### Implementation requirements
-/// - Use async I/O; avoid blocking the executor.
+/// - Keep `on_event` fast — it runs on a dedicated worker task but blocks
+///   that worker's event loop. For async I/O, send to a channel and process
+///   elsewhere.
 /// - Handle errors internally; do not panic.
 /// - Slow processing affects only this subscriber's queue.
-#[async_trait]
+///
+/// ### Synchronous design
+/// `on_event` is intentionally synchronous:
+/// - The `SubscriberSet` infrastructure already provides async fan-out via
+///   per-subscriber `mpsc` channels and dedicated worker tasks.
+/// - Adding async to `on_event` would force a `Box::pin` allocation per event
+///   per subscriber with no benefit — all real subscribers are synchronous.
+/// - If a subscriber needs async I/O, send events to a channel inside `on_event`
+///   and process them in a separate task.
 pub trait Subscribe: Send + Sync + 'static {
-    /// Processes a single event.
+    /// Processes a single event synchronously.
     ///
     /// Called from a dedicated worker task, not in the publisher context.
     /// Events are delivered in FIFO order per subscriber.
     ///
     /// Panics are caught; the runtime publishes `EventKind::SubscriberPanicked`.
-    async fn on_event(&self, event: &Event);
+    fn on_event(&self, event: &Event);
 
     /// Returns the subscriber name used in logs/metrics and overflow/panic events.
     ///

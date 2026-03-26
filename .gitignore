@@ -28,3 +28,6 @@ target
 
 # Rust library
 Cargo.lock
+
+# Taskfile
+.task/

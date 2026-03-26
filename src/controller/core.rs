@@ -85,9 +85,14 @@ impl Controller {
 
     /// Starts the controller loop (spawns in background).
     pub fn run(self: Arc<Self>, token: CancellationToken) {
+        let bus = self.bus.clone();
         tokio::spawn(async move {
             if let Err(e) = self.run_inner(token).await {
-                eprintln!("[controller] error: {e:?}");
+                bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task("controller")
+                        .with_reason(format!("controller_loop_exited: {e}")),
+                );
             }
         });
     }
@@ -265,7 +270,11 @@ impl Controller {
 
         if let Some(next_spec) = slot.queue.pop_front() {
             if let Err(e) = sup.add_task(next_spec) {
-                eprintln!("[controller] failed to start next task '{task_name}': {e}");
+                self.bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task(task_name)
+                        .with_reason(format!("queue_start_failed: {e}")),
+                );
                 return;
             }
             slot.status = SlotStatus::Running {

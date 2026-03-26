@@ -43,9 +43,8 @@ impl MetricsSubscriber {
     }
 }
 
-#[async_trait::async_trait]
 impl taskvisor::Subscribe for MetricsSubscriber {
-    async fn on_event(&self, ev: &taskvisor::Event) {
+    fn on_event(&self, ev: &taskvisor::Event) {
         match ev.kind {
             taskvisor::EventKind::TaskStarting => {
                 self.starts.fetch_add(1, Ordering::Relaxed);

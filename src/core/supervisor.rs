@@ -25,7 +25,9 @@
 //!
 //! Supervisor::run(tasks)        // start() + block until shutdown
 //!     ├──► start()
+//!     ├──► subscribe to bus (before publishing!)
 //!     ├──► add initial tasks
+//!     ├──► wait for N TaskAdded confirmations
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
 //!           ├──► cancel all tasks
@@ -182,8 +184,18 @@ impl Supervisor {
     }
 
     /// Waits until supervisor is fully initialized and ready to accept submissions.
+    ///
+    /// Uses register-before-check pattern: the `Notified` future is created
+    /// **before** checking `started`, so no notification is lost between
+    /// the check and the wait.
     pub async fn wait_ready(&self) {
-        self.ready.notified().await;
+        loop {
+            let notified = self.ready.notified();
+            if self.started.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Adds a new task to the supervisor at runtime.
@@ -234,20 +246,45 @@ impl Supervisor {
     ///
     /// Steps:
     /// - Start event loop (via [`start`])
+    /// - Subscribe to bus **before** publishing (guarantees no missed events)
     /// - Publish TaskAddRequested for initial tasks
-    /// - Optionally wait until registry becomes non-empty (if we added tasks)
+    /// - Wait for N `TaskAdded` confirmations from registry listener
     /// - Wait for shutdown signal or all tasks to exit
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.start();
 
         let expected = tasks.len();
-        for spec in tasks {
-            self.add_task(spec)?;
-        }
         if expected > 0 {
-            self.registry.wait_became_nonempty_once().await;
+            let mut rx = self.bus.subscribe();
+            for spec in tasks {
+                self.add_task(spec)?;
+            }
+            self.wait_tasks_registered(&mut rx, expected).await;
         }
         self.drive_shutdown().await
+    }
+
+    /// Waits until registry listener confirms N tasks were registered.
+    ///
+    /// Subscribes to bus **before** publishing, so no `TaskAdded` events can be missed.
+    /// On `Lagged`, stops waiting — tasks were registered but we lost the events;
+    /// `drive_shutdown` will handle the rest.
+    async fn wait_tasks_registered(
+        &self,
+        rx: &mut broadcast::Receiver<Arc<Event>>,
+        expected: usize,
+    ) {
+        let mut registered = 0usize;
+        while registered < expected {
+            match rx.recv().await {
+                Ok(ev) if ev.kind == EventKind::TaskAdded => {
+                    registered += 1;
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
@@ -258,6 +295,7 @@ impl Supervisor {
         self.registry.cancel_all().await;
         let res = self.wait_all_with_grace().await;
         self.runtime_token.cancel();
+        self.subs.close().await;
         res
     }
 
@@ -371,36 +409,32 @@ impl Supervisor {
     }
 
     /// Waits for either shutdown signal or natural completion of all tasks.
+    ///
+    /// Both paths cancel `runtime_token` (stops registry/subscriber listeners)
+    /// and drain subscriber queues via `subs.close()`.
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
-        tokio::select! {
+        let res = tokio::select! {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::new(EventKind::ShutdownRequested));
                 self.registry.cancel_all().await;
-                let res = self.wait_all_with_grace().await;
-                self.runtime_token.cancel();
-                res
+                self.wait_all_with_grace().await
             }
-            _ = self.registry.wait_until_empty() => { Ok(()) }
-        }
+            _ = self.registry.wait_until_empty() => {
+                Ok(())
+            }
+        };
+        self.runtime_token.cancel();
+        self.subs.close().await;
+        res
     }
 
     /// Waits for all tasks in registry with grace period timeout.
     ///
     /// Publishes terminal event (`AllStoppedWithinGrace` or `GraceExceeded`).
     async fn wait_all_with_grace(&self) -> Result<(), RuntimeError> {
-        use tokio::time::{Duration, sleep};
-
         let grace = self.cfg.grace;
-        let done = async {
-            loop {
-                if self.registry.is_empty().await {
-                    return;
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-        };
 
-        match timeout(grace, done).await {
+        match timeout(grace, self.registry.wait_until_empty()).await {
             Ok(_) => {
                 self.bus
                     .publish(Event::new(EventKind::AllStoppedWithinGrace));

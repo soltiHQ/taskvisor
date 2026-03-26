@@ -31,7 +31,6 @@
 
 use crate::events::{BackoffSource, Event, EventKind};
 use crate::subscribers::Subscribe;
-use async_trait::async_trait;
 
 /// Human-readable event printer for stdout.
 ///
@@ -40,9 +39,18 @@ use async_trait::async_trait;
 #[derive(Default)]
 pub struct LogWriter;
 
-#[async_trait]
 impl Subscribe for LogWriter {
-    async fn on_event(&self, e: &Event) {
+    fn on_event(&self, e: &Event) {
+        self.print_event(e);
+    }
+
+    fn name(&self) -> &'static str {
+        "LogWriter"
+    }
+}
+
+impl LogWriter {
+    fn print_event(&self, e: &Event) {
         let seq = format!("[{:03}]", e.seq % 1000);
 
         fn fmt_ms(ms: Option<u32>) -> String {
@@ -211,9 +219,5 @@ impl Subscribe for LogWriter {
                 );
             }
         }
-    }
-
-    fn name(&self) -> &'static str {
-        "LogWriter"
     }
 }
