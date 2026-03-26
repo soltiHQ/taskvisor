@@ -68,6 +68,17 @@ pub struct TaskSpec {
     timeout: Option<Duration>,
 }
 
+impl std::fmt::Debug for TaskSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskSpec")
+            .field("task", &self.task.name())
+            .field("restart", &self.restart)
+            .field("backoff", &self.backoff)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 impl TaskSpec {
     /// Creates a new task specification with explicit parameters.
     ///
