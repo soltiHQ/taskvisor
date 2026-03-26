@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sup = Arc::new(taskvisor::Supervisor::new(
         taskvisor::SupervisorConfig::default(),
         vec![],
@@ -88,10 +88,5 @@ fn make_worker(name: &'static str) -> taskvisor::TaskSpec {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
-    taskvisor::TaskSpec::new(
-        task,
-        taskvisor::RestartPolicy::default(),
-        taskvisor::BackoffPolicy::default(),
-        None,
-    )
+    taskvisor::TaskSpec::restartable(task)
 }

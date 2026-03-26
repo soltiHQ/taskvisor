@@ -88,16 +88,11 @@ fn make_spec() -> taskvisor::TaskSpec {
                 Ok(())
             }
         });
-    taskvisor::TaskSpec::new(
-        task,
-        taskvisor::RestartPolicy::OnFailure,
-        taskvisor::BackoffPolicy::default(),
-        None,
-    )
+    taskvisor::TaskSpec::restartable(task)
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(MetricsSubscriber::new());
 
     let subs: Vec<Arc<dyn taskvisor::Subscribe>> =

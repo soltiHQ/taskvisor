@@ -14,4 +14,8 @@ pub enum ControllerError {
     /// Controller channel is closed (controller task died).
     #[error("controller channel closed")]
     Closed,
+
+    /// Controller is already running (double `run()` call).
+    #[error("controller already running")]
+    AlreadyRunning,
 }
