@@ -39,7 +39,7 @@ struct Handle {
 }
 
 /// Event-driven registry of active task actors.
-pub struct Registry {
+pub(crate) struct Registry {
     tasks: RwLock<HashMap<Arc<str>, Handle>>,
     bus: Bus,
     runtime_token: CancellationToken,

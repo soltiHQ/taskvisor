@@ -19,5 +19,5 @@
 mod bus;
 mod event;
 
-pub use bus::Bus;
+pub(crate) use bus::Bus;
 pub use event::{BackoffSource, Event, EventKind};

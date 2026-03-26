@@ -43,7 +43,7 @@ use super::event::Event;
 /// - **Fire-and-forget**: no delivery or durability guarantees.
 /// - **Cloneable**: cheap to clone (internally holds an `Arc`-backed sender).
 #[derive(Clone, Debug)]
-pub struct Bus {
+pub(crate) struct Bus {
     tx: broadcast::Sender<Arc<Event>>,
 }
 

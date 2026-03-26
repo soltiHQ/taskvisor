@@ -119,6 +119,6 @@ mod spec;
 
 pub use admission::AdmissionPolicy;
 pub use config::ControllerConfig;
-pub use core::Controller;
+pub(crate) use core::Controller;
 pub use error::ControllerError;
 pub use spec::ControllerSpec;
