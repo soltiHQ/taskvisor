@@ -103,10 +103,12 @@ mod actor;
 mod alive;
 mod builder;
 mod config;
+mod handle;
 mod registry;
 mod runner;
 mod shutdown;
 mod supervisor;
 
 pub use config::SupervisorConfig;
+pub use handle::SupervisorHandle;
 pub use supervisor::Supervisor;

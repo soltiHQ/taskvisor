@@ -99,7 +99,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `Equal` *(recommended)* | `[delay/2, delay]` | Balanced: preserves ~75% of backoff |
 | `Decorrelated` | `[base, base*3]` capped at `max` | Sophisticated, self-adjusting |
 
-**Supervisor** — Owns the runtime. Spawns task actors, distributes events to subscribers, handles shutdown.
+**Supervisor** — Owns the runtime. Two modes: `run(tasks)` for static sets, `serve()` → `SupervisorHandle` for dynamic management.
+
+**SupervisorHandle** — Returned by `serve()`. The only way to add/remove/cancel tasks at runtime. Guarantees the runtime is alive.
 
 **Events & Subscribe** — Every lifecycle change (start, stop, fail, timeout, backoff, shutdown) is published to a broadcast bus. Implement `Subscribe` to observe them. Each subscriber gets its own queue — a slow subscriber never blocks others.
 
@@ -156,12 +158,17 @@ let spec = TaskSpec::restartable(task)
 
 ### Runtime task management
 ```rust
-// Add/remove/cancel while running
-sup.add_task(spec)?;
-sup.cancel("task-name").await?;
-sup.remove_task("task-name")?;
-let alive = sup.is_alive("task-name").await;
-let tasks = sup.list_tasks().await;
+// serve() returns a handle for dynamic management.
+// Unlike run(), the runtime stays alive until you call shutdown().
+let handle = sup.serve();
+
+handle.add(spec)?;
+handle.cancel("task-name").await?;
+handle.remove("task-name")?;
+let alive = handle.is_alive("task-name").await;
+let tasks = handle.list().await;
+
+handle.shutdown().await?;
 ```
 
 ---
@@ -267,10 +274,14 @@ let sup = Supervisor::builder(cfg)
     .with_controller(ControllerConfig::default())
     .build();
 
+let handle = sup.serve();
+
 // Submit with admission policy
-sup.submit(ControllerSpec::queue(spec)).await?;
-sup.submit(ControllerSpec::replace(spec)).await?;
-sup.submit(ControllerSpec::drop_if_running(spec)).await?;
+handle.submit(ControllerSpec::queue(spec)).await?;
+handle.submit(ControllerSpec::replace(spec)).await?;
+handle.submit(ControllerSpec::drop_if_running(spec)).await?;
+
+handle.shutdown().await?;
 ```
 
 ---
@@ -301,16 +312,24 @@ Supervisor
 ## Examples
 
 ```bash
-cargo run --example subscriber
-cargo run --example control
-cargo run --example controller --features controller
+cargo run --example basic
+cargo run --example worker
+cargo run --example periodic
+cargo run --example multiple_tasks
+cargo run --example metrics
+cargo run --example dynamic
+cargo run --example pipeline --features controller
 ```
 
 | Example | What it shows |
 |---------|--------------|
-| [subscriber.rs](examples/subscriber.rs) | Custom event subscriber tracking task metrics |
-| [control.rs](examples/control.rs) | Add, remove, cancel tasks at runtime |
-| [controller.rs](examples/controller.rs) | Admission policies: Queue, Replace, DropIfRunning |
+| [basic.rs](examples/basic.rs) | Minimal hello-world, one task runs once |
+| [worker.rs](examples/worker.rs) | Long-running worker with graceful Ctrl+C shutdown |
+| [periodic.rs](examples/periodic.rs) | Cron-like periodic task via `RestartPolicy::Always` |
+| [multiple_tasks.rs](examples/multiple.rs) | Three tasks with different policies and backoff |
+| [metrics.rs](examples/metrics.rs) | Custom `Subscribe` implementation for metrics |
+| [dynamic.rs](examples/dynamic.rs) | `serve()` → `SupervisorHandle`: add/remove/cancel at runtime |
+| [pipeline.rs](examples/pipeline.rs) | Controller admission policies: Queue, Replace, DropIfRunning |
 
 ## Optional features
 

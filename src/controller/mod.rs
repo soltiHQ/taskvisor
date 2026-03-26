@@ -18,7 +18,7 @@
 //! ```text
 //! ┌────────────────────────────┐
 //! │     Application code       │
-//! │ sup.submit(ControllerSpec) │
+//! │ handle.submit(ControllerSpec) │
 //! └──────────────┬─────────────┘
 //!                │
 //!                ▼
@@ -45,7 +45,7 @@
 //! ```
 //!
 //! **Flow summary**
-//! 1. Application calls `sup.submit(ControllerSpec)`.
+//! 1. Application calls `handle.submit(ControllerSpec)` (via `SupervisorHandle`).
 //! 2. Controller unwraps `TaskSpec` and applies `Admission` rules.
 //! 3. If accepted, controller calls `Supervisor::add_task(TaskSpec)` or requests remove.
 //! 4. On terminal `TaskRemoved` (via Bus), the slot becomes `Idle` and the next queued
@@ -100,7 +100,7 @@
 //! ## Public surface
 //!
 //! - Configure via `Supervisor::builder(..).with_controller(ControllerConfig)`.
-//! - Submit via `sup.submit(ControllerSpec::{queue, replace, drop_if_running}(...))`.
+//! - Submit via `handle.submit(ControllerSpec::{queue, replace, drop_if_running}(...))`.
 //! - Policies: [`AdmissionPolicy`] = `Queue | Replace | DropIfRunning`.
 //! - Controller emits `ControllerSubmitted`, `ControllerRejected`, and
 //!   `ControllerSlotTransition` (feature `"controller"`); readable with `"logging"`’s `LogWriter`.

@@ -119,12 +119,28 @@ use crate::{
 
 /// Orchestrates task actors, event delivery, and graceful shutdown.
 ///
-/// - Spawns and supervises task actors via event-driven registry
-/// - Provides runtime task management (add/remove tasks dynamically)
-/// - Fans out events to subscribers (non-blocking)
-/// - Handles graceful shutdown on OS signals
-/// - Tracks alive tasks for stuck detection
-/// - Enforces global concurrency limits
+/// ## Two usage modes
+///
+/// **Static** — run a known set of tasks until completion or Ctrl+C:
+/// ```rust,no_run
+/// # use taskvisor::prelude::*;
+/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+/// sup.run(vec![/* specs */]).await?;
+/// # Ok(()) }
+/// ```
+///
+/// **Dynamic** — add/remove/cancel tasks at runtime via [`SupervisorHandle`]:
+/// ```rust,no_run
+/// # use taskvisor::prelude::*;
+/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+/// let handle = sup.serve();
+/// // handle.add(...), handle.cancel(...), handle.shutdown().await
+/// # Ok(()) }
+/// ```
+///
+/// [`SupervisorHandle`]: crate::SupervisorHandle
 pub struct Supervisor {
     cfg: SupervisorConfig,
     bus: Bus,
@@ -192,12 +208,27 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
+    /// Returns a [`SupervisorHandle`] for dynamic task management.
+    ///
+    /// Starts the event loop (listeners) and returns a handle through which
+    /// you can add/remove/cancel tasks and trigger shutdown.
+    ///
+    /// This is the **only** way to manage tasks dynamically. Use [`run()`]
+    /// for static task sets.
+    ///
+    /// [`SupervisorHandle`]: crate::SupervisorHandle
+    /// [`run()`]: Self::run
+    pub fn serve(self: &Arc<Self>) -> super::handle::SupervisorHandle {
+        self.start();
+        super::handle::SupervisorHandle::new(Arc::clone(self))
+    }
+
     /// Waits until supervisor is fully initialized and ready to accept submissions.
     ///
     /// Uses register-before-check pattern: the `Notified` future is created
     /// **before** checking `started`, so no notification is lost between
     /// the check and the wait.
-    pub async fn wait_ready(&self) {
+    pub(crate) async fn wait_ready(&self) {
         loop {
             let notified = self.ready.notified();
             if self.started.load(Ordering::Acquire) {
@@ -211,7 +242,7 @@ impl Supervisor {
     ///
     /// Publishes `TaskAddRequested` with the spec to the bus.
     /// Registry listener will spawn the actor.
-    pub fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
+    pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
                 .with_task(spec.task().name())
@@ -224,14 +255,14 @@ impl Supervisor {
     ///
     /// Publishes `TaskRemoveRequested` to the bus.
     /// Registry listener will cancel and remove the task.
-    pub fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
+    pub(crate) fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
         self.bus
             .publish(Event::new(EventKind::TaskRemoveRequested).with_task(name));
         Ok(())
     }
 
     /// Returns a sorted list of currently active task names from the registry.
-    pub async fn list_tasks(&self) -> Vec<Arc<str>> {
+    pub(crate) async fn list_tasks(&self) -> Vec<Arc<str>> {
         self.registry.list().await
     }
 
@@ -240,9 +271,7 @@ impl Supervisor {
     /// Spawns:
     /// - subscriber listener (event fan-out)
     /// - registry listener (task lifecycle management)
-    ///
-    /// Use [`wait_ready`] after this to ensure readiness before submitting.
-    pub fn start(&self) {
+    pub(crate) fn start(&self) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -297,9 +326,7 @@ impl Supervisor {
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
-    ///
-    /// Use this when embedding the supervisor (via [`start`]) instead of relying on the OS signal handler inside [`run`].
-    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn shutdown(&self) -> Result<(), RuntimeError> {
         self.bus.publish(Event::new(EventKind::ShutdownRequested));
         self.registry.cancel_all().await;
         let res = self.wait_all_with_grace().await;
@@ -309,22 +336,22 @@ impl Supervisor {
     }
 
     /// Returns sorted list of currently alive task names.
-    pub async fn snapshot(&self) -> Vec<Arc<str>> {
+    pub(crate) async fn snapshot(&self) -> Vec<Arc<str>> {
         self.alive.snapshot().await
     }
 
     /// Check whether a given task is currently alive.
-    pub async fn is_alive(&self, name: &str) -> bool {
+    pub(crate) async fn is_alive(&self, name: &str) -> bool {
         self.alive.is_alive(name).await
     }
 
     /// Cancel a task by name and wait for confirmation (`TaskRemoved`).
-    pub async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub(crate) async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
         self.cancel_with_timeout(name, self.cfg.grace).await
     }
 
     /// Cancel with explicit timeout.
-    pub async fn cancel_with_timeout(
+    pub(crate) async fn cancel_with_timeout(
         &self,
         name: &str,
         wait_for: Duration,
@@ -344,15 +371,8 @@ impl Supervisor {
     }
 
     /// Submits a task to the controller (if enabled).
-    ///
-    /// Returns an error if:
-    /// - Controller feature is disabled
-    /// - Controller is not configured
-    /// - Submission queue is full (use `try_submit` for non-blocking)
-    ///
-    /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    pub async fn submit(
+    pub(crate) async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(), crate::controller::ControllerError> {
@@ -363,12 +383,8 @@ impl Supervisor {
     }
 
     /// Tries to submit a task without blocking.
-    ///
-    /// Returns `TrySubmitError::Full` if the queue is full.
-    ///
-    /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    pub fn try_submit(
+    pub(crate) fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(), crate::controller::ControllerError> {

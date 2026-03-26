@@ -92,7 +92,7 @@
 //! |-------------------|------------------------------------------------------------------------|----------------------------------------|
 //! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscribe`]                          |
 //! | **Policies**      | Configure restart/backoff strategies for tasks.                        | [`RestartPolicy`], [`BackoffPolicy`]   |
-//! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`]                         |
+//! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`], [`SupervisorHandle`]   |
 //! | **Errors**        | Typed errors for orchestration and task execution.                     | [`TaskError`], [`RuntimeError`]        |
 //! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.           | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
 //! | **Configuration** | Centralize runtime settings.                                           | [`SupervisorConfig`]                   |
@@ -133,7 +133,7 @@ mod tasks;
 
 // ---- Public re-exports ----
 
-pub use core::{Supervisor, SupervisorConfig};
+pub use core::{Supervisor, SupervisorConfig, SupervisorHandle};
 pub use error::{RuntimeError, TaskError};
 pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
