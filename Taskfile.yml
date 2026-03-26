@@ -32,4 +32,4 @@ tasks:
     cmds:
       - task: ci:_cargo/tool
         vars:
-          CMD: "bench --bench throughput"
+          CMD: "bench"

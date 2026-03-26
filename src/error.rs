@@ -47,6 +47,14 @@ pub enum RuntimeError {
         // Task timeout duration.
         timeout: Duration,
     },
+    /// Timeout waiting for task registration confirmation.
+    #[error("timeout waiting for task '{name}' registration after {timeout:?}")]
+    TaskAddTimeout {
+        /// The task name that was not registered in time.
+        name: Arc<str>,
+        /// How long we waited.
+        timeout: Duration,
+    },
 }
 
 impl RuntimeError {
@@ -57,6 +65,7 @@ impl RuntimeError {
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
+            RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
         }
     }
 }

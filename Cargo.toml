@@ -36,5 +36,22 @@ name = "pipeline"
 required-features = ["controller"]
 
 [[bench]]
+name = "lifecycle"
+harness = false
+
+[[bench]]
 name = "throughput"
 harness = false
+
+[[bench]]
+name = "fanout"
+harness = false
+
+[[bench]]
+name = "dynamic"
+harness = false
+
+[[bench]]
+name = "controller"
+harness = false
+required-features = ["controller"]

@@ -251,6 +251,16 @@ impl Supervisor {
         self.registry.list().await
     }
 
+    /// Checks if a task exists in the registry by name.
+    pub(crate) async fn registry_contains(&self, name: &str) -> bool {
+        self.registry.contains(name).await
+    }
+
+    /// Returns a new bus receiver for event subscription.
+    pub(crate) fn subscribe_bus(&self) -> broadcast::Receiver<Arc<Event>> {
+        self.bus.subscribe()
+    }
+
     /// Starts the supervisor event loop without blocking.
     ///
     /// Spawns:

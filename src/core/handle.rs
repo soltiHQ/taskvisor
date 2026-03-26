@@ -20,7 +20,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::broadcast;
+
 use crate::error::RuntimeError;
+use crate::events::EventKind;
 use crate::tasks::TaskSpec;
 
 use super::supervisor::Supervisor;
@@ -77,9 +80,70 @@ impl SupervisorHandle {
 
     /// Adds a new task to the supervisor at runtime.
     ///
+    /// Fire-and-forget: publishes `TaskAddRequested` and returns immediately.
     /// The task will be spawned asynchronously by the registry listener.
     pub fn add(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
         self.inner.add_task(spec)
+    }
+
+    /// Adds a task and waits for registration confirmation.
+    ///
+    /// Subscribes to the event bus **before** publishing `TaskAddRequested`,
+    /// then waits for the matching `TaskAdded` event from the registry.
+    ///
+    /// Returns `Ok(())` when the task is confirmed running, or
+    /// `RuntimeError::TaskAddTimeout` if confirmation doesn't arrive
+    /// within `timeout`.
+    pub async fn add_and_wait(
+        &self,
+        spec: TaskSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeError> {
+        let target: Arc<str> = Arc::from(spec.task().name());
+        // Subscribe BEFORE publishing — guarantees no missed events.
+        let mut rx = self.inner.subscribe_bus();
+        self.inner.add_task(spec)?;
+
+        let target2 = Arc::clone(&target);
+        let wait = async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev)
+                        if ev.kind == EventKind::TaskAdded
+                            && ev.task.as_deref() == Some(&*target2) =>
+                    {
+                        return Ok(());
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Events were lost. Check registry directly.
+                        if self.inner.registry_contains(&target2).await {
+                            return Ok(());
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+            // Bus closed — check if task made it in before shutdown.
+            if self.inner.registry_contains(&target2).await {
+                Ok(())
+            } else {
+                Err(RuntimeError::TaskAddTimeout {
+                    name: target2,
+                    timeout,
+                })
+            }
+        };
+
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeError::TaskAddTimeout {
+                name: target,
+                timeout,
+            }),
+        }
     }
 
     /// Removes a task by name.
