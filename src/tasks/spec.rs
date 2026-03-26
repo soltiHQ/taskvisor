@@ -61,6 +61,7 @@ use crate::{
 /// let spec = TaskSpec::with_defaults(demo, &cfg);
 /// ```
 #[derive(Clone)]
+#[must_use]
 pub struct TaskSpec {
     task: TaskRef,
     restart: RestartPolicy,
