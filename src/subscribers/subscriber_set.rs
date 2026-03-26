@@ -150,17 +150,6 @@ impl SubscriberSet {
         }
     }
 
-    /// Emits an event to all subscribers (clones the event).
-    ///
-    /// - Clones the event, wraps it in `Arc`, then calls [`emit_arc`](Self::emit_arc)
-    /// - Returns immediately (non-blocking)
-    ///
-    /// ### Notes
-    /// For hot paths, prefer [`emit_arc`](Self::emit_arc) to avoid cloning.
-    pub(crate) fn emit(&self, event: &Event) {
-        self.emit_arc(Arc::new(event.clone()));
-    }
-
     /// Emits a pre-allocated `Arc<Event>` to all subscribers.
     ///
     /// - Uses `try_send` (non-blocking)

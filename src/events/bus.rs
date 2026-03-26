@@ -65,10 +65,6 @@ impl Bus {
         let _ = self.tx.send(Arc::new(ev));
     }
 
-    pub fn publish_arc(&self, ev: Arc<Event>) {
-        let _ = self.tx.send(ev);
-    }
-
     /// Creates a new receiver that will observe subsequent events.
     ///
     /// - Each call creates an **independent** receiver.
