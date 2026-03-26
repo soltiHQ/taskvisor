@@ -44,9 +44,10 @@ use crate::{
 /// // Restartable with defaults:
 /// let spec = TaskSpec::restartable(demo.clone());
 ///
-/// // Restartable with custom timeout (builder chain):
+/// // Restartable with custom timeout and max retries (builder chain):
 /// let spec = TaskSpec::restartable(demo.clone())
-///     .with_timeout(Some(Duration::from_secs(30)));
+///     .with_timeout(Some(Duration::from_secs(30)))
+///     .with_max_retries(5);
 ///
 /// // Full control:
 /// let spec = TaskSpec::new(
@@ -67,6 +68,7 @@ pub struct TaskSpec {
     restart: RestartPolicy,
     backoff: BackoffPolicy,
     timeout: Option<Duration>,
+    max_retries: u32,
 }
 
 impl std::fmt::Debug for TaskSpec {
@@ -76,6 +78,7 @@ impl std::fmt::Debug for TaskSpec {
             .field("restart", &self.restart)
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
             .finish()
     }
 }
@@ -99,6 +102,7 @@ impl TaskSpec {
             restart,
             backoff,
             timeout,
+            max_retries: 0,
         }
     }
 
@@ -113,6 +117,7 @@ impl TaskSpec {
             restart: RestartPolicy::Never,
             backoff: BackoffPolicy::default(),
             timeout: None,
+            max_retries: 0,
         }
     }
 
@@ -127,6 +132,7 @@ impl TaskSpec {
             restart: RestartPolicy::OnFailure,
             backoff: BackoffPolicy::default(),
             timeout: None,
+            max_retries: 0,
         }
     }
 
@@ -143,6 +149,7 @@ impl TaskSpec {
             restart: cfg.restart,
             backoff: cfg.backoff,
             timeout: cfg.default_timeout(),
+            max_retries: cfg.max_retries,
         }
     }
 
@@ -171,6 +178,11 @@ impl TaskSpec {
         self.timeout
     }
 
+    /// Returns the maximum number of retry attempts (`0` = unlimited).
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
     /// Returns a new spec with updated timeout.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
@@ -186,6 +198,14 @@ impl TaskSpec {
     /// Returns a new spec with updated restart policy.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = restart;
+        self
+    }
+
+    /// Returns a new spec with updated max retries (`0` = unlimited).
+    ///
+    /// Only counts failure-driven retries, not success-driven restarts.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
         self
     }
 }

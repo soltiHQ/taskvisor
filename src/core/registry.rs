@@ -194,6 +194,7 @@ impl Registry {
                 restart: spec.restart(),
                 backoff: spec.backoff(),
                 timeout: spec.timeout(),
+                max_retries: spec.max_retries(),
             },
             self.semaphore.clone(),
         );

@@ -106,6 +106,8 @@ pub(crate) struct TaskActorParams {
     pub(crate) backoff: BackoffPolicy,
     /// Optional per-attempt timeout (`None` = no timeout).
     pub(crate) timeout: Option<Duration>,
+    /// Maximum retry attempts after failure (`0` = unlimited).
+    pub(crate) max_retries: u32,
 }
 
 /// Supervises execution of a single [`Task`] with retries, backoff, and event publishing.
@@ -247,13 +249,23 @@ impl TaskActor {
                         RestartPolicy::OnFailure | RestartPolicy::Always { .. }
                     );
                     let error_is_retryable = e.is_retryable();
+                    let retries_exhausted = self.params.max_retries > 0
+                        && backoff_attempt >= self.params.max_retries;
 
-                    if !(policy_allows_retry && error_is_retryable) {
+                    if !(policy_allows_retry && error_is_retryable) || retries_exhausted {
+                        let reason = if retries_exhausted {
+                            format!(
+                                "max_retries_exceeded({}/{}): {}",
+                                backoff_attempt, self.params.max_retries, e
+                            )
+                        } else {
+                            e.to_string()
+                        };
                         self.bus.publish(
                             Event::new(EventKind::ActorExhausted)
                                 .with_task(task_name.clone())
                                 .with_attempt(attempt)
-                                .with_reason(e.to_string()),
+                                .with_reason(reason),
                         );
                         return ActorExitReason::PolicyExhausted;
                     }

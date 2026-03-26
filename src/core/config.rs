@@ -74,6 +74,17 @@ pub struct SupervisorConfig {
     ///
     /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
     pub timeout: Duration,
+
+    /// Default maximum number of retry attempts after failure.
+    ///
+    /// - `0` = unlimited retries (default)
+    /// - `n > 0` = at most `n` retries after the initial failure
+    ///
+    /// Only counts failure-driven retries, not success-driven restarts
+    /// (e.g., `RestartPolicy::Always` after success does not consume retries).
+    ///
+    /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
+    pub max_retries: u32,
 }
 
 impl SupervisorConfig {
@@ -133,6 +144,7 @@ impl Default for SupervisorConfig {
     /// - `timeout = 0s` (no timeout)
     /// - `restart = RestartPolicy::OnFailure` (restart on errors only)
     /// - `backoff = BackoffPolicy::default()` (exponential backoff)
+    /// - `max_retries = 0` (unlimited)
     fn default() -> Self {
         Self {
             grace: Duration::from_secs(60),
@@ -141,6 +153,7 @@ impl Default for SupervisorConfig {
             timeout: Duration::from_secs(0),
             restart: RestartPolicy::default(),
             backoff: BackoffPolicy::default(),
+            max_retries: 0,
         }
     }
 }
