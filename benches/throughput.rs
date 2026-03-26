@@ -20,8 +20,8 @@
 //! cargo bench --bench throughput
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -29,8 +29,8 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
-    BackoffPolicy, Event, RestartPolicy, Subscribe, Supervisor,
-    SupervisorConfig, TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, Event, RestartPolicy, Subscribe, Supervisor, SupervisorConfig, TaskFn, TaskRef,
+    TaskSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,6 @@ impl CountingSubscriber {
             count: AtomicU64::new(0),
         })
     }
-
 }
 
 impl Subscribe for CountingSubscriber {
@@ -168,26 +167,22 @@ fn bench_event_throughput(c: &mut Criterion) {
 
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_tasks in [50, 200, 500] {
-            group.bench_with_input(
-                BenchmarkId::new(rt_name, n_tasks),
-                &n_tasks,
-                |b, &n| {
-                    b.iter_custom(|iters| {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let rt = rt_fn();
-                            total += rt.block_on(async {
-                                let counter = CountingSubscriber::new();
-                                let subs: Vec<Arc<dyn Subscribe>> = vec![counter.clone()];
-                                let tasks: Vec<TaskSpec> =
-                                    (0..n).map(|i| instant_task(&format!("t-{i}"))).collect();
-                                run_tasks(tasks, subs).await
-                            });
-                        }
-                        total
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(rt_name, n_tasks), &n_tasks, |b, &n| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let rt = rt_fn();
+                        total += rt.block_on(async {
+                            let counter = CountingSubscriber::new();
+                            let subs: Vec<Arc<dyn Subscribe>> = vec![counter.clone()];
+                            let tasks: Vec<TaskSpec> =
+                                (0..n).map(|i| instant_task(&format!("t-{i}"))).collect();
+                            run_tasks(tasks, subs).await
+                        });
+                    }
+                    total
+                });
+            });
         }
     }
     group.finish();
@@ -241,24 +236,27 @@ fn bench_subscriber_fanout(c: &mut Criterion) {
 
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_subs in [1usize, 4, 8] {
-            group.bench_function(BenchmarkId::new(rt_name, format!("{n_tasks}t_{n_subs}s")), |b| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let rt = rt_fn();
-                        total += rt.block_on(async {
-                            let subs: Vec<Arc<dyn Subscribe>> = (0..n_subs)
-                                .map(|i| NoopSubscriber::new(NAMES[i]) as Arc<dyn Subscribe>)
-                                .collect();
-                            let tasks: Vec<TaskSpec> = (0..n_tasks)
-                                .map(|i| instant_task(&format!("fo-{i}")))
-                                .collect();
-                            run_tasks(tasks, subs).await
-                        });
-                    }
-                    total
-                });
-            });
+            group.bench_function(
+                BenchmarkId::new(rt_name, format!("{n_tasks}t_{n_subs}s")),
+                |b| {
+                    b.iter_custom(|iters| {
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let rt = rt_fn();
+                            total += rt.block_on(async {
+                                let subs: Vec<Arc<dyn Subscribe>> = (0..n_subs)
+                                    .map(|i| NoopSubscriber::new(NAMES[i]) as Arc<dyn Subscribe>)
+                                    .collect();
+                                let tasks: Vec<TaskSpec> = (0..n_tasks)
+                                    .map(|i| instant_task(&format!("fo-{i}")))
+                                    .collect();
+                                run_tasks(tasks, subs).await
+                            });
+                        }
+                        total
+                    });
+                },
+            );
         }
     }
     group.finish();
@@ -279,25 +277,20 @@ fn bench_concurrent_scaling(c: &mut Criterion) {
 
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_tasks in [10, 100, 1000] {
-            group.bench_with_input(
-                BenchmarkId::new(rt_name, n_tasks),
-                &n_tasks,
-                |b, &n| {
-                    b.iter_custom(|iters| {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let rt = rt_fn();
-                            total += rt.block_on(async {
-                                let tasks: Vec<TaskSpec> = (0..n)
-                                    .map(|i| work_task(&format!("w-{i}"), 1000))
-                                    .collect();
-                                run_tasks(tasks, vec![]).await
-                            });
-                        }
-                        total
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(rt_name, n_tasks), &n_tasks, |b, &n| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let rt = rt_fn();
+                        total += rt.block_on(async {
+                            let tasks: Vec<TaskSpec> =
+                                (0..n).map(|i| work_task(&format!("w-{i}"), 1000)).collect();
+                            run_tasks(tasks, vec![]).await
+                        });
+                    }
+                    total
+                });
+            });
         }
     }
     group.finish();
