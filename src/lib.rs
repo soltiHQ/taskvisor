@@ -138,7 +138,7 @@ pub use error::{RuntimeError, TaskError};
 pub use events::{BackoffSource, Event, EventKind};
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
 pub use subscribers::Subscribe;
-pub use tasks::{Task, TaskFn, TaskRef, TaskSpec};
+pub use tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
 
 // Optional: expose a controller object.
 // Enable with: `--features controller`

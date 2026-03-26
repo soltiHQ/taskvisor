@@ -42,11 +42,7 @@ Use it for long-lived jobs, background workers, or anything that must stay alive
 A task that prints "pong" every 10 seconds, restarts forever, and shuts down on Ctrl+C:
 ```rust
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use taskvisor::{
-    Supervisor, SupervisorConfig, TaskFn, TaskSpec, TaskRef,
-    TaskError, RestartPolicy, BackoffPolicy,
-};
+use taskvisor::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,12 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     });
 
-    let spec = TaskSpec::new(
-        ping,
-        RestartPolicy::Always { interval: Some(Duration::from_secs(10)) },
-        BackoffPolicy::default(),
-        None, // no timeout
-    );
+    let spec = TaskSpec::restartable(ping)
+        .with_restart(RestartPolicy::Always { interval: Some(Duration::from_secs(10)) });
 
     sup.run(vec![spec]).await?;
     Ok(())
@@ -158,20 +150,16 @@ let sup = Supervisor::new(config, vec![metrics]);
 ### Periodic task (run every N seconds)
 ```rust
 // Runs, completes, waits 30s, runs again. Forever.
-let spec = TaskSpec::new(
-    task,
-    RestartPolicy::Always { interval: Some(Duration::from_secs(30)) },
-    BackoffPolicy::default(), // backoff only applies on failure
-    None,
-);
+let spec = TaskSpec::restartable(task)
+    .with_restart(RestartPolicy::Always { interval: Some(Duration::from_secs(30)) });
 ```
 
 ### Runtime task management
 ```rust
 // Add/remove/cancel while running
-sup.add_task(spec).await?;
+sup.add_task(spec)?;
 sup.cancel("task-name").await?;
-sup.remove_task("task-name").await?;
+sup.remove_task("task-name")?;
 let alive = sup.is_alive("task-name").await;
 let tasks = sup.list_tasks().await;
 ```
@@ -328,7 +316,7 @@ cargo run --example controller --features controller
 
 | Feature | What it enables |
 |---------|----------------|
-| `controller` | `Controller`, `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
+| `controller` | `ControllerSpec`, `ControllerConfig`, `ControllerError`, `AdmissionPolicy` |
 | `logging` | Built-in `LogWriter` subscriber that prints events to stdout (demo only) |
 
 ## Contributing

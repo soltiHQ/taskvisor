@@ -2,6 +2,7 @@
 name = "taskvisor"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 description = "Event-driven task orchestration with restart, backoff, and user-defined subscribers"
 repository = "https://github.com/soltiHQ/taskvisor"

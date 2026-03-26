@@ -14,7 +14,7 @@
 pub use crate::core::{Supervisor, SupervisorConfig};
 
 // Tasks
-pub use crate::tasks::{Task, TaskFn, TaskRef, TaskSpec};
+pub use crate::tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
 
 // Policies
 pub use crate::policies::{BackoffPolicy, RestartPolicy};

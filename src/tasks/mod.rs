@@ -42,4 +42,4 @@ mod task;
 
 pub use r#impl::func::TaskFn;
 pub use spec::TaskSpec;
-pub use task::{Task, TaskRef};
+pub use task::{BoxTaskFuture, Task, TaskRef};
