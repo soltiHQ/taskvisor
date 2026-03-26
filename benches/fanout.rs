@@ -102,7 +102,9 @@ fn bench_fanout(c: &mut Criterion) {
                             let rt = rt_fn();
                             total += rt.block_on(async {
                                 let subs: Vec<Arc<dyn Subscribe>> = (0..n_subs)
-                                    .map(|i| NoopSubscriber::arc(SUB_NAMES[i]) as Arc<dyn Subscribe>)
+                                    .map(|i| {
+                                        NoopSubscriber::arc(SUB_NAMES[i]) as Arc<dyn Subscribe>
+                                    })
                                     .collect();
                                 let tasks: Vec<TaskSpec> = (0..N_TASKS)
                                     .map(|i| instant_task(&format!("fo-{i}")))

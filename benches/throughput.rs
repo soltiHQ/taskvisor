@@ -60,7 +60,6 @@ impl CountingSubscriber {
             count: AtomicU64::new(0),
         })
     }
-
 }
 
 impl Subscribe for CountingSubscriber {
@@ -107,29 +106,25 @@ fn bench_batch(c: &mut Criterion) {
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_tasks in [50, 200, 500] {
             group.throughput(Throughput::Elements(n_tasks as u64));
-            group.bench_with_input(
-                BenchmarkId::new(rt_name, n_tasks),
-                &n_tasks,
-                |b, &n| {
-                    b.iter_custom(|iters| {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let rt = rt_fn();
-                            total += rt.block_on(async {
-                                let counter = CountingSubscriber::new();
-                                let subs: Vec<Arc<dyn Subscribe>> = vec![counter.clone()];
-                                let tasks: Vec<TaskSpec> =
-                                    (0..n).map(|i| instant_task(&format!("t-{i}"))).collect();
-                                let sup = Supervisor::new(bench_config(), subs);
-                                let start = std::time::Instant::now();
-                                sup.run(tasks).await.unwrap();
-                                start.elapsed()
-                            });
-                        }
-                        total
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(rt_name, n_tasks), &n_tasks, |b, &n| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let rt = rt_fn();
+                        total += rt.block_on(async {
+                            let counter = CountingSubscriber::new();
+                            let subs: Vec<Arc<dyn Subscribe>> = vec![counter.clone()];
+                            let tasks: Vec<TaskSpec> =
+                                (0..n).map(|i| instant_task(&format!("t-{i}"))).collect();
+                            let sup = Supervisor::new(bench_config(), subs);
+                            let start = std::time::Instant::now();
+                            sup.run(tasks).await.unwrap();
+                            start.elapsed()
+                        });
+                    }
+                    total
+                });
+            });
         }
     }
     group.finish();
@@ -143,28 +138,23 @@ fn bench_batch_work(c: &mut Criterion) {
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_tasks in [10, 100, 500] {
             group.throughput(Throughput::Elements(n_tasks as u64));
-            group.bench_with_input(
-                BenchmarkId::new(rt_name, n_tasks),
-                &n_tasks,
-                |b, &n| {
-                    b.iter_custom(|iters| {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let rt = rt_fn();
-                            total += rt.block_on(async {
-                                let tasks: Vec<TaskSpec> = (0..n)
-                                    .map(|i| work_task(&format!("w-{i}"), 1000))
-                                    .collect();
-                                let sup = Supervisor::new(bench_config(), vec![]);
-                                let start = std::time::Instant::now();
-                                sup.run(tasks).await.unwrap();
-                                start.elapsed()
-                            });
-                        }
-                        total
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(rt_name, n_tasks), &n_tasks, |b, &n| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let rt = rt_fn();
+                        total += rt.block_on(async {
+                            let tasks: Vec<TaskSpec> =
+                                (0..n).map(|i| work_task(&format!("w-{i}"), 1000)).collect();
+                            let sup = Supervisor::new(bench_config(), vec![]);
+                            let start = std::time::Instant::now();
+                            sup.run(tasks).await.unwrap();
+                            start.elapsed()
+                        });
+                    }
+                    total
+                });
+            });
         }
     }
     group.finish();

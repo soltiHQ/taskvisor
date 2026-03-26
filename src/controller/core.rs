@@ -218,21 +218,9 @@ impl Controller {
                         )),
                 );
             }
-            (SlotStatus::Running { .. }, AdmissionPolicy::DropIfRunning) => {}
-            _ => {
-                if self.reject_if_full(&slot_name, slot.queue.len()) {
-                    return;
-                }
-                slot.queue.push_back(task_spec);
-                self.bus.publish(
-                    Event::new(EventKind::ControllerSubmitted)
-                        .with_task(Arc::clone(&slot_name))
-                        .with_reason(format!(
-                            "admission={:?} depth={}",
-                            admission,
-                            slot.queue.len()
-                        )),
-                );
+            (SlotStatus::Running { .. }, AdmissionPolicy::DropIfRunning)
+            | (SlotStatus::Terminating { .. }, AdmissionPolicy::DropIfRunning) => {
+                // Slot is busy (running or terminating) — silently drop per policy.
             }
         }
     }

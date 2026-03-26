@@ -188,38 +188,40 @@ fn bench_churn(c: &mut Criterion) {
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_tasks in [10, 100, 500] {
             group.throughput(Throughput::Elements(n_tasks as u64));
-            group.bench_with_input(
-                BenchmarkId::new(rt_name, n_tasks),
-                &n_tasks,
-                |b, &n| {
-                    b.iter_custom(|iters| {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let rt = rt_fn();
-                            total += rt.block_on(async {
-                                let sup = Supervisor::new(bench_config(), vec![]);
-                                let handle = sup.serve();
+            group.bench_with_input(BenchmarkId::new(rt_name, n_tasks), &n_tasks, |b, &n| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let rt = rt_fn();
+                        total += rt.block_on(async {
+                            let sup = Supervisor::new(bench_config(), vec![]);
+                            let handle = sup.serve();
 
-                                let wait = Duration::from_secs(5);
-                                let start = std::time::Instant::now();
-                                for i in 0..n {
-                                    handle
-                                        .add_and_wait(worker_task(&format!("ch-{i}")), wait)
-                                        .await
-                                        .unwrap();
-                                }
-                                let _ = handle.shutdown().await;
-                                start.elapsed()
-                            });
-                        }
-                        total
-                    });
-                },
-            );
+                            let wait = Duration::from_secs(5);
+                            let start = std::time::Instant::now();
+                            for i in 0..n {
+                                handle
+                                    .add_and_wait(worker_task(&format!("ch-{i}")), wait)
+                                    .await
+                                    .unwrap();
+                            }
+                            let _ = handle.shutdown().await;
+                            start.elapsed()
+                        });
+                    }
+                    total
+                });
+            });
         }
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_add, bench_add_cancel, bench_list, bench_churn);
+criterion_group!(
+    benches,
+    bench_add,
+    bench_add_cancel,
+    bench_list,
+    bench_churn
+);
 criterion_main!(benches);

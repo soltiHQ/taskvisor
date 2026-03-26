@@ -309,6 +309,35 @@ Supervisor
 
 ---
 
+## Performance
+
+Measured with [Criterion](https://github.com/bheisler/criterion.rs) on hardware ranging from Raspberry Pi 4 to Apple M3 Max. Numbers below are order-of-magnitude estimates — run `cargo bench` on your machine for precise results.
+
+| What | Order of magnitude | What it tells you |
+|------|--------------------|-------------------|
+| Per-task overhead | ~10–50 µs | Full lifecycle (spawn → run → cleanup) for one no-op task. This is pure framework cost. |
+| `handle.add()` latency | ~100–800 ns | Submitting a task via `serve()` API. Channel send, no I/O. |
+| Batch throughput | ~50K–400K tasks/sec | Processing N instant tasks via `run()`. Scales with CPU. |
+| Fan-out (0 → 8 subscribers) | ~2× total time | Each subscriber gets its own queue. Linear growth, no contention. |
+| `add_and_wait` + `cancel` | ~30–200 µs | Full round-trip: register, confirm, cancel. |
+| `list()` with 500 tasks | ~5–30 µs | Registry snapshot via async channel. |
+
+**Scaling characteristics:** throughput scales linearly with batch size, subscriber overhead is linear per subscriber, and `list()` is linear in the number of registered tasks. No known superlinear bottlenecks.
+
+```bash
+# all benchmarks
+cargo bench
+
+# specific suite
+cargo bench --bench lifecycle
+cargo bench --bench throughput
+cargo bench --bench fanout
+cargo bench --bench dynamic
+cargo bench --bench controller --features controller
+```
+
+---
+
 ## Examples
 
 ```bash

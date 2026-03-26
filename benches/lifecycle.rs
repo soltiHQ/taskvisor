@@ -26,7 +26,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
-use taskvisor::{BackoffPolicy, RestartPolicy, Supervisor, SupervisorConfig, TaskFn, TaskRef, TaskSpec};
+use taskvisor::{
+    BackoffPolicy, RestartPolicy, Supervisor, SupervisorConfig, TaskFn, TaskRef, TaskSpec,
+};
 
 fn rt_current_thread() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
