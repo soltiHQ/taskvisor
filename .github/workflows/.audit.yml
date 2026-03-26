@@ -9,4 +9,4 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run audit
         uses: soltiHQ/actions/taskfile@main
-        with: { command: cargo/audit }
+        with: { command: ci:cargo/audit }
