@@ -1,6 +1,6 @@
 //! # Event subscriber trait.
 //!
-//! Provides [`Subscribe`] an extension point for plugging custom event handlers into the runtime.
+//! [`Subscribe`] is the extension point for plugging custom event handlers into the runtime.
 //!
 //! Each subscriber gets:
 //! - **Dedicated worker task** (runs independently)
@@ -8,24 +8,22 @@
 //! - **Panic isolation** (panics are caught and reported as `EventKind::SubscriberPanicked`)
 //!
 //! ## Architecture
+//!
 //! ```text
-//! SubscriberSet ──► [bounded queue] ──► worker task ──► subscriber.on_event()
-//!                                    └─► panic caught → EventKind::SubscriberPanicked
+//! SubscriberSet ──► [bounded queue] ──► worker task  ──► subscriber.on_event()
+//!                                   └─► panic caught ──► EventKind::SubscriberPanicked
 //! ```
 //!
 //! ## Rules
-//! - A slow subscriber only affects its own queue.
-//! - Queue overflow drops the event **for this subscriber only** and publishes
-//!   `EventKind::SubscriberOverflow`; other subscribers are unaffected.
+//!
+//! - Queue overflow drops the event **for this subscriber only** and publishes`EventKind::SubscriberOverflow`;
+//!   other subscribers are unaffected.
 //! - Events are processed sequentially (FIFO) per subscriber.
 //! - Subscribers do not block publishers or each other.
-//!
-//! ## Overflow behavior
-//! 1) The new event is **dropped** for this subscriber only.
-//! 2) The runtime publishes `EventKind::SubscriberOverflow`.
-//! 3) Other subscribers are unaffected.
+//! - A slow subscriber only affects its own queue.
 //!
 //! ## Example
+//!
 //! ```rust
 //! use taskvisor::{Subscribe, Event, EventKind};
 //!
@@ -38,8 +36,8 @@
 //!         }
 //!     }
 //!
-//!     fn name(&self) -> &'static str { "metrics" }      // prefer short, descriptive names
-//!     fn queue_capacity(&self) -> usize { 2048 }        // larger buffer for metrics
+//!     fn name(&self) -> &'static str { "metrics" }   // prefer short, descriptive names
+//!     fn queue_capacity(&self) -> usize { 2048 }     // larger buffer for metrics
 //! }
 //! ```
 
@@ -48,25 +46,29 @@ use crate::events::Event;
 /// Event subscriber for runtime observability.
 ///
 /// Each subscriber runs in isolation:
+/// - **Panic isolation**: panics are caught and published as `SubscriberPanicked`.
 /// - **Bounded queue** buffers events (capacity via [`Self::queue_capacity`]).
 /// - **Dedicated worker task** processes events sequentially (FIFO).
-/// - **Panic isolation**: panics are caught and published as `SubscriberPanicked`.
 ///
 /// ### Implementation requirements
-/// - Keep `on_event` fast — it runs on a dedicated worker task but blocks
-///   that worker's event loop. For async I/O, send to a channel and process
-///   elsewhere.
-/// - Handle errors internally; do not panic.
+///
+/// - Keep `on_event` fast: it runs on a dedicated worker task but blocks that worker's event loop.
+///   For async I/O, send to a channel and process elsewhere.
 /// - Slow processing affects only this subscriber's queue.
+/// - Handle errors internally; do not panic.
 ///
 /// ### Synchronous design
+///
 /// `on_event` is intentionally synchronous:
-/// - The `SubscriberSet` infrastructure already provides async fan-out via
-///   per-subscriber `mpsc` channels and dedicated worker tasks.
-/// - Adding async to `on_event` would force a `Box::pin` allocation per event
-///   per subscriber with no benefit — all real subscribers are synchronous.
-/// - If a subscriber needs async I/O, send events to a channel inside `on_event`
-///   and process them in a separate task.
+/// - The `SubscriberSet` infrastructure already provides async fan-out via per-subscriber `mpsc` channels and dedicated worker tasks.
+/// - If a subscriber needs async I/O, send events to a channel inside `on_event` and process them in a separate task.
+/// - Adding async to `on_event` would force a `Box::pin` allocation per event per subscriber with no benefit;
+///   All real subscribers are synchronous.
+///
+/// ## Also
+///
+/// - See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for the event structure.
+/// - For a built-in reference implementation see [`LogWriter`](crate::LogWriter) *(feature = `logging`)*.
 pub trait Subscribe: Send + Sync + 'static {
     /// Processes a single event synchronously.
     ///

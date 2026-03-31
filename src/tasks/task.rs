@@ -1,101 +1,53 @@
-//! # Task abstraction for supervised execution.
-//!
-//! Defines the core [`Task`] trait for async, cancelable units of work.
-//!
-//! - **[`Task`]** trait for implementing async tasks with cancellation support
-//! - **[`TaskRef`]** shared handle (`Arc<dyn Task>`) for passing tasks across the runtime
-//! - **[`BoxTaskFuture`]** type alias for boxed task futures
-//!
-//! ## Rules
-//! - The crate provides [`TaskFn`](crate::TaskFn) a function-backed implementation that wraps closures as tasks.
-//! - Tasks receive a [`CancellationToken`] and **must** observe cancellation at safe points.
-//!
-//! ## Return semantics
-//! - `Ok(())` task completed successfully (restart policy applies).
-//! - `Err(TaskError::Canceled)` cooperative shutdown (not considered a failure).
-//! - `Err(TaskError::Fail | TaskError::Timeout)` retryable failures.
-//! - `Err(TaskError::Fatal)` non-retryable, actor terminates as dead.
+//! Core [`Task`] trait, [`TaskRef`] handle, and [`BoxTaskFuture`] alias.
 
 use std::{future::Future, pin::Pin, sync::Arc};
-
 use tokio_util::sync::CancellationToken;
 
 use crate::error::TaskError;
 
-/// Boxed future returned by [`Task::spawn`].
-///
-/// This is a type alias for `Pin<Box<dyn Future<...>>>`:
-/// - **Boxed**: required for trait objects (dynamic dispatch)
-/// - **Pinned**: required for async futures (self-referential structs)
-/// - **Send**: task futures can be sent across threads
+/// Boxed, pinned, `Send` future: the return type of [`Task::spawn`].
 pub type BoxTaskFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
-/// Shared handle to a task object.
-///
-/// Type alias for `Arc<dyn Task>`, used throughout the runtime for:
-/// - Passing tasks to [`Supervisor`](crate::Supervisor)
-/// - Sharing tasks between actors
-/// - Cloning task references cheaply
+/// Shared handle to a task: `Arc<dyn Task>`.
 pub type TaskRef = Arc<dyn Task>;
 
-/// Asynchronous, cancelable unit of work.
+/// Async, cancelable unit of work managed by a [`Supervisor`](crate::Supervisor).
 ///
-/// A `Task` represents a unit of work that can be:
-/// - **Spawned multiple times** (via [`spawn`](Task::spawn))
-/// - **Cancelled cooperatively** (via [`CancellationToken`])
-/// - **Supervised** (by [`Supervisor`](crate::Supervisor))
+/// ## Contract
 ///
-/// ## Requirements
-/// - **Cancellation**: implementations **must** observe `ctx.cancelled()` at safe await points and
-///   return `Err(TaskError::Canceled)` promptly on shutdown.
+/// [`spawn`](Task::spawn) is called once per attempt and must return a fresh, independent future.
+/// Implementations must observe `ctx.cancelled()` and return `Err(`[`TaskError::Canceled`]`)` promptly.
+/// Non-cooperative tasks will be force-terminated after the grace period ([`GraceExceeded`](crate::RuntimeError::GraceExceeded)).
 ///
-/// ## Example
-/// ```rust
-/// use std::{future::Future, pin::Pin, time::Duration};
-/// use tokio_util::sync::CancellationToken;
-/// use taskvisor::{Task, TaskError};
+/// | Return value               | Meaning                 | Restarted?                                         |
+/// |----------------------------|-------------------------|----------------------------------------------------|
+/// | `Ok(())`                   | Task completed normally | Depends on [`RestartPolicy`](crate::RestartPolicy) |
+/// | `Err(TaskError::Canceled)` | Cooperative shutdown    | Never                                              |
+/// | `Err(TaskError::Fail)`     | Transient failure       | Per policy, with backoff                           |
+/// | `Err(TaskError::Timeout)`  | Attempt timed out       | Per policy, with backoff                           |
+/// | `Err(TaskError::Fatal)`    | Permanent failure       | Never                                              |
 ///
-/// struct MyTask;
+/// ## Cancellation
 ///
-/// impl Task for MyTask {
-///     fn name(&self) -> &str { "my-task" }
+/// The [`CancellationToken`] `ctx` is cancelled by the supervisor during shutdown or when the task is removed at runtime.
+/// - Long-running tasks should poll `ctx.cancelled()`: tasks that ignore the token will
+///   block graceful shutdown until the grace period expires.
+/// - Short-lived, one-shot tasks that complete quickly may omit this check.
 ///
-///     fn spawn(&self, ctx: CancellationToken)
-///         -> Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>
-///     {
-///         Box::pin(async move {
-///             loop {
-///                 // Do one unit of work (replace with real IO/compute)
-///                 // Safe point with cancellation via select
-///                 tokio::select! {
-///                     _ = ctx.cancelled() => {
-///                         return Err(TaskError::Canceled);
-///                     }
-///                     _ = tokio::time::sleep(Duration::from_millis(200)) => {
-///                         // work chunk finished; continue loop
-///                     }
-///                 }
-///             }
-///         })
-///     }
-/// }
-/// ```
+/// A task that loops forever and only exits via `ctx.cancelled()` should return `Err(TaskError::Canceled)`;
+/// A one-shot task that finishes its work should return `Ok(())`.
+///
+/// # Also
+///
+/// - For the closure-based implementation see [`TaskFn`](crate::TaskFn).
+/// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 pub trait Task: Send + Sync + 'static {
-    /// Returns a stable, human-readable task name.
-    ///
-    /// Used for logging, metrics, and stuck task detection during shutdown.
+    /// Task name used in logs, metrics, and shutdown diagnostics.
     fn name(&self) -> &str;
 
-    /// Creates a new Future that runs the task until completion or cancellation.
+    /// Creates a new future that runs the task until completion or cancellation.
     ///
-    /// ### Cancellation requirements
-    /// Implementations must observe `ctx.cancelled()` at safe `await` points and return
-    /// `Err(TaskError::Canceled)` promptly upon shutdown.
-    ///
-    /// ### Stateless execution
-    /// This method takes `&self` (not `&mut self`), meaning:
-    /// - Safe to call from multiple actors concurrently
-    /// - Each call returns an independent future
-    /// - No shared mutable state between spawns
+    /// Called once per attempt. Takes `&self` - each call must return an
+    /// independent future with no side effects from previous runs.
     fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture;
 }

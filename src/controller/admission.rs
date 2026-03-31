@@ -5,11 +5,13 @@
 //! When a new request for the same slot arrives, the admission policy decides what to do.
 //!
 //! ## Variants
+//!
 //! - `DropIfRunning`: If the slot is already running, **ignore** the new request.
 //! - `Replace`: **Stop** the running task (cancel/remove) and start the new one.
 //! - `Queue`: **Enqueue** the new request (FIFO).
 //!
 //! ## Invariants
+//!
 //! - Tasks within the same slot never run in parallel (use dynamic names if you need parallel execution).
 //! - Queued requests are executed strictly in submission order.
 

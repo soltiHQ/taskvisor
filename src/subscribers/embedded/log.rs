@@ -1,4 +1,4 @@
-//! # LogWriter human-readable event printer.
+//! # LogWriter event printer example.
 //!
 //! A minimal subscriber that prints incoming [`Event`]s to stdout.
 //! Useful for development, debugging, and demos.
@@ -20,9 +20,8 @@
 //! ```
 //!
 //! ## Example
-//! ```rust,ignore
-//! use taskvisor::{Supervisor, SupervisorConfig, Subscribe};
-//! use taskvisor::subscribers::log_writer::LogWriter;
+//! ```rust,no_run
+//! use taskvisor::{Supervisor, SupervisorConfig, Subscribe, LogWriter};
 //! use std::sync::Arc;
 //!
 //! let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter::default())];
@@ -32,10 +31,15 @@
 use crate::events::{BackoffSource, Event, EventKind};
 use crate::subscribers::Subscribe;
 
-/// Human-readable event printer for stdout.
+/// Event printer for stdout example.
 ///
-/// Prints `[seq] [event-type] key=value ...` with relevant metadata.
+/// Implements [`Subscribe`] and prints `[seq] [event-type] key=value ...` with relevant metadata.
 /// Useful for debugging, demos, or understanding supervisor flow.
+///
+/// ## Also
+///
+/// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
+/// - See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for event structure.
 #[derive(Default)]
 pub struct LogWriter;
 
@@ -66,7 +70,7 @@ impl LogWriter {
         }
 
         match e.kind {
-            // === Shutdown ===
+            // Shutdown
             EventKind::ShutdownRequested => {
                 println!("{} [shutdown-requested]", seq);
             }
@@ -77,7 +81,7 @@ impl LogWriter {
                 println!("{} [grace-exceeded]", seq);
             }
 
-            // === Task lifecycle ===
+            // Task lifecycle
             EventKind::TaskStarting => {
                 println!(
                     "{} [starting] task={} attempt={}",
@@ -123,7 +127,7 @@ impl LogWriter {
                 );
             }
 
-            // === Subscribers ===
+            // Subscribers
             EventKind::SubscriberOverflow => {
                 println!(
                     "{} [subscriber-overflow] subscriber={} reason=\"{}\"",
@@ -141,7 +145,7 @@ impl LogWriter {
                 );
             }
 
-            // === Management ===
+            // Management
             EventKind::TaskAddRequested => {
                 println!(
                     "{} [task-add-requested] task={}",
@@ -171,7 +175,7 @@ impl LogWriter {
                 );
             }
 
-            // === Terminals ===
+            // Terminals
             EventKind::ActorExhausted => {
                 println!(
                     "{} [actor-exhausted] task={} reason=\"{}\"",

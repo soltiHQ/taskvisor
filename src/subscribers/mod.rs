@@ -1,22 +1,22 @@
-//! Subscriber infrastructure (fan-out & handlers).
+//! # Subscriber infrastructure.
 //!
-//! This module exposes the subscriber extension points and the fan-out
-//! coordinator used by the runtime to deliver events to user-defined sinks.
+//! [`Subscribe`] is the trait you implement to consume runtime events.
+//! The supervisor delivers events to each subscriber via a dedicated bounded queue and worker task.
+//!
+//! See [`Subscribe`] for the full contract.
 //!
 //! ## Overview
+//!
 //! ```text
 //! Bus (broadcast) ──► Supervisor::subscriber_listener
 //!                         ├─► AliveTracker::update()
-//!                         └─► SubscriberSet::emit{,_arc}()
+//!                         └─► SubscriberSet::emit_arc()
 //!                                   ├─► [queue for S1] ──► worker ──► S1.on_event()
 //!                                   ├─► [queue for S2] ──► worker ──► S2.on_event()
 //!                                   └─► ...
 //! ```
 //!
-//! ## Contracts
-//! - [`Subscribe`] is the trait you implement to consume events.
-//! - [`SubscriberSet`] owns per-subscriber bounded queues and workers,
-//!   isolates panics, and reports overflow via internal events.
+//! See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for the event structure.
 
 mod subscriber;
 mod subscriber_set;

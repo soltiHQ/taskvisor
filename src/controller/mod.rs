@@ -1,25 +1,23 @@
 //! # Controller: slot-based admission & start-on-`TaskRemoved`
 //!
 //! The **controller** is a thin policy layer (wrapper) over `TaskSpec` submission.
-//! It enforces per-slot admission rules (`Queue`, `Replace`, `DropIfRunning`) and
-//! starts the *next* task **only after** a terminal `TaskRemoved` event is observed
-//! on the runtime bus. In this model, **one slot = one task name**
-//! (`slot key = TaskSpec::name()`).
+//! It enforces per-slot admission rules (`Queue`, `Replace`, `DropIfRunning`) and starts
+//! the *next* task **only after** a terminal `TaskRemoved` event is observed on the runtime bus.
 //!
-//! ---
+//! In this model, **one slot = one task name** *(`slot key = TaskSpec::name()`)*.
 //!
 //! ## Role in Taskvisor
 //!
-//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission
-//! rules (including Replace latest-wins), and delegates `add/remove` to the Supervisor.
+//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission rules,
+//! and delegates `add/remove` to the Supervisor.
 //! It subscribes to the Bus and advances slots strictly on `TaskRemoved` to avoid
 //! registry races and double starts.
 //!
 //! ```text
-//! ┌────────────────────────────┐
-//! │     Application code       │
-//! │ sup.submit(ControllerSpec) │
-//! └──────────────┬─────────────┘
+//! ┌───────────────────────────────┐
+//! │     Application code          │
+//! │ handle.submit(ControllerSpec) │
+//! └──────────────┬────────────────┘
 //!                │
 //!                ▼
 //!        ┌──────────────────┐
@@ -45,29 +43,36 @@
 //! ```
 //!
 //! **Flow summary**
-//! 1. Application calls `sup.submit(ControllerSpec)`.
+//! 1. Application calls `handle.submit(ControllerSpec)` (via `SupervisorHandle`).
 //! 2. Controller unwraps `TaskSpec` and applies `Admission` rules.
 //! 3. If accepted, controller calls `Supervisor::add_task(TaskSpec)` or requests remove.
-//! 4. On terminal `TaskRemoved` (via Bus), the slot becomes `Idle` and the next queued
-//!    task (if any) is started.
-//!
-//! ---
+//! 4. On terminal `TaskRemoved` (via Bus), the slot becomes `Idle` and the next queued task (if any) is started.
 //!
 //! ## Per-slot model
 //!
 //! - **Key**: `task_spec.name()` (exactly one running task per slot).
 //! - **State**: `Idle | Running | Terminating`, with a FIFO queue per slot.
-//! - **Replace (latest-wins)**: does **not** grow the queue; it **replaces the head**
-//!   (the immediate successor). The next task actually starts **only after `TaskRemoved`**.
+//! - **Replace (latest-wins)**: does **not** grow the queue; it **replaces the head** (the immediate successor).
+//!   The next task actually starts **only after `TaskRemoved`**.
 //!
 //! ```text
 //! State machine (per task name)
 //!
-//!   Idle ── submit → start → Running ── submit(Replace) → Terminating
-//!    ▲             (Supervisor.add)                 │
-//!    └─────────── on TaskRemoved ◄──────────────────┘
-//!                    ├─ if queue empty → Idle
-//!                    └─ if queue head exists → start head → Running
+//!   Idle ── submit(any) → start → Running
+//!    ▲                              │
+//!    │                    ┌─────────┼──────────────┐
+//!    │                    │         │              │
+//!    │            submit(Queue)  submit(Replace)  submit(DropIfRunning)
+//!    │            → enqueue      → enqueue head   → reject (silent)
+//!    │                           → Terminating
+//!    │                                  │
+//!    │                      submit(Queue) → enqueue
+//!    │                      submit(Replace) → replace head
+//!    │                      submit(DropIfRunning) → reject
+//!    │                                  │
+//!    └──────── on TaskRemoved ◄─────────┘
+//!                 ├─ queue empty → Idle (slot removed)
+//!                 └─ queue has next → start next → Running
 //! ```
 //!
 //! Queue operations
@@ -80,45 +85,47 @@
 //!                  (head replaced)                  (head replaced)
 //! ```
 //!
-//! ---
-//!
 //! ## Why gate on `TaskRemoved`
 //!
 //! `ActorExhausted/ActorDead` may arrive **before** full deregistration of the actor.
-//! Starting the next task on those signals can race the registry and cause
-//! `task_already_exists`. Gating advancement on **`TaskRemoved`** prevents double-adds.
+//! Starting the next task on those signals can race the registry and cause`task_already_exists`.
 //!
-//! ---
+//! Gating advancement on **`TaskRemoved`** prevents double-adds.
 //!
 //! ## Concurrency & scalability
 //!
 //! - `DashMap<Arc<str>, Arc<Mutex<SlotState>>>` avoids global map lock contention.
 //! - Per-slot `Mutex` ensures updates to one slot don’t block others.
 //!
-//! ---
-//!
 //! ## Public surface
 //!
 //! - Configure via `Supervisor::builder(..).with_controller(ControllerConfig)`.
-//! - Submit via `sup.submit(ControllerSpec::{queue, replace, drop_if_running}(...))`.
+//! - Submit via `handle.submit(ControllerSpec::{queue, replace, drop_if_running}(...))`.
 //! - Policies: [`AdmissionPolicy`] = `Queue | Replace | DropIfRunning`.
-//! - Controller emits `ControllerSubmitted`, `ControllerRejected`, and
-//!   `ControllerSlotTransition` (feature `"controller"`); readable with `"logging"`’s `LogWriter`.
+//! - Controller emits [`ControllerSubmitted`](crate::EventKind::ControllerSubmitted),
+//!   [`ControllerRejected`](crate::EventKind::ControllerRejected), and
+//!   [`ControllerSlotTransition`](crate::EventKind::ControllerSlotTransition) events;
+//!   readable with [`LogWriter`](crate::LogWriter).
 //!
 //! ## Invariants
+//!
 //! - At most **one** running task per slot.
 //! - Slots advance to next task **only** after `TaskRemoved`.
 //! - `Replace` is **latest-wins** (head replace); `Queue` is FIFO.
 
 mod admission;
-mod config;
-mod core;
-mod error;
-mod slot;
-mod spec;
-
 pub use admission::AdmissionPolicy;
+
+mod config;
 pub use config::ControllerConfig;
+
+mod core;
 pub(crate) use core::Controller;
+
+mod error;
 pub use error::ControllerError;
+
+mod spec;
 pub use spec::ControllerSpec;
+
+mod slot;

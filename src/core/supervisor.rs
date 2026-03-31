@@ -1,7 +1,7 @@
 //! # Supervisor: orchestrates task actors and graceful shutdown.
 //!
-//! The [`Supervisor`] owns the runtime components (event bus, subscribers, alive tracker, registry)
-//! and orchestrates task execution lifecycle from spawn to graceful termination.
+//! The [`Supervisor`] owns the runtime components and orchestrates task execution lifecycle
+//! from spawn to graceful termination.
 //!
 //! - Spawn task actors via event-driven registry
 //! - Dynamically add/remove tasks at runtime via events
@@ -18,10 +18,10 @@
 //!     │     ├──► updates AliveTracker
 //!     │     └──► fans out to SubscriberSet
 //!     └──► Registry.spawn_listener()
-//!           ├──► TaskAddRequested → spawn actor
-//!           ├──► TaskRemoveRequested → cancel task
-//!           ├──► ActorExhausted → cleanup
-//!           └──► ActorDead → cleanup
+//!           ├──► cmd_rx: Add(spec)      → spawn actor
+//!           ├──► cmd_rx: Remove(name)   → cancel task
+//!           ├──► bus_rx: ActorExhausted → cleanup
+//!           └──► bus_rx: ActorDead      → cleanup
 //!
 //! Supervisor::run(tasks)        // start() + block until shutdown
 //!     ├──► start()
@@ -41,15 +41,17 @@
 //! ## Runtime task management
 //! ```text
 //! add_task(spec)
-//!     ├──► Bus.publish(TaskAddRequested + spec)
-//!     └──► Registry.event_listener
+//!     ├──► Bus.publish(TaskAddRequested)   // observability (fire-and-forget)
+//!     ├──► cmd_tx.send(Add(spec))          // guaranteed delivery (mpsc)
+//!     └──► Registry.spawn_listener
 //!           ├──► spawn actor
 //!           ├──► registry.insert(handle)
 //!           └──► Bus.publish(TaskAdded)
 //!
 //! remove_task(name)
-//!     ├──► Bus.publish(TaskRemoveRequested + name)
-//!     └──► Registry.event_listener
+//!     ├──► Bus.publish(TaskRemoveRequested) // observability (fire-and-forget)
+//!     ├──► cmd_tx.send(Remove(name))        // guaranteed delivery (mpsc)
+//!     └──► Registry.spawn_listener
 //!           ├──► registry.remove(name) + cancel token
 //!           ├──► await actor finish
 //!           └──► Bus.publish(TaskRemoved)
@@ -62,16 +64,15 @@
 //! ```
 //!
 //! ## Rules
-//! - Registry tracks all active tasks by name
 //! - Each task has individual cancellation token (not shared with runtime_token)
-//! - Registry auto-cleanup via ActorExhausted/ActorDead events
 //! - Graceful shutdown cancels all tasks and waits for registry to drain
+//! - Registry auto-cleanup via ActorExhausted/ActorDead events
 //! - All operations are event-driven (idempotent)
+//! - Registry tracks all active tasks by name
 //!
 //! ## Example
-//! ```rust
+//! ```rust,no_run
 //! use std::time::Duration;
-//!
 //! use tokio_util::sync::CancellationToken;
 //!
 //! use taskvisor::{SupervisorConfig, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
@@ -102,13 +103,17 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::Notify, sync::broadcast, time::timeout};
+use tokio::{sync::Notify, sync::broadcast, sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "controller")]
 use tokio::sync::OnceCell;
 
-use crate::core::{alive::AliveTracker, builder::SupervisorBuilder, registry::Registry};
+use crate::core::{
+    alive::AliveTracker,
+    builder::SupervisorBuilder,
+    registry::{Registry, RegistryCommand},
+};
 use crate::{
     core::SupervisorConfig,
     error::RuntimeError,
@@ -119,12 +124,34 @@ use crate::{
 
 /// Orchestrates task actors, event delivery, and graceful shutdown.
 ///
-/// - Spawns and supervises task actors via event-driven registry
-/// - Provides runtime task management (add/remove tasks dynamically)
-/// - Fans out events to subscribers (non-blocking)
-/// - Handles graceful shutdown on OS signals
-/// - Tracks alive tasks for stuck detection
-/// - Enforces global concurrency limits
+/// ## Two usage modes
+///
+/// **Static** — run a known set of tasks until completion or Ctrl+C:
+/// ```rust,no_run
+/// # use taskvisor::prelude::*;
+/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+/// sup.run(vec![/* specs */]).await?;
+/// # Ok(()) }
+/// ```
+///
+/// **Dynamic** — add/remove/cancel tasks at runtime via [`SupervisorHandle`]:
+/// ```rust,no_run
+/// # use taskvisor::prelude::*;
+/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+/// let handle = sup.serve();
+/// // handle.add(...), handle.cancel(...), handle.shutdown().await
+/// # Ok(()) }
+/// ```
+///
+/// # Also
+///
+/// - [`SupervisorHandle`](crate::SupervisorHandle) - runtime management API returned by [`serve`](Self::serve)
+/// - `SupervisorBuilder` - step-by-step construction
+/// - [`SupervisorConfig`] - configuration knobs
+///
+/// [`SupervisorHandle`]: crate::SupervisorHandle
 pub struct Supervisor {
     cfg: SupervisorConfig,
     bus: Bus,
@@ -134,6 +161,7 @@ pub struct Supervisor {
     ready: Arc<Notify>,
     runtime_token: CancellationToken,
     started: AtomicBool,
+    cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
 
     #[cfg(feature = "controller")]
     pub(super) controller: OnceCell<Arc<crate::controller::Controller>>,
@@ -157,6 +185,7 @@ impl Supervisor {
         alive: Arc<AliveTracker>,
         registry: Arc<Registry>,
         runtime_token: CancellationToken,
+        cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
     ) -> Self {
         Self {
             cfg,
@@ -167,6 +196,7 @@ impl Supervisor {
             runtime_token,
             ready: Arc::new(Notify::new()),
             started: AtomicBool::new(false),
+            cmd_tx,
 
             #[cfg(feature = "controller")]
             controller: OnceCell::new(),
@@ -181,6 +211,7 @@ impl Supervisor {
     /// Creates a builder for constructing a Supervisor.
     ///
     /// ## Example
+    ///
     /// ```rust
     /// use taskvisor::{SupervisorConfig, Supervisor};
     ///
@@ -192,47 +223,57 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
-    /// Waits until supervisor is fully initialized and ready to accept submissions.
+    /// Returns a [`SupervisorHandle`] for dynamic task management.
     ///
-    /// Uses register-before-check pattern: the `Notified` future is created
-    /// **before** checking `started`, so no notification is lost between
-    /// the check and the wait.
-    pub async fn wait_ready(&self) {
-        loop {
-            let notified = self.ready.notified();
-            if self.started.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+    /// Starts the event loop (listeners) and returns a handle through which
+    //  can add/remove/cancel tasks and trigger shutdown.
+    ///
+    /// This is the **only** way to manage tasks dynamically. Use [`run()`] for static task sets.
+    ///
+    /// [`SupervisorHandle`]: crate::SupervisorHandle
+    /// [`run()`]: Self::run
+    pub fn serve(self: &Arc<Self>) -> super::handle::SupervisorHandle {
+        self.start();
+        super::handle::SupervisorHandle::new(Arc::clone(self))
     }
 
     /// Adds a new task to the supervisor at runtime.
     ///
-    /// Publishes `TaskAddRequested` with the spec to the bus.
-    /// Registry listener will spawn the actor.
-    pub fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
-        self.bus.publish(
-            Event::new(EventKind::TaskAddRequested)
-                .with_task(spec.task().name())
-                .with_spec(spec),
-        );
-        Ok(())
+    /// Publishes `TaskAddRequested` on bus (observability, fire-and-forget),
+    /// then sends `Add` command via mpsc (guaranteed delivery).
+    pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
+        self.bus
+            .publish(Event::new(EventKind::TaskAddRequested).with_task(spec.task().name()));
+        self.cmd_tx
+            .send(RegistryCommand::Add(spec))
+            .map_err(|_| RuntimeError::ShuttingDown)
     }
 
     /// Removes a task from the supervisor at runtime.
     ///
-    /// Publishes `TaskRemoveRequested` to the bus.
-    /// Registry listener will cancel and remove the task.
-    pub fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
+    /// Publishes `TaskRemoveRequested` on bus (observability, fire-and-forget),
+    /// then sends `Remove` command via mpsc (guaranteed delivery).
+    pub(crate) fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
         self.bus
             .publish(Event::new(EventKind::TaskRemoveRequested).with_task(name));
-        Ok(())
+        self.cmd_tx
+            .send(RegistryCommand::Remove(Arc::from(name)))
+            .map_err(|_| RuntimeError::ShuttingDown)
     }
 
     /// Returns a sorted list of currently active task names from the registry.
-    pub async fn list_tasks(&self) -> Vec<Arc<str>> {
+    pub(crate) async fn list_tasks(&self) -> Vec<Arc<str>> {
         self.registry.list().await
+    }
+
+    /// Checks if a task exists in the registry by name.
+    pub(crate) async fn registry_contains(&self, name: &str) -> bool {
+        self.registry.contains(name).await
+    }
+
+    /// Returns a new bus receiver for event subscription.
+    pub(crate) fn subscribe_bus(&self) -> broadcast::Receiver<Arc<Event>> {
+        self.bus.subscribe()
     }
 
     /// Starts the supervisor event loop without blocking.
@@ -240,9 +281,7 @@ impl Supervisor {
     /// Spawns:
     /// - subscriber listener (event fan-out)
     /// - registry listener (task lifecycle management)
-    ///
-    /// Use [`wait_ready`] after this to ensure readiness before submitting.
-    pub fn start(&self) {
+    pub(crate) fn start(&self) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -254,7 +293,7 @@ impl Supervisor {
     /// Runs task specifications until completion or shutdown signal.
     ///
     /// Steps:
-    /// - Start event loop (via [`start`])
+    /// - Start event loop (via `start`)
     /// - Subscribe to bus **before** publishing (guarantees no missed events)
     /// - Publish TaskAddRequested for initial tasks
     /// - Wait for N `TaskAdded` confirmations from registry listener
@@ -274,10 +313,6 @@ impl Supervisor {
     }
 
     /// Waits until registry listener confirms N tasks were registered.
-    ///
-    /// Subscribes to bus **before** publishing, so no `TaskAdded` events can be missed.
-    /// On `Lagged`, stops waiting — tasks were registered but we lost the events;
-    /// `drive_shutdown` will handle the rest.
     async fn wait_tasks_registered(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
@@ -297,9 +332,7 @@ impl Supervisor {
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
-    ///
-    /// Use this when embedding the supervisor (via [`start`]) instead of relying on the OS signal handler inside [`run`].
-    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn shutdown(&self) -> Result<(), RuntimeError> {
         self.bus.publish(Event::new(EventKind::ShutdownRequested));
         self.registry.cancel_all().await;
         let res = self.wait_all_with_grace().await;
@@ -309,22 +342,22 @@ impl Supervisor {
     }
 
     /// Returns sorted list of currently alive task names.
-    pub async fn snapshot(&self) -> Vec<Arc<str>> {
+    pub(crate) async fn snapshot(&self) -> Vec<Arc<str>> {
         self.alive.snapshot().await
     }
 
     /// Check whether a given task is currently alive.
-    pub async fn is_alive(&self, name: &str) -> bool {
+    pub(crate) async fn is_alive(&self, name: &str) -> bool {
         self.alive.is_alive(name).await
     }
 
     /// Cancel a task by name and wait for confirmation (`TaskRemoved`).
-    pub async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub(crate) async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
         self.cancel_with_timeout(name, self.cfg.grace).await
     }
 
     /// Cancel with explicit timeout.
-    pub async fn cancel_with_timeout(
+    pub(crate) async fn cancel_with_timeout(
         &self,
         name: &str,
         wait_for: Duration,
@@ -340,19 +373,15 @@ impl Supervisor {
                 .with_task(name)
                 .with_reason("manual_cancel"),
         );
+        self.cmd_tx
+            .send(RegistryCommand::Remove(Arc::from(name)))
+            .map_err(|_| RuntimeError::ShuttingDown)?;
         self.wait_task_removed(&mut rx, name, wait_for).await
     }
 
     /// Submits a task to the controller (if enabled).
-    ///
-    /// Returns an error if:
-    /// - Controller feature is disabled
-    /// - Controller is not configured
-    /// - Submission queue is full (use `try_submit` for non-blocking)
-    ///
-    /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    pub async fn submit(
+    pub(crate) async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(), crate::controller::ControllerError> {
@@ -363,12 +392,8 @@ impl Supervisor {
     }
 
     /// Tries to submit a task without blocking.
-    ///
-    /// Returns `TrySubmitError::Full` if the queue is full.
-    ///
-    /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
-    pub fn try_submit(
+    pub(crate) fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(), crate::controller::ControllerError> {
@@ -380,12 +405,10 @@ impl Supervisor {
 
     /// Listens to the internal event bus and fans out each received [`Event`] to all active subscribers.
     ///
-    /// The listener also updates the [`AliveTracker`] before fan-out to keep
-    /// the latest per-task state in sync.
+    /// The listener also updates the [`AliveTracker`] before fan-out to keep the latest per-task state in sync.
     ///
-    /// On `Lagged`, it creates a [`EventKind::SubscriberOverflow`] event and
-    /// emits it **directly to subscribers**, bypassing the bus — to avoid
-    /// reinforcing backpressure loops while still reporting the loss.
+    /// On `Lagged`, it creates a [`EventKind::SubscriberOverflow`] event and emits it **directly to subscribers**,
+    /// bypassing the bus - to avoid reinforcing backpressure loops while still reporting the loss.
     ///
     /// The loop terminates only when the broadcast channel is closed.
     fn subscriber_listener(&self) {
@@ -418,9 +441,6 @@ impl Supervisor {
     }
 
     /// Waits for either shutdown signal or natural completion of all tasks.
-    ///
-    /// Both paths cancel `runtime_token` (stops registry/subscriber listeners)
-    /// and drain subscriber queues via `subs.close()`.
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         let res = tokio::select! {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
@@ -457,6 +477,10 @@ impl Supervisor {
         }
     }
 
+    /// Waits for `TaskRemoved` event for the given task name, with timeout.
+    ///
+    /// On `Lagged`, falls back to checking the registry directly.
+    /// On `Closed`, checks registry as a last resort.
     async fn wait_task_removed(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,

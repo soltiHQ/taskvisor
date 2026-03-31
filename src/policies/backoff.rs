@@ -2,14 +2,11 @@
 //!
 //! [`BackoffPolicy`] controls how retry delays grow after repeated failures.
 //! It is parameterized by:
-//! - [`BackoffPolicy::factor`] the multiplicative growth factor;
-//! - [`BackoffPolicy::first`] the initial delay;
+//! - [`BackoffPolicy::factor`] the multiplicative growth factor.
+//! - [`BackoffPolicy::first`] the initial delay.
 //! - [`BackoffPolicy::max`] the maximum delay cap.
 //!
-//! The delay for attempt `n` is computed as `first × factor^n`, clamped to `max`,
-//! then jitter is applied. Because the base delay is derived purely from the attempt
-//! number, jitter output never feeds back into subsequent calculations — this prevents
-//! the negative feedback loop that causes delays to shrink over time.
+//! The delay for attempt `n` is computed as `first × factor^n`, clamped to `max`, then jitter is applied.
 //!
 //! # Example
 //! ```rust
@@ -23,13 +20,13 @@
 //!     jitter: JitterPolicy::None,
 //! };
 //!
-//! // Attempt 0 — uses 'first' (100ms), clamped to max
+//! // Attempt 0 - uses 'first' (100ms), clamped to max
 //! assert_eq!(backoff.next(0), Duration::from_millis(100));
 //!
-//! // Attempt 1 — first × factor^1 = 200ms
+//! // Attempt 1 - first × factor^1 = 200ms
 //! assert_eq!(backoff.next(1), Duration::from_millis(200));
 //!
-//! // Attempt 10 — 100ms × 2^10 = 102_400ms → capped at max=10s
+//! // Attempt 10 - 100ms × 2^10 = 102_400ms → capped at max=10s
 //! assert_eq!(backoff.next(10), Duration::from_secs(10));
 //! ```
 
@@ -39,10 +36,13 @@ use crate::policies::jitter::JitterPolicy;
 
 /// Retry backoff policy.
 ///
-/// Encapsulates parameters that determine how retry delays grow:
-/// - [`BackoffPolicy::factor`] — multiplicative growth factor;
-/// - [`BackoffPolicy::first`] — the initial delay;
-/// - [`BackoffPolicy::max`] — the maximum delay cap.
+/// See the module-level documentation for formula, parameters, and examples.
+///
+/// # Also
+///
+/// - [`RestartPolicy`](crate::RestartPolicy) - whether to restart at all
+/// - [`JitterPolicy`] - randomization applied to computed delay
+/// - [`TaskSpec`](crate::TaskSpec) - wires restart + backoff + timeout together
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffPolicy {
     /// Initial delay before the first retry.
@@ -74,8 +74,8 @@ impl BackoffPolicy {
     /// Computes the delay for the given attempt number (0-indexed).
     ///
     /// The base delay is `first × factor^attempt`, clamped to [`BackoffPolicy::max`].
-    /// Jitter is applied to the clamped base, but the result is **never** fed back
-    /// into subsequent calculations — each attempt derives its base independently.
+    /// Jitter is applied to the clamped base, but the result is **never** fed back into subsequent calculations.
+    /// Each attempt derives its base independently.
     ///
     /// # Notes
     /// - If `factor` is less than 1.0, delays decrease with higher attempts (not typical).

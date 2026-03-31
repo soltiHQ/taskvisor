@@ -1,23 +1,33 @@
 //! Runtime events: types and broadcast bus.
 //!
-//! This module groups the event **data model** and the **bus** used to
-//! publish/subscribe to runtime events emitted by the supervisor, registry,
-//! task actors, runner and subscriber workers.
+//! This module groups the event **data model** and the **bus** used to publish/subscribe to runtime events
+//! emitted by the supervisor, registry, task actors, runner and subscriber workers.
 //!
 //! ## Contents
+//!
 //! - [`EventKind`], [`Event`] event classification and payload metadata
 //! - [`Bus`] thin wrapper over `tokio::sync::broadcast`
 //!
-//! ## Quick reference
-//! - **Publishers**: `Supervisor`, `Registry`, `TaskActor`, `runner::run_once`,
-//!   `SubscriberSet` workers (overflow/panic).
-//! - **Consumers**: `Supervisor::subscriber_listener()` (fans out to `SubscriberSet`
-//!   and updates `AliveTracker`), and `Registry` (its own listener).
+//! ## Flow
 //!
-//! See `core/mod.rs` for the system-level wiring diagram.
+//! ```text
+//! TaskAddRequested → TaskAdded → TaskStarting ──┬── TaskStopped ─► ActorExhausted
+//!                                               ├── TaskFailed  ─► BackoffScheduled ─► TaskStarting
+//!                                               ├── TimeoutHit  ─► BackoffScheduled ─► TaskStarting
+//!                                               └── Fatal       ─► ActorDead
+//!
+//! TaskRemoveRequested → TaskStopped → TaskRemoved
+//!
+//! ShutdownRequested → AllStoppedWithinGrace | GraceExceeded
+//! ```
+//!
+//! ## Wiring
+//!
+//! Events are consumed by user-defined [`Subscribe`](crate::Subscribe) implementations.
+//! See [`LogWriter`](crate::LogWriter) for a built-in example.
+
+mod event;
+pub use event::{BackoffSource, Event, EventKind};
 
 mod bus;
-mod event;
-
 pub(crate) use bus::Bus;
-pub use event::{BackoffSource, Event, EventKind};

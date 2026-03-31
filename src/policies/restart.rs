@@ -1,10 +1,9 @@
 //! # Restart policies for task actors.
 //!
 //! [`RestartPolicy`] determines whether a task should be restarted after it finishes or fails.
-//!
-//! - [`RestartPolicy::Never`] the task runs once and is never restarted.
 //! - [`RestartPolicy::Always`] the task is restarted unconditionally, with optional delay between successful completions.
 //! - [`RestartPolicy::OnFailure`] the task is restarted only if it fails (default).
+//! - [`RestartPolicy::Never`] the task runs once and is never restarted.
 //!
 //! ## Choosing the right policy
 //!
@@ -34,6 +33,12 @@
 //! ```
 
 /// Policy controlling whether a task is restarted after completion or failure.
+///
+/// # Also
+///
+/// - [`BackoffPolicy`](crate::BackoffPolicy) - how retry delays grow between attempts
+/// - [`JitterPolicy`](crate::JitterPolicy) - randomization strategy for backoff delays
+/// - [`TaskSpec`](crate::TaskSpec) - wires restart + backoff + timeout together
 #[derive(Clone, Copy, Debug)]
 pub enum RestartPolicy {
     /// Never restart: the task runs once and exits permanently.
@@ -42,8 +47,8 @@ pub enum RestartPolicy {
     OnFailure,
     /// Always restart: the task restarts unconditionally after it finishes or fails.
     ///   - `interval`: Optional delay between successful completions.
-    ///   - `None` → restart immediately after success
     ///   - `Some(dur)` → wait `dur` before next cycle
+    ///   - `None` → restart immediately after success
     Always {
         interval: Option<std::time::Duration>,
     },
