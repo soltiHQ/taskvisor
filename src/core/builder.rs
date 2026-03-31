@@ -1,5 +1,17 @@
+//! # Builder for [`Supervisor`](crate::Supervisor) construction.
+//!
+//! [`SupervisorBuilder`] assembles all runtime components from a [`SupervisorConfig`].
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use taskvisor::{SupervisorBuilder, SupervisorConfig};
+//!
+//! let sv = SupervisorBuilder::new(SupervisorConfig::default()).build();
+//! ```
+
 use std::sync::Arc;
-use tokio::sync;
+use tokio::{sync, sync::mpsc};
 
 use super::{alive::AliveTracker, registry::Registry, supervisor::Supervisor};
 use crate::{
@@ -8,7 +20,13 @@ use crate::{
     subscribers::{Subscribe, SubscriberSet},
 };
 
-/// Builder for constructing a Supervisor with optional features.
+/// Builder for constructing a [`Supervisor`](crate::Supervisor) with optional features.
+///
+/// # Also
+///
+/// - [`Supervisor`](crate::Supervisor) - the runtime produced by this builder
+/// - [`SupervisorConfig`] - configuration knobs (grace period, bus capacity, concurrency)
+/// - [`Subscribe`](crate::Subscribe) - event handler trait wired via [`with_subscribers`](Self::with_subscribers)
 pub struct SupervisorBuilder {
     cfg: SupervisorConfig,
     subscribers: Vec<Arc<dyn Subscribe>>,
@@ -31,8 +49,7 @@ impl SupervisorBuilder {
 
     /// Sets event subscribers for observability.
     ///
-    /// Subscribers receive runtime events (task lifecycle, failures, etc.)
-    /// through dedicated workers with bounded queues.
+    /// Subscribers receive runtime events through dedicated workers with bounded queues.
     pub fn with_subscribers(mut self, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         self.subscribers = subscribers;
         self
@@ -57,7 +74,6 @@ impl SupervisorBuilder {
     /// - Registry for task lifecycle management
     /// - Subscriber workers
     /// - Optional controller (if configured)
-    // src/core/builder.rs
     pub fn build(self) -> Arc<Supervisor> {
         let bus = Bus::new(self.cfg.bus_capacity_clamped());
         let subs = Arc::new(SubscriberSet::new(self.subscribers, bus.clone()));
@@ -69,7 +85,8 @@ impl SupervisorBuilder {
             .map(sync::Semaphore::new)
             .map(Arc::new);
 
-        let registry = Registry::new(bus.clone(), runtime_token.clone(), semaphore);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let registry = Registry::new(bus.clone(), runtime_token.clone(), semaphore, cmd_rx);
         let alive = Arc::new(AliveTracker::new());
 
         let sup = Arc::new(Supervisor::new_internal(
@@ -79,6 +96,7 @@ impl SupervisorBuilder {
             alive,
             registry,
             runtime_token.clone(),
+            cmd_tx,
         ));
 
         #[cfg(feature = "controller")]

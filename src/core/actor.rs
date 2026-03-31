@@ -4,9 +4,11 @@
 //! - restarts per [`RestartPolicy`],
 //! - delays per [`BackoffPolicy`],
 //! - optional per-attempt timeout,
-//! - cooperative cancellation via [`CancellationToken`].
+//!
+//! *Cooperative cancellation via `CancellationToken`.*
 //!
 //! ## Event flow
+//!
 //! For each attempt, the actor publishes:
 //! ```text
 //! TaskStarting → [task execution] → TaskStopped (success/cancel)
@@ -23,6 +25,7 @@
 //!```
 //!
 //! ## Architecture
+//!
 //! ```text
 //! TaskSpec ──► Supervisor ──► TaskActor::run()
 //!
@@ -44,8 +47,8 @@
 //!   ├─► drop permit (release semaphore)
 //!   ├─► child_token goes out of scope
 //!   ├─► apply RestartPolicy
-//!   │     ├─► Never       → publish ActorExhausted → break
 //!   │     ├─► OnFailure   → if success: publish ActorExhausted → break
+//!   │     ├─► Never       → publish ActorExhausted → break
 //!   │     └─► Always      → continue (on success)
 //!   └─► on retryable failure:
 //!        ├─► publish BackoffScheduled
@@ -54,13 +57,13 @@
 //! ```
 //!
 //! ## Rules
+//!
 //! - Attempts run **sequentially** within one actor (never parallel)
 //! - Attempt counter **increments on each spawn** (monotonic, never resets)
 //! - Events have **monotonic sequence numbers** (ordering guarantees)
 //! - Each attempt gets its own **child_token** for isolation
 
 use std::{sync::Arc, time::Duration};
-
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -93,7 +96,6 @@ pub(crate) enum ActorExitReason {
     ///
     /// Occurs when:
     /// - Task returned `TaskError::Fatal`
-    /// - (Future) Max retries exceeded
     Fatal,
 }
 
@@ -111,6 +113,12 @@ pub(crate) struct TaskActorParams {
 }
 
 /// Supervises execution of a single [`Task`] with retries, backoff, and event publishing.
+///
+/// # Also
+///
+/// - [`run_once`](super::runner::run_once) - executes a single attempt
+/// - [`Registry`](super::registry::Registry) - spawns and owns task actors
+/// - [`TaskSpec`](crate::TaskSpec) - user-facing configuration that maps to [`TaskActorParams`]
 pub(crate) struct TaskActor {
     /// Task to execute.
     task: Arc<dyn Task>,
@@ -140,9 +148,8 @@ impl TaskActor {
 
     /// Runs the actor until completion, restart exhaustion, or cancellation.
     ///
-    /// We run each attempt under a **child** cancellation token so that cancelling the
-    /// current attempt (including backoff sleep) results in a clean exit without
-    /// restarting, even with `RestartPolicy::Always`.
+    /// We run each attempt under a **child** cancellation token so that cancelling the current attempt
+    /// (including backoff sleep) results in a clean exit without restarting, even with `RestartPolicy::Always`.
     pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let task_name: Arc<str> = Arc::from(self.task.name());
         let mut attempt: u32 = 0;
@@ -301,5 +308,157 @@ impl TaskActor {
             _ = &mut sleep => true,
             _ = token.cancelled() => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    type BoxFut = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
+
+    fn fast_backoff() -> BackoffPolicy {
+        BackoffPolicy {
+            first: Duration::from_millis(1),
+            max: Duration::from_millis(1),
+            factor: 1.0,
+            jitter: crate::JitterPolicy::None,
+        }
+    }
+
+    fn params(restart: RestartPolicy, max_retries: u32) -> TaskActorParams {
+        TaskActorParams {
+            restart,
+            backoff: fast_backoff(),
+            timeout: None,
+            max_retries,
+        }
+    }
+
+    fn actor(task: Arc<dyn Task>, restart: RestartPolicy, max_retries: u32) -> TaskActor {
+        TaskActor::new(
+            Bus::new(16),
+            Arc::clone(&task),
+            params(restart, max_retries),
+            None,
+        )
+    }
+
+    struct OkTask;
+    impl Task for OkTask {
+        fn name(&self) -> &str {
+            "ok"
+        }
+        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct FailTask;
+    impl Task for FailTask {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+            Box::pin(async {
+                Err(TaskError::Fail {
+                    reason: "boom".into(),
+                })
+            })
+        }
+    }
+
+    struct FatalTask;
+    impl Task for FatalTask {
+        fn name(&self) -> &str {
+            "fatal"
+        }
+        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+            Box::pin(async {
+                Err(TaskError::Fatal {
+                    reason: "fatal".into(),
+                })
+            })
+        }
+    }
+
+    struct CountedTask {
+        remaining: AtomicU32,
+    }
+    impl CountedTask {
+        fn new(fail_count: u32) -> Self {
+            Self {
+                remaining: AtomicU32::new(fail_count),
+            }
+        }
+    }
+    impl Task for CountedTask {
+        fn name(&self) -> &str {
+            "counted"
+        }
+        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+            let prev = self.remaining.fetch_sub(1, Ordering::SeqCst);
+            if prev > 0 {
+                Box::pin(async {
+                    Err(TaskError::Fail {
+                        reason: "transient".into(),
+                    })
+                })
+            } else {
+                Box::pin(async { Ok(()) })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn never_ok_returns_policy_exhausted() {
+        let a = actor(Arc::new(OkTask), RestartPolicy::Never, 0);
+        let reason = a.run(CancellationToken::new()).await;
+        assert_eq!(reason, ActorExitReason::PolicyExhausted);
+    }
+
+    #[tokio::test]
+    async fn on_failure_ok_returns_policy_exhausted() {
+        let a = actor(Arc::new(OkTask), RestartPolicy::OnFailure, 0);
+        let reason = a.run(CancellationToken::new()).await;
+        assert_eq!(reason, ActorExitReason::PolicyExhausted);
+    }
+
+    #[tokio::test]
+    async fn fatal_error_returns_fatal() {
+        let a = actor(Arc::new(FatalTask), RestartPolicy::OnFailure, 0);
+        let reason = a.run(CancellationToken::new()).await;
+        assert_eq!(reason, ActorExitReason::Fatal);
+    }
+
+    #[tokio::test]
+    async fn max_retries_exhausted_returns_policy_exhausted() {
+        let a = actor(Arc::new(FailTask), RestartPolicy::OnFailure, 3);
+        let reason = a.run(CancellationToken::new()).await;
+        assert_eq!(reason, ActorExitReason::PolicyExhausted);
+    }
+
+    #[tokio::test]
+    async fn cancellation_returns_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let a = actor(
+            Arc::new(OkTask),
+            RestartPolicy::Always { interval: None },
+            0,
+        );
+        let reason = a.run(token).await;
+        assert_eq!(reason, ActorExitReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn on_failure_retries_then_succeeds() {
+        let task = Arc::new(CountedTask::new(2));
+        let a = actor(task, RestartPolicy::OnFailure, 0);
+        let reason = a.run(CancellationToken::new()).await;
+        assert_eq!(reason, ActorExitReason::PolicyExhausted);
     }
 }

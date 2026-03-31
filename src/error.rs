@@ -1,12 +1,8 @@
 //! # Error types used by the taskvisor runtime and tasks.
 //!
 //! This module defines two main error enums:
-//!
 //! - [`RuntimeError`] errors raised by the orchestration runtime itself.
 //! - [`TaskError`] errors raised by individual task executions.
-//!
-//! Both types provide helper methods `as_label` for metrics.
-//! [`TaskError`] has additional methods: `is_retryable()` and `is_fatal()`
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +12,11 @@ use thiserror::Error;
 /// # Errors produced by the taskvisor runtime.
 ///
 /// These represent failures in the orchestration system itself.
+///
+/// # Also
+///
+/// - [`Supervisor`](crate::Supervisor) - returns `RuntimeError` from [`run`](crate::Supervisor::run)
+/// - [`SupervisorHandle`](crate::SupervisorHandle) - returns `RuntimeError` from management methods
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RuntimeError {
@@ -42,9 +43,9 @@ pub enum RuntimeError {
     /// Timeout waiting for task removal confirmation.
     #[error("timeout waiting for task '{name}' removal after {timeout:?}")]
     TaskRemoveTimeout {
-        /// Task which timeout on cancel.
+        /// The task name that timed out during removal.
         name: Arc<str>,
-        // Task timeout duration.
+        /// How long we waited before giving up.
         timeout: Duration,
     },
     /// Timeout waiting for task registration confirmation.
@@ -55,6 +56,9 @@ pub enum RuntimeError {
         /// How long we waited.
         timeout: Duration,
     },
+    /// The supervisor runtime is shutting down; the command channel is closed.
+    #[error("supervisor is shutting down")]
+    ShuttingDown,
 }
 
 impl RuntimeError {
@@ -66,6 +70,7 @@ impl RuntimeError {
             RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
             RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
+            RuntimeError::ShuttingDown => "runtime_shutting_down",
         }
     }
 }
@@ -74,6 +79,11 @@ impl RuntimeError {
 ///
 /// These represent failures of individual async tasks managed by the runtime.
 /// Some errors are retryable (`Timeout`, `Fail`), others are considered fatal.
+///
+/// # Also
+///
+/// - [`Task`](crate::Task) - trait whose [`spawn`](crate::Task::spawn) returns `Result<(), TaskError>`
+/// - [`RestartPolicy`](crate::RestartPolicy) - determines restart behavior based on error variant
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum TaskError {

@@ -8,6 +8,7 @@
 //!
 //! ## Architecture
 //! ### Overview
+//!
 //! ```text
 //!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
 //!     │   TaskSpec   │   │   TaskSpec   │   │   TaskSpec   │
@@ -37,7 +38,7 @@
 //! ┌───────────────────────────────────────────────────────────────────┐
 //! │                        Bus (broadcast channel)                    │
 //! │              (capacity: SupervisorConfig::bus_capacity)           │
-//!└─────────────────────────────────┬─────────────────────────────────┘
+//! └─────────────────────────────────┬─────────────────────────────────┘
 //!                                   ▼
 //!                       ┌────────────────────────┐
 //!                       │  subscriber_listener   │
@@ -55,6 +56,7 @@
 //! ```
 //!
 //! ### Lifecycle
+//!
 //! ```text
 //! TaskSpec ──► Supervisor ──► Registry ──► TaskActor::run()
 //!
@@ -88,6 +90,7 @@
 //! ```
 //!
 //! ## Features
+//!
 //! | Area              | Description                                                            | Key types / traits                     |
 //! |-------------------|------------------------------------------------------------------------|----------------------------------------|
 //! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscribe`]                          |
@@ -98,10 +101,12 @@
 //! | **Configuration** | Centralize runtime settings.                                           | [`SupervisorConfig`]                   |
 //!
 //! ## Optional features
+//!
 //! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
 //! - `controller`:  exposes controller runtime and admission types.
 //!
 //! ## Example
+//!
 //! ```rust
 //! use taskvisor::prelude::*;
 //!
@@ -123,31 +128,31 @@
 //!     Ok(())
 //! }
 //! ```
-mod core;
-mod error;
-mod events;
-mod policies;
+
 pub mod prelude;
-mod subscribers;
-mod tasks;
 
-// ---- Public re-exports ----
-
+mod core;
 pub use core::{Supervisor, SupervisorConfig, SupervisorHandle};
-pub use error::{RuntimeError, TaskError};
-pub use events::{BackoffSource, Event, EventKind};
-pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
-pub use subscribers::Subscribe;
+
+mod tasks;
 pub use tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
 
-// Optional: expose a controller object.
-// Enable with: `--features controller`
+mod policies;
+pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
+
+mod events;
+pub use events::{BackoffSource, Event, EventKind};
+
+mod error;
+pub use error::{RuntimeError, TaskError};
+
+mod subscribers;
+pub use subscribers::Subscribe;
+
 #[cfg(feature = "controller")]
 mod controller;
 #[cfg(feature = "controller")]
 pub use controller::{AdmissionPolicy, ControllerConfig, ControllerError, ControllerSpec};
 
-// Optional: expose a simple built-in logger subscriber (demo/reference).
-// Enable with: `--features logging`
 #[cfg(feature = "logging")]
 pub use subscribers::LogWriter;

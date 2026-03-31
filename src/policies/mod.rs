@@ -1,30 +1,26 @@
 //! Retry and restart policies.
 //!
-//! This module groups the knobs that control **if/when** a task is restarted
-//! and **how long** to wait between attempts.
+//! This module groups the knobs that control **if/when** a task is restarted and **how long** to wait between attempts.
 //!
 //! ## Contents
-//! - [`RestartPolicy`] when to restart a task (never / on-failure / always)
 //! - [`BackoffPolicy`] how retry delays evolve (first / factor / max + jitter)
+//! - [`RestartPolicy`] when to restart a task (never / on-failure / always)
 //! - [`JitterPolicy`]  randomization strategy to avoid thundering herd
 //!
-//! ## Quick wiring
-//! ```text
-//! TaskSpec { restart: RestartPolicy, backoff: BackoffPolicy, timeout: Option<Duration> }
-//!      └─► core::actor::TaskActor uses:
-//!           - restart to decide continue/exit
-//!           - backoff.next(attempt) to schedule the next attempt
-//! ```
+//! ## Wiring
+//!
+//! All three policies are configured through [`TaskSpec`](crate::TaskSpec).
 //!
 //! ## Defaults
-//! - `RestartPolicy::OnFailure` (recommended default for most tasks).
-//! - `BackoffPolicy::default()` → first=100ms, factor=1.0 (constant), max=30s, jitter=None.
+//! - `BackoffPolicy::default()` first=100ms, factor=1.0 (constant), max=30s, jitter=None.
 //! - `JitterPolicy::None` by default; consider `Equal` for balanced randomness.
+//! - `RestartPolicy::OnFailure` (recommended default for most tasks).
 
 mod backoff;
-mod jitter;
-mod restart;
-
 pub use backoff::BackoffPolicy;
-pub use jitter::JitterPolicy;
+
+mod restart;
 pub use restart::RestartPolicy;
+
+mod jitter;
+pub use jitter::JitterPolicy;

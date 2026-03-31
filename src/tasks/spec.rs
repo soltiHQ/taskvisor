@@ -1,15 +1,4 @@
-//! # Task specification for supervised execution.
-//!
-//! Defines [`TaskSpec`] a configuration bundle that describes how a task
-//! should be executed under supervision (restart policy, backoff, timeout).
-//!
-//! A spec can be created:
-//! - **Quick**: [`TaskSpec::once`] (run once, never restart) or [`TaskSpec::restartable`] (restart on failure)
-//! - **Explicit**: [`TaskSpec::new`] (full control over all parameters)
-//! - **From config**: [`TaskSpec::with_defaults`] (inherit defaults from [`SupervisorConfig`])
-//!
-//! ## Rules
-//! - The spec is then passed to [`Supervisor::run`](crate::Supervisor::run) for execution.
+//! Task execution specification.
 
 use std::time::Duration;
 
@@ -17,80 +6,70 @@ use crate::{
     core::SupervisorConfig, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
 };
 
-/// Specification for running a task under supervision.
+/// Describes *how* a [`Task`](crate::Task) should run under supervision.
 ///
-/// Bundles together:
-/// - The task itself ([`TaskRef`])
-/// - Restart policy ([`RestartPolicy`])
-/// - Backoff policy ([`BackoffPolicy`])
-/// - Optional execution timeout
+/// Bundles restart policy, backoff strategy, timeout, and max retries.
 ///
-/// It can be created manually with [`TaskSpec::new`] or derived from a
-/// global [`SupervisorConfig`] via [`TaskSpec::with_defaults`].
+/// - [`once`](Self::once) for fire-and-forget tasks.
+/// - [`restartable`](Self::restartable) for long-lived workers.
+/// - [`new`](Self::new) for full control over all parameters.
 ///
-/// ## Example
+/// ## Creating a spec
 /// ```rust
 /// use tokio_util::sync::CancellationToken;
 /// use taskvisor::{TaskSpec, TaskFn, SupervisorConfig, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
 /// use std::time::Duration;
 ///
-/// let demo: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
+/// let task: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
 ///     Ok::<(), TaskError>(())
 /// });
 ///
-/// // Quick one-shot (most common):
-/// let spec = TaskSpec::once(demo.clone());
+/// // One-shot (most common):
+/// let spec = TaskSpec::once(task.clone());
 ///
-/// // Restartable with defaults:
-/// let spec = TaskSpec::restartable(demo.clone());
-///
-/// // Restartable with custom timeout and max retries (builder chain):
-/// let spec = TaskSpec::restartable(demo.clone())
+/// // Restartable with builder chain:
+/// let spec = TaskSpec::restartable(task.clone())
 ///     .with_timeout(Some(Duration::from_secs(30)))
 ///     .with_max_retries(5);
 ///
-/// // Full control:
-/// let spec = TaskSpec::new(
-///     demo.clone(),
-///     RestartPolicy::Always { interval: None },
-///     BackoffPolicy::default(),
-///     Some(Duration::from_secs(5)),
-/// );
-///
 /// // Inherit from global config:
 /// let cfg = SupervisorConfig::default();
-/// let spec = TaskSpec::with_defaults(demo, &cfg);
+/// let spec = TaskSpec::with_defaults(task, &cfg);
 /// ```
+///
+/// ## Also
+///
+/// - See [`Task`](crate::Task) for the execution contract and cancellation semantics.
+/// - For the closure-based implementation see [`TaskFn`](crate::TaskFn).
 #[derive(Clone)]
 #[must_use]
 pub struct TaskSpec {
-    task: TaskRef,
+    timeout: Option<Duration>,
     restart: RestartPolicy,
     backoff: BackoffPolicy,
-    timeout: Option<Duration>,
+
+    task: TaskRef,
+
     max_retries: u32,
 }
 
 impl std::fmt::Debug for TaskSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskSpec")
-            .field("task", &self.task.name())
             .field("restart", &self.restart)
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
+            .field("task", &self.task.name())
             .field("max_retries", &self.max_retries)
             .finish()
     }
 }
 
 impl TaskSpec {
-    /// Creates a new task specification with explicit parameters.
+    /// Creates a spec with core parameters.
     ///
-    /// ### Parameters
-    /// - `task`: Task to execute
-    /// - `restart`: When to restart (never/always/on-failure)
-    /// - `backoff`: How to delay between retries
-    /// - `timeout`: Optional per-attempt timeout (`None` = no timeout)
+    /// Sets `max_retries` to `0` (unlimited).
+    /// Use [`.with_max_retries()`](Self::with_max_retries) to limit retry attempts.
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
@@ -98,57 +77,53 @@ impl TaskSpec {
         timeout: Option<Duration>,
     ) -> Self {
         Self {
-            task,
             restart,
             backoff,
             timeout,
+
+            task,
+
             max_retries: 0,
         }
     }
 
-    /// Creates a one-shot task that runs once and never restarts.
-    ///
-    /// Equivalent to `TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)`.
-    ///
-    /// Use builder methods (`.with_timeout()`, `.with_backoff()`) to customize further.
+    /// One-shot: run once, never restart.
     pub fn once(task: TaskRef) -> Self {
         Self {
-            task,
             restart: RestartPolicy::Never,
             backoff: BackoffPolicy::default(),
             timeout: None,
+
+            task,
+
             max_retries: 0,
         }
     }
 
-    /// Creates a restartable task that restarts on failure with default backoff.
-    ///
-    /// Equivalent to `TaskSpec::new(task, RestartPolicy::OnFailure, BackoffPolicy::default(), None)`.
-    ///
-    /// Use builder methods (`.with_timeout()`, `.with_backoff()`, `.with_restart()`) to customize further.
+    /// Restartable: restart on failure with default backoff.
     pub fn restartable(task: TaskRef) -> Self {
         Self {
-            task,
             restart: RestartPolicy::OnFailure,
             backoff: BackoffPolicy::default(),
             timeout: None,
+
+            task,
+
             max_retries: 0,
         }
     }
 
-    /// Creates a task specification inheriting defaults from global config.
+    /// Inherit restart, backoff, timeout, and max_retries from global config.
     ///
-    /// Uses `SupervisorConfig::default_timeout()` so that `0s` in config is treated as `None`.
-    ///
-    /// ### Parameters
-    /// - `task`: Task to execute
-    /// - `cfg`: Config to inherit restart/backoff/timeout from
+    /// A config `timeout` of [`Duration::ZERO`] is treated as "no timeout" (`None`).
     pub fn with_defaults(task: TaskRef, cfg: &SupervisorConfig) -> Self {
         Self {
-            task,
             restart: cfg.restart,
             backoff: cfg.backoff,
             timeout: cfg.default_timeout(),
+
+            task,
+
             max_retries: cfg.max_retries,
         }
     }
@@ -158,7 +133,7 @@ impl TaskSpec {
         &self.task
     }
 
-    /// Convenience: returns the task name.
+    /// Returns the task name.
     pub fn name(&self) -> &str {
         self.task.name()
     }
@@ -178,30 +153,30 @@ impl TaskSpec {
         self.timeout
     }
 
-    /// Returns the maximum number of retry attempts (`0` = unlimited).
+    /// Returns the maximum retry attempts (`0` = unlimited).
     pub fn max_retries(&self) -> u32 {
         self.max_retries
     }
 
-    /// Returns a new spec with updated timeout.
+    /// Builder: set timeout.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Returns a new spec with updated backoff.
+    /// Builder: set backoff policy.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
         self.backoff = backoff;
         self
     }
 
-    /// Returns a new spec with updated restart policy.
+    /// Builder: set restart policy.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = restart;
         self
     }
 
-    /// Returns a new spec with updated max retries (`0` = unlimited).
+    /// Builder: set max retries (`0` = unlimited).
     ///
     /// Only counts failure-driven retries, not success-driven restarts.
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {

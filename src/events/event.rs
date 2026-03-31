@@ -1,18 +1,19 @@
 //! # Runtime events emitted by the supervisor and task actors.
 //!
 //! The [`EventKind`] enum classifies event types across three categories:
-//! - **Lifecycle events**: task execution flow (starting, stopped, failed, timeout)
 //! - **Management events**: runtime task control (add/remove requests and confirmations)
+//! - **Lifecycle events**: task execution flow (starting, stopped, failed, timeout)
 //! - **Terminal events**: actor final states (exhausted policy, dead)
 //!
-//! The [`Event`] struct carries additional metadata such as timestamps, task name,
-//! reasons, and backoff delays.
+//! The [`Event`] struct carries additional metadata such as timestamps, task name, reasons, and backoff delays.
 //!
 //! ## Ordering guarantees
+//!
 //! Each event has a globally unique sequence number (`seq`) that increases monotonically.
 //! Use `seq` to restore the exact order when events are delivered out of order.
 //!
 //! ## Example
+//!
 //! ```rust
 //! use std::time::Duration;
 //! use taskvisor::{Event, EventKind};
@@ -38,7 +39,6 @@ static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
-    // === Subscriber events ===
     /// Subscriber panicked during event processing.
     ///
     /// Sets:
@@ -57,7 +57,6 @@ pub enum EventKind {
     /// - `seq`: global sequence
     SubscriberOverflow,
 
-    // === Shutdown events ===
     /// Shutdown requested (OS signal observed).
     ///
     /// Sets:
@@ -79,7 +78,6 @@ pub enum EventKind {
     /// - `seq`: global sequence
     GraceExceeded,
 
-    // === Task lifecycle events ===
     /// Task is starting an attempt.
     ///
     /// Sets:
@@ -129,12 +127,13 @@ pub enum EventKind {
     /// - `seq`: global sequence
     BackoffScheduled,
 
-    // === Runtime task management events ===
     /// Request to add a new task to the supervisor.
+    ///
+    /// Published by Supervisor on the bus for observability before sending
+    /// the `Add` command to Registry via mpsc.
     ///
     /// Sets:
     /// - `task`: logical task name
-    /// - `spec` (private): task spec to spawn
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     TaskAddRequested,
@@ -163,7 +162,6 @@ pub enum EventKind {
     /// - `seq`: global sequence
     TaskRemoved,
 
-    // === Actor terminal states ===
     /// Actor exhausted its restart policy and will not restart.
     ///
     /// Emitted when:
@@ -182,7 +180,6 @@ pub enum EventKind {
     ///
     /// Emitted when:
     /// - Task returned `TaskError::Fatal`
-    /// - (Future) max retries exceeded
     ///
     /// Sets:
     /// - `task`: task name
@@ -217,7 +214,7 @@ pub enum EventKind {
     ControllerSlotTransition,
 }
 
-/// Reason for schedule the next run/backoff.
+/// Reason for scheduling the next run/backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackoffSource {
     Success,
@@ -229,6 +226,12 @@ pub enum BackoffSource {
 /// - `seq`: monotonic global sequence for ordering
 /// - `at`: wall-clock timestamp (for logs)
 /// - other optional fields are set depending on the [`EventKind`]
+///
+/// # Also
+///
+/// - [`EventKind`] - event classification
+/// - [`Subscribe`](crate::Subscribe) - user-defined event handler trait
+/// - [`LogWriter`](crate::LogWriter) - built-in human-readable event printer
 #[derive(Clone)]
 pub struct Event {
     /// Globally unique, monotonically increasing sequence number.
@@ -250,9 +253,6 @@ pub struct Event {
     pub kind: EventKind,
     /// Source for backoff scheduling (success vs failure).
     pub backoff_source: Option<BackoffSource>,
-
-    /// Internal task specification (used only for TaskAddRequested).
-    pub(crate) spec: Option<crate::tasks::TaskSpec>,
 }
 
 impl Event {
@@ -262,13 +262,12 @@ impl Event {
             seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Release),
             kind,
             at: SystemTime::now(),
-            attempt: None,
-            timeout_ms: None,
-            reason: None,
-            delay_ms: None,
             backoff_source: None,
+            timeout_ms: None,
+            delay_ms: None,
+            attempt: None,
+            reason: None,
             task: None,
-            spec: None,
         }
     }
 
@@ -339,11 +338,13 @@ impl Event {
             .with_reason(info)
     }
 
+    /// Returns `true` if this is a [`EventKind::SubscriberOverflow`] event.
     #[inline]
     pub fn is_subscriber_overflow(&self) -> bool {
         matches!(self.kind, EventKind::SubscriberOverflow)
     }
 
+    /// Returns `true` if this is a [`EventKind::SubscriberPanicked`] event.
     #[inline]
     pub fn is_subscriber_panic(&self) -> bool {
         matches!(self.kind, EventKind::SubscriberPanicked)
@@ -357,11 +358,51 @@ impl Event {
             EventKind::SubscriberOverflow | EventKind::SubscriberPanicked
         )
     }
+}
 
-    #[inline]
-    pub(crate) fn with_spec(mut self, spec: crate::tasks::TaskSpec) -> Self {
-        self.spec = Some(spec);
-        self
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seq_increases_monotonically() {
+        let a = Event::new(EventKind::TaskStarting);
+        let b = Event::new(EventKind::TaskStopped);
+        assert!(b.seq > a.seq, "seq must grow: {} vs {}", a.seq, b.seq);
+    }
+
+    #[test]
+    fn with_timeout_clamps_large_duration() {
+        let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
+        let ev = Event::new(EventKind::TimeoutHit).with_timeout(huge);
+        assert_eq!(ev.timeout_ms, Some(u32::MAX));
+    }
+
+    #[test]
+    fn with_delay_clamps_large_duration() {
+        let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
+        let ev = Event::new(EventKind::BackoffScheduled).with_delay(huge);
+        assert_eq!(ev.delay_ms, Some(u32::MAX));
+    }
+
+    #[test]
+    fn is_internal_diagnostic_covers_both_variants() {
+        let overflow = Event::new(EventKind::SubscriberOverflow);
+        let panic = Event::new(EventKind::SubscriberPanicked);
+        let normal = Event::new(EventKind::TaskStarting);
+
+        assert!(overflow.is_internal_diagnostic());
+        assert!(panic.is_internal_diagnostic());
+        assert!(!normal.is_internal_diagnostic());
+    }
+
+    #[test]
+    fn subscriber_overflow_factory_sets_fields() {
+        let ev = Event::subscriber_overflow("my-sub", "full");
+        assert_eq!(ev.kind, EventKind::SubscriberOverflow);
+        assert_eq!(ev.task.as_deref(), Some("my-sub"));
+        assert!(ev.reason.as_deref().unwrap().contains("subscriber=my-sub"));
+        assert!(ev.reason.as_deref().unwrap().contains("reason=full"));
     }
 }
 

@@ -7,6 +7,8 @@ includes:
       rust_version: "1.90.0"
       cache_dir: ".cache"
       image_patch: "-1"
+      git_root:
+        sh: git rev-parse --show-toplevel
 
 tasks:
   default:
@@ -15,7 +17,7 @@ tasks:
       - echo "Please enter a task or use '-l' or '--list-all' to list all available tasks"
     silent: true
 
-  cargo/docs:
+  ci:cargo/docs:
     desc: Run 'rustdoc'.
     silent: true
     cmds:

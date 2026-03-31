@@ -1,55 +1,6 @@
-//! # Function-backed task implementation.
-//!
-//! Provides [`TaskFn`], a task implementation that wraps closures.
-//!
-//! ## Architecture
-//! ```text
-//! TaskFn<F> where F: Fn(CancellationToken) -> Future
-//!     └─► Each spawn() call creates a NEW future
-//!         └─► Future owns its state (no sharing between restarts)
-//! ```
-//!
-//! ## Example
-//! ```rust
-//! use tokio_util::sync::CancellationToken;
-//! use taskvisor::{TaskFn, TaskRef, TaskError};
-//! use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-//! use std::time::Duration;
-//!
-//! // Stateless task (no shared state):
-//! let simple: TaskRef = TaskFn::arc("simple", |ctx: CancellationToken| async move {
-//!     loop {
-//!         tokio::select! {
-//!             _ = ctx.cancelled() => return Err(TaskError::Canceled),
-//!             _ = tokio::time::sleep(Duration::from_secs(1)) => {
-//!                 // do one unit of work...
-//!             }
-//!         }
-//!     }
-//! });
-//!
-//! // Stateful task (with Arc for shared state):
-//! let counter = Arc::new(AtomicU64::new(0));
-//! let stateful: TaskRef = TaskFn::arc("counter", {
-//!     let counter = counter.clone();
-//!     move |ctx: CancellationToken| {
-//!         let counter = counter.clone();
-//!         async move {
-//!             loop {
-//!                 tokio::select! {
-//!                     _ = ctx.cancelled() => return Err(TaskError::Canceled),
-//!                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
-//!                         let _ = counter.fetch_add(1, Ordering::Relaxed);
-//!                     }
-//!                 }
-//!             }
-//!         }
-//!     }
-//! });
-//! ```
+//! Closure-based [`Task`] implementation.
 
 use std::{future::Future, sync::Arc};
-
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -57,32 +8,64 @@ use crate::{
     tasks::task::{BoxTaskFuture, Task},
 };
 
-/// Function-backed task implementation.
+/// Closure-based [`Task`] implementation.
 ///
-/// Wraps a closure `F: Fn(CancellationToken) -> Future` that creates a fresh future on each
-/// [`spawn`](Task::spawn) call.
+/// - Wraps `F: Fn(CancellationToken) -> Future`
+/// - Each [`spawn`](Task::spawn) invokes the closure to produce a fresh, independent future.
 ///
-/// ### Rules
-/// - Each `spawn()` creates an independent future (no implicit shared state).
-/// - For shared state, pass it explicitly via `Arc<...>` captured by the closure.
-/// - Closure has no mutable self (must implement `Fn`, not `FnMut`).
+/// ## Stateless task
+///
+/// ```rust
+/// use tokio_util::sync::CancellationToken;
+/// use taskvisor::{TaskFn, TaskRef, TaskError};
+///
+/// let worker: TaskRef = TaskFn::arc("worker", |_ctx: CancellationToken| async move {
+///     // do some work and complete
+///     Ok(())
+/// });
+/// ```
+///
+/// ## Stateful task (shared state via `Arc`)
+///
+/// ```rust
+/// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+/// use std::time::Duration;
+/// use tokio_util::sync::CancellationToken;
+///
+/// use taskvisor::{TaskFn, TaskRef, TaskError};
+///
+/// let counter = Arc::new(AtomicU64::new(0));
+/// let task: TaskRef = TaskFn::arc("counter", {
+///     let counter = counter.clone();
+///     move |ctx: CancellationToken| {
+///         // clone per-attempt; the underlying value persists across restarts.
+///         let counter = counter.clone();
+///         async move {
+///             loop {
+///                 tokio::select! {
+///                     _ = ctx.cancelled() => return Err(TaskError::Canceled),
+///                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
+///                         let _ = counter.fetch_add(1, Ordering::Relaxed);
+///                     }
+///                 }
+///             }
+///         }
+///     }
+/// });
+/// ```
+///
+/// ## Also
+///
+/// - See the [`Task`](crate::Task) trait documentation.
+/// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 #[derive(Debug)]
 pub struct TaskFn<F> {
-    /// Task name used in logs / metrics.
     name: Arc<str>,
-    /// Factory closure that produces a new future per spawn.
     f: F,
 }
 
 impl<F> TaskFn<F> {
-    /// Creates a new function-backed task with the given name.
-    ///
-    /// ### Parameters
-    /// - `name`: Task name (for logging, metrics).
-    /// - `f`: Closure that creates a future when called.
-    ///
-    /// ### Notes
-    /// Prefer [`TaskFn::arc`] when you need a [`TaskRef`](crate::TaskRef) immediately.
+    /// Creates a new task.
     pub fn new(name: impl Into<Arc<str>>, f: F) -> Self {
         Self {
             name: name.into(),
@@ -90,20 +73,7 @@ impl<F> TaskFn<F> {
         }
     }
 
-    /// Creates the task and returns it as a shared handle (`Arc<dyn Task>`).
-    ///
-    /// This is the most common way to create a `TaskFn`.
-    ///
-    /// ### Example
-    /// ```rust
-    /// use tokio_util::sync::CancellationToken;
-    /// use taskvisor::{TaskFn, TaskRef, TaskError};
-    ///
-    /// let t: TaskRef = TaskFn::arc("hello", |_ctx: CancellationToken| async {
-    ///     Ok::<_, TaskError>(())
-    /// });
-    /// assert_eq!(t.name(), "hello");
-    /// ```
+    /// Creates the task as a [`TaskRef`](crate::TaskRef) ready to pass to the supervisor.
     pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {
         Arc::new(Self::new(name, f))
     }

@@ -1,25 +1,11 @@
 //! # Supervisor handle for dynamic task management.
 //!
-//! [`SupervisorHandle`] is returned by [`Supervisor::serve()`] and provides
-//! the full runtime management API: add/remove/cancel tasks, query state,
-//! and initiate graceful shutdown.
+//! [`SupervisorHandle`] is returned by [`Supervisor::serve()`] and provides the full runtime management API.
 //!
 //! This is the **only** way to manage tasks dynamically at runtime.
 //! [`Supervisor::run()`] is a self-contained entry point for static task sets.
-//!
-//! ## Why a separate handle?
-//!
-//! Separating the runtime management API into a handle prevents a common
-//! misuse pattern: spawning `run(vec![])` in the background and then calling
-//! `add()` — which silently fails because `run()` exits immediately
-//! when the registry is empty.
-//!
-//! With this design, `add` is only available on `SupervisorHandle`,
-//! which guarantees the runtime is alive and ready.
 
-use std::sync::Arc;
-use std::time::Duration;
-
+use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast;
 
 use crate::error::RuntimeError;
@@ -30,10 +16,13 @@ use super::supervisor::Supervisor;
 
 /// Handle for managing a running supervisor.
 ///
-/// Obtained via [`Supervisor::serve()`]. Provides the full runtime
-/// management API: add/remove/cancel tasks, query state, shutdown.
+/// Obtained via [`Supervisor::serve()`]. Provides the full runtime management API.
 ///
-/// The handle holds an `Arc<Supervisor>` — cloning is cheap.
+/// # Also
+///
+/// - [`Supervisor`](crate::Supervisor) - the runtime behind this handle
+/// - [`SupervisorConfig`](crate::SupervisorConfig) - configuration knobs
+/// - [`TaskSpec`](crate::TaskSpec) - task configuration passed to [`add`](Self::add)
 ///
 /// ## Example
 /// ```rust,no_run
@@ -91,16 +80,14 @@ impl SupervisorHandle {
     /// Subscribes to the event bus **before** publishing `TaskAddRequested`,
     /// then waits for the matching `TaskAdded` event from the registry.
     ///
-    /// Returns `Ok(())` when the task is confirmed running, or
-    /// `RuntimeError::TaskAddTimeout` if confirmation doesn't arrive
-    /// within `timeout`.
+    /// Returns `Ok(())` when the task is confirmed running, or `RuntimeError::TaskAddTimeout`
+    /// if confirmation doesn't arrive within `timeout`.
     pub async fn add_and_wait(
         &self,
         spec: TaskSpec,
         timeout: Duration,
     ) -> Result<(), RuntimeError> {
         let target: Arc<str> = Arc::from(spec.task().name());
-        // Subscribe BEFORE publishing — guarantees no missed events.
         let mut rx = self.inner.subscribe_bus();
         self.inner.add_task(spec)?;
 
@@ -116,7 +103,6 @@ impl SupervisorHandle {
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Events were lost. Check registry directly.
                         if self.inner.registry_contains(&target2).await {
                             return Ok(());
                         }
@@ -126,7 +112,6 @@ impl SupervisorHandle {
                     }
                 }
             }
-            // Bus closed — check if task made it in before shutdown.
             if self.inner.registry_contains(&target2).await {
                 Ok(())
             } else {
@@ -148,17 +133,24 @@ impl SupervisorHandle {
 
     /// Removes a task by name.
     ///
-    /// The task will be cancelled and removed asynchronously.
+    /// Fire-and-forget: publishes `TaskRemoveRequested` and returns immediately.
+    /// The task will be cancelled and cleaned up asynchronously by the registry.
     pub fn remove(&self, name: &str) -> Result<(), RuntimeError> {
         self.inner.remove_task(name)
     }
 
-    /// Returns a sorted list of currently active task names.
+    /// Returns a sorted list of registered task names (from the registry).
+    ///
+    /// Includes tasks in any state: starting, running, stopping.
+    /// See [`snapshot`](Self::snapshot) for only currently executing tasks.
     pub async fn list(&self) -> Vec<Arc<str>> {
         self.inner.list_tasks().await
     }
 
-    /// Returns a sorted list of currently alive task names.
+    /// Returns a sorted list of currently alive task names (from the alive tracker).
+    ///
+    /// Only includes tasks whose last lifecycle event was [`TaskStarting`](crate::EventKind::TaskStarting).
+    /// See [`list`](Self::list) for all registered tasks regardless of state.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         self.inner.snapshot().await
     }

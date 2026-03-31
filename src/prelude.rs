@@ -5,10 +5,6 @@
 //! ```rust
 //! use taskvisor::prelude::*;
 //! ```
-//!
-//! This includes the core types for defining tasks, configuring the supervisor,
-//! subscribing to events, and the `CancellationToken` from `tokio-util` that
-//! every task implementation needs.
 
 // Core
 pub use crate::core::{Supervisor, SupervisorConfig, SupervisorHandle};
@@ -17,7 +13,7 @@ pub use crate::core::{Supervisor, SupervisorConfig, SupervisorHandle};
 pub use crate::tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
 
 // Policies
-pub use crate::policies::{BackoffPolicy, RestartPolicy};
+pub use crate::policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
 
 // Events
 pub use crate::events::{Event, EventKind};

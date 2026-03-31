@@ -1,31 +1,30 @@
 //! # Task registry - event-driven task lifecycle manager.
 //!
-//! Subscribes to Bus and manages active task actors:
-//! - On `TaskAddRequested(spec)`  → spawn actor, insert handle, publish `TaskAdded`
-//! - On `TaskRemoveRequested(name)` → cancel token, await join, publish `TaskRemoved`
-//! - On `ActorExhausted(name)` / `ActorDead(name)` → remove handle, await join, publish `TaskRemoved`
-//! - On runtime shutdown (registry listener stops) → `cancel_all()` (cancel → join → `TaskRemoved` for each)
+//! Manages active task actors using two input channels:
+//! - **Command channel** (`mpsc`): guaranteed delivery for `Add`/`Remove` commands.
+//! - **Event bus** (`broadcast`): lifecycle events from actors (`ActorExhausted`, `ActorDead`).
 //!
 //! ## Architecture
 //! ```text
-//! Bus → Registry.event_listener()
-//!         ├─► TaskAddRequested(spec)    → spawn_and_register(spec) → publish TaskAdded
-//!         ├─► TaskRemoveRequested(name) → cancel_and_remove(name)  → publish TaskRemoved
-//!         ├─► ActorExhausted(name)      → cleanup_task(name)       → publish TaskRemoved
-//!         └─► ActorDead(name)           → cleanup_task(name)       → publish TaskRemoved
+//! Supervisor ─► bus.publish(TaskAddRequested) ─► Bus (observability, fire-and-forget)
+//!            ─► cmd_tx.send(Add(spec)) ────────► Registry.spawn_listener()
+//!                                                   ├─► Add(spec)            ─► spawn_and_register
+//!                                                   ├─► Remove(name)         ─► cancel_and_remove
+//!                                                   ├─► ActorExhausted(name) ─► cleanup_task
+//!                                                   └─► ActorDead(name)      ─► cleanup_task
 //! ```
 //!
 //! ## Rules
-//! - Registry owns JoinHandle + CancellationToken for each actor
-//! - Cleanup is event-driven (no polling) and idempotent (safe on duplicates/races)
+//!
 //! - Does **not** react to `TaskStopped` directly (cleanup happens on actor terminal events)
-//! - Publishes `TaskAdded`/`TaskRemoved` for observability
+//! - Cleanup is event-driven *(no polling)* and idempotent (safe on duplicates/races)
 //! - Exposes `wait_until_empty` via internal notifier for shutdown coordination
+//! - Registry owns JoinHandle + CancellationToken for each actor
+//! - Publishes `TaskAdded`/`TaskRemoved` for observability
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::{Notify, RwLock, Semaphore};
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -33,18 +32,38 @@ use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
 use crate::events::{Bus, Event, EventKind};
 use crate::tasks::TaskSpec;
 
+/// Command sent via guaranteed-delivery channel (mpsc).
+///
+/// Separated from the broadcast bus to ensure control commands are never lost to `Lagged`.
+/// The Supervisor publishes observability events on the bus before sending the command.
+pub(crate) enum RegistryCommand {
+    /// Add a new task. Supervisor publishes `TaskAddRequested` on bus before sending.
+    Add(TaskSpec),
+    /// Remove a task by name. Supervisor publishes `TaskRemoveRequested` on bus before sending.
+    Remove(Arc<str>),
+}
+
 struct Handle {
     join: JoinHandle<ActorExitReason>,
     cancel: CancellationToken,
 }
 
 /// Event-driven registry of active task actors.
+///
+/// See the [module-level documentation](self) for the dual-channel architecture.
+///
+/// # Also
+///
+/// - [`Supervisor`](super::supervisor::Supervisor) - sends commands via mpsc, owns the registry
+/// - [`TaskActor`](super::actor::TaskActor) - per-task supervisor spawned by this registry
+/// - [`Bus`](crate::events::Bus) - delivers actor terminal events for cleanup
 pub(crate) struct Registry {
     tasks: RwLock<HashMap<Arc<str>, Handle>>,
     bus: Bus,
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
     empty_notify: Notify,
+    cmd_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryCommand>>>,
 }
 
 impl Registry {
@@ -53,6 +72,7 @@ impl Registry {
         bus: Bus,
         runtime_token: CancellationToken,
         semaphore: Option<Arc<Semaphore>>,
+        cmd_rx: mpsc::UnboundedReceiver<RegistryCommand>,
     ) -> Arc<Self> {
         Arc::new(Self {
             tasks: RwLock::new(HashMap::new()),
@@ -60,6 +80,7 @@ impl Registry {
             runtime_token,
             semaphore,
             empty_notify: Notify::new(),
+            cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
         })
     }
 
@@ -73,9 +94,7 @@ impl Registry {
     /// Wait until the registry becomes empty.
     ///
     /// Uses the register-before-check pattern to avoid race conditions:
-    /// `notified()` is created **before** checking the condition,
-    /// but `.await`ed **after**. This ensures no notification is lost between
-    /// the check and the wait.
+    /// `notified()` is created **before** checking the condition, but `.await`ed **after**.
     pub async fn wait_until_empty(&self) {
         loop {
             let notified = self.empty_notify.notified();
@@ -87,17 +106,42 @@ impl Registry {
     }
 
     /// Spawns the event listener task.
+    ///
+    /// Consumes the command receiver stored during construction.
+    /// Listens on two channels via `select!`:
+    /// - **cmd_rx** (mpsc): guaranteed-delivery commands (`Add`, `Remove`).
+    /// - **bus_rx** (broadcast): actor lifecycle events (`ActorExhausted`, `ActorDead`)
     pub fn spawn_listener(self: Arc<Self>) {
-        let mut rx = self.bus.subscribe();
+        let mut cmd_rx = self
+            .cmd_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("spawn_listener called exactly once");
+
+        let mut bus_rx = self.bus.subscribe();
         let rt = self.runtime_token.clone();
         let me = self.clone();
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
+
                     _ = rt.cancelled() => break,
-                    msg = rx.recv() => match msg {
-                        Ok(ev) => me.handle_event(&ev).await,
+
+                    cmd = cmd_rx.recv() => match cmd {
+                        Some(RegistryCommand::Add(spec)) => {
+                            me.spawn_and_register(spec).await;
+                        }
+                        Some(RegistryCommand::Remove(name)) => {
+                            me.remove_task(&name).await;
+                        }
+                        None => break,
+                    },
+
+                    msg = bus_rx.recv() => match msg {
+                        Ok(ev) => me.handle_bus_event(&ev).await,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             me.bus.publish(
@@ -115,19 +159,11 @@ impl Registry {
         });
     }
 
-    /// Handles incoming events.
-    async fn handle_event(&self, event: &Event) {
+    /// Handles lifecycle events from the bus.
+    ///
+    /// Only processes actor terminal events.
+    async fn handle_bus_event(&self, event: &Event) {
         match event.kind {
-            EventKind::TaskAddRequested => {
-                if let Some(spec) = &event.spec {
-                    self.spawn_and_register(spec.clone()).await;
-                }
-            }
-            EventKind::TaskRemoveRequested => {
-                if let Some(name) = &event.task {
-                    self.remove_task(name).await;
-                }
-            }
             EventKind::ActorExhausted | EventKind::ActorDead => {
                 if let Some(name) = &event.task {
                     self.cleanup_task(name).await;
@@ -177,10 +213,11 @@ impl Registry {
 
         let mut tasks = self.tasks.write().await;
         if tasks.contains_key(&*task_name) {
+            drop(tasks);
             self.bus.publish(
-                Event::new(EventKind::TaskFailed)
+                Event::new(EventKind::TaskAdded)
                     .with_task(task_name)
-                    .with_reason("task_already_exists"),
+                    .with_reason("already_exists"),
             );
             return;
         }
@@ -223,7 +260,7 @@ impl Registry {
             self.join_and_report(name, handle.join).await;
         } else {
             self.bus.publish(
-                Event::new(EventKind::TaskFailed)
+                Event::new(EventKind::TaskRemoved)
                     .with_task(name)
                     .with_reason("task_not_found"),
             );
