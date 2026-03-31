@@ -9,4 +9,4 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run docs gen
         uses: soltiHQ/actions/taskfile@main
-        with: { command: cargo/docs }
+        with: { command: ci:cargo/docs }
