@@ -101,6 +101,8 @@ pub enum EventKind {
     /// - `task`: task name
     /// - `attempt`: attempt number
     /// - `reason`: failure message
+    /// - `exit_code`: numeric exit code when the error came from a
+    ///   process-like runtime; `None` for logical errors
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     TaskFailed,
@@ -167,11 +169,13 @@ pub enum EventKind {
     /// Emitted when:
     /// - `RestartPolicy::Never` → task completed (success or handled case)
     /// - `RestartPolicy::OnFailure` → task completed successfully
+    /// - retry budget exceeded on a retryable failure
     ///
     /// Sets:
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: optional message
+    /// - `exit_code`: numeric exit code (process-like runtimes); `None` otherwise
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     ActorExhausted,
@@ -185,6 +189,7 @@ pub enum EventKind {
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: fatal error message
+    /// - `exit_code`: numeric exit code when the fatal error; `None` for logical errors
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     ActorDead,
