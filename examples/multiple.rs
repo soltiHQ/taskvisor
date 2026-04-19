@@ -76,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if n < 3 {
                 Err(TaskError::Fail {
                     reason: format!("attempt #{n} not ready yet"),
+                    exit_code: None,
                 })
             } else {
                 println!("[resilient] success on attempt #{n}!");

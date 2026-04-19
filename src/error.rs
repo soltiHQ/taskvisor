@@ -93,15 +93,19 @@ pub enum TaskError {
 
     /// Non-recoverable fatal error (should not be retried).
     #[error("fatal error (no retry): {reason}")]
-    Fatal { reason: String },
+    Fatal {
+        reason: String,
+        exit_code: Option<i32>,
+    },
 
     /// Task execution failed but may succeed if retried.
     #[error("execution failed: {reason}")]
-    Fail { reason: String },
+    Fail {
+        reason: String,
+        exit_code: Option<i32>,
+    },
 
     /// Task was canceled due to shut down or parent cancellation.
-    ///
-    /// This is **not an error** in traditional sense, but signals intentional termination.
     #[error("context canceled")]
     Canceled,
 }
@@ -125,5 +129,75 @@ impl TaskError {
     /// Indicates whether the error is fatal.
     pub fn is_fatal(&self) -> bool {
         matches!(self, TaskError::Fatal { .. })
+    }
+
+    /// Numeric exit code when the error originated from a process-like runtime.
+    /// `None` for `Timeout`, `Canceled`, and for logical `Fail`/`Fatal`
+    /// errors that have no process behind them.
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            TaskError::Fatal { exit_code, .. } | TaskError::Fail { exit_code, .. } => *exit_code,
+            TaskError::Timeout { .. } | TaskError::Canceled => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_is_some_for_fail_with_code() {
+        let e = TaskError::Fail {
+            reason: "x".into(),
+            exit_code: Some(5),
+        };
+        assert_eq!(e.exit_code(), Some(5));
+        assert!(e.is_retryable());
+        assert!(!e.is_fatal());
+    }
+
+    #[test]
+    fn exit_code_is_some_for_fatal_with_code() {
+        let e = TaskError::Fatal {
+            reason: "x".into(),
+            exit_code: Some(137),
+        };
+        assert_eq!(e.exit_code(), Some(137));
+        assert!(!e.is_retryable());
+        assert!(e.is_fatal());
+    }
+
+    #[test]
+    fn exit_code_is_none_for_logical_fail() {
+        let e = TaskError::Fail {
+            reason: "logical".into(),
+            exit_code: None,
+        };
+        assert_eq!(e.exit_code(), None);
+    }
+
+    #[test]
+    fn exit_code_is_none_for_timeout_and_canceled() {
+        use std::time::Duration;
+        assert_eq!(
+            TaskError::Timeout {
+                timeout: Duration::from_secs(1),
+            }
+            .exit_code(),
+            None,
+        );
+        assert_eq!(TaskError::Canceled.exit_code(), None);
+    }
+
+    #[test]
+    fn display_still_renders_reason_only() {
+        let e = TaskError::Fail {
+            reason: "boom".into(),
+            exit_code: Some(1),
+        };
+        // exit_code is surfaced via the structured `exit_code()` accessor,
+        // not through Display — the string format stays stable for logs.
+        assert_eq!(e.to_string(), "execution failed: boom");
     }
 }

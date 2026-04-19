@@ -239,12 +239,14 @@ impl TaskActor {
                     }
                 }
                 Err(e) if e.is_fatal() => {
-                    self.bus.publish(
-                        Event::new(EventKind::ActorDead)
-                            .with_task(task_name.clone())
-                            .with_attempt(attempt)
-                            .with_reason(e.to_string()),
-                    );
+                    let mut ev = Event::new(EventKind::ActorDead)
+                        .with_task(task_name.clone())
+                        .with_attempt(attempt)
+                        .with_reason(e.to_string());
+                    if let Some(code) = e.exit_code() {
+                        ev = ev.with_exit_code(code);
+                    }
+                    self.bus.publish(ev);
                     return ActorExitReason::Fatal;
                 }
                 Err(TaskError::Canceled) => {
@@ -268,12 +270,14 @@ impl TaskActor {
                         } else {
                             e.to_string()
                         };
-                        self.bus.publish(
-                            Event::new(EventKind::ActorExhausted)
-                                .with_task(task_name.clone())
-                                .with_attempt(attempt)
-                                .with_reason(reason),
-                        );
+                        let mut ev = Event::new(EventKind::ActorExhausted)
+                            .with_task(task_name.clone())
+                            .with_attempt(attempt)
+                            .with_reason(reason);
+                        if let Some(code) = e.exit_code() {
+                            ev = ev.with_exit_code(code);
+                        }
+                        self.bus.publish(ev);
                         return ActorExitReason::PolicyExhausted;
                     }
 
@@ -366,6 +370,7 @@ mod tests {
             Box::pin(async {
                 Err(TaskError::Fail {
                     reason: "boom".into(),
+                    exit_code: None,
                 })
             })
         }
@@ -380,6 +385,7 @@ mod tests {
             Box::pin(async {
                 Err(TaskError::Fatal {
                     reason: "fatal".into(),
+                    exit_code: None,
                 })
             })
         }
@@ -405,6 +411,7 @@ mod tests {
                 Box::pin(async {
                     Err(TaskError::Fail {
                         reason: "transient".into(),
+                        exit_code: None,
                     })
                 })
             } else {

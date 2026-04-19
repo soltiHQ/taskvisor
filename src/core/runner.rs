@@ -119,12 +119,14 @@ fn publish_stopped(bus: &Bus, name: &str) {
 
 /// Publishes `TaskFailed` event with error details.
 fn publish_failed(bus: &Bus, name: &str, attempt: u32, err: &TaskError) {
-    bus.publish(
-        Event::new(EventKind::TaskFailed)
-            .with_task(name)
-            .with_attempt(attempt)
-            .with_reason(err.to_string()),
-    );
+    let mut ev = Event::new(EventKind::TaskFailed)
+        .with_task(name)
+        .with_attempt(attempt)
+        .with_reason(err.to_string());
+    if let Some(code) = err.exit_code() {
+        ev = ev.with_exit_code(code);
+    }
+    bus.publish(ev);
 }
 
 /// Publishes `TimeoutHit` event (always followed by `TaskFailed`).
@@ -183,6 +185,7 @@ mod tests {
             Box::pin(async {
                 Err(TaskError::Fail {
                     reason: "boom".into(),
+                    exit_code: None,
                 })
             })
         }
@@ -200,7 +203,7 @@ mod tests {
             Err(TaskError::Timeout { timeout: dur }) => {
                 assert_eq!(dur, Duration::from_millis(50));
             }
-            Err(TaskError::Fail { reason }) => {
+            Err(TaskError::Fail { reason, .. }) => {
                 panic!("timeout should return TaskError::Timeout, not TaskError::Fail: {reason}");
             }
             other => {
