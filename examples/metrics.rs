@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[flaky-job] attempt #{n} — fail");
                 Err(TaskError::Fail {
                     reason: format!("attempt #{n}"),
+                    exit_code: None,
                 })
             } else {
                 println!("[flaky-job] attempt #{n} — success!");

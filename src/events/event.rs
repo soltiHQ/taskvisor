@@ -249,6 +249,9 @@ pub struct Event {
     pub attempt: Option<u32>,
     /// Name of the task, if applicable.
     pub task: Option<Arc<str>>,
+    /// Numeric exit code, from a process-like runtime.
+    /// `None` for events that have no process behind them.
+    pub exit_code: Option<i32>,
     /// Event classification.
     pub kind: EventKind,
     /// Source for backoff scheduling (success vs failure).
@@ -268,6 +271,7 @@ impl Event {
             attempt: None,
             reason: None,
             task: None,
+            exit_code: None,
         }
     }
 
@@ -305,6 +309,13 @@ impl Event {
     #[inline]
     pub fn with_attempt(mut self, n: u32) -> Self {
         self.attempt = Some(n);
+        self
+    }
+
+    /// Attaches a numeric exit code (from a process-like runtime).
+    #[inline]
+    pub fn with_exit_code(mut self, code: i32) -> Self {
+        self.exit_code = Some(code);
         self
     }
 
@@ -403,6 +414,21 @@ mod tests {
         assert_eq!(ev.task.as_deref(), Some("my-sub"));
         assert!(ev.reason.as_deref().unwrap().contains("subscriber=my-sub"));
         assert!(ev.reason.as_deref().unwrap().contains("reason=full"));
+    }
+
+    #[test]
+    fn new_event_has_no_exit_code() {
+        let ev = Event::new(EventKind::TaskFailed);
+        assert_eq!(ev.exit_code, None);
+    }
+
+    #[test]
+    fn with_exit_code_populates_field() {
+        let ev = Event::new(EventKind::TaskFailed).with_exit_code(42);
+        assert_eq!(ev.exit_code, Some(42));
+
+        let neg = Event::new(EventKind::ActorDead).with_exit_code(-1);
+        assert_eq!(neg.exit_code, Some(-1));
     }
 }
 
