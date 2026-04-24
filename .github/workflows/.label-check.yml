@@ -1,0 +1,41 @@
+name: Label check
+
+# Fails if the PR has none of the labels defined in .github/release.yml
+# (changelog categories + exclude labels). Enforce merges via branch protection
+# → Settings → Rules → require this job as a status check.
+
+on: { workflow_call: {} }
+
+jobs:
+  required:
+    runs-on: ${{ vars.RUNS_ON }}
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify PR has a changelog label
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          allowed=$(
+            {
+              yq '.changelog.categories[].labels[]' .github/release.yml | grep -vxF '*'
+              yq '.changelog.exclude.labels[]' .github/release.yml
+            } | sort -u
+          )
+
+          applied=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' | sort -u)
+          match=$(comm -12 <(printf '%s\n' "$allowed") <(printf '%s\n' "$applied") || true)
+
+          if [ -z "$match" ]; then
+            echo "::error::PR has no changelog label. Apply at least one of:"
+            printf '  - %s\n' $allowed
+            echo "Currently on PR: ${applied:-(none)}"
+            exit 1
+          fi
+          echo "matched: $(printf '%s ' $match)"

@@ -6,7 +6,8 @@ jobs:
   docs:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run docs gen
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci:cargo/docs }
+        with:
+          command: ci:cargo/docs CRATE=taskvisor MANIFEST_PATH=Cargo.toml

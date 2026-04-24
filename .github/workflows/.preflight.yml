@@ -1,12 +1,13 @@
-name: Audit
+name: Preflight
 
 on: { workflow_call: {} }
 
 jobs:
-  docs:
+  publish-dry-run:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v6
-      - name: Run audit
+      - name: Run publish dry-run
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci:cargo/audit }
+        with:
+          command: ci:cargo/publish-dry-run CRATE=taskvisor

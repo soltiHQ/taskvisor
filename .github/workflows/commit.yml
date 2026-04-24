@@ -11,6 +11,7 @@ on:
       - ".gitignore"
       - ".github/ISSUE_TEMPLATE/*"
       - ".github/pull_request_template.md"
+      - ".github/release.yml"
 
 concurrency:
   group: commit-${{ github.ref }}
