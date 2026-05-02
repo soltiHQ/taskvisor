@@ -36,6 +36,10 @@ Taskvisor fills that gap:
 - **Concurrency limits** - global semaphore, per-task timeouts, max retries
 - **Zero unsafe** - pure safe Rust
 
+> Need a complete task-orchestration **agent**: subprocess execution, HTTP/gRPC API, Prometheus metrics, control-plane discovery, ready Grafana dashboards? 
+> 
+> See [Solti SDK](https://github.com/soltiHQ/sdk): built on top of taskvisor.
+
 ---
 
 ## Quick start
@@ -434,4 +438,5 @@ Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/
 <div>
   <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
   <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
+  <a href="https://github.com/soltiHQ/sdk"><img alt="Solti SDK" src="https://img.shields.io/badge/Solti%20SDK-cc6633?style=for-the-badge&logo=rust&logoColor=white"></a>
 </div>
