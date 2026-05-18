@@ -44,14 +44,14 @@ tasks:
         vars:
           DOCS_ARGS: '--features "logging controller"'
 
-  ci/example:
-    desc: Build a Rust example by name. Pass NAME.
+  ci/build:
+    desc: Build a crate. Pass CRATE.
     requires:
-      vars: [ NAME ]
+      vars: [ CRATE ]
     cmds:
-      - task: rust:example
+      - task: rust:build
         vars:
-          NAME: '{{.NAME}}'
+          CRATE: '{{.CRATE}}'
 
   ci/publish-dry-run:
     desc: Simulate 'cargo publish' for the taskvisor crate.
