@@ -1,37 +1,45 @@
 version: '3'
 
 includes:
-  ci:
-    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/cargo/Taskfile.yml
+  rust:
+    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/rust/Taskfile.yml
     vars:
-      rust_version: "1.90.0"
-      cache_dir: ".cache"
       image_patch: "-1"
-      git_root:
-        sh: git rev-parse --show-toplevel
 
 tasks:
-  default:
-    desc: Default task.
+  ci/fmt:
+    desc: Run 'cargo fmt --check'.
     cmds:
-      - echo "Please enter a task or use '-l' or '--list-all' to list all available tasks"
-    silent: true
+      - task: rust:fmt
 
-  ci:cargo/docs:
-    desc: Run 'rustdoc'.
-    silent: true
+  ci/check:
+    desc: Run 'cargo check'.
     cmds:
-      - task: ci:_cargo/tool
-        vars:
-          CMD: >-
-            +nightly rustdoc --lib -Zrustdoc-map --features "logging controller"
-            -Zunstable-options -Zrustdoc-scrape-examples
-            --config 'build.rustdocflags=["--cfg","docsrs","-Z","unstable-options","--cap-lints","warn"]'
+      - task: rust:check
 
-  cargo/bench:
+  ci/clippy:
+    desc: Run 'cargo clippy'.
+    cmds:
+      - task: rust:clippy
+
+  ci/test:
+    desc: Run 'cargo test'.
+    cmds:
+      - task: rust:test
+
+  ci/audit:
+    desc: Run 'cargo audit'.
+    cmds:
+      - task: rust:audit
+
+  ci/bench:
     desc: Run 'cargo bench'.
-    silent: true
     cmds:
-      - task: ci:_cargo/tool
+      - task: rust:bench
+
+  ci/docs:
+    desc: Run 'rustdoc' for the taskvisor crate.
+    cmds:
+      - task: rust:docs
         vars:
-          CMD: "bench"
+          DOCS_ARGS: '--features "logging controller"'

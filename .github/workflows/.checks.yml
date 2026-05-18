@@ -9,7 +9,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run fmt
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci:cargo/fmt }
+        with: { command: ci/fmt }
 
   check:
     runs-on: ${{ vars.RUNS_ON }}
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run check
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci:cargo/check }
+        with: { command: ci/check }
 
   test:
     runs-on: ${{ vars.RUNS_ON }}
@@ -26,17 +26,25 @@ jobs:
 
       - name: Get Cache
         id: cache_get
-        uses: ./.github/actions/cache-get
-        with: { job_name: test }
+        uses: soltiHQ/actions/cache-get@main
+        with:
+          paths: |
+            .cache/cargo
+            .cache/target
+          key: job-test-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml') }}
 
       - name: Run Job
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci:cargo/test }
+        with: { command: ci/test }
 
       - name: Put Cache
         if: steps.cache_get.outputs.cache-hit != 'true'
-        uses: ./.github/actions/cache-put
-        with: { job_name: test }
+        uses: soltiHQ/actions/cache-put@main
+        with:
+          paths: |
+            .cache/cargo
+            .cache/target
+          key: job-test-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml') }}
 
   clippy:
     runs-on: ${{ vars.RUNS_ON }}
@@ -45,14 +53,22 @@ jobs:
 
       - name: Get Cache
         id: cache_get
-        uses: ./.github/actions/cache-get
-        with: { job_name: clippy }
+        uses: soltiHQ/actions/cache-get@main
+        with:
+          paths: |
+            .cache/cargo
+            .cache/target
+          key: job-clippy-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml') }}
 
       - name: Run Job
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci:cargo/clippy }
+        with: { command: ci/clippy }
 
       - name: Put Cache
         if: steps.cache_get.outputs.cache-hit != 'true'
-        uses: ./.github/actions/cache-put
-        with: { job_name: clippy }
+        uses: soltiHQ/actions/cache-put@main
+        with:
+          paths: |
+            .cache/cargo
+            .cache/target
+          key: job-clippy-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml') }}
