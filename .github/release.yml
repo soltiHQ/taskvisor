@@ -1,0 +1,25 @@
+# Configures GitHub's auto-generated release notes.
+
+changelog:
+  exclude:
+    labels:
+      - skip
+  categories:
+    - title: Features
+      labels:
+        - feature
+    - title: Bug fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - docs
+    - title: Dependencies
+      labels:
+        - deps
+    - title: CI/CD
+      labels:
+        - ci
+    - title: Other
+      labels:
+        - "*"

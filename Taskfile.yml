@@ -43,3 +43,20 @@ tasks:
       - task: rust:docs
         vars:
           DOCS_ARGS: '--features "logging controller"'
+
+  ci/build:
+    desc: Build a taskvisor example. Pass CRATE = example name.
+    requires:
+      vars: [ CRATE ]
+    cmds:
+      - task: rust:build
+        vars:
+          CRATE: "taskvisor"
+          BUILD_ARGS: '--example {{.CRATE}} --all-features'
+
+  ci/publish-dry-run:
+    desc: Simulate 'cargo publish' for the taskvisor crate.
+    cmds:
+      - task: rust:publish-dry-run
+        vars:
+          CRATE: "taskvisor"
