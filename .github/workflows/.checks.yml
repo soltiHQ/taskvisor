@@ -6,7 +6,7 @@ jobs:
   fmt:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run fmt
         uses: soltiHQ/actions/taskfile@main
         with: { command: ci/fmt }
@@ -14,7 +14,7 @@ jobs:
   check:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run check
         uses: soltiHQ/actions/taskfile@main
         with: { command: ci/check }
@@ -22,7 +22,7 @@ jobs:
   test:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Get Cache
         id: cache_get
@@ -49,7 +49,7 @@ jobs:
   clippy:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Get Cache
         id: cache_get
