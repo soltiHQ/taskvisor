@@ -12,7 +12,7 @@ jobs:
       - id: set
         shell: bash
         run: |
-          entries=$(find examples -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+          entries=$(find examples -mindepth 1 -maxdepth 1 -type f -name '*.rs' -exec basename {} .rs \;)
           matrix=$(printf '%s\n' "$entries" | jq -Rsc 'split("\n") | map(select(length > 0))')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
