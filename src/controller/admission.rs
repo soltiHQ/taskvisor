@@ -1,6 +1,9 @@
 //! # Per-task admission policy
 //!
-//! Controller treats tasks as **slots** identified by `name`.
+//! The controller admits **one task per slot**.
+//! The slot is the spec's slot key ([`TaskSpec::slot`](crate::TaskSpec::slot)), which falls back to the task
+//! name when not set explicitly - so the admission unit is the *slot*, not the task name (several differently-named runs may share one slot).
+//!
 //! At any given time **one** task may run in a slot.
 //! When a new request for the same slot arrives, the admission policy decides what to do.
 //!
@@ -12,7 +15,7 @@
 //!
 //! ## Invariants
 //!
-//! - Tasks within the same slot never run in parallel (use dynamic names if you need parallel execution).
+//! - Tasks within the same slot never run in parallel (use distinct slots if you need parallel execution).
 //! - Queued requests are executed strictly in submission order.
 
 /// Policy controlling how new submissions are handled when a slot is busy.

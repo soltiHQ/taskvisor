@@ -9,7 +9,7 @@ use crate::TaskSpec;
 /// Request to submit a task to the controller.
 ///
 /// Combines an admission policy and the actual task specification.
-/// The slot name is derived from the task name via [`slot_name`](Self::slot_name).
+/// The slot name comes from the task spec's slot (which falls back to the task name) via [`slot_name`](Self::slot_name).
 ///
 /// # Also
 ///
@@ -48,9 +48,9 @@ impl ControllerSpec {
         }
     }
 
-    /// Returns the slot name (derived from the task name).
+    /// Returns the slot name (admission key).
     pub fn slot_name(&self) -> &str {
-        self.task_spec.name()
+        self.task_spec.slot()
     }
 
     /// Convenience: Queue admission.
@@ -100,8 +100,15 @@ mod tests {
     }
 
     #[test]
-    fn slot_name_equals_task_name() {
+    fn slot_name_falls_back_to_task_name() {
         let cs = ControllerSpec::queue(make_spec("my-slot"));
         assert_eq!(cs.slot_name(), "my-slot");
+    }
+
+    #[test]
+    fn slot_name_uses_explicit_slot() {
+        let cs = ControllerSpec::queue(make_spec("runner-web-7").with_slot("web"));
+        assert_eq!(cs.slot_name(), "web");
+        assert_eq!(cs.task_spec.name(), "runner-web-7");
     }
 }

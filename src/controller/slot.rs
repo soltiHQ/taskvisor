@@ -2,7 +2,7 @@
 //!
 //! [`SlotState`] tracks the current status and pending queue for a single named slot.
 
-use std::{collections::VecDeque, time::Instant};
+use std::{collections::VecDeque, sync::Arc, time::Instant};
 
 use crate::TaskSpec;
 
@@ -15,6 +15,9 @@ use crate::TaskSpec;
 pub(super) struct SlotState {
     /// Current status (idle, running, or terminating).
     pub status: SlotStatus,
+
+    /// Name of the task currently occupying the slot (running or terminating).
+    pub running: Option<Arc<str>>,
 
     /// Queue of pending tasks (FIFO order).
     pub queue: VecDeque<TaskSpec>,
@@ -44,6 +47,7 @@ impl SlotState {
     pub fn new() -> Self {
         Self {
             status: SlotStatus::Idle,
+            running: None,
             queue: VecDeque::new(),
         }
     }
