@@ -1,5 +1,6 @@
 //! Task execution specification.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
@@ -11,8 +12,8 @@ use crate::{
 /// Bundles restart policy, backoff strategy, timeout, and max retries.
 ///
 /// - [`once`](Self::once) for fire-and-forget tasks.
-/// - [`restartable`](Self::restartable) for long-lived workers.
 /// - [`new`](Self::new) for full control over all parameters.
+/// - [`restartable`](Self::restartable) for long-lived workers.
 ///
 /// ## Creating a spec
 /// ```rust
@@ -49,6 +50,7 @@ pub struct TaskSpec {
     backoff: BackoffPolicy,
 
     task: TaskRef,
+    slot: Option<Arc<str>>,
 
     max_retries: u32,
 }
@@ -60,6 +62,7 @@ impl std::fmt::Debug for TaskSpec {
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
             .field("task", &self.task.name())
+            .field("slot", &self.slot())
             .field("max_retries", &self.max_retries)
             .finish()
     }
@@ -82,6 +85,7 @@ impl TaskSpec {
             timeout,
 
             task,
+            slot: None,
 
             max_retries: 0,
         }
@@ -95,6 +99,7 @@ impl TaskSpec {
             timeout: None,
 
             task,
+            slot: None,
 
             max_retries: 0,
         }
@@ -108,6 +113,7 @@ impl TaskSpec {
             timeout: None,
 
             task,
+            slot: None,
 
             max_retries: 0,
         }
@@ -123,6 +129,7 @@ impl TaskSpec {
             timeout: cfg.default_timeout(),
 
             task,
+            slot: None,
 
             max_retries: cfg.max_retries,
         }
@@ -136,6 +143,11 @@ impl TaskSpec {
     /// Returns the task name.
     pub fn name(&self) -> &str {
         self.task.name()
+    }
+
+    /// Returns the slot key used for admission control.
+    pub fn slot(&self) -> &str {
+        self.slot.as_deref().unwrap_or_else(|| self.task.name())
     }
 
     /// Returns the restart policy.
@@ -182,5 +194,37 @@ impl TaskSpec {
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
+    }
+
+    /// Builder: set the admission slot key.
+    ///
+    /// Defaults to the task name.
+    pub fn with_slot(mut self, slot: impl Into<Arc<str>>) -> Self {
+        self.slot = Some(slot.into());
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TaskFn;
+    use tokio_util::sync::CancellationToken;
+
+    fn task(name: &str) -> TaskRef {
+        TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) })
+    }
+
+    #[test]
+    fn slot_falls_back_to_task_name() {
+        let spec = TaskSpec::once(task("my-task"));
+        assert_eq!(spec.slot(), "my-task");
+    }
+
+    #[test]
+    fn with_slot_overrides_slot_but_not_name() {
+        let spec = TaskSpec::once(task("runner-web-7")).with_slot("web");
+        assert_eq!(spec.slot(), "web");
+        assert_eq!(spec.name(), "runner-web-7");
     }
 }
