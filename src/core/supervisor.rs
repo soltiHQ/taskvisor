@@ -379,12 +379,11 @@ impl Supervisor {
         name: &str,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        let exists_before = self.registry.contains(name).await;
-        if !exists_before {
+        let mut rx = self.bus.subscribe();
+        if !self.registry.contains(name).await {
             return Ok(false);
         }
 
-        let mut rx = self.bus.subscribe();
         self.bus.publish(
             Event::new(EventKind::TaskRemoveRequested)
                 .with_task(name)
@@ -491,6 +490,7 @@ impl Supervisor {
     ///
     /// On `Lagged`, falls back to checking the registry directly.
     /// On `Closed`, checks registry as a last resort.
+    /// On timeout, re-checks the registry so a missed `TaskRemoved` is not reported as a spurious timeout.
     async fn wait_task_removed(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
@@ -523,10 +523,16 @@ impl Supervisor {
 
         match timeout(wait_for, wait_for_event).await {
             Ok(result) => result,
-            Err(_) => Err(RuntimeError::TaskRemoveTimeout {
-                name: target,
-                timeout: wait_for,
-            }),
+            Err(_) => {
+                if self.registry.contains(&target).await {
+                    Err(RuntimeError::TaskRemoveTimeout {
+                        name: target,
+                        timeout: wait_for,
+                    })
+                } else {
+                    Ok(true)
+                }
+            }
         }
     }
 }
@@ -619,6 +625,32 @@ mod tests {
             matches!(res, Err(RuntimeError::TaskAlreadyExists { .. })),
             "duplicate add must return TaskAlreadyExists, got {res:?}"
         );
+
+        let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_reports_removed_then_absent() {
+        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+        let handle = sup.serve();
+
+        let t: TaskRef = TaskFn::arc("c", |ctx: CancellationToken| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        handle
+            .add_and_wait(TaskSpec::restartable(t), Duration::from_secs(1))
+            .await
+            .expect("add should succeed");
+
+        let removed = handle.cancel("c").await.expect("cancel should not error");
+        assert!(
+            removed,
+            "cancelling an existing task should report removed=true"
+        );
+
+        let absent = handle.cancel("c").await.expect("cancel should not error");
+        assert!(!absent, "cancelling a missing task should report false");
 
         let _ = handle.shutdown().await;
     }
