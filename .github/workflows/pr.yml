@@ -2,7 +2,7 @@ name: Pr
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [labeled, synchronize, reopened]
 
 concurrency:
   group: pr-${{ github.ref }}
@@ -17,10 +17,12 @@ permissions: {
 jobs:
   audit:
     name: Audit
+    if: ${{ toJSON(github.event.pull_request.labels) != '[]' }}
     uses: ./.github/workflows/.audit.yml
 
   label-check:
     name: Label check
+    if: ${{ toJSON(github.event.pull_request.labels) != '[]' }}
     uses: ./.github/workflows/.label-check.yml
 
   docs:
