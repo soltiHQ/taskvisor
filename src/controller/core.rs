@@ -23,7 +23,7 @@
 
 use std::{
     sync::{Arc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
@@ -33,8 +33,9 @@ use tokio_util::sync::CancellationToken;
 use tokio::sync::broadcast;
 
 use crate::{
-    Supervisor,
+    RuntimeError, Supervisor, TaskSpec,
     events::{Bus, Event, EventKind},
+    identity::TaskId,
 };
 
 use super::{
@@ -87,13 +88,7 @@ pub(crate) struct Controller {
     bus: Bus,
 
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
-
-    /// Reverse index: running task name → slot key.
-    ///
-    /// `TaskRemoved` carries only the task name, but slots are keyed by the logical slot (which may differ from the name).
-    ///  This index lets `on_task_finished` find the owning slot.
-    ///  An entry exists exactly while a task occupies a slot (inserted on start, removed on `TaskRemoved`).
-    running: DashMap<Arc<str>, Arc<str>>,
+    running: DashMap<TaskId, Arc<str>>,
 
     tx: mpsc::Sender<ControllerSpec>,
     rx: RwLock<Option<mpsc::Receiver<ControllerSpec>>>,
@@ -174,12 +169,13 @@ impl Controller {
         Ok(())
     }
 
-    /// Recovers slots that may be stuck in `Running`/`Terminating` after bus lag.
+    /// Recovers slots whose task vanished after a bus lag (a missed `TaskAdded`/`TaskRemoved`).
     ///
-    /// When the broadcast receiver falls behind, we may have missed `TaskRemoved` events.
-    /// Walk all slots and check if the task is still alive in the registry.
-    /// If not, treat it as finished.
+    /// Walks all non-`Idle` slots; if the occupying task is no longer in the registry (and an `Admitting` slot has exceeded the admit deadline),
+    /// the slot is freed and its queue advanced. All correlation/cleanup is keyed by [`TaskId`].
     async fn recover_stale_slots(&self) {
+        const ADMIT_DEADLINE: Duration = Duration::from_secs(5);
+
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
@@ -199,59 +195,46 @@ impl Controller {
             if matches!(slot.status, SlotStatus::Idle) {
                 continue;
             }
+            if let SlotStatus::Admitting { since } = slot.status
+                && since.elapsed() < ADMIT_DEADLINE
+            {
+                continue;
+            }
 
-            let alive = match slot.running.as_deref() {
-                Some(name) => sup.registry_contains(name).await,
+            let alive = match slot.running_id {
+                Some(rid) => sup.contains_id(rid).await,
                 None => false,
             };
             if alive {
                 continue;
             }
 
-            if let Some(name) = slot.running.take() {
-                self.running.remove(&*name);
+            if let Some(id) = slot.running_id.take() {
+                self.running.remove(&id);
             }
             slot.status = SlotStatus::Idle;
 
-            if let Some(next_spec) = slot.queue.pop_front() {
-                let next_name: Arc<str> = Arc::from(next_spec.name());
-                if let Err(e) = sup.add_task(next_spec) {
-                    self.bus.publish(
-                        Event::new(EventKind::ControllerRejected)
-                            .with_task(Arc::clone(&slot_name))
-                            .with_reason(format!("recovery_start_failed: {e}")),
-                    );
-                    continue;
-                }
-                slot.status = SlotStatus::Running {
-                    started_at: Instant::now(),
-                };
-                slot.running = Some(Arc::clone(&next_name));
-                self.running.insert(next_name, Arc::clone(&slot_name));
-                self.bus.publish(
-                    Event::new(EventKind::ControllerSubmitted)
-                        .with_task(Arc::clone(&slot_name))
-                        .with_reason(format!("recovered_from_lag depth={}", slot.queue.len())),
-                );
-            } else {
+            self.start_next_from_queue(&sup, &mut slot, &slot_name);
+
+            if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
                 drop(slot);
                 self.slots.remove(&*slot_name);
             }
         }
     }
 
-    /// Handles a new task submission by applying admission policy to the slot.
+    /// Applies the admission policy for a new submission.
     ///
-    /// **Idle** (any policy): start immediately via `add_task`.
+    /// **Idle**: admit immediately, `add_task` mints the [`TaskId`] and the slot enters `Admitting`;
+    /// it becomes `Running` only when the matching `TaskAdded` is observed.
     ///
-    /// **Queue**: push to tail (FIFO). Rejected if per-slot queue is full.
+    /// **Queue**: push to tail (FIFO); rejected if the per-slot queue is full.
     ///
-    /// **Replace** (latest-wins): replaces the queue head (immediate successor).
-    /// - If `Running` → transition to `Terminating`, call `remove_task` once.
-    /// - If already `Terminating` → replace head only, do NOT call remove again.
-    /// - The next task actually starts in `on_task_finished` upon `TaskRemoved`.
+    /// **Replace** (latest-wins): replaces the queue head;
+    /// if the slot is `Running` the current task is removed now,
+    /// if `Admitting` it is removed once it appears (in [`on_task_added`](Self::on_task_added)).
     ///
-    /// **DropIfRunning**: silently reject if slot is `Running` or `Terminating`.
+    /// **DropIfRunning**: reject while the slot is busy (`Admitting`/`Running`/`Terminating`).
     async fn handle_submission(&self, spec: ControllerSpec) {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
@@ -266,27 +249,36 @@ impl Controller {
 
         match (&slot.status, admission) {
             (SlotStatus::Idle, _) => {
-                let task_name: Arc<str> = Arc::from(task_spec.name());
-                if let Err(e) = sup.add_task(task_spec) {
+                match self.start_in_slot(&sup, &mut slot, &slot_name, task_spec) {
+                    Ok(_id) => {
+                        self.bus.publish(
+                            Event::new(EventKind::ControllerSubmitted)
+                                .with_task(Arc::clone(&slot_name))
+                                .with_reason(format!("admission={admission:?} status=admitting")),
+                        );
+                    }
+                    Err(e) => {
+                        self.bus.publish(
+                            Event::new(EventKind::ControllerRejected)
+                                .with_task(Arc::clone(&slot_name))
+                                .with_reason(format!("add_failed: {e}")),
+                        );
+                        drop(slot);
+                        self.slots.remove(&*slot_name);
+                    }
+                }
+            }
+            (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
+                if let Some(rid) = slot.running_id
+                    && let Err(e) = sup.remove(rid)
+                {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(&slot_name))
-                            .with_reason(format!("add_failed: {}", e)),
+                            .with_reason(format!("remove_failed: {e}")),
                     );
                     return;
                 }
-                slot.status = SlotStatus::Running {
-                    started_at: Instant::now(),
-                };
-                slot.running = Some(Arc::clone(&task_name));
-                self.running.insert(task_name, Arc::clone(&slot_name));
-                self.bus.publish(
-                    Event::new(EventKind::ControllerSubmitted)
-                        .with_task(Arc::clone(&slot_name))
-                        .with_reason(format!("admission={:?} status=running", admission)),
-                );
-            }
-            (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
                 Self::replace_head_or_push(&mut slot, task_spec);
                 slot.status = SlotStatus::Terminating {
                     cancelled_at: Instant::now(),
@@ -296,30 +288,29 @@ impl Controller {
                         .with_task(Arc::clone(&slot_name))
                         .with_reason("running→terminating (replace)"),
                 );
-                if let Some(running) = slot.running.clone()
-                    && let Err(e) = sup.remove_task(&running)
-                {
-                    self.bus.publish(
-                        Event::new(EventKind::ControllerRejected)
-                            .with_task(Arc::clone(&slot_name))
-                            .with_reason(format!("remove_failed: {}", e)),
-                    );
-                }
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
                         .with_reason(format!("admission=Replace depth={}", slot.queue.len())),
                 );
             }
-            (SlotStatus::Running { .. }, AdmissionPolicy::Queue) => {
-                if self.reject_if_full(&slot_name, slot.queue.len()) {
-                    return;
-                }
-                slot.queue.push_back(task_spec);
+            (SlotStatus::Admitting { .. }, AdmissionPolicy::Replace) => {
+                Self::replace_head_or_push(&mut slot, task_spec);
+                slot.status = SlotStatus::Terminating {
+                    cancelled_at: Instant::now(),
+                };
+                self.bus.publish(
+                    Event::new(EventKind::ControllerSlotTransition)
+                        .with_task(Arc::clone(&slot_name))
+                        .with_reason("admitting→terminating (replace)"),
+                );
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
-                        .with_reason(format!("admission=Queue depth={}", slot.queue.len())),
+                        .with_reason(format!(
+                            "admission=Replace status=admitting depth={}",
+                            slot.queue.len()
+                        )),
                 );
             }
             (SlotStatus::Terminating { .. }, AdmissionPolicy::Replace) => {
@@ -333,7 +324,12 @@ impl Controller {
                         )),
                 );
             }
-            (SlotStatus::Terminating { .. }, AdmissionPolicy::Queue) => {
+            (
+                SlotStatus::Admitting { .. }
+                | SlotStatus::Running { .. }
+                | SlotStatus::Terminating { .. },
+                AdmissionPolicy::Queue,
+            ) => {
                 if self.reject_if_full(&slot_name, slot.queue.len()) {
                     return;
                 }
@@ -341,14 +337,15 @@ impl Controller {
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
-                        .with_reason(format!(
-                            "admission=Queue status=terminating depth={}",
-                            slot.queue.len()
-                        )),
+                        .with_reason(format!("admission=Queue depth={}", slot.queue.len())),
                 );
             }
-            (SlotStatus::Running { .. }, AdmissionPolicy::DropIfRunning)
-            | (SlotStatus::Terminating { .. }, AdmissionPolicy::DropIfRunning) => {
+            (
+                SlotStatus::Admitting { .. }
+                | SlotStatus::Running { .. }
+                | SlotStatus::Terminating { .. },
+                AdmissionPolicy::DropIfRunning,
+            ) => {
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
@@ -358,61 +355,150 @@ impl Controller {
         }
     }
 
-    /// Handles bus events (terminal only).
+    /// Routes bus events that drive slot transitions, correlated by [`TaskId`].
     async fn handle_event(&self, event: Arc<Event>) {
-        if event.kind == EventKind::TaskRemoved {
-            self.on_task_finished(&event).await
+        match event.kind {
+            EventKind::TaskAdded => self.on_task_added(&event).await,
+            EventKind::TaskRemoved => self.on_task_finished(&event).await,
+            EventKind::TaskAddFailed => self.on_task_add_failed(&event).await,
+            _ => {}
         }
     }
 
-    /// Handles `TaskRemoved` for a task; frees the slot and optionally starts the queued next.
-    async fn on_task_finished(&self, event: &Event) {
-        let Some(removed) = event.task.as_deref() else {
+    /// `TaskAdded`: the admitted actor now exists - flip `Admitting` → `Running`.
+    /// If a `Replace` arrived while admitting (slot is `Terminating`), remove it now.
+    async fn on_task_added(&self, event: &Event) {
+        let Some(id) = event.id else {
             return;
         };
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
-
-        let Some((_, slot_name)) = self.running.remove(removed) else {
+        let Some(slot_name) = self.running.get(&id).map(|e| e.clone()) else {
             return;
         };
         let Some(slot_arc) = self.slots.get(&*slot_name).map(|e| e.clone()) else {
             return;
         };
         let mut slot = slot_arc.lock().await;
+        if slot.running_id != Some(id) {
+            return;
+        }
+        match slot.status {
+            SlotStatus::Admitting { .. } => {
+                slot.status = SlotStatus::Running {
+                    started_at: Instant::now(),
+                };
+                self.bus.publish(
+                    Event::new(EventKind::ControllerSlotTransition)
+                        .with_task(slot_name)
+                        .with_reason("admitting→running"),
+                );
+            }
+            SlotStatus::Terminating { .. } => {
+                if let Some(rid) = slot.running_id
+                    && let Err(e) = sup.remove(rid)
+                {
+                    self.bus.publish(
+                        Event::new(EventKind::ControllerRejected)
+                            .with_task(slot_name)
+                            .with_reason(format!("remove_failed: {e}")),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 
+    /// `TaskAddFailed`: admission was rejected (e.g. duplicate name)
+    /// free the slot and start the next queued task, so a slot can never wedge in `Admitting`.
+    async fn on_task_add_failed(&self, event: &Event) {
+        self.free_and_advance(event).await;
+    }
+
+    /// `TaskRemoved`: the occupying task ended - free the slot and start the next queued task.
+    /// Correlating by [`TaskId`] makes duplicate/stale removals harmless no-ops.
+    async fn on_task_finished(&self, event: &Event) {
+        self.free_and_advance(event).await;
+    }
+
+    /// Common terminal handling for `TaskRemoved`/`TaskAddFailed`:
+    /// resolve the owning slot by [`TaskId`], free it, and advance its queue.
+    ///
+    /// Idempotent: a stale/duplicate event whose id is no longer in the index is a no-op.
+    async fn free_and_advance(&self, event: &Event) {
+        let Some(id) = event.id else {
+            return;
+        };
+        let Some(sup) = self.supervisor.upgrade() else {
+            return;
+        };
+        let Some((_, slot_name)) = self.running.remove(&id) else {
+            return;
+        };
+        let Some(slot_arc) = self.slots.get(&*slot_name).map(|e| e.clone()) else {
+            return;
+        };
+        let mut slot = slot_arc.lock().await;
+        if slot.running_id != Some(id) {
+            return;
+        }
+
+        slot.running_id = None;
         slot.status = SlotStatus::Idle;
-        slot.running = None;
 
+        self.start_next_from_queue(&sup, &mut slot, &slot_name);
+
+        if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
+            drop(slot);
+            self.slots.remove(&*slot_name);
+        }
+    }
+
+    /// Admits `task_spec` into the slot: mints the identity via `add_task`, marks the slot `Admitting`, and records the reverse index.
+    /// The slot becomes `Running` on `TaskAdded`.
+    fn start_in_slot(
+        &self,
+        sup: &Arc<Supervisor>,
+        slot: &mut SlotState,
+        slot_name: &Arc<str>,
+        task_spec: TaskSpec,
+    ) -> Result<TaskId, RuntimeError> {
+        let id = sup.add_task(task_spec)?;
+        slot.status = SlotStatus::Admitting {
+            since: Instant::now(),
+        };
+        slot.running_id = Some(id);
+        self.running.insert(id, Arc::clone(slot_name));
+        Ok(id)
+    }
+
+    /// Pops and admits queued tasks until one is accepted or the queue drains.
+    /// Leaves the slot `Admitting` (one started) or `Idle` (queue empty / all failed).
+    fn start_next_from_queue(
+        &self,
+        sup: &Arc<Supervisor>,
+        slot: &mut SlotState,
+        slot_name: &Arc<str>,
+    ) {
         while let Some(next_spec) = slot.queue.pop_front() {
-            let next_name: Arc<str> = Arc::from(next_spec.name());
-            match sup.add_task(next_spec) {
-                Ok(()) => {
-                    slot.status = SlotStatus::Running {
-                        started_at: Instant::now(),
-                    };
-                    slot.running = Some(Arc::clone(&next_name));
-                    self.running.insert(next_name, Arc::clone(&slot_name));
+            match self.start_in_slot(sup, slot, slot_name, next_spec) {
+                Ok(_id) => {
                     self.bus.publish(
                         Event::new(EventKind::ControllerSubmitted)
-                            .with_task(Arc::clone(&slot_name))
+                            .with_task(Arc::clone(slot_name))
                             .with_reason(format!("started_from_queue depth={}", slot.queue.len())),
                     );
-                    break;
+                    return;
                 }
                 Err(e) => {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
-                            .with_task(Arc::clone(&slot_name))
+                            .with_task(Arc::clone(slot_name))
                             .with_reason(format!("queue_start_failed: {e}")),
                     );
                 }
             }
-        }
-        if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
-            drop(slot);
-            self.slots.remove(&*slot_name);
         }
     }
 
@@ -586,6 +672,54 @@ mod tests {
             running: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_supersedes_in_same_slot() {
+        let sup = Supervisor::builder(crate::SupervisorConfig::default())
+            .with_controller(ControllerConfig::default())
+            .build();
+        let handle = sup.serve();
+
+        let mk = |name: &'static str| -> ControllerSpec {
+            let task: TaskRef = TaskFn::arc(name, |ctx: CancellationToken| async move {
+                ctx.cancelled().await;
+                Ok(())
+            });
+            ControllerSpec::replace(TaskSpec::restartable(task).with_slot("s"))
+        };
+
+        handle.submit(mk("run-1")).await.unwrap();
+        handle.submit(mk("run-2")).await.unwrap();
+
+        let superseded = poll_until(std::time::Duration::from_secs(3), || async {
+            let alive = handle.snapshot().await;
+            alive.iter().any(|n| &**n == "run-2") && alive.iter().all(|n| &**n != "run-1")
+        })
+        .await;
+        assert!(
+            superseded,
+            "Replace must supersede run-1 with run-2 in the shared slot, not run both"
+        );
+
+        let _ = handle.shutdown().await;
+    }
+
+    async fn poll_until<F, Fut>(within: std::time::Duration, mut cond: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            if cond().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 }

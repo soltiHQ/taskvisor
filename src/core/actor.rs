@@ -71,6 +71,7 @@ use crate::{
     TaskError,
     core::runner::run_once,
     events::{Bus, Event, EventKind},
+    identity::TaskId,
     policies::{BackoffPolicy, RestartPolicy},
     tasks::Task,
 };
@@ -120,6 +121,8 @@ pub(crate) struct TaskActorParams {
 /// - [`Registry`](super::registry::Registry) - spawns and owns task actors
 /// - [`TaskSpec`](crate::TaskSpec) - user-facing configuration that maps to [`TaskActorParams`]
 pub(crate) struct TaskActor {
+    /// Runtime identity stamped on every lifecycle event this actor publishes.
+    id: TaskId,
     /// Task to execute.
     task: Arc<dyn Task>,
     /// Parameters for supervised task executions.
@@ -131,14 +134,16 @@ pub(crate) struct TaskActor {
 }
 
 impl TaskActor {
-    /// Creates a new task actor.
+    /// Creates a new task actor with its runtime identity.
     pub(crate) fn new(
         bus: Bus,
         task: Arc<dyn Task>,
         params: TaskActorParams,
         semaphore: Option<Arc<Semaphore>>,
+        id: TaskId,
     ) -> Self {
         Self {
+            id,
             task,
             params,
             bus,
@@ -152,6 +157,7 @@ impl TaskActor {
     /// (including backoff sleep) results in a clean exit without restarting, even with `RestartPolicy::Always`.
     pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let task_name: Arc<str> = Arc::from(self.task.name());
+        let id = self.id;
         let mut attempt: u32 = 0;
         let mut backoff_attempt: u32 = 0;
 
@@ -171,6 +177,7 @@ impl TaskActor {
                                 self.bus.publish(
                                     Event::new(EventKind::ActorExhausted)
                                         .with_task(task_name.clone())
+                        .with_id(id)
                                         .with_attempt(attempt)
                                         .with_reason("semaphore_closed")
                                 );
@@ -195,6 +202,7 @@ impl TaskActor {
             self.bus.publish(
                 Event::new(EventKind::TaskStarting)
                     .with_task(task_name.clone())
+                    .with_id(id)
                     .with_attempt(attempt),
             );
             let res = run_once(
@@ -202,6 +210,7 @@ impl TaskActor {
                 &child,
                 self.params.timeout,
                 attempt,
+                id,
                 &self.bus,
             )
             .await;
@@ -218,6 +227,7 @@ impl TaskActor {
                                     Event::new(EventKind::BackoffScheduled)
                                         .with_backoff_success()
                                         .with_task(task_name.clone())
+                                        .with_id(id)
                                         .with_attempt(attempt)
                                         .with_delay(d),
                                 );
@@ -231,6 +241,7 @@ impl TaskActor {
                             self.bus.publish(
                                 Event::new(EventKind::ActorExhausted)
                                     .with_task(task_name.clone())
+                                    .with_id(id)
                                     .with_attempt(attempt)
                                     .with_reason("policy_exhausted_success"),
                             );
@@ -241,6 +252,7 @@ impl TaskActor {
                 Err(e) if e.is_fatal() => {
                     let mut ev = Event::new(EventKind::ActorDead)
                         .with_task(task_name.clone())
+                        .with_id(id)
                         .with_attempt(attempt)
                         .with_reason(e.to_string());
                     if let Some(code) = e.exit_code() {
@@ -272,6 +284,7 @@ impl TaskActor {
                         };
                         let mut ev = Event::new(EventKind::ActorExhausted)
                             .with_task(task_name.clone())
+                            .with_id(id)
                             .with_attempt(attempt)
                             .with_reason(reason);
                         if let Some(code) = e.exit_code() {
@@ -288,6 +301,7 @@ impl TaskActor {
                         Event::new(EventKind::BackoffScheduled)
                             .with_backoff_failure()
                             .with_task(task_name.clone())
+                            .with_id(id)
                             .with_delay(delay)
                             .with_attempt(attempt)
                             .with_reason(e.to_string()),
@@ -348,6 +362,7 @@ mod tests {
             Arc::clone(&task),
             params(restart, max_retries),
             None,
+            TaskId::next(),
         )
     }
 

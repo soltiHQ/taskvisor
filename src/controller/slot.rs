@@ -2,9 +2,10 @@
 //!
 //! [`SlotState`] tracks the current status and pending queue for a single named slot.
 
-use std::{collections::VecDeque, sync::Arc, time::Instant};
+use std::{collections::VecDeque, time::Instant};
 
 use crate::TaskSpec;
+use crate::identity::TaskId;
 
 /// State of a single task slot.
 ///
@@ -13,11 +14,12 @@ use crate::TaskSpec;
 /// - [`AdmissionPolicy`](super::AdmissionPolicy) - determines how submissions interact with slot state
 /// - [`Controller`](super::Controller) - owns and manages slot states
 pub(super) struct SlotState {
-    /// Current status (idle, running, or terminating).
+    /// Current status (idle, admitting, running, or terminating).
     pub status: SlotStatus,
 
-    /// Name of the task currently occupying the slot (running or terminating).
-    pub running: Option<Arc<str>>,
+    /// Runtime identity of the task currently occupying the slot.
+    /// The canonical key used to address the task (removal) and correlate its events.
+    pub running_id: Option<TaskId>,
 
     /// Queue of pending tasks (FIFO order).
     pub queue: VecDeque<TaskSpec>,
@@ -28,6 +30,12 @@ pub(super) struct SlotState {
 pub(super) enum SlotStatus {
     /// No task running, ready to accept new submissions.
     Idle,
+
+    /// A task was submitted (`add_task` issued) and the slot is awaiting the `TaskAdded` confirmation before it is considered `Running`.
+    Admitting {
+        /// When admission was requested (for the admit deadline during lag recovery).
+        since: Instant,
+    },
 
     /// Task currently running.
     Running {
@@ -47,7 +55,7 @@ impl SlotState {
     pub fn new() -> Self {
         Self {
             status: SlotStatus::Idle,
-            running: None,
+            running_id: None,
             queue: VecDeque::new(),
         }
     }

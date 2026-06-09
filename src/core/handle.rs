@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 use crate::error::RuntimeError;
 use crate::events::EventKind;
+use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
 
 use super::supervisor::Supervisor;
@@ -69,9 +70,9 @@ impl SupervisorHandle {
 
     /// Adds a new task to the supervisor at runtime.
     ///
-    /// Fire-and-forget: publishes `TaskAddRequested` and returns immediately.
-    /// The task will be spawned asynchronously by the registry listener.
-    pub fn add(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
+    /// Fire-and-forget: mints the [`TaskId`], publishes `TaskAddRequested`, and returns immediately with the id.
+    /// The task is spawned asynchronously by the registry listener.
+    pub fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         self.inner.add_task(spec)
     }
 
@@ -81,38 +82,34 @@ impl SupervisorHandle {
     /// then waits for the matching `TaskAdded`/`TaskAddFailed` event from the registry.
     ///
     /// Returns:
-    /// - `Ok(())` when the task is confirmed running,
+    /// - `Ok(TaskId)` when the task is confirmed running,
     /// - `Err(RuntimeError::TaskAlreadyExists)` if a task with the same name is already registered,
     /// - `Err(RuntimeError::TaskAddTimeout)` if no confirmation arrives within `timeout`.
+    ///
+    /// Correlation is by the minted [`TaskId`] (the canonical key), not the task name.
     pub async fn add_and_wait(
         &self,
         spec: TaskSpec,
         timeout: Duration,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<TaskId, RuntimeError> {
         let target: Arc<str> = Arc::from(spec.task().name());
         let mut rx = self.inner.subscribe_bus();
-        self.inner.add_task(spec)?;
+        let id = self.inner.add_task(spec)?;
 
         let target2 = Arc::clone(&target);
         let wait = async move {
             loop {
                 match rx.recv().await {
-                    Ok(ev)
-                        if ev.kind == EventKind::TaskAdded
-                            && ev.task.as_deref() == Some(&*target2) =>
-                    {
-                        return Ok(());
+                    Ok(ev) if ev.id == Some(id) && ev.kind == EventKind::TaskAdded => {
+                        return Ok(id);
                     }
-                    Ok(ev)
-                        if ev.kind == EventKind::TaskAddFailed
-                            && ev.task.as_deref() == Some(&*target2) =>
-                    {
+                    Ok(ev) if ev.id == Some(id) && ev.kind == EventKind::TaskAddFailed => {
                         return Err(RuntimeError::TaskAlreadyExists { name: target2 });
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if self.inner.registry_contains(&target2).await {
-                            return Ok(());
+                        if self.inner.contains_id(id).await {
+                            return Ok(id);
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
@@ -120,8 +117,8 @@ impl SupervisorHandle {
                     }
                 }
             }
-            if self.inner.registry_contains(&target2).await {
-                Ok(())
+            if self.inner.contains_id(id).await {
+                Ok(id)
             } else {
                 Err(RuntimeError::TaskAddTimeout {
                     name: target2,
@@ -143,15 +140,26 @@ impl SupervisorHandle {
     ///
     /// Fire-and-forget: publishes `TaskRemoveRequested` and returns immediately.
     /// The task will be cancelled and cleaned up asynchronously by the registry.
-    pub fn remove(&self, name: &str) -> Result<(), RuntimeError> {
-        self.inner.remove_task(name)
+    pub fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
+        self.inner.remove(id)
+    }
+
+    /// Removes the task currently holding `name` (label); `false` if no such task.
+    pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        match self.inner.id_for_label(name).await {
+            Some(id) => {
+                self.inner.remove(id)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Returns a sorted list of registered task names (from the registry).
     ///
     /// Includes tasks in any state: starting, running, stopping.
     /// See [`snapshot`](Self::snapshot) for only currently executing tasks.
-    pub async fn list(&self) -> Vec<Arc<str>> {
+    pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.inner.list_tasks().await
     }
 
@@ -168,20 +176,29 @@ impl SupervisorHandle {
         self.inner.is_alive(name).await
     }
 
-    /// Cancel a task by name and wait for confirmation.
+    /// Cancel a task by identity and wait for confirmation.
     ///
     /// Uses the default grace period from supervisor config.
-    pub async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.inner.cancel(name).await
+    pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.inner.cancel(id).await
+    }
+
+    /// Cancel the task currently holding `name` (label), resolving to its identity.
+    /// Returns `false` if no task currently holds that label.
+    pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        match self.inner.id_for_label(name).await {
+            Some(id) => self.inner.cancel(id).await,
+            None => Ok(false),
+        }
     }
 
     /// Cancel a task with explicit timeout.
     pub async fn cancel_with_timeout(
         &self,
-        name: &str,
+        id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        self.inner.cancel_with_timeout(name, wait_for).await
+        self.inner.cancel_with_timeout(id, wait_for).await
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.

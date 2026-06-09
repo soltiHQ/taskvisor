@@ -131,6 +131,9 @@
 
 pub mod prelude;
 
+mod identity;
+pub use identity::TaskId;
+
 mod core;
 pub use core::{Supervisor, SupervisorConfig, SupervisorHandle};
 
