@@ -235,8 +235,9 @@ pub enum EventKind {
 }
 
 /// Reason for scheduling the next run/backoff.
+///
+/// A closed set (success vs failure); intentionally **not** `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum BackoffSource {
     Success,
     Failure,

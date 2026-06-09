@@ -263,10 +263,22 @@ impl Controller {
                                 .with_task(Arc::clone(&slot_name))
                                 .with_reason(format!("add_failed: {e}")),
                         );
+                        drop(slot);
+                        self.slots.remove(&*slot_name);
                     }
                 }
             }
             (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
+                if let Some(rid) = slot.running_id
+                    && let Err(e) = sup.remove(rid)
+                {
+                    self.bus.publish(
+                        Event::new(EventKind::ControllerRejected)
+                            .with_task(Arc::clone(&slot_name))
+                            .with_reason(format!("remove_failed: {e}")),
+                    );
+                    return;
+                }
                 Self::replace_head_or_push(&mut slot, task_spec);
                 slot.status = SlotStatus::Terminating {
                     cancelled_at: Instant::now(),
@@ -276,15 +288,6 @@ impl Controller {
                         .with_task(Arc::clone(&slot_name))
                         .with_reason("running→terminating (replace)"),
                 );
-                if let Some(rid) = slot.running_id
-                    && let Err(e) = sup.remove(rid)
-                {
-                    self.bus.publish(
-                        Event::new(EventKind::ControllerRejected)
-                            .with_task(Arc::clone(&slot_name))
-                            .with_reason(format!("remove_failed: {e}")),
-                    );
-                }
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
