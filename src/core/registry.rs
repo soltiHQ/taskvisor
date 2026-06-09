@@ -240,7 +240,7 @@ impl Registry {
         if tasks.contains_key(&*task_name) {
             drop(tasks);
             self.bus.publish(
-                Event::new(EventKind::TaskAdded)
+                Event::new(EventKind::TaskAddFailed)
                     .with_task(task_name)
                     .with_reason("already_exists"),
             );

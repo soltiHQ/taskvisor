@@ -27,7 +27,7 @@
 //!     ├──► start()
 //!     ├──► subscribe to bus (before publishing!)
 //!     ├──► add initial tasks
-//!     ├──► wait for N TaskAdded confirmations
+//!     ├──► wait for each task's add outcome (TaskAdded/TaskAddFailed)
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
 //!           └──► drain_with_grace (cancel tasks, join within grace, force-abort stragglers)
@@ -294,39 +294,56 @@ impl Supervisor {
     /// - Start event loop (via `start`)
     /// - Subscribe to bus **before** publishing (guarantees no missed events)
     /// - Publish TaskAddRequested for initial tasks
-    /// - Wait for N `TaskAdded` confirmations from registry listener
+    /// - Wait for each task's add outcome (`TaskAdded`/`TaskAddFailed`) before driving shutdown
     /// - Wait for shutdown signal or all tasks to exit
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.start();
 
-        let expected = tasks.len();
-        if expected > 0 {
+        if !tasks.is_empty() {
+            let names: Vec<Arc<str>> = tasks.iter().map(|s| Arc::from(s.task().name())).collect();
             let mut rx = self.bus.subscribe();
             for spec in tasks {
                 self.add_task(spec)?;
             }
-            self.wait_tasks_registered(&mut rx, expected).await;
+            self.wait_tasks_registered(&mut rx, &names).await;
         }
         self.drive_shutdown().await
     }
 
-    /// Waits until registry listener confirms N tasks were registered.
+    /// Waits until every initially-added task has been processed by the registry.
     async fn wait_tasks_registered(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
-        expected: usize,
+        names: &[Arc<str>],
     ) {
-        let mut registered = 0usize;
-        while registered < expected {
-            match rx.recv().await {
-                Ok(ev) if ev.kind == EventKind::TaskAdded => {
-                    registered += 1;
+        let mut pending: Vec<Arc<str>> = names.to_vec();
+
+        let confirm = async {
+            while !pending.is_empty() {
+                match rx.recv().await {
+                    Ok(ev)
+                        if matches!(ev.kind, EventKind::TaskAdded | EventKind::TaskAddFailed) =>
+                    {
+                        if let Some(name) = ev.task.as_deref() {
+                            pending.retain(|p| &**p != name);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let mut still = Vec::new();
+                        for p in std::mem::take(&mut pending) {
+                            if !self.registry.contains(&p).await {
+                                still.push(p);
+                            }
+                        }
+                        pending = still;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-                Ok(_) => continue,
-                Err(broadcast::error::RecvError::Lagged(_)) => break,
-                Err(broadcast::error::RecvError::Closed) => break,
             }
-        }
+        };
+        const CONFIRM_BACKSTOP: Duration = Duration::from_secs(5);
+        let _ = timeout(CONFIRM_BACKSTOP, confirm).await;
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits up to `grace` for them to stop.
@@ -577,5 +594,32 @@ mod tests {
             res.is_ok(),
             "cooperative shutdown should be Ok, got {res:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn add_and_wait_duplicate_name_returns_already_exists() {
+        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+        let handle = sup.serve();
+
+        let make = || -> TaskRef {
+            TaskFn::arc("dup", |ctx: CancellationToken| async move {
+                ctx.cancelled().await;
+                Ok(())
+            })
+        };
+        handle
+            .add_and_wait(TaskSpec::restartable(make()), Duration::from_secs(1))
+            .await
+            .expect("first add should succeed");
+
+        let res = handle
+            .add_and_wait(TaskSpec::restartable(make()), Duration::from_secs(1))
+            .await;
+        assert!(
+            matches!(res, Err(RuntimeError::TaskAlreadyExists { .. })),
+            "duplicate add must return TaskAlreadyExists, got {res:?}"
+        );
+
+        let _ = handle.shutdown().await;
     }
 }

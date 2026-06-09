@@ -78,10 +78,12 @@ impl SupervisorHandle {
     /// Adds a task and waits for registration confirmation.
     ///
     /// Subscribes to the event bus **before** publishing `TaskAddRequested`,
-    /// then waits for the matching `TaskAdded` event from the registry.
+    /// then waits for the matching `TaskAdded`/`TaskAddFailed` event from the registry.
     ///
-    /// Returns `Ok(())` when the task is confirmed running, or `RuntimeError::TaskAddTimeout`
-    /// if confirmation doesn't arrive within `timeout`.
+    /// Returns:
+    /// - `Ok(())` when the task is confirmed running,
+    /// - `Err(RuntimeError::TaskAlreadyExists)` if a task with the same name is already registered,
+    /// - `Err(RuntimeError::TaskAddTimeout)` if no confirmation arrives within `timeout`.
     pub async fn add_and_wait(
         &self,
         spec: TaskSpec,
@@ -100,6 +102,12 @@ impl SupervisorHandle {
                             && ev.task.as_deref() == Some(&*target2) =>
                     {
                         return Ok(());
+                    }
+                    Ok(ev)
+                        if ev.kind == EventKind::TaskAddFailed
+                            && ev.task.as_deref() == Some(&*target2) =>
+                    {
+                        return Err(RuntimeError::TaskAlreadyExists { name: target2 });
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => {

@@ -160,6 +160,14 @@ impl LogWriter {
                     or(e.task.as_deref(), "none")
                 );
             }
+            EventKind::TaskAddFailed => {
+                println!(
+                    "{} [task-add-failed] task={} reason=\"{}\"",
+                    seq,
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
+                );
+            }
             EventKind::TaskRemoveRequested => {
                 println!(
                     "{} [task-remove-requested] task={}",
