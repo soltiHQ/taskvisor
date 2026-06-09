@@ -19,15 +19,25 @@ jobs:
         uses: soltiHQ/actions/taskfile@main
         with: { command: ci/check }
 
-  test:
+  unittest:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/cargo-cache
-        with: { scope: test }
+        with: { scope: unittest }
       - name: Run Job
         uses: soltiHQ/actions/taskfile@main
-        with: { command: ci/test }
+        with: { command: ci/test-unit }
+
+  integration:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/cargo-cache
+        with: { scope: integration }
+      - name: Run Job
+        uses: soltiHQ/actions/taskfile@main
+        with: { command: ci/test-integration }
 
   clippy:
     runs-on: ${{ vars.RUNS_ON }}

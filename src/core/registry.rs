@@ -75,6 +75,7 @@ pub(crate) struct Registry {
     bus: Bus,
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
+    grace: Duration,
     empty_notify: Notify,
     cmd_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryCommand>>>,
 }
@@ -85,6 +86,7 @@ impl Registry {
         bus: Bus,
         runtime_token: CancellationToken,
         semaphore: Option<Arc<Semaphore>>,
+        grace: Duration,
         cmd_rx: mpsc::UnboundedReceiver<RegistryCommand>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -92,6 +94,7 @@ impl Registry {
             bus,
             runtime_token,
             semaphore,
+            grace,
             empty_notify: Notify::new(),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
         })
@@ -315,7 +318,7 @@ impl Registry {
             self.notify_after_remove(len_after);
 
             handle.cancel.cancel();
-            self.spawn_join_report(id, handle.label, handle.join);
+            self.spawn_join_report(id, handle.label, handle.join, Some(self.grace));
         } else {
             self.bus.publish(
                 Event::new(EventKind::TaskRemoved)
@@ -329,7 +332,7 @@ impl Registry {
     async fn cleanup_task(&self, id: TaskId) {
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
-            self.spawn_join_report(id, handle.label, handle.join);
+            self.spawn_join_report(id, handle.label, handle.join, None);
         }
     }
 
@@ -343,11 +346,35 @@ impl Registry {
     }
 
     /// Joins the actor handle in a detached task and reports its terminal events.
-    fn spawn_join_report(&self, id: TaskId, name: Arc<str>, join: JoinHandle<ActorExitReason>) {
+    fn spawn_join_report(
+        &self,
+        id: TaskId,
+        name: Arc<str>,
+        join: JoinHandle<ActorExitReason>,
+        force_after: Option<Duration>,
+    ) {
         let bus = self.bus.clone();
         tokio::spawn(async move {
-            let res = join.await;
-            Self::report_join(&bus, id, &name, res);
+            let mut join = join;
+            match force_after {
+                Some(grace) => match tokio::time::timeout(grace, &mut join).await {
+                    Ok(res) => Self::report_join(&bus, id, &name, res),
+                    Err(_) => {
+                        join.abort();
+                        let _ = join.await;
+                        bus.publish(
+                            Event::new(EventKind::TaskRemoved)
+                                .with_task(name)
+                                .with_id(id)
+                                .with_reason("force_terminated_after_grace"),
+                        );
+                    }
+                },
+                None => {
+                    let res = join.await;
+                    Self::report_join(&bus, id, &name, res);
+                }
+            }
         });
     }
 
@@ -395,7 +422,7 @@ mod tests {
         let bus = Bus::new(64);
         let token = CancellationToken::new();
         let (_tx, rx) = mpsc::unbounded_channel();
-        Registry::new(bus, token, None, rx)
+        Registry::new(bus, token, None, Duration::from_secs(5), rx)
     }
 
     #[tokio::test]

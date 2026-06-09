@@ -136,10 +136,12 @@ impl SupervisorHandle {
         }
     }
 
-    /// Removes a task by name.
+    /// Removes a task by identity.
     ///
     /// Fire-and-forget: publishes `TaskRemoveRequested` and returns immediately.
-    /// The task will be cancelled and cleaned up asynchronously by the registry.
+    ///
+    /// The task is cancelled and cleaned up asynchronously by the registry;
+    /// a task that ignores cancellation is force-aborted after the configured grace period.
     pub fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
         self.inner.remove(id)
     }
@@ -176,15 +178,17 @@ impl SupervisorHandle {
         self.inner.is_alive(name).await
     }
 
-    /// Cancel a task by identity and wait for confirmation.
+    /// Requests cooperative cancellation of a task and waits up to the configured grace period for it to actually stop (its `TaskRemoved` event).
     ///
-    /// Uses the default grace period from supervisor config.
+    /// A task that ignores cancellation is **force-aborted after the grace period**;
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         self.inner.cancel(id).await
     }
 
     /// Cancel the task currently holding `name` (label), resolving to its identity.
-    /// Returns `false` if no task currently holds that label.
+    ///
+    /// Returns `Ok(false)` if no task currently holds that label;
+    /// otherwise behaves like [`cancel`](Self::cancel) (including the `TaskRemoveTimeout` case for a task that won't stop).
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         match self.inner.id_for_label(name).await {
             Some(id) => self.inner.cancel(id).await,
@@ -192,7 +196,12 @@ impl SupervisorHandle {
         }
     }
 
-    /// Cancel a task with explicit timeout.
+    /// Cancel a task with an explicit confirmation window `wait_for` (instead of the configured grace).
+    ///
+    /// Returns `Ok(true)` once the task confirms termination within `wait_for`, `Ok(false)`
+    /// if no such task is registered, or `Err(RuntimeError::TaskRemoveTimeout)`.
+    ///
+    /// Regardless of `wait_for`, a task that ignores cancellation is still force-aborted after the supervisor's grace period.
     pub async fn cancel_with_timeout(
         &self,
         id: TaskId,

@@ -42,10 +42,10 @@ pub enum RuntimeError {
         /// The missing task name.
         name: Arc<str>,
     },
-    /// Timeout waiting for task removal confirmation.
+    /// A cancelled task did not confirm termination within the wait window.
     #[error("timeout waiting for task {id} removal after {timeout:?}")]
     TaskRemoveTimeout {
-        /// The runtime identity that timed out during removal.
+        /// The runtime identity that did not stop in time.
         id: TaskId,
         /// How long we waited before giving up.
         timeout: Duration,
@@ -144,8 +144,7 @@ impl TaskError {
     }
 
     /// Numeric exit code when the error originated from a process-like runtime.
-    /// `None` for `Timeout`, `Canceled`, and for logical `Fail`/`Fatal`
-    /// errors that have no process behind them.
+    /// `None` for `Timeout`, `Canceled`, and for logical `Fail`/`Fatal` errors that have no process behind them.
     #[must_use]
     pub fn exit_code(&self) -> Option<i32> {
         match self {
@@ -209,8 +208,6 @@ mod tests {
             reason: "boom".into(),
             exit_code: Some(1),
         };
-        // exit_code is surfaced via the structured `exit_code()` accessor,
-        // not through Display — the string format stays stable for logs.
         assert_eq!(e.to_string(), "execution failed: boom");
     }
 }

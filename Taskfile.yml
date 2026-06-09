@@ -23,19 +23,28 @@ tasks:
       - task: rust:clippy
 
   ci/test:
-    desc: Run 'cargo test'.
+    desc: Run 'cargo test' (all targets, all features).
     cmds:
       - task: rust:test
+
+  ci/test-unit:
+    desc: Run unit tests ('cargo test --lib') and doctests ('cargo test --doc').
+    cmds:
+      - task: rust:test
+        vars: { TEST_ARGS: '--lib --all-features' }
+      - task: rust:test
+        vars: { TEST_ARGS: '--doc --all-features' }
+
+  ci/test-integration:
+    desc: Run integration tests ('cargo test --test "*"').
+    cmds:
+      - task: rust:test
+        vars: { TEST_ARGS: '--test "*" --all-features' }
 
   ci/audit:
     desc: Run 'cargo audit'.
     cmds:
       - task: rust:audit
-
-  ci/bench:
-    desc: Run 'cargo bench'.
-    cmds:
-      - task: rust:bench
 
   ci/docs:
     desc: Run 'rustdoc' for the taskvisor crate.
@@ -60,3 +69,8 @@ tasks:
       - task: rust:publish-dry-run
         vars:
           CRATE: "taskvisor"
+
+  rust:benchmark:
+    desc: Run 'cargo bench'.
+    cmds:
+      - task: rust:bench

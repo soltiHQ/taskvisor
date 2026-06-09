@@ -55,3 +55,7 @@ harness = false
 name              = "controller"
 harness           = false
 required-features = ["controller"]
+
+[[test]]
+name              = "controller"
+required-features = ["controller"]
