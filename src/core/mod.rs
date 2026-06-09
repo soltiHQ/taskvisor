@@ -89,9 +89,10 @@
 //! ## Shutdown timeline
 //!
 //! ```text
-//! OS signal → Supervisor publishes ShutdownRequested → cancel runtime_token
-//! → Registry.cancel_all(): cancel each task, await join, publish TaskRemoved
-//! → Supervisor.wait_all_with_grace(): AllStoppedWithinGrace OR GraceExceeded{grace, stuck}
+//! OS signal → Supervisor publishes ShutdownRequested
+//! → Supervisor.drain_with_grace() → Registry.cancel_all_within(grace):
+//!     cancel each task token, join bounded by grace, force-abort (JoinHandle::abort) stragglers, publish TaskRemoved
+//! → AllStoppedWithinGrace OR GraceExceeded{grace, stuck} → cancel runtime_token → close subscribers
 //! ```
 //!
 //! ## Notes

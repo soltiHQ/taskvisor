@@ -22,10 +22,10 @@
 //! - Registry owns JoinHandle + CancellationToken for each actor
 //! - Publishes `TaskAdded`/`TaskRemoved` for observability
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
@@ -154,8 +154,7 @@ impl Registry {
                     }
                 }
             }
-
-            me.cancel_all().await;
+            me.cancel_all_within(Duration::ZERO).await;
         });
     }
 
@@ -191,8 +190,15 @@ impl Registry {
         self.tasks.read().await.is_empty()
     }
 
-    /// Cancels all tasks in the registry: cancel → join → TaskRemoved.
-    pub async fn cancel_all(&self) {
+    /// Cancels all tasks, waits up to `grace` for cooperative exit, then force-aborts stragglers.
+    ///
+    /// Steps:
+    /// - drain the registry and cancel every task token,
+    /// - join each actor, bounded by a single shared `grace` deadline,
+    /// - any actor still running when the deadline passes is force-terminated via [`JoinHandle::abort`] and reported in the returned "stuck" set.
+    ///
+    /// Always publishes `TaskRemoved` for every task (and `ActorDead` on panic).
+    pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let handles: Vec<(Arc<str>, Handle)> = {
             let mut tasks = self.tasks.write().await;
             let drained = tasks.drain().collect::<Vec<_>>();
@@ -202,9 +208,27 @@ impl Registry {
         for (_, h) in &handles {
             h.cancel.cancel();
         }
+
+        let deadline = tokio::time::Instant::now() + grace;
+        let mut stuck = Vec::new();
+
         for (name, h) in handles {
-            self.join_and_report(&name, h.join).await;
+            let mut join = h.join;
+            match tokio::time::timeout_at(deadline, &mut join).await {
+                Ok(res) => self.report_join(&name, res),
+                Err(_elapsed) => {
+                    join.abort();
+                    let _ = join.await;
+                    self.bus.publish(
+                        Event::new(EventKind::TaskRemoved)
+                            .with_task(Arc::clone(&name))
+                            .with_reason("force_terminated_after_grace"),
+                    );
+                    stuck.push(name);
+                }
+            }
         }
+        stuck
     }
 
     /// Spawns an actor and registers its handle.
@@ -283,17 +307,23 @@ impl Registry {
         Some((h, len_after))
     }
 
-    /// Await join; report panic as ActorDead(actor_panic); always emit TaskRemoved.
+    /// Await join, then report terminal events for the actor.
     async fn join_and_report(&self, name: &str, join: JoinHandle<ActorExitReason>) {
-        match join.await {
-            Ok(_) => {}
-            Err(_) => {
-                self.bus.publish(
-                    Event::new(EventKind::ActorDead)
-                        .with_task(name)
-                        .with_reason("actor_panic"),
-                );
-            }
+        let res = join.await;
+        self.report_join(name, res);
+    }
+
+    /// Publish terminal events for a joined actor: `ActorDead` if it panicked, then always `TaskRemoved`.
+    /// A cancelled (force-aborted) join is not a panic.
+    fn report_join(&self, name: &str, res: Result<ActorExitReason, JoinError>) {
+        if let Err(e) = res
+            && e.is_panic()
+        {
+            self.bus.publish(
+                Event::new(EventKind::ActorDead)
+                    .with_task(name)
+                    .with_reason("actor_panic"),
+            );
         }
         self.bus
             .publish(Event::new(EventKind::TaskRemoved).with_task(name));

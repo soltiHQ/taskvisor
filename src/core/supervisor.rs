@@ -30,12 +30,10 @@
 //!     ├──► wait for N TaskAdded confirmations
 //!     └──► drive_shutdown()
 //!           ├──► wait for signal or empty registry
-//!           ├──► cancel all tasks
-//!           └──► wait_all_with_grace
+//!           └──► drain_with_grace (cancel tasks, join within grace, force-abort stragglers)
 //!
 //! Supervisor::shutdown()        // explicit graceful stop
-//!     ├──► cancel all tasks
-//!     └──► wait_all_with_grace
+//!     └──► drain_with_grace (cancel tasks, join within grace, force-abort stragglers)
 //! ```
 //!
 //! ## Runtime task management
@@ -331,11 +329,13 @@ impl Supervisor {
         }
     }
 
-    /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
+    /// Initiates graceful shutdown: cancels all tasks and waits up to `grace` for them to stop.
+    ///
+    /// Tasks that do not stop cooperatively within the configured grace period are force-terminated;
+    /// see [`drain_with_grace`](Self::drain_with_grace).
     pub(crate) async fn shutdown(&self) -> Result<(), RuntimeError> {
         self.bus.publish(Event::new(EventKind::ShutdownRequested));
-        self.registry.cancel_all().await;
-        let res = self.wait_all_with_grace().await;
+        let res = self.drain_with_grace().await;
         self.runtime_token.cancel();
         self.subs.close().await;
         res
@@ -445,8 +445,7 @@ impl Supervisor {
         let res = tokio::select! {
             _ = crate::core::shutdown::wait_for_shutdown_signal() => {
                 self.bus.publish(Event::new(EventKind::ShutdownRequested));
-                self.registry.cancel_all().await;
-                self.wait_all_with_grace().await
+                self.drain_with_grace().await
             }
             _ = self.registry.wait_until_empty() => {
                 Ok(())
@@ -457,23 +456,17 @@ impl Supervisor {
         res
     }
 
-    /// Waits for all tasks in registry with grace period timeout.
-    ///
-    /// Publishes terminal event (`AllStoppedWithinGrace` or `GraceExceeded`).
-    async fn wait_all_with_grace(&self) -> Result<(), RuntimeError> {
+    /// Cancels all tasks and waits up to `grace` for them to stop, force-aborting stragglers.
+    async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         let grace = self.cfg.grace;
-
-        match timeout(grace, self.registry.wait_until_empty()).await {
-            Ok(_) => {
-                self.bus
-                    .publish(Event::new(EventKind::AllStoppedWithinGrace));
-                Ok(())
-            }
-            Err(_) => {
-                self.bus.publish(Event::new(EventKind::GraceExceeded));
-                let stuck = self.snapshot().await;
-                Err(RuntimeError::GraceExceeded { grace, stuck })
-            }
+        let stuck = self.registry.cancel_all_within(grace).await;
+        if stuck.is_empty() {
+            self.bus
+                .publish(Event::new(EventKind::AllStoppedWithinGrace));
+            Ok(())
+        } else {
+            self.bus.publish(Event::new(EventKind::GraceExceeded));
+            Err(RuntimeError::GraceExceeded { grace, stuck })
         }
     }
 
@@ -518,5 +511,71 @@ impl Supervisor {
                 timeout: wait_for,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TaskFn, TaskRef};
+
+    #[tokio::test]
+    async fn shutdown_force_terminates_noncooperative_task_within_grace() {
+        let cfg = SupervisorConfig {
+            grace: Duration::from_millis(200),
+            ..Default::default()
+        };
+        let sup = Supervisor::new(cfg, vec![]);
+        let handle = sup.serve();
+
+        let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: CancellationToken| async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(())
+        });
+        handle
+            .add_and_wait(TaskSpec::once(stubborn), Duration::from_secs(1))
+            .await
+            .expect("task should register");
+
+        let res = tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown must return within grace, not block on the stuck task");
+
+        match res {
+            Err(RuntimeError::GraceExceeded { stuck, .. }) => {
+                assert!(
+                    stuck.iter().any(|n| &**n == "stubborn"),
+                    "stuck set must list the non-cooperative task, got {stuck:?}"
+                );
+            }
+            other => panic!("expected GraceExceeded listing the stuck task, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cooperative_task_returns_ok() {
+        let cfg = SupervisorConfig {
+            grace: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let sup = Supervisor::new(cfg, vec![]);
+        let handle = sup.serve();
+
+        let good: TaskRef = TaskFn::arc("good", |ctx: CancellationToken| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        handle
+            .add_and_wait(TaskSpec::restartable(good), Duration::from_secs(1))
+            .await
+            .expect("task should register");
+
+        let res = timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("cooperative shutdown must not hang");
+        assert!(
+            res.is_ok(),
+            "cooperative shutdown should be Ok, got {res:?}"
+        );
     }
 }
