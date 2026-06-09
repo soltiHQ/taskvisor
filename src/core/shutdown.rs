@@ -25,7 +25,6 @@ pub async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     let mut sigquit = signal(SignalKind::quit())?;
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
         _ = sigint.recv()  => {},
         _ = sigterm.recv() => {},
         _ = sigquit.recv() => {},

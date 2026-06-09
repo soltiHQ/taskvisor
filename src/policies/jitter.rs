@@ -2,7 +2,7 @@
 //!
 //! [`JitterPolicy`] adds randomness to backoff delays to prevent thundering herd effects when multiple tasks retry simultaneously.
 //! - [`JitterPolicy::Equal`] delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
-//! - [`JitterPolicy::Decorrelated`] stateful jitter based on previous delay (sophisticated)
+//! - [`JitterPolicy::Decorrelated`] memoryless randomized band that widens with the base delay
 //! - [`JitterPolicy::Full`] random delay in [0, backoff_delay] (most aggressive)
 //! - [`JitterPolicy::None`] no randomization, predictable delays
 
@@ -16,7 +16,7 @@ use std::time::Duration;
 /// - **None**: Predictable, but risks thundering herd
 /// - **Equal**: Balanced (recommended for most use cases)
 /// - **Full**: Maximum randomness, aggressive load spreading
-/// - **Decorrelated**: Stateful, prevents retry correlation (requires previous delay)
+/// - **Decorrelated**: Widest spread; per-attempt randomized band (memoryless approximation)
 ///
 /// # Also
 ///
@@ -43,10 +43,7 @@ pub enum JitterPolicy {
     /// Preserves ~75% of the original backoff on average.
     Equal,
 
-    /// Decorrelated jitter: delay = random[base, prev_delay * 3], capped at `max`.
-    ///
-    /// More sophisticated, considers the previous delay and grows independently.
-    /// Requires context via [`apply_decorrelated`](Self::apply_decorrelated).
+    /// Decorrelated-style jitter: delay = random in `[base, min(3 × base, max)]`.
     Decorrelated,
 }
 

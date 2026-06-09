@@ -437,29 +437,40 @@ impl Supervisor {
     /// On `Lagged`, it creates a [`EventKind::SubscriberOverflow`] event and emits it **directly to subscribers**,
     /// bypassing the bus - to avoid reinforcing backpressure loops while still reporting the loss.
     ///
-    /// The loop terminates only when the broadcast channel is closed.
+    /// On runtime shutdown the loop drains any buffered events to subscribers and exits.
     fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
         let alive = Arc::clone(&self.alive);
+        let rt = self.runtime_token.clone();
 
         tokio::spawn(async move {
             loop {
-                match rx.recv().await {
-                    Ok(arc_ev) => {
-                        alive.update(&arc_ev).await;
-                        set.emit_arc(arc_ev);
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        let e = Event::new(EventKind::SubscriberOverflow)
-                            .with_task("subscriber_listener")
-                            .with_reason(format!("lagged({skipped})"));
+                tokio::select! {
+                    biased;
 
-                        let arc_e = Arc::new(e);
-                        alive.update(&arc_e).await;
-                        set.emit_arc(arc_e);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
+                    msg = rx.recv() => match msg {
+                        Ok(arc_ev) => {
+                            alive.update(&arc_ev).await;
+                            set.emit_arc(arc_ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            let e = Event::new(EventKind::SubscriberOverflow)
+                                .with_task("subscriber_listener")
+                                .with_reason(format!("lagged({skipped})"));
+
+                            let arc_e = Arc::new(e);
+                            alive.update(&arc_e).await;
+                            set.emit_arc(arc_e);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+
+                    _ = rt.cancelled() => {
+                        while let Ok(arc_ev) = rx.try_recv() {
+                            alive.update(&arc_ev).await;
+                            set.emit_arc(arc_ev);
+                        }
                         break;
                     }
                 }

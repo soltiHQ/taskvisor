@@ -234,6 +234,8 @@ impl TaskActor {
                                 if !Self::sleep_cancellable(d, &runtime_token).await {
                                     return ActorExitReason::Cancelled;
                                 }
+                            } else {
+                                tokio::task::yield_now().await;
                             }
                             continue;
                         }

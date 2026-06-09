@@ -36,7 +36,7 @@ use std::time::{Duration, SystemTime};
 use crate::identity::TaskId;
 
 /// Global sequence counter for event ordering.
-static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,7 +290,7 @@ impl Event {
     #[must_use]
     pub fn new(kind: EventKind) -> Self {
         Self {
-            seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Release),
+            seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
             kind,
             at: SystemTime::now(),
             backoff_source: None,
