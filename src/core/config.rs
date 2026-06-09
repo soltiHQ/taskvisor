@@ -139,14 +139,38 @@ impl SupervisorConfig {
     }
 }
 
+impl Default for SupervisorConfig {
+    /// Default configuration:
+    /// - `grace = 60s` (reasonable graceful shutdown window)
+    /// - `max_concurrent = 0` (unlimited)
+    /// - `bus_capacity = 1024` (good baseline)
+    /// - `timeout = 0s` (no timeout)
+    /// - `restart = RestartPolicy::OnFailure` (restart on errors only)
+    /// - `backoff = BackoffPolicy::default()` (constant 100ms, see [`BackoffPolicy`])
+    /// - `max_retries = 0` (unlimited)
+    fn default() -> Self {
+        Self {
+            grace: Duration::from_secs(60),
+            max_concurrent: 0,
+            bus_capacity: 1024,
+            timeout: Duration::from_secs(0),
+            restart: RestartPolicy::default(),
+            backoff: BackoffPolicy::default(),
+            max_retries: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn validate_rejects_zero_bus_capacity() {
-        let mut cfg = SupervisorConfig::default();
-        cfg.bus_capacity = 0;
+        let cfg = SupervisorConfig {
+            bus_capacity: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
@@ -195,27 +219,5 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.bus_capacity_clamped(), 1);
-    }
-}
-
-impl Default for SupervisorConfig {
-    /// Default configuration:
-    /// - `grace = 60s` (reasonable graceful shutdown window)
-    /// - `max_concurrent = 0` (unlimited)
-    /// - `bus_capacity = 1024` (good baseline)
-    /// - `timeout = 0s` (no timeout)
-    /// - `restart = RestartPolicy::OnFailure` (restart on errors only)
-    /// - `backoff = BackoffPolicy::default()` (constant 100ms, see [`BackoffPolicy`])
-    /// - `max_retries = 0` (unlimited)
-    fn default() -> Self {
-        Self {
-            grace: Duration::from_secs(60),
-            max_concurrent: 0,
-            bus_capacity: 1024,
-            timeout: Duration::from_secs(0),
-            restart: RestartPolicy::default(),
-            backoff: BackoffPolicy::default(),
-            max_retries: 0,
-        }
     }
 }
