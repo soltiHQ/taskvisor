@@ -149,6 +149,18 @@ pub enum EventKind {
     /// - `seq`: global sequence
     TaskAdded,
 
+    /// Task could not be added: a task with the same name is already registered.
+    ///
+    /// Published by Registry instead of `TaskAdded` when an `Add` command targets a name that already exists;
+    /// no new actor is spawned.
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `reason`: e.g. "already_exists"
+    /// - `at`: wall-clock timestamp
+    /// - `seq`: global sequence
+    TaskAddFailed,
+
     /// Request to remove a task from the supervisor.
     ///
     /// Sets:
