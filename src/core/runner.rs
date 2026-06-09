@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     error::TaskError,
     events::{Bus, Event, EventKind},
+    identity::TaskId,
     tasks::Task,
 };
 
@@ -79,6 +80,7 @@ pub async fn run_once<T: Task + ?Sized>(
     parent: &CancellationToken,
     timeout: Option<Duration>,
     attempt: u32,
+    id: TaskId,
     bus: &Bus,
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
@@ -88,7 +90,7 @@ pub async fn run_once<T: Task + ?Sized>(
             Ok(r) => r,
             Err(_elapsed) => {
                 child.cancel();
-                publish_timeout(bus, task.name(), dur, attempt);
+                publish_timeout(bus, id, task.name(), dur, attempt);
                 Err(TaskError::Timeout { timeout: dur })
             }
         }
@@ -98,29 +100,34 @@ pub async fn run_once<T: Task + ?Sized>(
 
     match res {
         Ok(()) => {
-            publish_stopped(bus, task.name());
+            publish_stopped(bus, id, task.name());
             Ok(())
         }
         Err(TaskError::Canceled) => {
-            publish_stopped(bus, task.name());
+            publish_stopped(bus, id, task.name());
             Err(TaskError::Canceled)
         }
         Err(e) => {
-            publish_failed(bus, task.name(), attempt, &e);
+            publish_failed(bus, id, task.name(), attempt, &e);
             Err(e)
         }
     }
 }
 
 /// Publishes `TaskStopped` event (success or graceful cancellation).
-fn publish_stopped(bus: &Bus, name: &str) {
-    bus.publish(Event::new(EventKind::TaskStopped).with_task(name));
+fn publish_stopped(bus: &Bus, id: TaskId, name: &str) {
+    bus.publish(
+        Event::new(EventKind::TaskStopped)
+            .with_task(name)
+            .with_id(id),
+    );
 }
 
 /// Publishes `TaskFailed` event with error details.
-fn publish_failed(bus: &Bus, name: &str, attempt: u32, err: &TaskError) {
+fn publish_failed(bus: &Bus, id: TaskId, name: &str, attempt: u32, err: &TaskError) {
     let mut ev = Event::new(EventKind::TaskFailed)
         .with_task(name)
+        .with_id(id)
         .with_attempt(attempt)
         .with_reason(err.to_string());
     if let Some(code) = err.exit_code() {
@@ -130,10 +137,11 @@ fn publish_failed(bus: &Bus, name: &str, attempt: u32, err: &TaskError) {
 }
 
 /// Publishes `TimeoutHit` event (always followed by `TaskFailed`).
-fn publish_timeout(bus: &Bus, name: &str, dur: Duration, attempt: u32) {
+fn publish_timeout(bus: &Bus, id: TaskId, name: &str, dur: Duration, attempt: u32) {
     bus.publish(
         Event::new(EventKind::TimeoutHit)
             .with_task(name)
+            .with_id(id)
             .with_timeout(dur)
             .with_attempt(attempt),
     );
@@ -197,7 +205,7 @@ mod tests {
         let parent = CancellationToken::new();
         let timeout = Some(Duration::from_millis(50));
 
-        let result = run_once(&SlowTask, &parent, timeout, 1, &bus).await;
+        let result = run_once(&SlowTask, &parent, timeout, 1, TaskId::next(), &bus).await;
 
         match result {
             Err(TaskError::Timeout { timeout: dur }) => {
@@ -217,7 +225,7 @@ mod tests {
         let bus = Bus::new(16);
         let parent = CancellationToken::new();
 
-        let result = run_once(&OkTask, &parent, None, 1, &bus).await;
+        let result = run_once(&OkTask, &parent, None, 1, TaskId::next(), &bus).await;
         assert!(result.is_ok());
     }
 
@@ -226,7 +234,7 @@ mod tests {
         let bus = Bus::new(16);
         let parent = CancellationToken::new();
 
-        let result = run_once(&FailTask, &parent, None, 1, &bus).await;
+        let result = run_once(&FailTask, &parent, None, 1, TaskId::next(), &bus).await;
 
         assert!(
             matches!(result, Err(TaskError::Fail { .. })),
@@ -240,7 +248,15 @@ mod tests {
         let mut rx = bus.subscribe();
         let parent = CancellationToken::new();
 
-        let _ = run_once(&SlowTask, &parent, Some(Duration::from_millis(50)), 1, &bus).await;
+        let _ = run_once(
+            &SlowTask,
+            &parent,
+            Some(Duration::from_millis(50)),
+            1,
+            TaskId::next(),
+            &bus,
+        )
+        .await;
 
         let mut saw_timeout_hit = false;
         while let Ok(ev) = rx.try_recv() {

@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, SystemTime};
 
+use crate::identity::TaskId;
+
 /// Global sequence counter for event ordering.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -266,8 +268,13 @@ pub struct Event {
     pub reason: Option<Arc<str>>,
     /// Attempt count (starting from 1).
     pub attempt: Option<u32>,
-    /// Name of the task, if applicable.
+    /// Name of the task, if applicable. A free-form human **label** (not an identity).
     pub task: Option<Arc<str>>,
+    /// Runtime identity of the task run instance this event belongs to, if applicable.
+    ///
+    /// This is the canonical correlation key: unlike [`task`](Self::task) (a human label
+    /// that may repeat), a [`TaskId`] is unique per run instance and never reused.
+    pub id: Option<TaskId>,
     /// Numeric exit code, from a process-like runtime.
     /// `None` for events that have no process behind them.
     pub exit_code: Option<i32>,
@@ -290,6 +297,7 @@ impl Event {
             attempt: None,
             reason: None,
             task: None,
+            id: None,
             exit_code: None,
         }
     }
@@ -305,6 +313,13 @@ impl Event {
     #[inline]
     pub fn with_task(mut self, task: impl Into<Arc<str>>) -> Self {
         self.task = Some(task.into());
+        self
+    }
+
+    /// Attaches the runtime task identity ([`TaskId`]).
+    #[inline]
+    pub fn with_id(mut self, id: TaskId) -> Self {
+        self.id = Some(id);
         self
     }
 
@@ -395,6 +410,9 @@ impl std::fmt::Debug for Event {
         let mut d = f.debug_struct("Event");
         d.field("seq", &self.seq);
         d.field("kind", &self.kind);
+        if let Some(id) = self.id {
+            d.field("id", &id);
+        }
         if let Some(ref task) = self.task {
             d.field("task", task);
         }

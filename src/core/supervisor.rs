@@ -116,6 +116,7 @@ use crate::{
     core::SupervisorConfig,
     error::RuntimeError,
     events::{Bus, Event, EventKind},
+    identity::TaskId,
     subscribers::{Subscribe, SubscriberSet},
     tasks::TaskSpec,
 };
@@ -235,38 +236,48 @@ impl Supervisor {
         super::handle::SupervisorHandle::new(Arc::clone(self))
     }
 
-    /// Adds a new task to the supervisor at runtime.
+    /// Adds a new task to the supervisor at runtime, returning its minted [`TaskId`].
     ///
-    /// Publishes `TaskAddRequested` on bus (observability, fire-and-forget),
-    /// then sends `Add` command via mpsc (guaranteed delivery).
-    pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<(), RuntimeError> {
-        self.bus
-            .publish(Event::new(EventKind::TaskAddRequested).with_task(spec.task().name()));
+    /// Mints the runtime identity, publishes `TaskAddRequested` on bus (observability, fire-and-forget),
+    /// then sends the `Add` command via mpsc (guaranteed delivery).
+    pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
+        let id = TaskId::next();
+        self.bus.publish(
+            Event::new(EventKind::TaskAddRequested)
+                .with_task(spec.task().name())
+                .with_id(id),
+        );
         self.cmd_tx
-            .send(RegistryCommand::Add(spec))
-            .map_err(|_| RuntimeError::ShuttingDown)
+            .send(RegistryCommand::Add(id, spec))
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        Ok(id)
     }
 
-    /// Removes a task from the supervisor at runtime.
+    /// Removes a task from the supervisor at runtime, by its runtime identity.
     ///
     /// Publishes `TaskRemoveRequested` on bus (observability, fire-and-forget),
-    /// then sends `Remove` command via mpsc (guaranteed delivery).
-    pub(crate) fn remove_task(&self, name: &str) -> Result<(), RuntimeError> {
+    /// then sends the `Remove` command via mpsc (guaranteed delivery).
+    pub(crate) fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
         self.bus
-            .publish(Event::new(EventKind::TaskRemoveRequested).with_task(name));
+            .publish(Event::new(EventKind::TaskRemoveRequested).with_id(id));
         self.cmd_tx
-            .send(RegistryCommand::Remove(Arc::from(name)))
+            .send(RegistryCommand::Remove(id))
             .map_err(|_| RuntimeError::ShuttingDown)
     }
 
-    /// Returns a sorted list of currently active task names from the registry.
-    pub(crate) async fn list_tasks(&self) -> Vec<Arc<str>> {
+    /// Returns currently active tasks as `(id, label)` pairs from the registry.
+    pub(crate) async fn list_tasks(&self) -> Vec<(TaskId, Arc<str>)> {
         self.registry.list().await
     }
 
-    /// Checks if a task exists in the registry by name.
-    pub(crate) async fn registry_contains(&self, name: &str) -> bool {
-        self.registry.contains(name).await
+    /// Checks if a task with the given identity is registered.
+    pub(crate) async fn contains_id(&self, id: TaskId) -> bool {
+        self.registry.contains(id).await
+    }
+
+    /// Resolves a label to the identity currently holding it (if any).
+    pub(crate) async fn id_for_label(&self, name: &str) -> Option<TaskId> {
+        self.registry.id_for_label(name).await
     }
 
     /// Returns a new bus receiver for event subscription.
@@ -300,12 +311,12 @@ impl Supervisor {
         self.start();
 
         if !tasks.is_empty() {
-            let names: Vec<Arc<str>> = tasks.iter().map(|s| Arc::from(s.task().name())).collect();
             let mut rx = self.bus.subscribe();
+            let mut pending_ids = Vec::with_capacity(tasks.len());
             for spec in tasks {
-                self.add_task(spec)?;
+                pending_ids.push(self.add_task(spec)?);
             }
-            self.wait_tasks_registered(&mut rx, &names).await;
+            self.wait_tasks_registered(&mut rx, &pending_ids).await;
         }
         self.drive_shutdown().await
     }
@@ -314,9 +325,9 @@ impl Supervisor {
     async fn wait_tasks_registered(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
-        names: &[Arc<str>],
+        ids: &[TaskId],
     ) {
-        let mut pending: Vec<Arc<str>> = names.to_vec();
+        let mut pending: Vec<TaskId> = ids.to_vec();
 
         let confirm = async {
             while !pending.is_empty() {
@@ -324,16 +335,16 @@ impl Supervisor {
                     Ok(ev)
                         if matches!(ev.kind, EventKind::TaskAdded | EventKind::TaskAddFailed) =>
                     {
-                        if let Some(name) = ev.task.as_deref() {
-                            pending.retain(|p| &**p != name);
+                        if let Some(id) = ev.id {
+                            pending.retain(|p| *p != id);
                         }
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let mut still = Vec::new();
-                        for p in std::mem::take(&mut pending) {
-                            if !self.registry.contains(&p).await {
-                                still.push(p);
+                        for id in std::mem::take(&mut pending) {
+                            if !self.registry.contains(id).await {
+                                still.push(id);
                             }
                         }
                         pending = still;
@@ -368,31 +379,31 @@ impl Supervisor {
         self.alive.is_alive(name).await
     }
 
-    /// Cancel a task by name and wait for confirmation (`TaskRemoved`).
-    pub(crate) async fn cancel(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.cancel_with_timeout(name, self.cfg.grace).await
+    /// Cancel a task by identity and wait for confirmation (`TaskRemoved`).
+    pub(crate) async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.cancel_with_timeout(id, self.cfg.grace).await
     }
 
     /// Cancel with explicit timeout.
     pub(crate) async fn cancel_with_timeout(
         &self,
-        name: &str,
+        id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
         let mut rx = self.bus.subscribe();
-        if !self.registry.contains(name).await {
+        if !self.registry.contains(id).await {
             return Ok(false);
         }
 
         self.bus.publish(
             Event::new(EventKind::TaskRemoveRequested)
-                .with_task(name)
+                .with_id(id)
                 .with_reason("manual_cancel"),
         );
         self.cmd_tx
-            .send(RegistryCommand::Remove(Arc::from(name)))
+            .send(RegistryCommand::Remove(id))
             .map_err(|_| RuntimeError::ShuttingDown)?;
-        self.wait_task_removed(&mut rx, name, wait_for).await
+        self.wait_task_removed(&mut rx, id, wait_for).await
     }
 
     /// Submits a task to the controller (if enabled).
@@ -486,36 +497,31 @@ impl Supervisor {
         }
     }
 
-    /// Waits for `TaskRemoved` event for the given task name, with timeout.
+    /// Waits for the `TaskRemoved` event for the given identity, with timeout.
     ///
     /// On `Lagged`, falls back to checking the registry directly.
     /// On `Closed`, checks registry as a last resort.
-    /// On timeout, re-checks the registry so a missed `TaskRemoved` is not reported as a spurious timeout.
+    /// On timeout, re-checks the registry so a missed `TaskRemoved` is not a spurious timeout.
     async fn wait_task_removed(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
-        name: &str,
+        id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        let target: Arc<str> = Arc::from(name);
-
         let wait_for_event = async {
             loop {
                 match rx.recv().await {
-                    Ok(ev)
-                        if matches!(ev.kind, EventKind::TaskRemoved)
-                            && ev.task.as_deref() == Some(&*target) =>
-                    {
+                    Ok(ev) if matches!(ev.kind, EventKind::TaskRemoved) && ev.id == Some(id) => {
                         return Ok(true);
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if !self.registry.contains(&target).await {
+                        if !self.registry.contains(id).await {
                             return Ok(true);
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Ok(!self.registry.contains(&target).await);
+                        return Ok(!self.registry.contains(id).await);
                     }
                 }
             }
@@ -524,9 +530,9 @@ impl Supervisor {
         match timeout(wait_for, wait_for_event).await {
             Ok(result) => result,
             Err(_) => {
-                if self.registry.contains(&target).await {
+                if self.registry.contains(id).await {
                     Err(RuntimeError::TaskRemoveTimeout {
-                        name: target,
+                        id,
                         timeout: wait_for,
                     })
                 } else {
@@ -638,18 +644,18 @@ mod tests {
             ctx.cancelled().await;
             Ok(())
         });
-        handle
+        let id = handle
             .add_and_wait(TaskSpec::restartable(t), Duration::from_secs(1))
             .await
             .expect("add should succeed");
 
-        let removed = handle.cancel("c").await.expect("cancel should not error");
+        let removed = handle.cancel(id).await.expect("cancel should not error");
         assert!(
             removed,
             "cancelling an existing task should report removed=true"
         );
 
-        let absent = handle.cancel("c").await.expect("cancel should not error");
+        let absent = handle.cancel(id).await.expect("cancel should not error");
         assert!(!absent, "cancelling a missing task should report false");
 
         let _ = handle.shutdown().await;

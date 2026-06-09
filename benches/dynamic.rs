@@ -123,8 +123,8 @@ fn bench_add_cancel(c: &mut Criterion) {
                         let spec = worker_task(&name);
 
                         let start = std::time::Instant::now();
-                        handle.add_and_wait(spec, wait).await.unwrap();
-                        let _ = handle.cancel(&name).await;
+                        let id = handle.add_and_wait(spec, wait).await.unwrap();
+                        let _ = handle.cancel(id).await;
                         total += start.elapsed();
                     }
 

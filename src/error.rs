@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::identity::TaskId;
+
 /// # Errors produced by the taskvisor runtime.
 ///
 /// These represent failures in the orchestration system itself.
@@ -41,10 +43,10 @@ pub enum RuntimeError {
         name: Arc<str>,
     },
     /// Timeout waiting for task removal confirmation.
-    #[error("timeout waiting for task '{name}' removal after {timeout:?}")]
+    #[error("timeout waiting for task {id} removal after {timeout:?}")]
     TaskRemoveTimeout {
-        /// The task name that timed out during removal.
-        name: Arc<str>,
+        /// The runtime identity that timed out during removal.
+        id: TaskId,
         /// How long we waited before giving up.
         timeout: Duration,
     },

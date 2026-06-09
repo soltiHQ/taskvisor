@@ -99,15 +99,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add workers dynamically
     println!("Adding worker-a and worker-b...");
-    handle.add(make_worker("worker-a"))?;
-    handle.add(make_worker("worker-b"))?;
+    let id_a = handle.add(make_worker("worker-a"))?;
+    let id_b = handle.add(make_worker("worker-b"))?;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     println!("Active: {:?}", handle.list().await);
 
     // Remove worker-a
     println!("\nRemoving worker-a...");
-    handle.remove("worker-a")?;
+    handle.remove(id_a)?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     println!("Active: {:?}", handle.list().await);
 
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cancel worker-b
     println!("Cancelling worker-b...");
-    let cancelled = handle.cancel("worker-b").await?;
+    let cancelled = handle.cancel(id_b).await?;
     println!("worker-b cancelled: {cancelled}");
     println!("worker-b alive: {}", handle.is_alive("worker-b").await);
 
