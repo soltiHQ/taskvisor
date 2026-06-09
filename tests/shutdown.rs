@@ -1,6 +1,4 @@
 //! Graceful-shutdown & run-completion integration tests.
-//!
-//! Shutdown assertions target the **return value** (the reliable contract).
 
 mod common;
 
@@ -10,6 +8,7 @@ use std::time::Duration;
 use common::*;
 use taskvisor::prelude::*;
 
+/// Task that ignores cancellation and sleeps far longer than any test grace.
 fn make_stubborn(name: &str) -> TaskRef {
     TaskFn::arc(name, |_ctx: CancellationToken| async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -17,18 +16,21 @@ fn make_stubborn(name: &str) -> TaskRef {
     })
 }
 
-fn served(grace: Duration) -> SupervisorHandle {
-    Supervisor::builder(SupervisorConfig {
+fn served(grace: Duration) -> (SupervisorHandle, Arc<EventCollector>) {
+    let collector = EventCollector::new();
+    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
+    let sup = Supervisor::builder(SupervisorConfig {
         grace,
         ..Default::default()
     })
-    .build()
-    .serve()
+    .with_subscribers(subs)
+    .build();
+    (sup.serve(), collector)
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn shutdown_cooperative_returns_ok() {
-    let handle = served(Duration::from_secs(5));
+async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
+    let (handle, collector) = served(Duration::from_secs(5));
     handle
         .add_and_wait(
             TaskSpec::restartable(make_coop("c1")),
@@ -47,11 +49,23 @@ async fn shutdown_cooperative_returns_ok() {
     with_timeout(5, handle.shutdown())
         .await
         .expect("cooperative tasks drain within grace → Ok");
+
+    let requested = collector
+        .find(EventKind::ShutdownRequested)
+        .expect("ShutdownRequested");
+    let all_stopped = collector
+        .find(EventKind::AllStoppedWithinGrace)
+        .expect("AllStoppedWithinGrace");
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+    assert!(
+        requested.seq < all_stopped.seq,
+        "ShutdownRequested must precede AllStopped"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts() {
-    let handle = served(Duration::from_millis(200));
+    let (handle, collector) = served(Duration::from_millis(200));
     handle
         .add_and_wait(
             TaskSpec::once(make_stubborn("stubborn")),
@@ -67,19 +81,27 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
         }
         other => panic!("expected GraceExceeded, got {other:?}"),
     }
+    assert!(collector.find(EventKind::ShutdownRequested).is_some());
+    assert!(collector.find(EventKind::GraceExceeded).is_some());
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn shutdown_empty_registry_returns_ok() {
-    let handle = served(SupervisorConfig::default().grace);
+async fn shutdown_empty_registry_returns_ok_all_stopped() {
+    let (handle, collector) = served(SupervisorConfig::default().grace);
+
     with_timeout(5, handle.shutdown())
         .await
         .expect("empty registry drains instantly → Ok");
+
+    assert!(collector.find(EventKind::ShutdownRequested).is_some());
+    assert!(collector.find(EventKind::AllStoppedWithinGrace).is_some());
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
-    let handle = served(Duration::from_millis(500));
+    let (handle, collector) = served(Duration::from_millis(500));
     handle
         .add_and_wait(
             TaskSpec::restartable(make_coop("coop")),
@@ -105,11 +127,13 @@ async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
         }
         other => panic!("expected GraceExceeded, got {other:?}"),
     }
+    assert!(collector.find(EventKind::GraceExceeded).is_some());
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
-    let handle = served(Duration::ZERO);
+    let (handle, collector) = served(Duration::ZERO);
     handle
         .add_and_wait(TaskSpec::once(make_stubborn("z")), Duration::from_secs(1))
         .await
@@ -122,6 +146,45 @@ async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
         }
         other => panic!("expected GraceExceeded, got {other:?}"),
     }
+    assert!(collector.find(EventKind::GraceExceeded).is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_emits_task_removed_for_each_drained_task() {
+    let (handle, collector) = served(Duration::from_secs(5));
+    let id_a = handle
+        .add_and_wait(
+            TaskSpec::restartable(make_coop("a")),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let id_b = handle
+        .add_and_wait(
+            TaskSpec::restartable(make_coop("b")),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    with_timeout(5, handle.shutdown())
+        .await
+        .expect("shutdown ok");
+
+    assert!(
+        collector
+            .by_id(id_a)
+            .iter()
+            .any(|e| e.kind == EventKind::TaskRemoved),
+        "missing TaskRemoved for task a"
+    );
+    assert!(
+        collector
+            .by_id(id_b)
+            .iter()
+            .any(|e| e.kind == EventKind::TaskRemoved),
+        "missing TaskRemoved for task b"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

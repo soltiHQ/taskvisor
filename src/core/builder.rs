@@ -86,7 +86,13 @@ impl SupervisorBuilder {
             .map(Arc::new);
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let registry = Registry::new(bus.clone(), runtime_token.clone(), semaphore, cmd_rx);
+        let registry = Registry::new(
+            bus.clone(),
+            runtime_token.clone(),
+            semaphore,
+            self.cfg.grace,
+            cmd_rx,
+        );
         let alive = Arc::new(AliveTracker::new());
 
         let sup = Arc::new(Supervisor::new_internal(

@@ -355,20 +355,26 @@ Supervisor
 
 ## Performance
 
-Measured with [Criterion](https://github.com/bheisler/criterion.rs) on hardware ranging from Raspberry Pi 4 to Apple M3 Max. 
-Numbers below are order-of-magnitude estimates: run `cargo bench` on your machine for precise results.
+Measured with [Criterion](https://github.com/bheisler/criterion.rs) on a single-threaded Tokio runtime
+(the common case for a supervisor). Numbers are indicative point estimates — they depend on hardware and
+load, so run `cargo bench` on your own machine for precise results. Two reference machines, ~30× apart:
 
-| What                      | Order of magnitude  | What it tells you                                                |
-|---------------------------|---------------------|------------------------------------------------------------------|
-| Per-task overhead         | ~10-50 us           | Full lifecycle (spawn, run, cleanup) for one no-op task          |
-| `handle.add()` latency    | ~100-800 ns         | Submitting a task via `serve()` API. Channel send, no I/O        |
-| Batch throughput          | ~50K-400K tasks/sec | Processing N instant tasks via `run()`. Scales with CPU          |
-| Fan-out (0-8 subscribers) | ~2x total time      | Each subscriber gets its own queue. Linear growth, no contention |
-| `add_and_wait` + `cancel` | ~30-200 us          | Full round-trip: register, confirm, cancel                       |
-| `list()` with 500 tasks   | ~5-30 us            | Registry snapshot via async channel                              |
+| Operation (`current_thread`)                | Apple M3 Max | Raspberry Pi 4 | What it measures                                    |
+|---------------------------------------------|--------------|----------------|-----------------------------------------------------|
+| `handle.add()`                              | ~95 ns       | ~0.9 µs        | Mint a `TaskId` + channel send (no I/O)             |
+| `list()` — 100 tasks                        | ~1.4 µs      | ~8 µs          | Registry snapshot, sorted by id                     |
+| `list()` — 500 tasks                        | ~8 µs        | ~59 µs         | Linear in the number of registered tasks            |
+| One task lifecycle                          | ~9.6 µs      | ~79 µs         | spawn → run → exhaust → cleanup (≈6 events)         |
+| `add_and_wait` + `cancel`                   | ~12 µs       | ~47 µs         | Full round-trip: register, confirm, cancel          |
+| Batch of 500 tasks via `run()`              | ~1.7 ms      | ~12.8 ms       | N instant tasks to completion (~290K/s vs ~39K/s)   |
+| Churn 500 (add + remove)                    | ~3.5 ms      | ~15.4 ms       | Register then tear down 500 tasks                   |
+| Fan-out, 100 tasks × 8 subscribers          | ~0.5 ms      | ~3.4 ms        | Per-subscriber queue; linear, no cross-contention   |
 
-Throughput scales linearly with batch size, subscriber overhead is linear per subscriber, and `list()` is linear in the number of registered tasks. 
-No known superlinear bottlenecks.
+Per-task overhead is event-bookkeeping (lifecycle events on the bus + registry insert/remove), so it is
+negligible next to any real task work (I/O, milliseconds and up). A multi-threaded runtime is typically
+~2–6× slower per operation here due to cross-thread scheduling and lock contention — `current_thread` is
+usually the right choice for a supervisor. Scaling is linear in batch size, subscriber count, and task
+count; no known superlinear bottlenecks.
 
 ```bash
 cargo bench                                          # all benchmarks

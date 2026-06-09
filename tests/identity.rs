@@ -356,7 +356,7 @@ async fn cancel_with_timeout_true_for_cooperative_task() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_with_timeout_eagerly_removes_stuck_task() {
+async fn cancel_with_timeout_errors_on_stuck_task() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let task = TaskFn::arc("stubborn", |_ctx: CancellationToken| async move {
@@ -368,18 +368,61 @@ async fn cancel_with_timeout_eagerly_removes_stuck_task() {
             .await
             .expect("add stubborn");
 
-        assert!(
-            handle
-                .cancel_with_timeout(id, Duration::from_millis(150))
-                .await
-                .expect("cancel_with_timeout ok"),
-            "eager removal reports the stuck task as removed"
-        );
-        assert!(
-            !handle.list().await.iter().any(|(i, _)| *i == id),
-            "stuck task must have left the registry eagerly"
-        );
+        match handle
+            .cancel_with_timeout(id, Duration::from_millis(150))
+            .await
+        {
+            Err(RuntimeError::TaskRemoveTimeout {
+                id: timed_id,
+                timeout,
+            }) => {
+                assert_eq!(timed_id, id);
+                assert_eq!(timeout, Duration::from_millis(150));
+            }
+            other => panic!(
+                "expected TaskRemoveTimeout for a task that ignores cancellation, got {other:?}"
+            ),
+        }
         let _ = with_timeout(5, handle.shutdown()).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
+    let collector = EventCollector::new();
+    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
+    let sup = Supervisor::builder(SupervisorConfig {
+        grace: Duration::from_millis(300),
+        ..Default::default()
+    })
+    .with_subscribers(subs)
+    .build();
+    let handle = sup.serve();
+
+    with_timeout(10, async {
+        let task = TaskFn::arc("stuck-runner", |_ctx: CancellationToken| async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(())
+        });
+        let id = handle
+            .add_and_wait(TaskSpec::restartable(task), Duration::from_secs(2))
+            .await
+            .expect("add stuck-runner");
+
+        handle.remove(id).expect("remove");
+
+        assert!(
+            poll_until(Duration::from_secs(3), || async {
+                collector.by_id(id).iter().any(|e| {
+                    e.kind == EventKind::TaskRemoved
+                        && e.reason.as_deref() == Some("force_terminated_after_grace")
+                })
+            })
+            .await,
+            "stuck task must be force-aborted after grace, not leaked"
+        );
+        let _ = handle.shutdown().await;
     })
     .await;
 }

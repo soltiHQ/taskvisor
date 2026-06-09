@@ -161,6 +161,7 @@ pub struct Supervisor {
     runtime_token: CancellationToken,
     started: AtomicBool,
     cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
+    subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 
     #[cfg(feature = "controller")]
     pub(super) controller: OnceCell<Arc<crate::controller::Controller>>,
@@ -196,6 +197,7 @@ impl Supervisor {
             ready: Arc::new(Notify::new()),
             started: AtomicBool::new(false),
             cmd_tx,
+            subscriber_handle: std::sync::Mutex::new(None),
 
             #[cfg(feature = "controller")]
             controller: OnceCell::new(),
@@ -365,6 +367,7 @@ impl Supervisor {
         self.bus.publish(Event::new(EventKind::ShutdownRequested));
         let res = self.drain_with_grace().await;
         self.runtime_token.cancel();
+        self.join_subscriber_listener().await;
         self.subs.close().await;
         res
     }
@@ -444,7 +447,7 @@ impl Supervisor {
         let alive = Arc::clone(&self.alive);
         let rt = self.runtime_token.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -476,6 +479,16 @@ impl Supervisor {
                 }
             }
         });
+
+        *self.subscriber_handle.lock().unwrap() = Some(handle);
+    }
+
+    /// Awaits the subscriber listener.
+    async fn join_subscriber_listener(&self) {
+        let handle = self.subscriber_handle.lock().unwrap().take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     /// Waits for either shutdown signal or natural completion of all tasks.
@@ -490,6 +503,7 @@ impl Supervisor {
             }
         };
         self.runtime_token.cancel();
+        self.join_subscriber_listener().await;
         self.subs.close().await;
         res
     }
@@ -508,11 +522,8 @@ impl Supervisor {
         }
     }
 
-    /// Waits for the `TaskRemoved` event for the given identity, with timeout.
-    ///
-    /// On `Lagged`, falls back to checking the registry directly.
-    /// On `Closed`, checks registry as a last resort.
-    /// On timeout, re-checks the registry so a missed `TaskRemoved` is not a spurious timeout.
+    /// Waits up to `wait_for` for a task to **actually terminate**, signalled by its `TaskRemoved`
+    /// event (published by the registry only after the actor's `JoinHandle` completes).
     async fn wait_task_removed(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
@@ -523,33 +534,21 @@ impl Supervisor {
             loop {
                 match rx.recv().await {
                     Ok(ev) if matches!(ev.kind, EventKind::TaskRemoved) && ev.id == Some(id) => {
-                        return Ok(true);
+                        return true;
                     }
                     Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if !self.registry.contains(id).await {
-                            return Ok(true);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Ok(!self.registry.contains(id).await);
-                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return false,
                 }
             }
         };
 
         match timeout(wait_for, wait_for_event).await {
-            Ok(result) => result,
-            Err(_) => {
-                if self.registry.contains(id).await {
-                    Err(RuntimeError::TaskRemoveTimeout {
-                        id,
-                        timeout: wait_for,
-                    })
-                } else {
-                    Ok(true)
-                }
-            }
+            Ok(true) => Ok(true),
+            Ok(false) | Err(_) => Err(RuntimeError::TaskRemoveTimeout {
+                id,
+                timeout: wait_for,
+            }),
         }
     }
 }
