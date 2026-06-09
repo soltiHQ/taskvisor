@@ -24,7 +24,7 @@
 //! ## Wiring
 //!
 //! Events are consumed by user-defined [`Subscribe`](crate::Subscribe) implementations.
-//! See [`LogWriter`](crate::LogWriter) for a built-in example.
+//! See `LogWriter` (feature = `logging`) for a built-in example.
 
 mod event;
 pub use event::{BackoffSource, Event, EventKind};

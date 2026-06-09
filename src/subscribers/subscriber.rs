@@ -68,7 +68,7 @@ use crate::events::Event;
 /// ## Also
 ///
 /// - See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for the event structure.
-/// - For a built-in reference implementation see [`LogWriter`](crate::LogWriter) *(feature = `logging`)*.
+/// - For a built-in reference implementation see `LogWriter` *(feature = `logging`)*.
 pub trait Subscribe: Send + Sync + 'static {
     /// Processes a single event synchronously.
     ///

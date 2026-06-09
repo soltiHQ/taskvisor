@@ -4,7 +4,8 @@
 //! It enforces per-slot admission rules (`Queue`, `Replace`, `DropIfRunning`) and starts
 //! the *next* task **only after** a terminal `TaskRemoved` event is observed on the runtime bus.
 //!
-//! In this model, **one slot = one task name** *(`slot key = TaskSpec::name()`)*.
+//! **one slot = one logical key** *(`slot key = TaskSpec::slot()`, which defaults to the task name and can be overridden via `TaskSpec::with_slot`)*.
+//! Several differently-named tasks may therefore share a single slot, and one task name may be admitted into distinct slots.
 //!
 //! ## Role in Taskvisor
 //!
@@ -50,13 +51,13 @@
 //!
 //! ## Per-slot model
 //!
-//! - **Key**: `task_spec.name()` (exactly one running task per slot).
+//! - **Key**: `task_spec.slot()` defaults to `name()`, override with `with_slot` (exactly one running task per slot).
 //! - **State**: `Idle | Running | Terminating`, with a FIFO queue per slot.
 //! - **Replace (latest-wins)**: does **not** grow the queue; it **replaces the head** (the immediate successor).
 //!   The next task actually starts **only after `TaskRemoved`**.
 //!
 //! ```text
-//! State machine (per task name)
+//! State machine (per slot)
 //!
 //!   Idle ── submit(any) → start → Running
 //!    ▲                              │
@@ -105,7 +106,7 @@
 //! - Controller emits [`ControllerSubmitted`](crate::EventKind::ControllerSubmitted),
 //!   [`ControllerRejected`](crate::EventKind::ControllerRejected), and
 //!   [`ControllerSlotTransition`](crate::EventKind::ControllerSlotTransition) events;
-//!   readable with [`LogWriter`](crate::LogWriter).
+//!   readable with `LogWriter` (feature = `logging`).
 //!
 //! ## Invariants
 //!

@@ -6,7 +6,7 @@
 //!
 //! ## What is the controller?
 //!
-//! The controller is a thin layer over the supervisor that groups tasks into **slots** (keyed by task name).
+//! The controller is a thin layer over the supervisor that groups tasks into **slots** (keyed by `TaskSpec::slot()`, which defaults to the task name).
 //! Each slot enforces an admission policy:
 //!
 //! | Policy          | Behavior                                             | Use case           |
@@ -15,8 +15,8 @@
 //! | `Replace`       | Cancels running task, starts new one                 | Search-as-you-type |
 //! | `DropIfRunning` | Silently ignores if slot is busy                     | Debounced actions  |
 //!
-//! The slot key is the task name (`TaskSpec::name()`).
-//! **Tasks with different names go to different slots and never interfere.**
+//! The slot key is `TaskSpec::slot()` (defaults to the task name; override with `.with_slot(...)`).
+//! **Tasks with different slot keys go to different slots and never interfere.**
 //!
 //! ## What this shows
 //!

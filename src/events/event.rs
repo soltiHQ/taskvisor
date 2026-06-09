@@ -253,7 +253,7 @@ pub enum BackoffSource {
 ///
 /// - [`EventKind`] - event classification
 /// - [`Subscribe`](crate::Subscribe) - user-defined event handler trait
-/// - [`LogWriter`](crate::LogWriter) - built-in human-readable event printer
+/// - `LogWriter` (feature = `logging`) - built-in human-readable event printer
 #[derive(Clone)]
 pub struct Event {
     /// Globally unique, monotonically increasing sequence number.

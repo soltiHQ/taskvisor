@@ -45,12 +45,12 @@
 //! Supervisor::run()
 //!   ├─ spawn subscriber_listener()   ──┐
 //!   ├─ Registry::spawn_listener()      │ both subscribe to Bus
-//!   ├─ cmd_tx.send(Add(spec))          │ commands via mpsc (guaranteed)
+//!   ├─ cmd_tx.send(Add(id, spec))      │ commands via mpsc (guaranteed)
 //!   └─ wait: shutdown signal OR registry empty
 //!
 //!   Supervisor ──cmd_tx──► Registry (mpsc, guaranteed delivery)
-//!                            ├─► Add(spec)    → spawn → publish TaskAdded
-//!                            └─► Remove(name) → cancel → publish TaskRemoved
+//!                            ├─► Add(id, spec) → spawn → publish TaskAdded
+//!                            └─► Remove(id)    → cancel → publish TaskRemoved
 //!
 //!                         ┌──────────────────────────── Bus (broadcast) ───────────────────────┐
 //! Publishers:             │                                                                    │

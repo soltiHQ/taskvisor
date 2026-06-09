@@ -18,8 +18,8 @@
 //!     │     ├──► updates AliveTracker
 //!     │     └──► fans out to SubscriberSet
 //!     └──► Registry.spawn_listener()
-//!           ├──► cmd_rx: Add(spec)      → spawn actor
-//!           ├──► cmd_rx: Remove(name)   → cancel task
+//!           ├──► cmd_rx: Add(id, spec)  → spawn actor
+//!           ├──► cmd_rx: Remove(id)     → cancel task
 //!           ├──► bus_rx: ActorExhausted → cleanup
 //!           └──► bus_rx: ActorDead      → cleanup
 //!
@@ -38,26 +38,26 @@
 //!
 //! ## Runtime task management
 //! ```text
-//! add_task(spec)
+//! add_task(spec)                           // mints TaskId, returns it to caller
 //!     ├──► Bus.publish(TaskAddRequested)   // observability (fire-and-forget)
-//!     ├──► cmd_tx.send(Add(spec))          // guaranteed delivery (mpsc)
+//!     ├──► cmd_tx.send(Add(id, spec))      // guaranteed delivery (mpsc)
 //!     └──► Registry.spawn_listener
 //!           ├──► spawn actor
 //!           ├──► registry.insert(handle)
 //!           └──► Bus.publish(TaskAdded)
 //!
-//! remove_task(name)
+//! remove(id)
 //!     ├──► Bus.publish(TaskRemoveRequested) // observability (fire-and-forget)
-//!     ├──► cmd_tx.send(Remove(name))        // guaranteed delivery (mpsc)
+//!     ├──► cmd_tx.send(Remove(id))          // guaranteed delivery (mpsc)
 //!     └──► Registry.spawn_listener
-//!           ├──► registry.remove(name) + cancel token
+//!           ├──► registry.remove(id) + cancel token
 //!           ├──► await actor finish
 //!           └──► Bus.publish(TaskRemoved)
 //!
 //! Actor finishes
 //!     ├──► Bus.publish(ActorExhausted/ActorDead)
 //!     └──► Registry.event_listener
-//!           ├──► registry.remove(name)
+//!           ├──► registry.remove(id)
 //!           └──► Bus.publish(TaskRemoved)
 //! ```
 //!
@@ -66,7 +66,7 @@
 //! - Graceful shutdown cancels all tasks and waits for registry to drain
 //! - Registry auto-cleanup via ActorExhausted/ActorDead events
 //! - All operations are event-driven (idempotent)
-//! - Registry tracks all active tasks by name
+//! - Registry tracks all active tasks by `TaskId` (with a label index for name lookups)
 //!
 //! ## Example
 //! ```rust,no_run

@@ -102,7 +102,7 @@
 //!
 //! ## Optional features
 //!
-//! - `logging`: exports a simple built-in [`LogWriter`] _(demo/reference only)_.
+//! - `logging`: exports a simple built-in `LogWriter` _(demo/reference only)_.
 //! - `controller`:  exposes controller runtime and admission types.
 //!
 //! ## Example

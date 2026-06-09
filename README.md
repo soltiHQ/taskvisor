@@ -18,7 +18,7 @@ Inspired by Erlang/OTP supervisors. Runs your background tasks, restarts them on
 
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
 [![docs.rs](https://docs.rs/taskvisor/badge.svg)](https://docs.rs/taskvisor)
-[![Minimum Rust 1.85](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://rust-lang.org)
+[![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
 ## Why taskvisor?
@@ -46,7 +46,7 @@ Taskvisor fills that gap:
 
 ```toml
 [dependencies]
-taskvisor = "0.1.1"
+taskvisor = "0.1.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -384,7 +384,7 @@ cargo bench --bench controller --features controller # controller benchmarks
 cargo run --example basic
 cargo run --example worker
 cargo run --example periodic
-cargo run --example multiple_tasks
+cargo run --example multiple
 cargo run --example metrics
 cargo run --example dynamic
 cargo run --example pipeline --features controller
@@ -395,7 +395,7 @@ cargo run --example pipeline --features controller
 | [basic.rs](examples/basic.rs)             | Minimal hello-world, one task runs once                      |
 | [worker.rs](examples/worker.rs)           | Long-running worker with graceful Ctrl+C shutdown            |
 | [periodic.rs](examples/periodic.rs)       | Cron-like periodic task via `RestartPolicy::Always`          |
-| [multiple_tasks.rs](examples/multiple.rs) | Three tasks with different policies and backoff              |
+| [multiple.rs](examples/multiple.rs)       | Three tasks with different policies and backoff              |
 | [metrics.rs](examples/metrics.rs)         | Custom `Subscribe` implementation for metrics                |
 | [dynamic.rs](examples/dynamic.rs)         | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime |
 | [pipeline.rs](examples/pipeline.rs)       | Controller admission policies: Queue, Replace, DropIfRunning |
@@ -407,7 +407,7 @@ cargo run --example pipeline --features controller
 | Feature      | What it enables                                                                       |
 |--------------|---------------------------------------------------------------------------------------|
 | `controller` | Slot-based admission control: `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
-| `logging`    | Built-in `LogWriter` subscriber - structured event output via `tracing`               |
+| `logging`    | Built-in `LogWriter` subscriber - human-readable event output to stdout (demo/reference) |
 
 ```toml
 taskvisor = { version = "0.1", features = ["controller", "logging"] }
@@ -428,6 +428,10 @@ taskvisor = { version = "0.1", features = ["controller", "logging"] }
 
 Taskvisor `is not` a replacement for tokio or tower.  
 It sits one level above: you write the task, taskvisor runs it, restarts it, and tells you what happened.
+
+It is also `not` an actor framework: there are no addressable actors, typed mailboxes, or message passing.
+Taskvisor supervises **tasks** (async functions), not actors — if you need an actor hierarchy with mailboxes,
+reach for a dedicated actor crate (e.g. `ractor`) instead.
 
 ---
 
