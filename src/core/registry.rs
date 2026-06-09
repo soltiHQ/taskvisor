@@ -149,6 +149,7 @@ impl Registry {
                                     .with_task("registry")
                                     .with_reason(format!("registry_listener_lagged({})", n))
                             );
+                            me.reap_finished().await;
                             continue;
                         }
                     }
@@ -215,7 +216,7 @@ impl Registry {
         for (name, h) in handles {
             let mut join = h.join;
             match tokio::time::timeout_at(deadline, &mut join).await {
-                Ok(res) => self.report_join(&name, res),
+                Ok(res) => Self::report_join(&self.bus, &name, res),
                 Err(_elapsed) => {
                     join.abort();
                     let _ = join.await;
@@ -275,13 +276,13 @@ impl Registry {
             .publish(Event::new(EventKind::TaskAdded).with_task(task_name));
     }
 
-    /// Removes a task and cancels its token.
+    /// Removes a task.
     async fn remove_task(&self, name: &str) {
         if let Some((handle, len_after)) = self.take_handle_with_len(name).await {
             self.notify_after_remove(len_after);
 
             handle.cancel.cancel();
-            self.join_and_report(name, handle.join).await;
+            self.spawn_join_report(Arc::from(name), handle.join);
         } else {
             self.bus.publish(
                 Event::new(EventKind::TaskRemoved)
@@ -291,11 +292,11 @@ impl Registry {
         }
     }
 
-    /// Cleanup finished task (called on ActorExhausted/ActorDead).
+    /// Cleanup finished task.
     async fn cleanup_task(&self, name: &str) {
         if let Some((handle, len_after)) = self.take_handle_with_len(name).await {
             self.notify_after_remove(len_after);
-            self.join_and_report(name, handle.join).await;
+            self.spawn_join_report(Arc::from(name), handle.join);
         }
     }
 
@@ -307,25 +308,97 @@ impl Registry {
         Some((h, len_after))
     }
 
-    /// Await join, then report terminal events for the actor.
-    async fn join_and_report(&self, name: &str, join: JoinHandle<ActorExitReason>) {
-        let res = join.await;
-        self.report_join(name, res);
+    /// Joins the actor handle in a detached task and reports its terminal events.
+    fn spawn_join_report(&self, name: Arc<str>, join: JoinHandle<ActorExitReason>) {
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            let res = join.await;
+            Self::report_join(&bus, &name, res);
+        });
+    }
+
+    /// Removes and reports any actors whose task has already finished.
+    async fn reap_finished(&self) {
+        let finished: Vec<Arc<str>> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .iter()
+                .filter(|(_, h)| h.join.is_finished())
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        for name in finished {
+            self.cleanup_task(&name).await;
+        }
     }
 
     /// Publish terminal events for a joined actor: `ActorDead` if it panicked, then always `TaskRemoved`.
     /// A cancelled (force-aborted) join is not a panic.
-    fn report_join(&self, name: &str, res: Result<ActorExitReason, JoinError>) {
+    fn report_join(bus: &Bus, name: &str, res: Result<ActorExitReason, JoinError>) {
         if let Err(e) = res
             && e.is_panic()
         {
-            self.bus.publish(
+            bus.publish(
                 Event::new(EventKind::ActorDead)
                     .with_task(name)
                     .with_reason("actor_panic"),
             );
         }
-        self.bus
-            .publish(Event::new(EventKind::TaskRemoved).with_task(name));
+        bus.publish(Event::new(EventKind::TaskRemoved).with_task(name));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> Arc<Registry> {
+        let bus = Bus::new(64);
+        let token = CancellationToken::new();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        Registry::new(bus, token, None, rx)
+    }
+
+    #[tokio::test]
+    async fn reap_finished_removes_completed_handles() {
+        let reg = registry();
+
+        let join = tokio::spawn(async { ActorExitReason::PolicyExhausted });
+        while !join.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        reg.tasks.write().await.insert(
+            Arc::from("done"),
+            Handle {
+                join,
+                cancel: CancellationToken::new(),
+            },
+        );
+        assert!(!reg.is_empty().await);
+
+        reg.reap_finished().await;
+        assert!(
+            reg.is_empty().await,
+            "reap_finished must drop the completed handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_finished_keeps_running_handles() {
+        let reg = registry();
+
+        let cancel = CancellationToken::new();
+        let child = cancel.clone();
+        let join = tokio::spawn(async move {
+            child.cancelled().await;
+            ActorExitReason::Cancelled
+        });
+        reg.tasks
+            .write()
+            .await
+            .insert(Arc::from("running"), Handle { join, cancel });
+
+        reg.reap_finished().await;
+        assert!(!reg.is_empty().await, "a running actor must not be reaped");
     }
 }
