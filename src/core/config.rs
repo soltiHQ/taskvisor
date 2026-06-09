@@ -95,21 +95,11 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Validates configuration parameters.
-    ///
-    /// Checks:
-    /// - `bus_capacity > 0`
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.bus_capacity == 0 {
-            return Err("bus_capacity must be > 0");
-        }
-        Ok(())
-    }
-
     /// Returns the global concurrency limit as an `Option`.
     /// - `None` → unlimited (no semaphore)
     /// - `Some(n)` → at most `n` concurrent tasks
     #[inline]
+    #[must_use]
     pub fn concurrency_limit(&self) -> Option<usize> {
         if self.max_concurrent == 0 {
             None
@@ -122,6 +112,7 @@ impl SupervisorConfig {
     /// - `None` → no timeout
     /// - `Some(d)` → timeout applied per attempt
     #[inline]
+    #[must_use]
     pub fn default_timeout(&self) -> Option<Duration> {
         if self.timeout == Duration::ZERO {
             None
@@ -134,6 +125,7 @@ impl SupervisorConfig {
     ///
     /// The `Bus` should use this value to avoid constructing an invalid channel.
     #[inline]
+    #[must_use]
     pub fn bus_capacity_clamped(&self) -> usize {
         self.bus_capacity.max(1)
     }
@@ -164,20 +156,6 @@ impl Default for SupervisorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_rejects_zero_bus_capacity() {
-        let cfg = SupervisorConfig {
-            bus_capacity: 0,
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_accepts_default() {
-        assert!(SupervisorConfig::default().validate().is_ok());
-    }
 
     #[test]
     fn concurrency_limit_zero_means_unlimited() {

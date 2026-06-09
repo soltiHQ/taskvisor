@@ -60,13 +60,15 @@ impl Default for JitterPolicy {
 impl JitterPolicy {
     /// Applies jitter to the given delay.
     ///
-    /// For `Decorrelated`, this method returns the input **unchanged** because decorrelated jitter requires additional context.
-    /// Use [`apply_decorrelated`](Self::apply_decorrelated) instead.
+    /// `Decorrelated` has no previous-delay context here, so it falls back to **full jitter**
+    /// (random in `[0, delay]`) rather than silently returning the input. For the true
+    /// decorrelated recurrence use [`apply_decorrelated`](Self::apply_decorrelated).
+    #[must_use]
     pub fn apply(&self, delay: Duration) -> Duration {
         match self {
-            JitterPolicy::None | JitterPolicy::Decorrelated => delay,
+            JitterPolicy::None => delay,
+            JitterPolicy::Decorrelated | JitterPolicy::Full => self.full_jitter(delay),
             JitterPolicy::Equal => self.equal_jitter(delay),
-            JitterPolicy::Full => self.full_jitter(delay),
         }
     }
 
@@ -138,9 +140,15 @@ mod tests {
     }
 
     #[test]
-    fn decorrelated_apply_returns_input_unchanged() {
+    fn decorrelated_apply_falls_back_to_full_jitter() {
         let delay = Duration::from_millis(500);
-        assert_eq!(JitterPolicy::Decorrelated.apply(delay), delay);
+        for _ in 0..100 {
+            let d = JitterPolicy::Decorrelated.apply(delay);
+            assert!(
+                d <= delay,
+                "context-free Decorrelated apply() must be ≤ delay"
+            );
+        }
     }
 
     #[test]

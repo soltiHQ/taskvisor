@@ -65,6 +65,7 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     /// Returns a short stable label (snake_case) for use in logs/metrics.
+    #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
@@ -96,14 +97,20 @@ pub enum TaskError {
     /// Non-recoverable fatal error (should not be retried).
     #[error("fatal error (no retry): {reason}")]
     Fatal {
+        /// Human-readable failure reason (rendered by `Display`).
         reason: String,
+        /// Numeric exit code when the error came from a process-like runtime;
+        /// `None` for logical errors with no process behind them.
         exit_code: Option<i32>,
     },
 
     /// Task execution failed but may succeed if retried.
     #[error("execution failed: {reason}")]
     Fail {
+        /// Human-readable failure reason (rendered by `Display`).
         reason: String,
+        /// Numeric exit code when the error came from a process-like runtime;
+        /// `None` for logical errors with no process behind them.
         exit_code: Option<i32>,
     },
 
@@ -114,6 +121,7 @@ pub enum TaskError {
 
 impl TaskError {
     /// Returns a short stable label.
+    #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
             TaskError::Timeout { .. } => "task_timeout",
@@ -124,11 +132,13 @@ impl TaskError {
     }
 
     /// Indicates whether the error type is safe to retry.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, TaskError::Timeout { .. } | TaskError::Fail { .. })
     }
 
     /// Indicates whether the error is fatal.
+    #[must_use]
     pub fn is_fatal(&self) -> bool {
         matches!(self, TaskError::Fatal { .. })
     }
@@ -136,6 +146,7 @@ impl TaskError {
     /// Numeric exit code when the error originated from a process-like runtime.
     /// `None` for `Timeout`, `Canceled`, and for logical `Fail`/`Fatal`
     /// errors that have no process behind them.
+    #[must_use]
     pub fn exit_code(&self) -> Option<i32> {
         match self {
             TaskError::Fatal { exit_code, .. } | TaskError::Fail { exit_code, .. } => *exit_code,

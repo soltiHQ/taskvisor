@@ -287,6 +287,7 @@ pub struct Event {
 
 impl Event {
     /// Creates a new event of the given kind with current timestamp and next sequence number.
+    #[must_use]
     pub fn new(kind: EventKind) -> Self {
         Self {
             seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Release),
@@ -305,6 +306,7 @@ impl Event {
 
     /// Attaches a human-readable reason.
     #[inline]
+    #[must_use]
     pub fn with_reason(mut self, reason: impl Into<Arc<str>>) -> Self {
         self.reason = Some(reason.into());
         self
@@ -312,6 +314,7 @@ impl Event {
 
     /// Attaches a task name.
     #[inline]
+    #[must_use]
     pub fn with_task(mut self, task: impl Into<Arc<str>>) -> Self {
         self.task = Some(task.into());
         self
@@ -319,6 +322,7 @@ impl Event {
 
     /// Attaches the runtime task identity ([`TaskId`]).
     #[inline]
+    #[must_use]
     pub fn with_id(mut self, id: TaskId) -> Self {
         self.id = Some(id);
         self
@@ -326,6 +330,7 @@ impl Event {
 
     /// Attaches a timeout duration (stored as milliseconds).
     #[inline]
+    #[must_use]
     pub fn with_timeout(mut self, d: Duration) -> Self {
         let ms = d.as_millis().min(u128::from(u32::MAX)) as u32;
         self.timeout_ms = Some(ms);
@@ -334,6 +339,7 @@ impl Event {
 
     /// Attaches a backoff delay (stored as milliseconds).
     #[inline]
+    #[must_use]
     pub fn with_delay(mut self, d: Duration) -> Self {
         let ms = d.as_millis().min(u128::from(u32::MAX)) as u32;
         self.delay_ms = Some(ms);
@@ -342,6 +348,7 @@ impl Event {
 
     /// Attaches an attempt count.
     #[inline]
+    #[must_use]
     pub fn with_attempt(mut self, n: u32) -> Self {
         self.attempt = Some(n);
         self
@@ -349,6 +356,7 @@ impl Event {
 
     /// Attaches a numeric exit code (from a process-like runtime).
     #[inline]
+    #[must_use]
     pub fn with_exit_code(mut self, code: i32) -> Self {
         self.exit_code = Some(code);
         self
@@ -356,6 +364,7 @@ impl Event {
 
     /// Marks that this backoff comes from a successful attempt.
     #[inline]
+    #[must_use]
     pub fn with_backoff_success(mut self) -> Self {
         self.backoff_source = Some(BackoffSource::Success);
         self
@@ -363,6 +372,7 @@ impl Event {
 
     /// Marks that this backoff comes from a failed attempt.
     #[inline]
+    #[must_use]
     pub fn with_backoff_failure(mut self) -> Self {
         self.backoff_source = Some(BackoffSource::Failure);
         self
@@ -370,6 +380,7 @@ impl Event {
 
     /// Creates a subscriber overflow event.
     #[inline]
+    #[must_use]
     pub fn subscriber_overflow(subscriber: &'static str, reason: &'static str) -> Self {
         Event::new(EventKind::SubscriberOverflow)
             .with_task(subscriber)
@@ -378,6 +389,7 @@ impl Event {
 
     /// Creates a subscriber panic event.
     #[inline]
+    #[must_use]
     pub fn subscriber_panicked(subscriber: &'static str, info: String) -> Self {
         Event::new(EventKind::SubscriberPanicked)
             .with_task(subscriber)
@@ -386,18 +398,21 @@ impl Event {
 
     /// Returns `true` if this is a [`EventKind::SubscriberOverflow`] event.
     #[inline]
+    #[must_use]
     pub fn is_subscriber_overflow(&self) -> bool {
         matches!(self.kind, EventKind::SubscriberOverflow)
     }
 
     /// Returns `true` if this is a [`EventKind::SubscriberPanicked`] event.
     #[inline]
+    #[must_use]
     pub fn is_subscriber_panic(&self) -> bool {
         matches!(self.kind, EventKind::SubscriberPanicked)
     }
 
     /// Returns `true` for internal diagnostic events.
     #[inline]
+    #[must_use]
     pub fn is_internal_diagnostic(&self) -> bool {
         matches!(
             self.kind,
