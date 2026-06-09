@@ -38,6 +38,7 @@ static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Classification of runtime events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EventKind {
     /// Subscriber panicked during event processing.
     ///
@@ -221,6 +222,7 @@ pub enum EventKind {
 
 /// Reason for scheduling the next run/backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BackoffSource {
     Success,
     Failure,
