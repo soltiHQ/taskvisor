@@ -50,10 +50,11 @@ const RUNTIMES: [(&str, RtFactory); 2] = [
 ];
 
 fn bench_config() -> SupervisorConfig {
-    let mut cfg = SupervisorConfig::default();
-    cfg.bus_capacity = 16384;
-    cfg.grace = Duration::from_secs(5);
-    cfg
+    SupervisorConfig {
+        bus_capacity: 16384,
+        grace: Duration::from_secs(5),
+        ..Default::default()
+    }
 }
 
 fn worker_task(name: &str) -> TaskSpec {
