@@ -55,7 +55,8 @@ It works at a higher level: you write the task, and taskvisor runs it, restarts 
 It is also not an actor framework: there are no addressable actors, mailboxes, or message passing.
 Taskvisor supervises **tasks** (plain async functions), not actors.
 
-> **Roadmap:** taskvisor is the supervision core of *Solti*, a larger task-orchestration toolkit in
+> **Roadmap:** 
+> taskvisor is the supervision core of *Solti*, a larger task-orchestration toolkit in
 > development on top of it (subprocess execution, HTTP/gRPC API, metrics, dashboards). 
 > 
 > Taskvisor stands on its own today: the rest is future work.
