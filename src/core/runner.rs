@@ -61,7 +61,8 @@ impl Future for CatchPanic {
     type Output = Result<(), TaskError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        std::panic::catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx))).unwrap_or_else(|payload| Poll::Ready(Err(panic_to_error(payload.as_ref()))))
+        std::panic::catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx)))
+            .unwrap_or_else(|payload| Poll::Ready(Err(panic_to_error(payload.as_ref()))))
     }
 }
 
