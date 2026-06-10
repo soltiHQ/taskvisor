@@ -27,5 +27,5 @@ pub use crate::error::{RuntimeError, TaskError};
 // Runtime task identity
 pub use crate::identity::TaskId;
 
-// Re-export CancellationToken — every task needs it.
+// Re-export CancellationToken.
 pub use tokio_util::sync::CancellationToken;

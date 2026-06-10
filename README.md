@@ -2,18 +2,25 @@
 
 > Lightweight, event-driven task supervision for async Rust.
 
-Inspired by Erlang/OTP supervisors. Runs your background tasks, restarts them on failure with configurable backoff, and emits structured events for every lifecycle change.
+Inspired by Erlang/OTP supervisors. 
+Runs your background tasks, restarts them on failure with configurable backoff, and emits structured events for every lifecycle change.
 
 ```text
- ┌────────────┐     runs & restarts    ┌──────────────┐
- │   Tasks    │ <───────────────────── │  Supervisor  │
- └────────────┘                        └──────┬───────┘
-                                              |
-                                         emits events
-                                              |
-                                       ┌──────────────┐
-                                       │ Subscribers  │ <─ your metrics / logs
-                                       └──────────────┘
+TaskFn (your async code)
+   ▼
+TaskSpec (task + RestartPolicy + BackoffPolicy + timeout + max_retries)
+   ▼
+Supervisor
+   ├──► Registry
+   │     └──► TaskActor (per task)
+   │           ├──► attempt loop
+   │           │     ├──► run task with timeout + cancellation token
+   │           │     ├──► apply RestartPolicy on Ok/Err
+   │           │     └──► apply BackoffPolicy on failure
+   │           └──► publish events to Bus
+   └──► Bus (broadcast channel)
+         ├──► AliveTracker (sequence-based liveness)
+         └──► Subscribers (own queue each; your metrics, logs, alerts)
 ```
 
 [![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
@@ -21,38 +28,50 @@ Inspired by Erlang/OTP supervisors. Runs your background tasks, restarts them on
 [![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
+<div>
+  <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
+  <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
+</div>
+
 ## Why taskvisor?
 
-Tokio gives you `spawn` and `JoinHandle`, but no supervision, no restart policies, no backoff, and no observability.
-If a spawned task panics or fails, you find out when the `JoinHandle` is polled - or never.
+Tokio gives you `spawn` and `JoinHandle`, but no supervision: no restart policies, no backoff, and no events to tell you what happened.
+If a spawned task panics or fails, you only find out when you poll its `JoinHandle` - or never.
 
 Taskvisor fills that gap:
-- **Restart policies** - `Never`, `OnFailure`, `Always { interval }` per task
-- **Backoff with jitter** - exponential, constant, or decorrelated; prevents thundering herd
-- **Structured events** - every start, stop, failure, timeout, and backoff is published to a broadcast bus
-- **Pluggable subscribers** - implement one method (`on_event`) to hook in metrics, alerting, or logging
-- **Dynamic management** - add, remove, cancel tasks at runtime via `SupervisorHandle`
-- **Admission control** - optional slot-based controller with Queue / Replace / DropIfRunning policies
-- **Concurrency limits** - global semaphore, per-task timeouts, max retries
-- **Zero unsafe** - pure safe Rust
 
-> Need a complete task-orchestration **agent**: subprocess execution, HTTP/gRPC API, Prometheus metrics, control-plane discovery, ready Grafana dashboards? 
+|     | Feature                   | What you get                                                        |
+|:---:|---------------------------|---------------------------------------------------------------------|
+| 🔁  | **Restart policies**      | `Never`, `OnFailure`, or `Always { interval }`: chosen per task     |
+|  ⏳  | **Backoff with jitter**   | Exponential, constant, or decorrelated; spreads retries out in time |
+| 📡  | **Structured events**     | Every start, stop, failure, timeout, and backoff on a broadcast bus |
+| 🔌  | **Pluggable subscribers** | Implement one method (`on_event`) for metrics, alerts, or logging   |
+| 🎛️ | **Dynamic management**    | Add, remove, cancel tasks at runtime via `SupervisorHandle`         |
+| 🚦  | **Admission control**     | Optional slot controller: Queue / Replace / DropIfRunning           |
+| 🚧  | **Concurrency limits**    | Global semaphore, per-task timeouts, max retries                    |
+
+Taskvisor is not a replacement for tokio or tower. 
+It works at a higher level: you write the task, and taskvisor runs it, restarts it on failure with backoff, and tells you what happened through events.
+
+It is also not an actor framework: there are no addressable actors, mailboxes, or message passing.
+Taskvisor supervises **tasks** (plain async functions), not actors.
+
+> **Roadmap:** taskvisor is the supervision core of *Solti*, a larger task-orchestration toolkit in
+> development on top of it (subprocess execution, HTTP/gRPC API, metrics, dashboards). 
 > 
-> See [Solti SDK](https://github.com/soltiHQ/sdk): built on top of taskvisor.
-
----
+> Taskvisor stands on its own today: the rest is future work.
 
 ## Quick start
 
 ```toml
 [dependencies]
-taskvisor = "0.1.3"
+taskvisor = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
 A task that prints "pong" every 10 seconds, restarts forever, and shuts down on Ctrl+C:
 
-```rust
+```rust,no_run
 use std::time::Duration;
 use taskvisor::prelude::*;
 
@@ -77,7 +96,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
----
+## See it recover from failure
+
+A task that fails twice, then succeeds - taskvisor retries it with backoff and publishes an event for every step. 
+A subscriber prints them, so you *see* the supervision happen:
+
+```rust,no_run
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+use taskvisor::prelude::*;
+
+/// A subscriber that prints every lifecycle event the supervisor emits for a task.
+struct Printer;
+impl Subscribe for Printer {
+    fn on_event(&self, ev: &Event) {
+        if let Some(task) = ev.task.as_deref() {
+            println!("  {:?} (task={task})", ev.kind);
+        }
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let flaky: TaskRef = TaskFn::arc("flaky", move |_ctx: CancellationToken| {
+        let attempts = Arc::clone(&attempts);
+        async move {
+            let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
+            if n < 3 {
+                Err(TaskError::Fail { reason: format!("boom #{n}"), exit_code: None })
+            } else {
+                Ok(()) // 3rd attempt succeeds
+            }
+        }
+    });
+
+    // Restart on failure, with a short backoff between attempts.
+    let spec = TaskSpec::restartable(flaky).with_backoff(BackoffPolicy {
+        first: Duration::from_millis(50),
+        ..BackoffPolicy::default()
+    });
+
+    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Printer)];
+    Supervisor::new(SupervisorConfig::default(), subs).run(vec![spec]).await?;
+    Ok(())
+}
+```
+
+```text
+  TaskAddRequested (task=flaky)
+  TaskAdded (task=flaky)
+  TaskStarting (task=flaky)        # attempt 1
+  TaskFailed (task=flaky)
+  BackoffScheduled (task=flaky)    # wait, then retry
+  TaskStarting (task=flaky)        # attempt 2
+  TaskFailed (task=flaky)
+  BackoffScheduled (task=flaky)
+  TaskStarting (task=flaky)        # attempt 3
+  TaskStopped (task=flaky)         # success
+  ActorExhausted (task=flaky)      # OnFailure + success = done
+  TaskRemoved (task=flaky)
+```
+
+Restart, backoff, and an event for every step, without writing a retry loop.
+See [`examples/metrics.rs`](examples/metrics.rs) for a fuller version (`cargo run --example metrics`).
+
 
 ## Two modes
 
@@ -86,29 +170,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `sup.run(specs)` | Tasks known upfront    | Blocks until all done or Ctrl+C                  |
 | `sup.serve()`    | Tasks added at runtime | Returns `SupervisorHandle`, you control shutdown |
 
-```rust
+```rust,ignore
 // Dynamic mode
 let handle = sup.serve();
 
-handle.add(spec)?;
-handle.cancel("task-name").await?;
-handle.remove("task-name")?;
+let id = handle.add(spec)?;                       // returns a TaskId
+handle.cancel(id).await?;                         // cancel by identity
+handle.remove(id)?;                               // or remove by identity
+handle.cancel_by_label("task-name").await?;       // ...or by label
 let alive = handle.is_alive("task-name").await;
-let tasks = handle.list().await;
+let tasks = handle.list().await;                  // Vec<(TaskId, name)>
 
 handle.shutdown().await?;
 ```
-
----
 
 ## Core concepts
 
 **Task & TaskFn** - A `Task` is any `Send + Sync + 'static` type that implements `fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture`. 
 `TaskFn` wraps a closure into a `Task` so you don't need a struct. `TaskRef` is just `Arc<dyn Task>`.
 
-**TaskSpec** - Bundles a task with its policies: restart, backoff, timeout, and max retries. This is what you pass to the supervisor.
+**TaskSpec** - Bundles a task with its policies: restart, backoff, timeout, and max retries. 
+This is what you pass to the supervisor.
 
-```rust
+```rust,ignore
 // One-shot (run once, never restart)
 let spec = TaskSpec::once(task);
 
@@ -124,11 +208,12 @@ let spec = TaskSpec::new(task, RestartPolicy::Always { interval: None }, backoff
 
 | Policy                  | Behavior                                                       |
 |-------------------------|----------------------------------------------------------------|
-| `Never`                 | Run once, done.                                                |
-| `OnFailure` *(default)* | Restart only on error. Success = stop.                         |
-| `Always { interval }`   | Always restart. `interval: Some(10s)` waits between successes. |
+| `Never`                 | Runs once, then stops.                                         |
+| `OnFailure` *(default)* | Restarts only after an error; stops on success.                |
+| `Always { interval }`   | Always restarts. `interval: Some(10s)` waits between runs.     |
 
-**BackoffPolicy** - Controls retry delay after failure. Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied:
+**BackoffPolicy** - Controls retry delay after failure. 
+Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied:
 
 | Field    | Default  | Meaning                                      |
 |----------|----------|----------------------------------------------|
@@ -137,20 +222,18 @@ let spec = TaskSpec::new(task, RestartPolicy::Always { interval: None }, backoff
 | `factor` | `1.0`    | Multiplier per attempt (`2.0` = exponential) |
 | `jitter` | `None`   | Randomization strategy (see below)           |
 
-**JitterPolicy** - Prevents thundering herd when multiple tasks retry at the same time:
+**JitterPolicy** - adds jitter to retry delays to prevent many tasks from retrying at the same time:
 
-| Policy                  | Range                            | Use when                            |
-|-------------------------|----------------------------------|-------------------------------------|
-| `None`                  | exact delay                      | Single task, predictable timing     |
-| `Full`                  | `[0, delay]`                     | Maximum spread needed               |
-| `Equal` *(recommended)* | `[delay/2, delay]`               | Balanced: preserves ~75% of backoff |
-| `Decorrelated`          | `[base, base*3]` capped at `max` | Sophisticated, self-adjusting       |
+| Policy                  | Range                            | Use when                               |
+|-------------------------|----------------------------------|----------------------------------------|
+| `None`                  | exact delay                      | Single task, predictable timing        |
+| `Full`                  | `[0, delay]`                     | Maximum spread needed                  |
+| `Equal` *(recommended)* | `[delay/2, delay]`               | Balanced; keeps about 75% of the delay |
+| `Decorrelated`          | `[base, base*3]` capped at `max` | Self-adjusting; widens with each retry |
 
 **Events & Subscribe** - Every lifecycle change is published to a broadcast bus. 
 Implement `Subscribe` to observe them. 
 Each subscriber gets its own bounded queue - a slow subscriber never blocks others or the supervisor.
-
----
 
 ## Error handling
 
@@ -164,14 +247,14 @@ Return these from your task to control what happens next:
 | `Err(TaskError::Fatal { reason, exit_code })`  | No        | Permanent failure. Actor stops, publishes `ActorDead`. |
 | `Err(TaskError::Canceled)`                     | No        | Graceful shutdown. Not an error.                       |
 
-`exit_code` is `Option<i32>`: use when the error comes from a process-like runtime (subprocess, WASI), pass `None` for logical errors. 
+`exit_code` is `Option<i32>`: use when the error comes from a process-like runtime, pass `None` for logical errors. 
 Subscribers receive it as `Event::exit_code` on `TaskFailed` / `ActorDead` / `ActorExhausted`.
 
 ### Cancellation
 
 Tasks **must** observe cancellation via the `CancellationToken` passed to `spawn`:
 
-```rust
+```rust,ignore
 // Pattern 1: select! (recommended for long-running tasks)
 tokio::select! {
     _ = ctx.cancelled() => Err(TaskError::Canceled),
@@ -183,13 +266,11 @@ if ctx.is_cancelled() { return Err(TaskError::Canceled); }
 do_work().await
 ```
 
----
-
 ## Recipes
 
 ### Exponential backoff with jitter
 
-```rust
+```rust,no_run
 use std::time::Duration;
 use taskvisor::{BackoffPolicy, JitterPolicy};
 
@@ -203,7 +284,7 @@ let backoff = BackoffPolicy {
 
 ### Per-task timeout with max retries
 
-```rust
+```rust,ignore
 // Task gets 5s per attempt, max 3 retries.
 // If exceeded: TimeoutHit event + TaskError::Timeout + backoff + retry.
 let spec = TaskSpec::new(task, RestartPolicy::OnFailure, backoff, Some(Duration::from_secs(5)))
@@ -212,10 +293,10 @@ let spec = TaskSpec::new(task, RestartPolicy::OnFailure, backoff, Some(Duration:
 
 ### Custom subscriber (metrics)
 
-```rust
+```rust,no_run
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use taskvisor::{Subscribe, Event, EventKind};
+use taskvisor::{Subscribe, Event, EventKind, Supervisor, SupervisorConfig};
 
 struct Metrics { failures: AtomicU64 }
 
@@ -229,53 +310,54 @@ impl Subscribe for Metrics {
 
 let metrics = Arc::new(Metrics { failures: AtomicU64::new(0) });
 let sup = Supervisor::builder(SupervisorConfig::default())
-    .with_subscribers(vec![metrics])
+    .with_subscribers(vec![metrics as Arc<dyn Subscribe>])
     .build();
 ```
 
 ### Periodic task (run every N seconds)
 
-```rust
+```rust,ignore
 // Runs, completes, waits 30s, runs again. Forever.
 let spec = TaskSpec::restartable(task)
     .with_restart(RestartPolicy::Always { interval: Some(Duration::from_secs(30)) });
 ```
 
----
-
 ## Events
 
 Every lifecycle change publishes an `Event` to the bus. Subscribe to observe them.
 
-| Event                                      | Meaning                                             |
-|--------------------------------------------|-----------------------------------------------------|
-| **Lifecycle**                              |                                                     |
-| `TaskStarting`                             | Attempt is beginning                                |
-| `TaskStopped`                              | Completed or cancelled gracefully                   |
-| `TaskFailed`                               | Attempt failed (retryable or fatal)                 |
-| `TimeoutHit`                               | Attempt exceeded its timeout                        |
-| `BackoffScheduled`                         | Retry delay scheduled (includes delay duration)     |
-| **Terminal**                               |                                                     |
-| `ActorExhausted`                           | Restart policy says stop (normal end-of-life)       |
-| `ActorDead`                                | Fatal error, actor will not restart                 |
-| **Management**                             |                                                     |
-| `TaskAdded` / `TaskRemoved`                | Task registered / unregistered                      |
-| `TaskAddRequested` / `TaskRemoveRequested` | Add/remove commands received                        |
-| **Shutdown**                               |                                                     |
-| `ShutdownRequested`                        | OS signal caught (SIGTERM/SIGINT)                   |
-| `AllStoppedWithinGrace`                    | Clean shutdown                                      |
-| `GraceExceeded`                            | Some tasks didn't stop in time                      |
-| **Subscriber**                             |                                                     |
-| `SubscriberPanicked`                       | A subscriber panicked (isolated, others unaffected) |
-| `SubscriberOverflow`                       | Subscriber queue full, event dropped                |
+| Event                                      | Meaning                                              |
+|--------------------------------------------|------------------------------------------------------|
+| **Lifecycle**                              |                                                      |
+| `TaskStarting`                             | Attempt is beginning                                 |
+| `TaskStopped`                              | Completed or cancelled gracefully                    |
+| `TaskFailed`                               | Attempt failed (retryable or fatal)                  |
+| `TimeoutHit`                               | Attempt exceeded its timeout                         |
+| `BackoffScheduled`                         | Retry delay scheduled (includes delay duration)      |
+| **Terminal**                               |                                                      |
+| `ActorExhausted`                           | Restart policy says stop; the normal way a task ends |
+| `ActorDead`                                | Fatal error, actor will not restart                  |
+| **Management**                             |                                                      |
+| `TaskAdded` / `TaskRemoved`                | Task registered / unregistered                       |
+| `TaskAddFailed`                            | Add rejected: a task with that name already exists   |
+| `TaskAddRequested` / `TaskRemoveRequested` | Add/remove commands received                         |
+| **Shutdown**                               |                                                      |
+| `ShutdownRequested`                        | OS signal caught (SIGTERM/SIGINT)                    |
+| `AllStoppedWithinGrace`                    | Clean shutdown                                       |
+| `GraceExceeded`                            | Some tasks didn't stop in time                       |
+| **Subscriber**                             |                                                      |
+| `SubscriberPanicked`                       | A subscriber panicked (isolated, others unaffected)  |
+| `SubscriberOverflow`                       | Subscriber queue full, event dropped                 |
+| **Controller** *(feature = `controller`)*  |                                                      |
+| `ControllerSubmitted`                      | Task accepted into a slot                            |
+| `ControllerRejected`                       | Submission rejected (slot busy, queue full, ...)     |
+| `ControllerSlotTransition`                 | Slot changed state (e.g. running → terminating)      |
 
-Each event carries: `kind`, `task` (name), `attempt`, `reason`, `delay_ms`, `timeout_ms`, `seq` (monotonic ordering), `at` (timestamp).
-
----
+Each event carries: `kind`, `id` (the task's `TaskId`), `task` (name), `attempt`, `reason`, `exit_code`, `delay_ms`, `timeout_ms`, `backoff_source`, `seq` (monotonic ordering), `at` (timestamp).
 
 ## Configuration
 
-```rust
+```rust,no_run
 use std::time::Duration;
 use taskvisor::{SupervisorConfig, RestartPolicy, BackoffPolicy};
 
@@ -299,11 +381,10 @@ cfg.backoff = BackoffPolicy::default();
 | `restart`        | `OnFailure`              | Default restart policy for tasks                      |
 | `backoff`        | `100ms / 1.0x / 30s max` | Default backoff for tasks                             |
 
----
-
 ## Controller *(feature = `controller`)*
 
-Slot-based admission control. Tasks submit to named slots; the policy decides what happens when a slot is busy.
+Slot-based admission control. 
+Tasks submit to named slots, the policy decides what happens when a slot is busy.
 
 | Policy          | Behavior                                               |
 |-----------------|--------------------------------------------------------|
@@ -311,7 +392,7 @@ Slot-based admission control. Tasks submit to named slots; the policy decides wh
 | `Replace`       | Cancels running task, starts the new one immediately.  |
 | `DropIfRunning` | Rejects submission if slot is already busy.            |
 
-```rust
+```rust,ignore
 use taskvisor::{ControllerSpec, ControllerConfig};
 
 let sup = Supervisor::builder(cfg)
@@ -327,62 +408,19 @@ handle.submit(ControllerSpec::drop_if_running(spec)).await?;
 handle.shutdown().await?;
 ```
 
----
-
-## How it works
-
-```text
-TaskFn (your async code)
-   |
-   v
-TaskSpec (task + RestartPolicy + BackoffPolicy + timeout + max_retries)
-   |
-   v
-Supervisor
-   ├── Registry
-   │     └── TaskActor (per task)
-   │           ├── attempt loop
-   │           │     ├── run task with timeout + cancellation token
-   │           │     ├── apply RestartPolicy on Ok/Err
-   │           │     └── apply BackoffPolicy on failure
-   │           └── publish events to Bus
-   └── Bus (broadcast channel)
-         ├── AliveTracker (sequence-based liveness)
-         └── Subscribers (your metrics, logs, alerts)
-```
-
----
-
 ## Performance
 
-Measured with [Criterion](https://github.com/bheisler/criterion.rs) on a single-threaded Tokio runtime
-(the common case for a supervisor). Numbers are indicative point estimates — they depend on hardware and
-load, so run `cargo bench` on your own machine for precise results. Two reference machines, ~30× apart:
+Per-task overhead is a few microseconds: a handful of events on the bus, plus one registry insert and remove. 
+That is small next to real task work, where I/O takes milliseconds or more. 
+The cost grows linearly with the number of tasks, subscribers, and batch size.
 
-| Operation (`current_thread`)                | Apple M3 Max | Raspberry Pi 4 | What it measures                                    |
-|---------------------------------------------|--------------|----------------|-----------------------------------------------------|
-| `handle.add()`                              | ~95 ns       | ~0.9 µs        | Mint a `TaskId` + channel send (no I/O)             |
-| `list()` — 100 tasks                        | ~1.4 µs      | ~8 µs          | Registry snapshot, sorted by id                     |
-| `list()` — 500 tasks                        | ~8 µs        | ~59 µs         | Linear in the number of registered tasks            |
-| One task lifecycle                          | ~9.6 µs      | ~79 µs         | spawn → run → exhaust → cleanup (≈6 events)         |
-| `add_and_wait` + `cancel`                   | ~12 µs       | ~47 µs         | Full round-trip: register, confirm, cancel          |
-| Batch of 500 tasks via `run()`              | ~1.7 ms      | ~12.8 ms       | N instant tasks to completion (~290K/s vs ~39K/s)   |
-| Churn 500 (add + remove)                    | ~3.5 ms      | ~15.4 ms       | Register then tear down 500 tasks                   |
-| Fan-out, 100 tasks × 8 subscribers          | ~0.5 ms      | ~3.4 ms        | Per-subscriber queue; linear, no cross-contention   |
-
-Per-task overhead is event-bookkeeping (lifecycle events on the bus + registry insert/remove), so it is
-negligible next to any real task work (I/O, milliseconds and up). A multi-threaded runtime is typically
-~2–6× slower per operation here due to cross-thread scheduling and lock contention — `current_thread` is
-usually the right choice for a supervisor. Scaling is linear in batch size, subscriber count, and task
-count; no known superlinear bottlenecks.
+Run the benchmarks on your own hardware:
 
 ```bash
 cargo bench                                          # all benchmarks
 cargo bench --bench lifecycle                        # specific suite
 cargo bench --bench controller --features controller # controller benchmarks
 ```
-
----
 
 ## Examples
 
@@ -406,47 +444,17 @@ cargo run --example pipeline --features controller
 | [dynamic.rs](examples/dynamic.rs)         | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime |
 | [pipeline.rs](examples/pipeline.rs)       | Controller admission policies: Queue, Replace, DropIfRunning |
 
----
-
 ## Optional features
 
 | Feature      | What it enables                                                                       |
 |--------------|---------------------------------------------------------------------------------------|
 | `controller` | Slot-based admission control: `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
-| `logging`    | Built-in `LogWriter` subscriber - human-readable event output to stdout (demo/reference) |
+| `logging`    | Built-in `LogWriter` subscriber - event output to stdout (demo/reference)             |
 
 ```toml
-taskvisor = { version = "0.1", features = ["controller", "logging"] }
+taskvisor = { version = "0.2", features = ["controller", "logging"] }
 ```
-
----
-
-## Comparison with alternatives
-
-|                         | taskvisor                         | bare tokio::spawn | tower          | backon |
-|-------------------------|-----------------------------------|-------------------|----------------|--------|
-| Restart policies        | Per-task (Never/OnFailure/Always) | Manual            | No             | No     |
-| Backoff with jitter     | Built-in (4 strategies)           | Manual            | Via middleware | Yes    |
-| Lifecycle events        | Full bus with subscribers         | JoinHandle only   | No             | No     |
-| Dynamic task management | add/remove/cancel at runtime      | Manual            | No             | No     |
-| Admission control       | Queue/Replace/DropIfRunning       | No                | No             | No     |
-| Concurrency limits      | Global semaphore                  | Manual            | Via middleware | No     |
-
-Taskvisor `is not` a replacement for tokio or tower.  
-It sits one level above: you write the task, taskvisor runs it, restarts it, and tells you what happened.
-
-It is also `not` an actor framework: there are no addressable actors, typed mailboxes, or message passing.
-Taskvisor supervises **tasks** (async functions), not actors — if you need an actor hierarchy with mailboxes,
-reach for a dedicated actor crate (e.g. `ractor`) instead.
-
----
 
 ## Contributing
 
 Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/issues) or send a pull request.
-
-<div>
-  <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
-  <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
-  <a href="https://github.com/soltiHQ/sdk"><img alt="Solti SDK" src="https://img.shields.io/badge/Solti%20SDK-cc6633?style=for-the-badge&logo=rust&logoColor=white"></a>
-</div>

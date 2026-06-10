@@ -31,7 +31,7 @@
 //! - **SubscriberSet (workers)** → `SubscriberOverflow`, `SubscriberPanicked`
 //!
 //! Consumers (subscribe to Bus):
-//! - **Supervisor::subscriber_listener()** (single fan-out point)
+//! - **Supervisor::subscriber_listener()** (single distribution point)
 //!     - updates **AliveTracker** (sequence-based ordering)
 //!     - emits to **SubscriberSet** (per-subscriber mpsc queues)
 //! - **Registry** (cmd_rx + bus_rx): commands via mpsc, lifecycle cleanup via bus

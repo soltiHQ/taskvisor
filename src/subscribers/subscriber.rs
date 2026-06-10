@@ -60,10 +60,9 @@ use crate::events::Event;
 /// ### Synchronous design
 ///
 /// `on_event` is intentionally synchronous:
-/// - The `SubscriberSet` infrastructure already provides async fan-out via per-subscriber `mpsc` channels and dedicated worker tasks.
+/// - The `SubscriberSet` infrastructure already provides async distribution via per-subscriber `mpsc` channels and dedicated worker tasks.
 /// - If a subscriber needs async I/O, send events to a channel inside `on_event` and process them in a separate task.
-/// - Adding async to `on_event` would force a `Box::pin` allocation per event per subscriber with no benefit;
-///   All real subscribers are synchronous.
+/// - Adding async to `on_event` would force a `Box::pin` allocation per event per subscriber with no benefit, since subscribers are synchronous in practice.
 ///
 /// ## Also
 ///

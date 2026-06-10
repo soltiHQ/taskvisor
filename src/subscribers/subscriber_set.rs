@@ -48,7 +48,7 @@ struct SubscriberChannel {
     sender: mpsc::Sender<Arc<Event>>,
 }
 
-/// Fan-out coordinator for multiple event subscribers.
+/// Distributes events to multiple subscribers.
 ///
 /// Manages per-subscriber queues and worker tasks, providing:
 /// - **Concurrent delivery**: events are dispatched to all subscriber queues in a single pass

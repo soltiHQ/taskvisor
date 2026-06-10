@@ -15,7 +15,7 @@
 //! ## Rules
 //!
 //! - State toggles only on selected events (see below); all others just advance `last_seq`.
-//! - **Entry removed** on `TaskRemoved` (not just set to false — fully cleaned up).
+//! - **Entry removed** on `TaskRemoved` (not just set to false; the entry is fully cleaned up).
 //! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
 //! - Events with `seq <= last_seq` for the task are **rejected** (stale).
 //! - **Alive = false** on `TaskStopped`, `TaskFailed`, `ActorExhausted`, `ActorDead`.

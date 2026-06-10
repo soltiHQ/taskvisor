@@ -89,7 +89,7 @@
 //! ## Why gate on `TaskRemoved`
 //!
 //! `ActorExhausted/ActorDead` may arrive **before** full deregistration of the actor.
-//! Starting the next task on those signals can race the registry and cause`task_already_exists`.
+//! Starting the next task on those signals can race the registry and cause `task_already_exists`.
 //!
 //! Gating advancement on **`TaskRemoved`** prevents double-adds.
 //!

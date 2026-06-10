@@ -1,6 +1,6 @@
 //! # Jitter policy for retry delays.
 //!
-//! [`JitterPolicy`] adds randomness to backoff delays to prevent thundering herd effects when multiple tasks retry simultaneously.
+//! [`JitterPolicy`] adds randomness to backoff delays so that many tasks do not all retry at the same moment.
 //! - [`JitterPolicy::Equal`] delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
 //! - [`JitterPolicy::Decorrelated`] memoryless randomized band that widens with the base delay
 //! - [`JitterPolicy::Full`] random delay in [0, backoff_delay] (most aggressive)
@@ -13,7 +13,7 @@ use std::time::Duration;
 /// Prevents synchronized retries across multiple tasks by adding controlled randomness.
 ///
 /// ## Trade-offs
-/// - **None**: Predictable, but risks thundering herd
+/// - **None**: Predictable, but many tasks may retry at the same time
 /// - **Equal**: Balanced (recommended for most use cases)
 /// - **Full**: Maximum randomness, aggressive load spreading
 /// - **Decorrelated**: Widest spread; per-attempt randomized band (memoryless approximation)

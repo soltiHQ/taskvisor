@@ -13,7 +13,7 @@
 //!   Runner  ──┘
 //! ```
 //!
-//! taskvisor uses a single internal listener that fans out events to multiple user-defined subscribers via `SubscriberSet`.
+//! taskvisor uses a single internal listener that distributes events to multiple user-defined subscribers via `SubscriberSet`.
 //!
 //! ## Rules
 //!
@@ -42,7 +42,7 @@ use super::event::Event;
 ///
 /// - **Non-blocking**: `publish()` returns immediately (send clones internally).
 /// - **Cloneable**: cheap to clone (internally holds an `Arc`-backed sender).
-/// - **Fire-and-forget**: no delivery or durability guarantees.
+/// - **Best-effort**: no delivery or durability guarantees.
 #[derive(Clone, Debug)]
 pub(crate) struct Bus {
     tx: broadcast::Sender<Arc<Event>>,
