@@ -20,6 +20,14 @@ async fn drained(collector: &EventCollector, at_least_removed: usize) {
     );
 }
 
+#[test]
+fn supervisor_builder_is_nameable_from_public_api() {
+    // The builder must be a public, nameable type: users store it in variables,
+    // write helper functions returning it, and docs.rs must render its page.
+    let builder: taskvisor::SupervisorBuilder = Supervisor::builder(SupervisorConfig::default());
+    let _ = builder;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn never_oneshot_success_emits_starting_stopped_exhausted_once() {
     let collector = EventCollector::new();

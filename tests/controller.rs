@@ -35,6 +35,50 @@ fn logging_once(name: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn shutdown_does_not_start_queued_tasks() {
+    let (handle, collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        // Occupy the slot with a long-running cooperative task.
+        handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("occupant")).with_slot("s"),
+            ))
+            .await
+            .expect("first submit ok");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                handle.is_alive("occupant").await
+            })
+            .await,
+            "occupant must be running before queueing the next task"
+        );
+
+        // Queue a successor behind it.
+        handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("queued")).with_slot("s"),
+            ))
+            .await
+            .expect("second submit ok");
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+
+    // Draining the occupant publishes TaskRemoved; the controller must NOT react
+    // by starting the queued task mid-shutdown (it would be force-aborted with no grace).
+    assert!(
+        collector.by_label("queued").is_empty()
+            || collector
+                .by_label("queued")
+                .iter()
+                .all(|e| e.kind != EventKind::TaskStarting),
+        "queued task must not start during shutdown"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn submit_without_controller_via_new_returns_not_configured() {
     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = sup.serve();

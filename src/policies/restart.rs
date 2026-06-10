@@ -40,6 +40,7 @@
 /// - [`JitterPolicy`](crate::JitterPolicy) - randomization strategy for backoff delays
 /// - [`TaskSpec`](crate::TaskSpec) - wires restart + backoff + timeout together
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum RestartPolicy {
     /// Never restart: the task runs once and exits permanently.
     Never,

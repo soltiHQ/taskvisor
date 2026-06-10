@@ -92,12 +92,14 @@ pub(crate) struct Controller {
 
     tx: mpsc::Sender<ControllerSpec>,
     rx: RwLock<Option<mpsc::Receiver<ControllerSpec>>>,
+
+    shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl Controller {
     /// Creates a new controller (must call [`run`](Self::run) to start it).
     pub fn new(config: ControllerConfig, supervisor: &Arc<Supervisor>, bus: Bus) -> Arc<Self> {
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let (tx, rx) = mpsc::channel(config.queue_capacity.max(1));
 
         Arc::new(Self {
             config,
@@ -107,7 +109,14 @@ impl Controller {
             running: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Returns `true` once shutdown has been observed on the bus.
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Returns a handle for submitting tasks.
@@ -169,12 +178,9 @@ impl Controller {
         Ok(())
     }
 
-    /// Recovers slots whose task vanished after a bus lag (a missed `TaskAdded`/`TaskRemoved`).
-    ///
-    /// Walks all non-`Idle` slots; if the occupying task is no longer in the registry (and an `Admitting` slot has exceeded the admit deadline),
-    /// the slot is freed and its queue advanced. All correlation/cleanup is keyed by [`TaskId`].
+    /// Recovers slots wedged by a bus lag (a missed `TaskAdded`/`TaskRemoved`).
     async fn recover_stale_slots(&self) {
-        const ADMIT_DEADLINE: Duration = Duration::from_secs(5);
+        const RECOVERY_DEADLINE: Duration = Duration::from_secs(5);
 
         let Some(sup) = self.supervisor.upgrade() else {
             return;
@@ -195,10 +201,14 @@ impl Controller {
             if matches!(slot.status, SlotStatus::Idle) {
                 continue;
             }
-            if let SlotStatus::Admitting { since } = slot.status
-                && since.elapsed() < ADMIT_DEADLINE
-            {
-                continue;
+            match slot.status {
+                SlotStatus::Admitting { since } if since.elapsed() < RECOVERY_DEADLINE => continue,
+                SlotStatus::Terminating { cancelled_at }
+                    if cancelled_at.elapsed() < RECOVERY_DEADLINE =>
+                {
+                    continue;
+                }
+                _ => {}
             }
 
             let alive = match slot.running_id {
@@ -206,6 +216,30 @@ impl Controller {
                 None => false,
             };
             if alive {
+                match slot.status {
+                    SlotStatus::Admitting { .. } => {
+                        slot.status = SlotStatus::Running {
+                            started_at: Instant::now(),
+                        };
+                        self.bus.publish(
+                            Event::new(EventKind::ControllerSlotTransition)
+                                .with_task(Arc::clone(&slot_name))
+                                .with_reason("admitting→running (lag recovery)"),
+                        );
+                    }
+                    SlotStatus::Terminating { .. } => {
+                        if let Some(rid) = slot.running_id
+                            && let Err(e) = sup.remove(rid)
+                        {
+                            self.bus.publish(
+                                Event::new(EventKind::ControllerRejected)
+                                    .with_task(Arc::clone(&slot_name))
+                                    .with_reason(format!("recovery_remove_failed: {e}")),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
 
@@ -214,7 +248,9 @@ impl Controller {
             }
             slot.status = SlotStatus::Idle;
 
-            self.start_next_from_queue(&sup, &mut slot, &slot_name);
+            if !self.is_shutting_down() {
+                self.start_next_from_queue(&sup, &mut slot, &slot_name);
+            }
 
             if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
                 drop(slot);
@@ -239,6 +275,14 @@ impl Controller {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
+        if self.is_shutting_down() {
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(spec.slot_name().to_owned())
+                    .with_reason("controller_shutting_down"),
+            );
+            return;
+        }
 
         let slot_name: Arc<str> = Arc::from(spec.slot_name());
         let admission = spec.admission;
@@ -361,6 +405,10 @@ impl Controller {
             EventKind::TaskAdded => self.on_task_added(&event).await,
             EventKind::TaskRemoved => self.on_task_finished(&event).await,
             EventKind::TaskAddFailed => self.on_task_add_failed(&event).await,
+            EventKind::ShutdownRequested => {
+                self.shutting_down
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             _ => {}
         }
     }
@@ -447,7 +495,9 @@ impl Controller {
         slot.running_id = None;
         slot.status = SlotStatus::Idle;
 
-        self.start_next_from_queue(&sup, &mut slot, &slot_name);
+        if !self.is_shutting_down() {
+            self.start_next_from_queue(&sup, &mut slot, &slot_name);
+        }
 
         if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
             drop(slot);
@@ -663,7 +713,7 @@ mod tests {
     }
 
     fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let (tx, rx) = mpsc::channel(config.queue_capacity.max(1));
         Controller {
             config,
             supervisor: Weak::new(),
@@ -672,7 +722,147 @@ mod tests {
             running: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    #[tokio::test]
+    async fn zero_queue_capacity_is_clamped_not_panicking() {
+        let sup = Supervisor::builder(crate::SupervisorConfig::default())
+            .with_controller(ControllerConfig {
+                queue_capacity: 0,
+                max_slot_queue: 1,
+            })
+            .build();
+        let handle = sup.serve();
+
+        let task: TaskRef = TaskFn::arc("clamped", |_ctx: CancellationToken| async { Ok(()) });
+        handle
+            .submit(ControllerSpec::queue(TaskSpec::once(task)))
+            .await
+            .expect("submission must work with capacity clamped to 1");
+
+        let _ = handle.shutdown().await;
+    }
+
+    fn long_ago() -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("test host uptime must exceed one minute")
+    }
+
+    async fn sup_with_live_task() -> (Arc<Supervisor>, crate::core::SupervisorHandle, TaskId) {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let handle = sup.serve();
+        let task: TaskRef = TaskFn::arc("occupant", |ctx: CancellationToken| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let id = handle
+            .add_and_wait(TaskSpec::restartable(task), Duration::from_secs(1))
+            .await
+            .expect("task should register");
+        (sup, handle, id)
+    }
+
+    #[tokio::test]
+    async fn recover_promotes_admitting_slot_with_alive_task() {
+        let (sup, handle, id) = sup_with_live_task().await;
+        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+
+        ctrl.slots.insert(
+            Arc::from("s"),
+            Arc::new(Mutex::new(SlotState {
+                status: SlotStatus::Admitting { since: long_ago() },
+                running_id: Some(id),
+                queue: std::collections::VecDeque::new(),
+            })),
+        );
+        ctrl.running.insert(id, Arc::from("s"));
+
+        ctrl.recover_stale_slots().await;
+
+        let slot_arc = ctrl.slots.get("s").map(|e| e.clone()).expect("slot exists");
+        let slot = slot_arc.lock().await;
+        assert!(
+            matches!(slot.status, SlotStatus::Running { .. }),
+            "an Admitting slot whose task is alive must be promoted to Running, got {:?}",
+            slot.status
+        );
+
+        drop(slot);
+        let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn recover_reissues_removal_for_terminating_slot_with_alive_task() {
+        let (sup, handle, id) = sup_with_live_task().await;
+        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+
+        ctrl.slots.insert(
+            Arc::from("s"),
+            Arc::new(Mutex::new(SlotState {
+                status: SlotStatus::Terminating {
+                    cancelled_at: long_ago(),
+                },
+                running_id: Some(id),
+                queue: std::collections::VecDeque::new(),
+            })),
+        );
+        ctrl.running.insert(id, Arc::from("s"));
+
+        ctrl.recover_stale_slots().await;
+
+        let removed = poll_until(Duration::from_secs(2), || async {
+            !sup.contains_id(id).await
+        })
+        .await;
+        assert!(
+            removed,
+            "recovery must re-issue the deferred removal for a Terminating slot"
+        );
+
+        let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_queue_advancement_after_shutdown_requested() {
+        let (sup, handle, id) = sup_with_live_task().await;
+        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+
+        let queued: TaskRef = TaskFn::arc("queued", |ctx: CancellationToken| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(TaskSpec::restartable(queued));
+        ctrl.slots.insert(
+            Arc::from("s"),
+            Arc::new(Mutex::new(SlotState {
+                status: SlotStatus::Running {
+                    started_at: Instant::now(),
+                },
+                running_id: Some(id),
+                queue,
+            })),
+        );
+        ctrl.running.insert(id, Arc::from("s"));
+        ctrl.handle_event(Arc::new(Event::new(EventKind::ShutdownRequested)))
+            .await;
+        ctrl.handle_event(Arc::new(
+            Event::new(EventKind::TaskRemoved)
+                .with_task("occupant")
+                .with_id(id),
+        ))
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            sup.id_for_label("queued").await.is_none(),
+            "controller must not start queued tasks once shutdown has been requested"
+        );
+
+        let _ = handle.shutdown().await;
     }
 
     #[tokio::test]

@@ -147,7 +147,7 @@ use crate::{
 /// # Also
 ///
 /// - [`SupervisorHandle`](crate::SupervisorHandle) - runtime management API returned by [`serve`](Self::serve)
-/// - `SupervisorBuilder` - step-by-step construction
+/// - [`SupervisorBuilder`](crate::SupervisorBuilder) - step-by-step construction
 /// - [`SupervisorConfig`] - configuration knobs
 ///
 /// [`SupervisorHandle`]: crate::SupervisorHandle
@@ -523,6 +523,9 @@ impl Supervisor {
 
     /// Waits up to `wait_for` for a task to **actually terminate**, signalled by its `TaskRemoved`
     /// event (published by the registry only after the actor's `JoinHandle` completes).
+    ///
+    /// The `TaskRemoved` event may be lost to broadcast lag, that's why on `Lagged`/`Closed` and on timeout this falls back to the registry's termination state
+    /// (`is_terminated`: not registered **and** not awaiting join) instead of reporting a spurious `TaskRemoveTimeout`.
     async fn wait_task_removed(
         &self,
         rx: &mut broadcast::Receiver<Arc<Event>>,
@@ -536,18 +539,30 @@ impl Supervisor {
                         return true;
                     }
                     Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => return false,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if self.registry.is_terminated(id).await {
+                            return true;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return self.registry.is_terminated(id).await;
+                    }
                 }
             }
         };
 
         match timeout(wait_for, wait_for_event).await {
             Ok(true) => Ok(true),
-            Ok(false) | Err(_) => Err(RuntimeError::TaskRemoveTimeout {
-                id,
-                timeout: wait_for,
-            }),
+            Ok(false) | Err(_) => {
+                if self.registry.is_terminated(id).await {
+                    Ok(true)
+                } else {
+                    Err(RuntimeError::TaskRemoveTimeout {
+                        id,
+                        timeout: wait_for,
+                    })
+                }
+            }
         }
     }
 }
@@ -639,6 +654,62 @@ mod tests {
         assert!(
             matches!(res, Err(RuntimeError::TaskAlreadyExists { .. })),
             "duplicate add must return TaskAlreadyExists, got {res:?}"
+        );
+
+        let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wait_task_removed_survives_bus_lag() {
+        let cfg = SupervisorConfig {
+            bus_capacity: 8,
+            ..Default::default()
+        };
+        let sup = Supervisor::new(cfg, vec![]);
+        let handle = sup.serve();
+
+        let t: TaskRef = TaskFn::arc("laggy", |ctx: CancellationToken| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let id = handle
+            .add_and_wait(TaskSpec::restartable(t), Duration::from_secs(1))
+            .await
+            .expect("add should succeed");
+
+        let mut lagged_rx = sup.subscribe_bus();
+        let mut observer = sup.subscribe_bus();
+
+        sup.remove(id).expect("remove should be accepted");
+
+        let observed = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(ev) = observer.recv().await
+                    && ev.kind == EventKind::TaskRemoved
+                    && ev.id == Some(id)
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        observed.expect("TaskRemoved must be observed by a healthy receiver");
+
+        for _ in 0..32 {
+            sup.bus
+                .publish(Event::new(EventKind::TaskStarting).with_task("noise"));
+        }
+
+        let res = timeout(
+            Duration::from_secs(1),
+            sup.wait_task_removed(&mut lagged_rx, id, Duration::from_millis(300)),
+        )
+        .await
+        .expect("wait_task_removed must not hang");
+        assert!(
+            matches!(res, Ok(true)),
+            "a lagged receiver must fall back to runtime state instead of reporting \
+             a spurious TaskRemoveTimeout, got {res:?}"
         );
 
         let _ = handle.shutdown().await;

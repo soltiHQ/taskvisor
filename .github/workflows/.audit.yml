@@ -3,7 +3,7 @@ name: Audit
 on: { workflow_call: {} }
 
 jobs:
-  docs:
+  audit:
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - uses: actions/checkout@v6

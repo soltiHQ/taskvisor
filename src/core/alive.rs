@@ -8,16 +8,18 @@
 //! ```text
 //! Supervisor ──► Bus ──► subscriber_listener() ──► AliveTracker::update()
 //!                                                         ▼
-//!                                              HashMap<Arc<str>, TaskState>
-//!                                                  (name → {seq, alive})
+//!                                              HashMap<AliveKey, TaskState>
+//!                                              (TaskId → {name, seq, alive})
 //! ```
 //!
 //! ## Rules
 //!
+//! - Entries are keyed by [`TaskId`] (identity), falling back to the name only for id-less events.
+//!   Names are labels and may be **reused across runs**: a late event from a previous run (same name, different id) never corrupts the current run's state.
 //! - State toggles only on selected events (see below); all others just advance `last_seq`.
 //! - **Entry removed** on `TaskRemoved` (not just set to false; the entry is fully cleaned up).
 //! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
-//! - Events with `seq <= last_seq` for the task are **rejected** (stale).
+//! - Events with `seq <= last_seq` for the same identity are **rejected** (stale).
 //! - **Alive = false** on `TaskStopped`, `TaskFailed`, `ActorExhausted`, `ActorDead`.
 //! - **Alive = true** on `TaskStarting`.
 
@@ -25,11 +27,21 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::events::{Event, EventKind};
+use crate::identity::TaskId;
+
+/// Tracker key: runtime identity when the event carries one, name otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AliveKey {
+    Id(TaskId),
+    Name(Arc<str>),
+}
 
 /// Per-task state for ordering validation.
 #[derive(Debug, Clone)]
 struct TaskState {
-    /// Last seen sequence number for this task.
+    /// Label of the task run (what `is_alive`/`snapshot` report).
+    name: Arc<str>,
+    /// Last seen sequence number for this task run.
     last_seq: u64,
     /// Current status *(true = alive, false = stopped)*.
     alive: bool,
@@ -52,7 +64,7 @@ struct TaskState {
 /// - [`Event`](crate::Event) - event payload with `seq` used for ordering
 /// - [`EventKind`](crate::EventKind) - classification that drives alive/dead transitions
 pub(crate) struct AliveTracker {
-    state: RwLock<HashMap<Arc<str>, TaskState>>,
+    state: RwLock<HashMap<AliveKey, TaskState>>,
 }
 
 impl AliveTracker {
@@ -77,28 +89,30 @@ impl AliveTracker {
     /// update(TaskStarting, seq=99)  → ignored (stale)
     /// ```
     pub async fn update(&self, ev: &Event) -> bool {
-        let Some(name) = ev.task.as_deref() else {
-            return false;
+        let key = match (ev.id, ev.task.as_deref()) {
+            (Some(id), _) => AliveKey::Id(id),
+            (None, Some(name)) => AliveKey::Name(Arc::from(name)),
+            (None, None) => return false,
         };
         let mut map = self.state.write().await;
 
         if matches!(ev.kind, EventKind::TaskRemoved) {
-            return match map.get(name) {
+            return match map.get(&key) {
                 Some(state) if ev.seq > state.last_seq => {
-                    map.remove(name);
+                    map.remove(&key);
                     true
                 }
                 _ => false,
             };
         }
-        let entry = if let Some(existing) = map.get_mut(name) {
-            existing
-        } else {
-            map.entry(Arc::from(name)).or_insert(TaskState {
-                last_seq: 0,
-                alive: false,
-            })
+        let Some(name) = ev.task.as_deref() else {
+            return false;
         };
+        let entry = map.entry(key).or_insert_with(|| TaskState {
+            name: Arc::from(name),
+            last_seq: 0,
+            alive: false,
+        });
         if ev.seq <= entry.last_seq {
             return false;
         }
@@ -118,29 +132,29 @@ impl AliveTracker {
         changed
     }
 
-    /// Returns a sorted list of currently alive task names.
+    /// Returns a sorted, deduplicated list of currently alive task names.
     ///
-    /// Used by [`Supervisor`](crate::Supervisor) to detect stuck tasks during graceful shutdown.
-    /// *(tasks that didn't stop within grace period)*.
+    /// Exposed via [`SupervisorHandle::snapshot`](crate::SupervisorHandle::snapshot):
+    /// tasks whose last lifecycle event was `TaskStarting`.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         let state = self.state.read().await;
         let mut alive: Vec<Arc<str>> = state
-            .iter()
-            .filter(|(_, ts)| ts.alive)
-            .map(|(name, _)| name.clone())
+            .values()
+            .filter(|ts| ts.alive)
+            .map(|ts| ts.name.clone())
             .collect();
         alive.sort_unstable();
+        alive.dedup();
         alive
     }
 
-    /// Returns true if the task is currently marked alive.
+    /// Returns true if any task run with this name is currently marked alive.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.state
             .read()
             .await
-            .get(name)
-            .map(|ts| ts.alive)
-            .unwrap_or(false)
+            .values()
+            .any(|ts| ts.alive && &*ts.name == name)
     }
 }
 
@@ -152,6 +166,43 @@ mod tests {
         let mut e = Event::new(kind).with_task(task);
         e.seq = seq;
         e
+    }
+
+    fn evi(kind: EventKind, task: &str, seq: u64, id: crate::identity::TaskId) -> Event {
+        let mut e = Event::new(kind).with_task(task).with_id(id);
+        e.seq = seq;
+        e
+    }
+
+    #[tokio::test]
+    async fn late_removed_from_old_id_keeps_new_task_alive() {
+        let tracker = AliveTracker::new();
+        let old = crate::identity::TaskId::next();
+        let new = crate::identity::TaskId::next();
+
+        tracker
+            .update(&evi(EventKind::TaskStarting, "x", 1, old))
+            .await;
+        tracker
+            .update(&evi(EventKind::TaskStarting, "x", 3, new))
+            .await;
+        tracker
+            .update(&evi(EventKind::TaskRemoved, "x", 4, old))
+            .await;
+
+        assert!(
+            tracker.is_alive("x").await,
+            "late TaskRemoved of the previous run must not kill the new run's state"
+        );
+        assert!(
+            tracker.snapshot().await.iter().any(|n| &**n == "x"),
+            "snapshot must still report the reused label as alive"
+        );
+
+        tracker
+            .update(&evi(EventKind::TaskRemoved, "x", 5, new))
+            .await;
+        assert!(!tracker.is_alive("x").await);
     }
 
     #[tokio::test]

@@ -78,6 +78,7 @@ pub(crate) struct Registry {
     grace: Duration,
     empty_notify: Notify,
     cmd_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryCommand>>>,
+    pending_joins: Arc<std::sync::Mutex<HashMap<TaskId, usize>>>,
 }
 
 impl Registry {
@@ -97,7 +98,39 @@ impl Registry {
             grace,
             empty_notify: Notify::new(),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
+            pending_joins: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Increments the pending-join refcount for `id`.
+    fn pending_inc(pending: &std::sync::Mutex<HashMap<TaskId, usize>>, id: TaskId) {
+        let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
+        *map.entry(id).or_insert(0) += 1;
+    }
+
+    /// Decrements the pending-join refcount for `id`, dropping the entry at zero.
+    fn pending_dec(pending: &std::sync::Mutex<HashMap<TaskId, usize>>, id: TaskId) {
+        let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&id) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&id);
+            }
+        }
+    }
+
+    /// Returns `true` once the task is fully terminated: not registered and not awaiting join.
+    ///
+    /// Used as a state fallback when a `TaskRemoved` event may have been lost to broadcast lag.
+    pub async fn is_terminated(&self, id: TaskId) -> bool {
+        if self.state.read().await.tasks.contains_key(&id) {
+            return false;
+        }
+        !self
+            .pending_joins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&id)
     }
 
     #[inline]
@@ -225,6 +258,7 @@ impl Registry {
     ///
     /// Always publishes `TaskRemoved` for every task (and `ActorDead` on panic).
     pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
+        let grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
         let handles: Vec<(TaskId, Handle)> = {
             let mut st = self.state.write().await;
             st.by_label.clear();
@@ -232,7 +266,8 @@ impl Registry {
             self.empty_notify.notify_waiters();
             drained
         };
-        for (_, h) in &handles {
+        for (id, h) in &handles {
+            Self::pending_inc(&self.pending_joins, *id);
             h.cancel.cancel();
         }
 
@@ -243,10 +278,14 @@ impl Registry {
             let label = h.label.clone();
             let mut join = h.join;
             match tokio::time::timeout_at(deadline, &mut join).await {
-                Ok(res) => Self::report_join(&self.bus, id, &label, res),
+                Ok(res) => {
+                    Self::pending_dec(&self.pending_joins, id);
+                    Self::report_join(&self.bus, id, &label, res);
+                }
                 Err(_elapsed) => {
                     join.abort();
                     let _ = join.await;
+                    Self::pending_dec(&self.pending_joins, id);
                     self.bus.publish(
                         Event::new(EventKind::TaskRemoved)
                             .with_task(Arc::clone(&label))
@@ -314,12 +353,14 @@ impl Registry {
 
     /// Removes a task by identity.
     async fn remove_task(&self, id: TaskId) {
+        Self::pending_inc(&self.pending_joins, id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
 
             handle.cancel.cancel();
             self.spawn_join_report(id, handle.label, handle.join, Some(self.grace));
         } else {
+            Self::pending_dec(&self.pending_joins, id);
             self.bus.publish(
                 Event::new(EventKind::TaskRemoved)
                     .with_id(id)
@@ -330,9 +371,12 @@ impl Registry {
 
     /// Cleanup finished task by identity.
     async fn cleanup_task(&self, id: TaskId) {
+        Self::pending_inc(&self.pending_joins, id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
             self.spawn_join_report(id, handle.label, handle.join, None);
+        } else {
+            Self::pending_dec(&self.pending_joins, id);
         }
     }
 
@@ -354,14 +398,19 @@ impl Registry {
         force_after: Option<Duration>,
     ) {
         let bus = self.bus.clone();
+        let pending = Arc::clone(&self.pending_joins);
         tokio::spawn(async move {
             let mut join = join;
             match force_after {
                 Some(grace) => match tokio::time::timeout(grace, &mut join).await {
-                    Ok(res) => Self::report_join(&bus, id, &name, res),
+                    Ok(res) => {
+                        Self::pending_dec(&pending, id);
+                        Self::report_join(&bus, id, &name, res);
+                    }
                     Err(_) => {
                         join.abort();
                         let _ = join.await;
+                        Self::pending_dec(&pending, id);
                         bus.publish(
                             Event::new(EventKind::TaskRemoved)
                                 .with_task(name)
@@ -372,6 +421,7 @@ impl Registry {
                 },
                 None => {
                     let res = join.await;
+                    Self::pending_dec(&pending, id);
                     Self::report_join(&bus, id, &name, res);
                 }
             }

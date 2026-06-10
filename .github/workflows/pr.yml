@@ -22,7 +22,6 @@ jobs:
 
   label-check:
     name: Label check
-    if: ${{ toJSON(github.event.pull_request.labels) != '[]' }}
     uses: ./.github/workflows/.label-check.yml
 
   docs:
@@ -42,7 +41,7 @@ jobs:
 
   pr-check:
     name: Pr Check
-    needs: [audit, label-check, docs, build]
+    needs: [audit, label-check, docs, build, preflight]
     runs-on: ${{ vars.RUNS_ON }}
     steps:
       - name: All checks passed

@@ -23,6 +23,6 @@ changelog:
     - title: Other
       labels:
         - other
-    - title: Exclude
+    - title: Uncategorized
       labels:
         - "*"

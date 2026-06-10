@@ -7,7 +7,7 @@
 //! ```
 
 // Core
-pub use crate::core::{Supervisor, SupervisorConfig, SupervisorHandle};
+pub use crate::core::{Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle};
 
 // Tasks
 pub use crate::tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};

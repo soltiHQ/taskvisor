@@ -17,6 +17,9 @@
 //! Failure:
 //!   task.spawn() ─► Err(Fail/Fatal) ─► publish TaskFailed
 //!
+//! Panic:
+//!   task panics ─► caught ─► treated as Err(Fail) ─► publish TaskFailed
+//!
 //! Timeout:
 //!   timeout exceeded ─► cancel child ─► publish TimeoutHit
 //!                                    ─► return Timeout error
@@ -27,11 +30,17 @@
 //!
 //! - `TimeoutHit` is an **informational** event published **before** `TaskFailed` on timeout *(it is not a terminal event itself)*
 //! - `Canceled` is treated as graceful exit → `TaskStopped` (not `TaskFailed`).
+//! - A **panic** in the task body (or in `spawn()` itself) is caught and converted to a retryable [`TaskError::Fail`] with reason `task panicked: ...` - restart policy applies.
 //! - Always publishes **exactly one** terminal event per attempt: `TaskStopped` or `TaskFailed`.
 //! - Derives **child token** per attempt (isolated cancellation).
 //! - Child cancellation does **not** affect parent.
 
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
+
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
@@ -39,8 +48,35 @@ use crate::{
     error::TaskError,
     events::{Bus, Event, EventKind},
     identity::TaskId,
-    tasks::Task,
+    tasks::{BoxTaskFuture, Task},
 };
+
+/// Future adapter that traps panics raised by the task body.
+///
+/// Polls the inner future inside [`std::panic::catch_unwind`], converting a panic into a retryable [`TaskError::Fail`];
+/// actor applies the normal restart/backoff policy instead of unwinding (which would leave the task unreaped in the registry and never restarted).
+struct CatchPanic(BoxTaskFuture);
+
+impl Future for CatchPanic {
+    type Output = Result<(), TaskError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        std::panic::catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx))).unwrap_or_else(|payload| Poll::Ready(Err(panic_to_error(payload.as_ref()))))
+    }
+}
+
+/// Maps a panic payload to a retryable [`TaskError::Fail`] with the panic message.
+fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
+    let msg = payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    TaskError::Fail {
+        reason: format!("task panicked: {msg}"),
+        exit_code: None,
+    }
+}
 
 /// Executes a single attempt of `task`, publishing lifecycle events to `bus`.
 ///
@@ -85,8 +121,17 @@ pub async fn run_once<T: Task + ?Sized>(
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
 
+    let fut = match std::panic::catch_unwind(AssertUnwindSafe(|| task.spawn(child.clone()))) {
+        Ok(fut) => CatchPanic(fut),
+        Err(payload) => {
+            let e = panic_to_error(payload.as_ref());
+            publish_failed(bus, id, task.name(), attempt, &e);
+            return Err(e);
+        }
+    };
+
     let res = if let Some(dur) = timeout.filter(|d| *d > Duration::ZERO) {
-        match time::timeout(dur, task.spawn(child.clone())).await {
+        match time::timeout(dur, fut).await {
             Ok(r) => r,
             Err(_elapsed) => {
                 child.cancel();
@@ -95,7 +140,7 @@ pub async fn run_once<T: Task + ?Sized>(
             }
         }
     } else {
-        task.spawn(child.clone()).await
+        fut.await
     };
 
     match res {

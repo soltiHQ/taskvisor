@@ -249,12 +249,16 @@ pub enum BackoffSource {
 /// - `at`: wall-clock timestamp (for logs)
 /// - other optional fields are set depending on the [`EventKind`]
 ///
+/// Fields are public for reading;
+/// Construct via [`Event::new`] and the `with_*` builders.
+///
 /// # Also
 ///
 /// - [`EventKind`] - event classification
 /// - [`Subscribe`](crate::Subscribe) - user-defined event handler trait
 /// - `LogWriter` (feature = `logging`) - built-in human-readable event printer
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Event {
     /// Globally unique, monotonically increasing sequence number.
     pub seq: u64,
