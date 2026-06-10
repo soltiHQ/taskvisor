@@ -2,7 +2,6 @@
 
 > Lightweight, event-driven task supervision for async Rust.
 
-Inspired by Erlang/OTP supervisors. 
 Runs your background tasks, restarts them on failure with configurable backoff, and emits structured events for every lifecycle change.
 
 ```text
@@ -145,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ```text
+# output:
   TaskAddRequested (task=flaky)
   TaskAdded (task=flaky)
   TaskStarting (task=flaky)        # attempt 1
@@ -160,6 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Restart, backoff, and an event for every step, without writing a retry loop.
+
 See [`examples/metrics.rs`](examples/metrics.rs) for a fuller version (`cargo run --example metrics`).
 
 
