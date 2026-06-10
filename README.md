@@ -187,7 +187,10 @@ handle.shutdown().await?;
 
 ## Core concepts
 
-**Task & TaskFn** - A `Task` is any `Send + Sync + 'static` type that implements `fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture`. 
+**Task & TaskFn** - A `Task` is any `Send + Sync + 'static` type that implements
+```rust,ignore
+fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture
+``` 
 `TaskFn` wraps a closure into a `Task` so you don't need a struct. `TaskRef` is just `Arc<dyn Task>`.
 
 **TaskSpec** - Bundles a task with its policies: restart, backoff, timeout, and max retries. 
