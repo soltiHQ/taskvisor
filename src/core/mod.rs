@@ -109,6 +109,9 @@
 //! - [`registry`]   task lifecycle: spawn/cancel/join/cleanup
 //! - [`alive`]      sequence-based alive tracking
 
+mod builder;
+pub use builder::SupervisorBuilder;
+
 mod config;
 pub use config::SupervisorConfig;
 
@@ -120,7 +123,6 @@ pub use supervisor::Supervisor;
 
 mod actor;
 mod alive;
-mod builder;
 mod registry;
 mod runner;
 mod shutdown;

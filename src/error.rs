@@ -36,12 +36,6 @@ pub enum RuntimeError {
         /// The duplicate task name.
         name: Arc<str>,
     },
-    /// Attempted to remove a task that doesn't exist in the registry.
-    #[error("task '{name}' not found in registry")]
-    TaskNotFound {
-        /// The missing task name.
-        name: Arc<str>,
-    },
     /// A cancelled task did not confirm termination within the wait window.
     #[error("timeout waiting for task {id} removal after {timeout:?}")]
     TaskRemoveTimeout {
@@ -70,7 +64,6 @@ impl RuntimeError {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
-            RuntimeError::TaskNotFound { .. } => "runtime_task_not_found",
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
             RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
             RuntimeError::ShuttingDown => "runtime_shutting_down",

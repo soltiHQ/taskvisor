@@ -6,8 +6,8 @@
 //!
 //! - [`TaskId`] - *identity*: unique per run instance, owned by the runtime (this crate), never reused.
 //!   Use it to correlate lifecycle [`Event`](crate::Event)s and to address a task for cancellation/removal.
-//! - **name** ([`Task::name`](crate::Task::name)) - *human label*: free-form, **not** required to be unique.
-//!   Used for logs, metrics, and external resource naming.
+//! - **name** ([`Task::name`](crate::Task::name)) - *label*: free-form, used for logs, metrics, and external resource naming.
+//!   At most one **currently registered** task may hold a given name (a duplicate add is rejected with `TaskAddFailed`/`TaskAlreadyExists`).
 //! - **slot** ([`TaskSpec::slot`](crate::TaskSpec::slot)) - *admission key*: the logical unit the controller admits one-at-a-time.
 
 use std::sync::atomic::{AtomicU64, Ordering};

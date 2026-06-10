@@ -22,6 +22,7 @@ use std::time::Duration;
 ///
 /// - [`BackoffPolicy`](crate::BackoffPolicy) - uses `JitterPolicy` to randomize computed delays
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JitterPolicy {
     /// No jitter: use exact backoff delay.
     ///
@@ -73,8 +74,6 @@ impl JitterPolicy {
     /// - `base`: minimal delay (usually the initial backoff)
     /// - `prev`: previous actual delay
     /// - `max`: maximum cap
-    ///
-    /// ### Note
     ///
     /// If called on a non-`Decorrelated` policy, falls back to `apply(base)`.
     pub fn apply_decorrelated(&self, base: Duration, prev: Duration, max: Duration) -> Duration {

@@ -244,13 +244,14 @@ Each subscriber gets its own bounded queue - a slow subscriber never blocks othe
 
 Return these from your task to control what happens next:
 
-| Return                                         | Retryable | What happens                                           |
-|------------------------------------------------|-----------|--------------------------------------------------------|
-| `Ok(())`                                       | -         | Task completed. `RestartPolicy` decides next step.     |
-| `Err(TaskError::Fail { reason, exit_code })`   | Yes       | Retryable failure. Backoff, then retry.                |
-| `Err(TaskError::Timeout { .. })`               | Yes       | Set automatically when per-task timeout is exceeded.   |
-| `Err(TaskError::Fatal { reason, exit_code })`  | No        | Permanent failure. Actor stops, publishes `ActorDead`. |
-| `Err(TaskError::Canceled)`                     | No        | Graceful shutdown. Not an error.                       |
+| Return                                        | Retryable | What happens                                                               |
+|-----------------------------------------------|-----------|----------------------------------------------------------------------------|
+| `Ok(())`                                      | -         | Task completed. `RestartPolicy` decides next step.                         |
+| `Err(TaskError::Fail { reason, exit_code })`  | Yes       | Retryable failure. Backoff, then retry.                                    |
+| `Err(TaskError::Timeout { .. })`              | Yes       | Set automatically when per-task timeout is exceeded.                       |
+| `Err(TaskError::Fatal { reason, exit_code })` | No        | Permanent failure. Actor stops, publishes `ActorDead`.                     |
+| `Err(TaskError::Canceled)`                    | No        | Graceful shutdown. Not an error.                                           |
+| `panic!` in the task body                     | Yes       | Caught and converted to `TaskError::Fail`; backoff, then retry per policy. |
 
 `exit_code` is `Option<i32>`: use when the error comes from a process-like runtime, pass `None` for logical errors. 
 Subscribers receive it as `Event::exit_code` on `TaskFailed` / `ActorDead` / `ActorExhausted`.

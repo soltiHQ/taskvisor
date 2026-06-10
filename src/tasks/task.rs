@@ -43,6 +43,9 @@ pub type TaskRef = Arc<dyn Task>;
 /// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 pub trait Task: Send + Sync + 'static {
     /// Task name used in logs, metrics, and shutdown diagnostics.
+    ///
+    /// Names must be unique among **currently registered** tasks (a duplicate add is rejected),
+    /// but may be reused after the previous holder is removed.
     fn name(&self) -> &str;
 
     /// Creates a new future that runs the task until completion or cancellation.

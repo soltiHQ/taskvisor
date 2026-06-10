@@ -177,9 +177,9 @@ impl TaskActor {
                                 self.bus.publish(
                                     Event::new(EventKind::ActorExhausted)
                                         .with_task(task_name.clone())
-                        .with_id(id)
+                                        .with_id(id)
                                         .with_attempt(attempt)
-                                        .with_reason("semaphore_closed")
+                                        .with_reason("semaphore_closed"),
                                 );
                                 return ActorExitReason::Cancelled;
                             }
@@ -264,7 +264,17 @@ impl TaskActor {
                     return ActorExitReason::Fatal;
                 }
                 Err(TaskError::Canceled) => {
-                    return ActorExitReason::Cancelled;
+                    if runtime_token.is_cancelled() {
+                        return ActorExitReason::Cancelled;
+                    }
+                    self.bus.publish(
+                        Event::new(EventKind::ActorExhausted)
+                            .with_task(task_name.clone())
+                            .with_id(id)
+                            .with_attempt(attempt)
+                            .with_reason("task_returned_canceled"),
+                    );
+                    return ActorExitReason::PolicyExhausted;
                 }
                 Err(e) => {
                     let policy_allows_retry = matches!(

@@ -11,11 +11,11 @@ Apply **one** of these labels before merge
 | Label     | Release section      |
 |-----------|----------------------|
 | `feature` | Features             |
-| `fix`     | Bug fixes            |
+| `bug`     | Bug fixes            |
 | `docs`    | Documentation        |
 | `deps`    | Dependencies         |
-| `ci`      | CI / Build           |
-| `other`   | Other changes        |
+| `ci`      | CI/CD                |
+| `other`   | Other                |
 | `skip`    | *omitted from notes* |
 
 ## ✅ Checklist

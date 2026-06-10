@@ -5,14 +5,16 @@
 //! the *next* task **only after** a terminal `TaskRemoved` event is observed on the runtime bus.
 //!
 //! **one slot = one logical key** *(`slot key = TaskSpec::slot()`, which defaults to the task name and can be overridden via `TaskSpec::with_slot`)*.
-//! Several differently-named tasks may therefore share a single slot, and one task name may be admitted into distinct slots.
+//! Several differently-named tasks may therefore share a single slot (sequentially).
+//!
+//! ## Note:
+//!
+//! Task **names stay globally unique** in the registry - submitting a name that is already running will be rejected by the registry (`TaskAddFailed`), which frees the slot and advances its queue.
 //!
 //! ## Role in Taskvisor
 //!
-//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission rules,
-//! and delegates `add/remove` to the Supervisor.
-//! It subscribes to the Bus and advances slots strictly on `TaskRemoved` to avoid
-//! registry races and double starts.
+//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission rules, and delegates `add/remove` to the Supervisor.
+//! It subscribes to the Bus and advances slots strictly on `TaskRemoved` to avoid registry races and double starts.
 //!
 //! ```text
 //! ┌───────────────────────────────┐

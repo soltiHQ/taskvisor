@@ -4,7 +4,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust
 //! use taskvisor::{SupervisorBuilder, SupervisorConfig};
 //!
 //! let sv = SupervisorBuilder::new(SupervisorConfig::default()).build();

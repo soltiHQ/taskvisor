@@ -26,8 +26,5 @@ target
 # Cache files
 .cache
 
-# Rust library
-Cargo.lock
-
 # Taskfile
 .task/

@@ -1,5 +1,13 @@
+//! # Errors produced by the controller (feature = `controller`).
+//!
+//! [`ControllerError`] covers submission-path failures: the controller being
+//! absent, its queue being full, or its channel being closed.
+
 use thiserror::Error;
 
+/// Errors returned by [`SupervisorHandle::submit`](crate::SupervisorHandle::submit)
+/// and [`try_submit`](crate::SupervisorHandle::try_submit).
+#[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {
     /// Controller is not configured (builder didn't call `with_controller`).

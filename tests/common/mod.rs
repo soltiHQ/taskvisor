@@ -150,6 +150,12 @@ pub fn make_fatal(name: &str, exit_code: Option<i32>) -> TaskRef {
     })
 }
 
+pub fn make_panic(name: &str) -> TaskRef {
+    TaskFn::arc(name, |_ctx: CancellationToken| async move {
+        panic!("kaboom");
+    })
+}
+
 pub fn fast_backoff() -> BackoffPolicy {
     BackoffPolicy {
         first: Duration::from_millis(1),

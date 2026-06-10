@@ -20,6 +20,7 @@
 
 /// Policy controlling how new submissions are handled when a slot is busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdmissionPolicy {
     /// Skip task if already running.
     ///

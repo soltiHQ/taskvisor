@@ -129,6 +129,8 @@
 //! }
 //! ```
 
+#![forbid(unsafe_code)]
+
 /// Compiles the runnable Rust code blocks in `README.md` as doctests
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
@@ -140,7 +142,7 @@ mod identity;
 pub use identity::TaskId;
 
 mod core;
-pub use core::{Supervisor, SupervisorConfig, SupervisorHandle};
+pub use core::{Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle};
 
 mod tasks;
 pub use tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};

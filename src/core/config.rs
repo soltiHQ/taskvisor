@@ -40,7 +40,7 @@ use crate::policies::{BackoffPolicy, RestartPolicy};
 ///
 /// # Also
 ///
-/// - `SupervisorBuilder` - consumes config to build a [`Supervisor`](crate::Supervisor)
+/// - [`SupervisorBuilder`](crate::SupervisorBuilder) - consumes config to build a [`Supervisor`](crate::Supervisor)
 /// - [`TaskSpec`](crate::TaskSpec) - inherits defaults from config via `with_defaults`
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
