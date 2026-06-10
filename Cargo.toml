@@ -30,7 +30,7 @@ controller = ["dashmap"]
 features = ["logging", "controller"]
 
 [dependencies]
-tokio      = { version = "1.47.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tokio      = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7.16"
 thiserror  = "2.0.16"
 fastrand   = "2.3.0"
