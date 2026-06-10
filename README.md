@@ -1,5 +1,10 @@
 # Taskvisor
 
+[![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
+[![docs.rs](https://docs.rs/taskvisor/badge.svg)](https://docs.rs/taskvisor)
+[![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
+[![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
+
 <div>
   <a href="https://docs.rs/taskvisor/latest/taskvisor/"><img alt="API Docs" src="https://img.shields.io/badge/API%20Docs-4d76ae?style=for-the-badge&logo=rust&logoColor=white"></a>
   <a href="./examples/"><img alt="Examples" src="https://img.shields.io/badge/Examples-2ea44f?style=for-the-badge&logo=github&logoColor=white"></a>
@@ -26,11 +31,6 @@ Supervisor
          ├──► AliveTracker (sequence-based liveness)
          └──► Subscribers (own queue each; your metrics, logs, alerts)
 ```
-
-[![Crates.io](https://img.shields.io/crates/v/taskvisor.svg)](https://crates.io/crates/taskvisor)
-[![docs.rs](https://docs.rs/taskvisor/badge.svg)](https://docs.rs/taskvisor)
-[![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
-[![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
 ## Why taskvisor?
 
