@@ -15,7 +15,7 @@
 //! **[`TaskFn`]** - pass a name and an async closure.
 //!
 //! The closure is called on every start and restart, producing a fresh future each time.
-//! No struct, no trait impl - just a function. Suitable for the majority of use cases.
+//! No struct, no trait impl - just a function. Suitable for most use cases.
 //!
 //! See examples on [`TaskFn`].
 //!

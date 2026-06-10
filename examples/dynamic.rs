@@ -26,7 +26,7 @@
 //! - CLI tool that processes a batch of files in parallel
 //! - Periodic cron-like jobs defined in config at startup
 //!
-//! ### `serve()`: "I'll manage it"
+//! ### `serve()`: manage tasks at runtime
 //!
 //! Tasks appear and disappear at runtime.
 //!
@@ -42,10 +42,10 @@
 //! ## What this shows
 //!
 //! - `sup.serve()`: starts listeners, returns a handle. Non-blocking.
-//! - `handle.add(spec)`: register a new task dynamically.
-//! - `handle.remove(name)`: cancel and deregister by name.
-//! - `handle.cancel(name)`: cancel and wait for confirmation.
-//! - `handle.list()`: snapshot of active task names.
+//! - `handle.add(spec)`: register a new task dynamically, returns its `TaskId`.
+//! - `handle.remove(id)`: cancel and deregister by identity (or `remove_by_label(name)`).
+//! - `handle.cancel(id)`: cancel and wait for confirmation (or `cancel_by_label(name)`).
+//! - `handle.list()`: snapshot of active `(TaskId, name)` pairs.
 //! - `handle.is_alive(name)`: check if a specific task is running.
 //! - `handle.shutdown()`: graceful stop (consumes the handle).
 //!

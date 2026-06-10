@@ -51,7 +51,7 @@ pub struct BackoffPolicy {
     pub max: Duration,
     /// Multiplicative growth factor (`>= 1.0` recommended).
     pub factor: f64,
-    /// Jitter policy to prevent thundering herd.
+    /// Jitter policy that spreads retries out in time.
     pub jitter: JitterPolicy,
 }
 

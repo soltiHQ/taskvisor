@@ -14,14 +14,14 @@
 //!
 //! ## What this shows
 //!
-//! - **`BackoffPolicy`** customization: exponential factor, initial delay, max cap.
+//! - **`BackoffPolicy`** customization: exponential factor, initial delay, maximum delay.
 //!   `resilient` uses `factor: 2.0` → delays: 200ms, 400ms, 800ms, …
 //! - **`max_retries(3)`**: the task gives up after 3 failure-driven retries.
 //!   Success-driven restarts (like `always-on`) don't count toward max_retries.
 //! - **`SupervisorConfig::grace`**: how long the supervisor waits for tasks to stop during shutdown.
 //!   Here set to 5 seconds.
 //! - The `always-on` task runs indefinitely because `RestartPolicy::Always` never stops.
-//!   The supervisor only exits when it receives Ctrl+C *(which triggers`drive_shutdown` → cancel all → grace period → exit)*.
+//!   The supervisor only exits when it receives Ctrl+C (which triggers `drive_shutdown`: cancel all, wait the grace period, then exit).
 //!
 //! ## Why `_ctx` is unused
 //!

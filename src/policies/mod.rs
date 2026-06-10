@@ -5,7 +5,7 @@
 //! ## Contents
 //! - [`BackoffPolicy`] how retry delays evolve (first / factor / max + jitter)
 //! - [`RestartPolicy`] when to restart a task (never / on-failure / always)
-//! - [`JitterPolicy`]  randomization strategy to avoid thundering herd
+//! - [`JitterPolicy`]  randomization strategy; tasks do not all retry at once
 //!
 //! ## Wiring
 //!

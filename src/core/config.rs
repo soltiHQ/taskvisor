@@ -88,7 +88,7 @@ pub struct SupervisorConfig {
     /// - `n > 0` = at most `n` retries after the initial failure
     ///
     /// Only counts failure-driven retries, not success-driven restarts
-    /// *(e.g., `RestartPolicy::Always` after success does not consume retries)*.
+    /// (e.g., `RestartPolicy::Always` after success does not consume retries).
     ///
     /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
     pub max_retries: u32,
@@ -135,7 +135,7 @@ impl Default for SupervisorConfig {
     /// Default configuration:
     /// - `grace = 60s` (reasonable graceful shutdown window)
     /// - `max_concurrent = 0` (unlimited)
-    /// - `bus_capacity = 1024` (good baseline)
+    /// - `bus_capacity = 1024` (a reasonable default)
     /// - `timeout = 0s` (no timeout)
     /// - `restart = RestartPolicy::OnFailure` (restart on errors only)
     /// - `backoff = BackoffPolicy::default()` (constant 100ms, see [`BackoffPolicy`])

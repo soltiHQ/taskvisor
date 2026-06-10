@@ -129,6 +129,11 @@
 //! }
 //! ```
 
+/// Compiles the runnable Rust code blocks in `README.md` as doctests
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod prelude;
 
 mod identity;

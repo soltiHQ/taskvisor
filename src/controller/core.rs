@@ -95,7 +95,7 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
-    /// Creates a new controller *(must call .run() to start)*.
+    /// Creates a new controller (must call [`run`](Self::run) to start it).
     pub fn new(config: ControllerConfig, supervisor: &Arc<Supervisor>, bus: Bus) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
 

@@ -13,7 +13,7 @@
 //!
 //! ## Why `ctx.cancelled()` matters
 //!
-//! Tokio **does NOT kill futures**: it cancels them cooperatively.
+//! Tokio **does not kill futures**: it cancels them cooperatively.
 //! When the supervisor shuts down, it cancels the task's `CancellationToken`.
 //! If your task is awaiting `sleep(10s)`, it won't notice until the sleep finishes.
 //! `tokio::select!` with `ctx.cancelled()` lets the task react immediately.

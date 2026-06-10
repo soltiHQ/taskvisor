@@ -8,7 +8,7 @@
 //! - Perform graceful shutdown with configurable grace period
 //! - Enforce global concurrency limits via optional semaphore
 //! - Track alive tasks for stuck detection during shutdown
-//! - Fan-out events to subscribers via [`SubscriberSet`]
+//! - Distribute events to subscribers via [`SubscriberSet`]
 //! - Handle OS termination signals
 //!
 //! ## Architecture
@@ -16,7 +16,7 @@
 //! Supervisor::start()           // non-blocking setup
 //!     ├──► subscriber_listener()
 //!     │     ├──► updates AliveTracker
-//!     │     └──► fans out to SubscriberSet
+//!     │     └──► distributes to SubscriberSet
 //!     └──► Registry.spawn_listener()
 //!           ├──► cmd_rx: Add(id, spec)  → spawn actor
 //!           ├──► cmd_rx: Remove(id)     → cancel task
@@ -39,7 +39,7 @@
 //! ## Runtime task management
 //! ```text
 //! add_task(spec)                           // mints TaskId, returns it to caller
-//!     ├──► Bus.publish(TaskAddRequested)   // observability (fire-and-forget)
+//!     ├──► Bus.publish(TaskAddRequested)   // observability (non-blocking)
 //!     ├──► cmd_tx.send(Add(id, spec))      // guaranteed delivery (mpsc)
 //!     └──► Registry.spawn_listener
 //!           ├──► spawn actor
@@ -125,7 +125,7 @@ use crate::{
 ///
 /// ## Two usage modes
 ///
-/// **Static** — run a known set of tasks until completion or Ctrl+C:
+/// **Static**: run a known set of tasks until completion or Ctrl+C:
 /// ```rust,no_run
 /// # use taskvisor::prelude::*;
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -134,7 +134,7 @@ use crate::{
 /// # Ok(()) }
 /// ```
 ///
-/// **Dynamic** — add/remove/cancel tasks at runtime via [`SupervisorHandle`]:
+/// **Dynamic**: add/remove/cancel tasks at runtime via [`SupervisorHandle`]:
 /// ```rust,no_run
 /// # use taskvisor::prelude::*;
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -226,8 +226,7 @@ impl Supervisor {
 
     /// Returns a [`SupervisorHandle`] for dynamic task management.
     ///
-    /// Starts the event loop (listeners) and returns a handle through which
-    //  can add/remove/cancel tasks and trigger shutdown.
+    /// Starts the event loop (listeners) and returns a handle through which you can add, remove, or cancel tasks and trigger shutdown.
     ///
     /// This is the **only** way to manage tasks dynamically. Use [`run()`] for static task sets.
     ///
@@ -290,7 +289,7 @@ impl Supervisor {
     /// Starts the supervisor event loop without blocking.
     ///
     /// Spawns:
-    /// - subscriber listener (event fan-out)
+    /// - subscriber listener (distributes events to subscribers)
     /// - registry listener (task lifecycle management)
     pub(crate) fn start(&self) {
         if self.started.swap(true, Ordering::AcqRel) {
@@ -433,9 +432,9 @@ impl Supervisor {
         }
     }
 
-    /// Listens to the internal event bus and fans out each received [`Event`] to all active subscribers.
+    /// Listens to the internal event bus and distributes each received [`Event`] to all active subscribers.
     ///
-    /// The listener also updates the [`AliveTracker`] before fan-out to keep the latest per-task state in sync.
+    /// The listener also updates the [`AliveTracker`] before distributing them, to keep the latest per-task state in sync.
     ///
     /// On `Lagged`, it creates a [`EventKind::SubscriberOverflow`] event and emits it **directly to subscribers**,
     /// bypassing the bus - to avoid reinforcing backpressure loops while still reporting the loss.
