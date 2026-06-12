@@ -22,7 +22,7 @@ pub(super) struct SlotState {
     pub running_id: Option<TaskId>,
 
     /// Queue of pending tasks (FIFO order).
-    pub queue: VecDeque<TaskSpec>,
+    pub queue: VecDeque<(TaskId, TaskSpec)>,
 }
 
 /// Status of a task slot.
@@ -102,18 +102,14 @@ mod tests {
     fn queue_push_pop_fifo() {
         let mut slot = SlotState::new();
 
-        let task_a = make_spec("a");
-        let task_b = make_spec("b");
-        let task_c = make_spec("c");
-
-        slot.queue.push_back(task_a);
-        slot.queue.push_back(task_b);
-        slot.queue.push_back(task_c);
+        slot.queue.push_back((TaskId::next(), make_spec("a")));
+        slot.queue.push_back((TaskId::next(), make_spec("b")));
+        slot.queue.push_back((TaskId::next(), make_spec("c")));
 
         assert_eq!(slot.queue.len(), 3);
-        assert_eq!(slot.queue.pop_front().unwrap().name(), "a");
-        assert_eq!(slot.queue.pop_front().unwrap().name(), "b");
-        assert_eq!(slot.queue.pop_front().unwrap().name(), "c");
+        assert_eq!(slot.queue.pop_front().unwrap().1.name(), "a");
+        assert_eq!(slot.queue.pop_front().unwrap().1.name(), "b");
+        assert_eq!(slot.queue.pop_front().unwrap().1.name(), "c");
         assert!(slot.queue.is_empty());
     }
 

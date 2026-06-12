@@ -35,6 +35,152 @@ fn logging_once(name: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn submit_returns_task_id_carried_by_events() {
+    let (handle, collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        let id = handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("id-task")).with_slot("s"),
+            ))
+            .await
+            .expect("submit ok");
+
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                collector
+                    .find_all(EventKind::TaskAdded)
+                    .iter()
+                    .any(|e| e.id == Some(id))
+            })
+            .await,
+            "TaskAdded must carry the id returned by submit()"
+        );
+        assert!(
+            collector
+                .find_all(EventKind::ControllerSubmitted)
+                .iter()
+                .any(|e| e.id == Some(id)),
+            "ControllerSubmitted must carry the submitted id"
+        );
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_submission_event_carries_its_id() {
+    let (handle, collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("occupant-rej")).with_slot("s"),
+            ))
+            .await
+            .expect("first submit ok");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                handle.is_alive("occupant-rej").await
+            })
+            .await
+        );
+
+        let rejected_id = handle
+            .submit(ControllerSpec::drop_if_running(
+                TaskSpec::restartable(make_coop("dropped")).with_slot("s"),
+            ))
+            .await
+            .expect("submit accepted into channel");
+
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                collector
+                    .find_all(EventKind::ControllerRejected)
+                    .iter()
+                    .any(|e| e.id == Some(rejected_id))
+            })
+            .await,
+            "ControllerRejected must carry the id of the dropped submission"
+        );
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remove_of_queued_submission_purges_it_before_start() {
+    let (handle, collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("occupant-q")).with_slot("s"),
+            ))
+            .await
+            .expect("first submit ok");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                handle.is_alive("occupant-q").await
+            })
+            .await
+        );
+
+        let victim_id = handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("queued-victim")).with_slot("s"),
+            ))
+            .await
+            .expect("second submit ok");
+
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                collector
+                    .find_all(EventKind::ControllerSubmitted)
+                    .iter()
+                    .any(|e| e.id == Some(victim_id))
+            })
+            .await,
+            "queued submission must be confirmed before removal"
+        );
+
+        handle.remove(victim_id).expect("remove accepted");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                collector
+                    .find_all(EventKind::ControllerRejected)
+                    .iter()
+                    .any(|e| {
+                        e.id == Some(victim_id) && e.reason.as_deref() == Some("removed_from_queue")
+                    })
+            })
+            .await,
+            "controller must confirm the queued spec was purged"
+        );
+
+        assert!(
+            handle
+                .cancel_by_label("occupant-q")
+                .await
+                .expect("cancel occupant")
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            collector
+                .by_label("queued-victim")
+                .iter()
+                .all(|e| e.kind != EventKind::TaskStarting),
+            "a removed queued submission must never start"
+        );
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn shutdown_does_not_start_queued_tasks() {
     let (handle, collector) = served_controller(ControllerConfig::default());
 
@@ -119,7 +265,7 @@ async fn idle_submit_admits_emits_submitted_then_running_transition() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
         let spec = TaskSpec::restartable(make_coop("runner-7")).with_slot("web");
-        handle.submit(ControllerSpec::queue(spec)).await.unwrap();
+        let id = handle.submit(ControllerSpec::queue(spec)).await.unwrap();
 
         assert!(
             poll_until(Duration::from_secs(3), || async {
@@ -139,18 +285,20 @@ async fn idle_submit_admits_emits_submitted_then_running_transition() {
                     .is_some_and(|r| r.contains("status=admitting"))
         }));
         for e in collector.by_label("web") {
-            if matches!(
-                e.kind,
-                EventKind::ControllerSubmitted | EventKind::ControllerSlotTransition
-            ) {
-                assert_eq!(e.id, None, "controller events must not carry a TaskId");
+            if e.kind == EventKind::ControllerSubmitted {
+                assert_eq!(
+                    e.id,
+                    Some(id),
+                    "ControllerSubmitted must carry the submission TaskId"
+                );
             }
         }
         assert!(
             collector
                 .by_label("runner-7")
                 .iter()
-                .any(|e| { e.kind == EventKind::TaskStarting && e.id.is_some() })
+                .any(|e| { e.kind == EventKind::TaskStarting && e.id == Some(id) }),
+            "the lifecycle must run under the id minted at submit()"
         );
 
         let _ = handle.shutdown().await;

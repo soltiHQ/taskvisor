@@ -12,7 +12,7 @@
 //!   task.spawn() ─► Ok(()) ─► publish TaskStopped
 //!
 //! Cancellation:
-//!   task.spawn() ─► Err(Canceled) ─► publish TaskStopped (graceful exit)
+//!   task.spawn() ─► Err(Canceled) ─► publish TaskCanceled (graceful exit)
 //!
 //! Failure:
 //!   task.spawn() ─► Err(Fail/Fatal) ─► publish TaskFailed
@@ -29,9 +29,9 @@
 //! ## Rules
 //!
 //! - `TimeoutHit` is an **informational** event published **before** `TaskFailed` on timeout *(it is not a terminal event itself)*
-//! - `Canceled` is treated as graceful exit → `TaskStopped` (not `TaskFailed`).
+//! - `Canceled` is treated as graceful exit → `TaskCanceled` (not `TaskFailed`).
 //! - A **panic** in the task body (or in `spawn()` itself) is caught and converted to a retryable [`TaskError::Fail`] with reason `task panicked: ...` - restart policy applies.
-//! - Always publishes **exactly one** terminal event per attempt: `TaskStopped` or `TaskFailed`.
+//! - Always publishes **exactly one** terminal event per attempt: `TaskStopped`, `TaskCanceled`, or `TaskFailed`.
 //! - Derives **child token** per attempt (isolated cancellation).
 //! - Child cancellation does **not** affect parent.
 
@@ -102,13 +102,13 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
 ///
 /// - Parent cancellation propagates to child token
 /// - Task **should** return `Err(TaskError::Canceled)` when detecting cancellation
-/// - `Canceled` is treated as **graceful exit**, publishes `TaskStopped` (not `TaskFailed`)
+/// - `Canceled` is treated as **graceful exit**, publishes `TaskCanceled` (not `TaskFailed`)
 /// - Child cancellation does **not** affect parent (isolated per attempt)
 ///
 /// ### Event semantics
 ///
 /// Always publishes **exactly one** terminal event per attempt:
-/// - `TaskStopped` on `Ok(())` or `Err(Canceled)` (graceful completion)
+/// - `TaskStopped` on `Ok(())`, `TaskCanceled` on `Err(Canceled)` (graceful exits)
 /// - `TaskFailed` on `Err(Fail/Fatal/Timeout)` (actual errors)
 ///
 /// `TimeoutHit` is informational and published **before** `TaskFailed` on timeout.
@@ -146,11 +146,11 @@ pub async fn run_once<T: Task + ?Sized>(
 
     match res {
         Ok(()) => {
-            publish_stopped(bus, id, task.name());
+            publish_stopped(bus, id, task.name(), attempt);
             Ok(())
         }
         Err(TaskError::Canceled) => {
-            publish_stopped(bus, id, task.name());
+            publish_canceled(bus, id, task.name(), attempt);
             Err(TaskError::Canceled)
         }
         Err(e) => {
@@ -160,12 +160,27 @@ pub async fn run_once<T: Task + ?Sized>(
     }
 }
 
-/// Publishes `TaskStopped` event (success or graceful cancellation).
-fn publish_stopped(bus: &Bus, id: TaskId, name: &str) {
+/// Publishes `TaskStopped` event.
+///
+/// successful attempt.
+fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32) {
     bus.publish(
         Event::new(EventKind::TaskStopped)
             .with_task(name)
-            .with_id(id),
+            .with_id(id)
+            .with_attempt(attempt),
+    );
+}
+
+/// Publishes `TaskCanceled` event.
+///
+/// graceful cancellation of an attempt.
+fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32) {
+    bus.publish(
+        Event::new(EventKind::TaskCanceled)
+            .with_task(name)
+            .with_id(id)
+            .with_attempt(attempt),
     );
 }
 
@@ -182,7 +197,9 @@ fn publish_failed(bus: &Bus, id: TaskId, name: &str, attempt: u32, err: &TaskErr
     bus.publish(ev);
 }
 
-/// Publishes `TimeoutHit` event (always followed by `TaskFailed`).
+/// Publishes `TimeoutHit` event.
+///
+/// always followed by `TaskFailed`.
 fn publish_timeout(bus: &Bus, id: TaskId, name: &str, dur: Duration, attempt: u32) {
     bus.publish(
         Event::new(EventKind::TimeoutHit)
@@ -264,6 +281,27 @@ mod tests {
                 panic!("expected TaskError::Timeout, got: {other:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_success_publishes_stopped_with_attempt() {
+        let bus = Bus::new(16);
+        let mut rx = bus.subscribe();
+        let parent = CancellationToken::new();
+
+        let _ = run_once(&OkTask, &parent, None, 3, TaskId::next(), &bus).await;
+
+        let mut stopped_attempt = None;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev.kind, EventKind::TaskStopped) {
+                stopped_attempt = ev.attempt;
+            }
+        }
+        assert_eq!(
+            stopped_attempt,
+            Some(3),
+            "TaskStopped must carry the attempt number"
+        );
     }
 
     #[tokio::test]

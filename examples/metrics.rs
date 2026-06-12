@@ -113,13 +113,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             if n <= 3 {
-                println!("[flaky-job] attempt #{n} — fail");
+                println!("[flaky-job] attempt #{n}: fail");
                 Err(TaskError::Fail {
                     reason: format!("attempt #{n}"),
                     exit_code: None,
                 })
             } else {
-                println!("[flaky-job] attempt #{n} — success!");
+                println!("[flaky-job] attempt #{n}: success!");
                 Ok(())
             }
         }

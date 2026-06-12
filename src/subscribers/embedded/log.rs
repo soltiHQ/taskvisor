@@ -93,6 +93,9 @@ impl LogWriter {
             EventKind::TaskStopped => {
                 println!("{} [stopped] task={}", seq, or(e.task.as_deref(), "none"));
             }
+            EventKind::TaskCanceled => {
+                println!("{} [canceled] task={}", seq, or(e.task.as_deref(), "none"));
+            }
             EventKind::TaskFailed => {
                 println!(
                     "{} [failed] task={} reason=\"{}\" attempt={}",

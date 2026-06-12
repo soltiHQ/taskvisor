@@ -215,27 +215,28 @@ impl SupervisorHandle {
         self.inner.shutdown().await
     }
 
-    /// Submits a task to the controller (if enabled).
+    /// Submits a task to the controller (if enabled), returning its pre-minted [`TaskId`].
     ///
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
     pub async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
-    ) -> Result<(), crate::controller::ControllerError> {
+    ) -> Result<TaskId, crate::controller::ControllerError> {
         self.inner.submit(spec).await
     }
 
-    /// Tries to submit a task without blocking.
+    /// Tries to submit a task without blocking, returning its pre-minted [`TaskId`].
     ///
     /// Returns `ControllerError::Full` if the queue is full.
+    /// See [`submit`](Self::submit) for the enqueued-vs-admitted semantics.
     ///
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
     pub fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,
-    ) -> Result<(), crate::controller::ControllerError> {
+    ) -> Result<TaskId, crate::controller::ControllerError> {
         self.inner.try_submit(spec)
     }
 }

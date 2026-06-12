@@ -46,27 +46,42 @@ use super::{
     spec::ControllerSpec,
 };
 
+struct Submission {
+    id: TaskId,
+    spec: ControllerSpec,
+}
+
 /// Handle for submitting tasks to the controller.
 #[derive(Clone)]
 pub(crate) struct ControllerHandle {
-    tx: mpsc::Sender<ControllerSpec>,
+    tx: mpsc::Sender<Submission>,
 }
 
 impl ControllerHandle {
     /// Submit a task (async, waits if queue is full).
-    pub async fn submit(&self, spec: ControllerSpec) -> Result<(), ControllerError> {
+    ///
+    /// Returns the pre-minted [`TaskId`].
+    pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
+        let id = TaskId::next();
         self.tx
-            .send(spec)
+            .send(Submission { id, spec })
             .await
-            .map_err(|_| ControllerError::Closed)
+            .map_err(|_| ControllerError::Closed)?;
+        Ok(id)
     }
 
     /// Try to submit without blocking (fails if queue full).
-    pub fn try_submit(&self, spec: ControllerSpec) -> Result<(), ControllerError> {
-        self.tx.try_send(spec).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => ControllerError::Full,
-            mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
-        })
+    ///
+    /// Returns the pre-minted [`TaskId`].
+    pub fn try_submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
+        let id = TaskId::next();
+        self.tx
+            .try_send(Submission { id, spec })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => ControllerError::Full,
+                mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
+            })?;
+        Ok(id)
     }
 }
 
@@ -90,8 +105,8 @@ pub(crate) struct Controller {
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
     running: DashMap<TaskId, Arc<str>>,
 
-    tx: mpsc::Sender<ControllerSpec>,
-    rx: RwLock<Option<mpsc::Receiver<ControllerSpec>>>,
+    tx: mpsc::Sender<Submission>,
+    rx: RwLock<Option<mpsc::Receiver<Submission>>>,
 
     shutting_down: std::sync::atomic::AtomicBool,
 }
@@ -154,8 +169,8 @@ impl Controller {
             tokio::select! {
                 _ = token.cancelled() => break,
 
-                Some(spec) = rx.recv() => {
-                    self.handle_submission(spec).await;
+                Some(sub) = rx.recv() => {
+                    self.handle_submission(sub).await;
                 }
                 result = bus_rx.recv() => {
                     match result {
@@ -271,14 +286,16 @@ impl Controller {
     /// if `Admitting` it is removed once it appears (in [`on_task_added`](Self::on_task_added)).
     ///
     /// **DropIfRunning**: reject while the slot is busy (`Admitting`/`Running`/`Terminating`).
-    async fn handle_submission(&self, spec: ControllerSpec) {
+    async fn handle_submission(&self, sub: Submission) {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
+        let Submission { id, spec } = sub;
         if self.is_shutting_down() {
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(spec.slot_name().to_owned())
+                    .with_id(id)
                     .with_reason("controller_shutting_down"),
             );
             return;
@@ -293,11 +310,12 @@ impl Controller {
 
         match (&slot.status, admission) {
             (SlotStatus::Idle, _) => {
-                match self.start_in_slot(&sup, &mut slot, &slot_name, task_spec) {
-                    Ok(_id) => {
+                match self.start_in_slot(&sup, &mut slot, &slot_name, id, task_spec) {
+                    Ok(()) => {
                         self.bus.publish(
                             Event::new(EventKind::ControllerSubmitted)
                                 .with_task(Arc::clone(&slot_name))
+                                .with_id(id)
                                 .with_reason(format!("admission={admission:?} status=admitting")),
                         );
                     }
@@ -305,6 +323,7 @@ impl Controller {
                         self.bus.publish(
                             Event::new(EventKind::ControllerRejected)
                                 .with_task(Arc::clone(&slot_name))
+                                .with_id(id)
                                 .with_reason(format!("add_failed: {e}")),
                         );
                         drop(slot);
@@ -319,11 +338,12 @@ impl Controller {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(&slot_name))
+                            .with_id(id)
                             .with_reason(format!("remove_failed: {e}")),
                     );
                     return;
                 }
-                Self::replace_head_or_push(&mut slot, task_spec);
+                self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
                 slot.status = SlotStatus::Terminating {
                     cancelled_at: Instant::now(),
                 };
@@ -335,11 +355,12 @@ impl Controller {
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
                         .with_reason(format!("admission=Replace depth={}", slot.queue.len())),
                 );
             }
             (SlotStatus::Admitting { .. }, AdmissionPolicy::Replace) => {
-                Self::replace_head_or_push(&mut slot, task_spec);
+                self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
                 slot.status = SlotStatus::Terminating {
                     cancelled_at: Instant::now(),
                 };
@@ -351,6 +372,7 @@ impl Controller {
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
                         .with_reason(format!(
                             "admission=Replace status=admitting depth={}",
                             slot.queue.len()
@@ -358,10 +380,11 @@ impl Controller {
                 );
             }
             (SlotStatus::Terminating { .. }, AdmissionPolicy::Replace) => {
-                Self::replace_head_or_push(&mut slot, task_spec);
+                self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
                         .with_reason(format!(
                             "admission=Replace status=terminating depth={}",
                             slot.queue.len()
@@ -374,13 +397,14 @@ impl Controller {
                 | SlotStatus::Terminating { .. },
                 AdmissionPolicy::Queue,
             ) => {
-                if self.reject_if_full(&slot_name, slot.queue.len()) {
+                if self.reject_if_full(&slot_name, id, slot.queue.len()) {
                     return;
                 }
-                slot.queue.push_back(task_spec);
+                slot.queue.push_back((id, task_spec));
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
                         .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
                         .with_reason(format!("admission=Queue depth={}", slot.queue.len())),
                 );
             }
@@ -393,6 +417,7 @@ impl Controller {
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
                         .with_reason(format!("dropped: slot busy (status={:?})", slot.status)),
                 );
             }
@@ -405,11 +430,47 @@ impl Controller {
             EventKind::TaskAdded => self.on_task_added(&event).await,
             EventKind::TaskRemoved => self.on_task_finished(&event).await,
             EventKind::TaskAddFailed => self.on_task_add_failed(&event).await,
+            EventKind::TaskRemoveRequested => self.on_remove_requested(&event).await,
             EventKind::ShutdownRequested => {
                 self.shutting_down
                     .store(true, std::sync::atomic::Ordering::Release);
             }
             _ => {}
+        }
+    }
+
+    /// `TaskRemoveRequested`: if the id belongs to a queued, not-yet-admitted submission, remove it from its slot queue
+    /// and acknowledge with `ControllerRejected("removed_from_queue")`.
+    async fn on_remove_requested(&self, event: &Event) {
+        let Some(id) = event.id else {
+            return;
+        };
+        let slot_keys: Vec<Arc<str>> = self
+            .slots
+            .iter()
+            .map(|entry| Arc::clone(entry.key()))
+            .collect();
+
+        for slot_name in slot_keys {
+            let Some(slot_arc) = self.slots.get(&*slot_name).map(|e| e.clone()) else {
+                continue;
+            };
+            let mut slot = slot_arc.lock().await;
+            let Some(pos) = slot.queue.iter().position(|(qid, _)| *qid == id) else {
+                continue;
+            };
+            slot.queue.remove(pos);
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(Arc::clone(&slot_name))
+                    .with_id(id)
+                    .with_reason("removed_from_queue"),
+            );
+            if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
+                drop(slot);
+                self.slots.remove(&*slot_name);
+            }
+            return;
         }
     }
 
@@ -505,22 +566,24 @@ impl Controller {
         }
     }
 
-    /// Admits `task_spec` into the slot: mints the identity via `add_task`, marks the slot `Admitting`, and records the reverse index.
+    /// Admits `task_spec` into the slot under its **pre-minted** identity,
+    /// marks the slot `Admitting`, and records the reverse index.
     /// The slot becomes `Running` on `TaskAdded`.
     fn start_in_slot(
         &self,
         sup: &Arc<Supervisor>,
         slot: &mut SlotState,
         slot_name: &Arc<str>,
+        id: TaskId,
         task_spec: TaskSpec,
-    ) -> Result<TaskId, RuntimeError> {
-        let id = sup.add_task(task_spec)?;
+    ) -> Result<(), RuntimeError> {
+        sup.add_task_with_id(id, task_spec)?;
         slot.status = SlotStatus::Admitting {
             since: Instant::now(),
         };
         slot.running_id = Some(id);
         self.running.insert(id, Arc::clone(slot_name));
-        Ok(id)
+        Ok(())
     }
 
     /// Pops and admits queued tasks until one is accepted or the queue drains.
@@ -531,12 +594,13 @@ impl Controller {
         slot: &mut SlotState,
         slot_name: &Arc<str>,
     ) {
-        while let Some(next_spec) = slot.queue.pop_front() {
-            match self.start_in_slot(sup, slot, slot_name, next_spec) {
-                Ok(_id) => {
+        while let Some((next_id, next_spec)) = slot.queue.pop_front() {
+            match self.start_in_slot(sup, slot, slot_name, next_id, next_spec) {
+                Ok(()) => {
                     self.bus.publish(
                         Event::new(EventKind::ControllerSubmitted)
                             .with_task(Arc::clone(slot_name))
+                            .with_id(next_id)
                             .with_reason(format!("started_from_queue depth={}", slot.queue.len())),
                     );
                     return;
@@ -545,6 +609,7 @@ impl Controller {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(slot_name))
+                            .with_id(next_id)
                             .with_reason(format!("queue_start_failed: {e}")),
                     );
                 }
@@ -564,11 +629,12 @@ impl Controller {
     }
 
     #[inline]
-    fn reject_if_full(&self, slot_name: &str, slot_len: usize) -> bool {
+    fn reject_if_full(&self, slot_name: &str, id: TaskId, slot_len: usize) -> bool {
         if slot_len >= self.config.max_slot_queue {
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(slot_name)
+                    .with_id(id)
                     .with_reason(format!(
                         "queue_full: {}/{}",
                         slot_len, self.config.max_slot_queue
@@ -580,12 +646,27 @@ impl Controller {
         }
     }
 
-    #[inline]
-    fn replace_head_or_push(slot: &mut SlotState, task_spec: crate::TaskSpec) {
+    /// Replaces the queue head with the new submission (latest-wins) or pushes it.
+    ///
+    /// A displaced queued submission is rejected with `superseded_by_replace`,
+    /// carrying its id, so submitters can observe that it will never run.
+    fn replace_head_or_push(
+        &self,
+        slot: &mut SlotState,
+        slot_name: &Arc<str>,
+        id: TaskId,
+        task_spec: crate::TaskSpec,
+    ) {
         if let Some(head) = slot.queue.front_mut() {
-            *head = task_spec;
+            let (displaced_id, _) = std::mem::replace(head, (id, task_spec));
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(Arc::clone(slot_name))
+                    .with_id(displaced_id)
+                    .with_reason("superseded_by_replace"),
+            );
         } else {
-            slot.queue.push_front(task_spec);
+            slot.queue.push_front((id, task_spec));
         }
     }
 }
@@ -601,37 +682,62 @@ mod tests {
         TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
     }
 
-    #[test]
-    fn replace_head_or_push_into_empty_queue() {
-        let mut slot = SlotState::new();
-        Controller::replace_head_or_push(&mut slot, make_spec("first"));
-
-        assert_eq!(slot.queue.len(), 1);
-        assert_eq!(slot.queue.front().unwrap().name(), "first");
+    fn slot_arc_name() -> Arc<str> {
+        Arc::from("s")
     }
 
     #[test]
-    fn replace_head_or_push_replaces_existing_head() {
+    fn replace_head_or_push_into_empty_queue() {
+        let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
         let mut slot = SlotState::new();
-        slot.queue.push_back(make_spec("old-head"));
-        slot.queue.push_back(make_spec("tail"));
+        ctrl.replace_head_or_push(
+            &mut slot,
+            &slot_arc_name(),
+            TaskId::next(),
+            make_spec("first"),
+        );
 
-        Controller::replace_head_or_push(&mut slot, make_spec("new-head"));
+        assert_eq!(slot.queue.len(), 1);
+        assert_eq!(slot.queue.front().unwrap().1.name(), "first");
+    }
+
+    #[test]
+    fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
+        let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+        let mut rx = ctrl.bus.subscribe();
+        let mut slot = SlotState::new();
+        let displaced = TaskId::next();
+        slot.queue.push_back((displaced, make_spec("old-head")));
+        slot.queue.push_back((TaskId::next(), make_spec("tail")));
+
+        ctrl.replace_head_or_push(
+            &mut slot,
+            &slot_arc_name(),
+            TaskId::next(),
+            make_spec("new-head"),
+        );
 
         assert_eq!(slot.queue.len(), 2, "queue depth should not grow");
-        assert_eq!(slot.queue.front().unwrap().name(), "new-head");
-        assert_eq!(slot.queue.back().unwrap().name(), "tail");
+        assert_eq!(slot.queue.front().unwrap().1.name(), "new-head");
+        assert_eq!(slot.queue.back().unwrap().1.name(), "tail");
+
+        let ev = rx.try_recv().expect("displaced head must be rejected");
+        assert_eq!(ev.kind, EventKind::ControllerRejected);
+        assert_eq!(ev.id, Some(displaced));
+        assert_eq!(ev.reason.as_deref(), Some("superseded_by_replace"));
     }
 
     #[test]
     fn replace_head_multiple_times_keeps_depth_1() {
+        let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
         let mut slot = SlotState::new();
-        Controller::replace_head_or_push(&mut slot, make_spec("v1"));
-        Controller::replace_head_or_push(&mut slot, make_spec("v2"));
-        Controller::replace_head_or_push(&mut slot, make_spec("v3"));
+        let name = slot_arc_name();
+        ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v1"));
+        ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v2"));
+        ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v3"));
 
         assert_eq!(slot.queue.len(), 1);
-        assert_eq!(slot.queue.front().unwrap().name(), "v3");
+        assert_eq!(slot.queue.front().unwrap().1.name(), "v3");
     }
 
     #[test]
@@ -642,8 +748,8 @@ mod tests {
             max_slot_queue: 3,
         };
         let ctrl = make_controller(config, bus);
-        assert!(!ctrl.reject_if_full("slot", 0));
-        assert!(!ctrl.reject_if_full("slot", 2));
+        assert!(!ctrl.reject_if_full("slot", TaskId::next(), 0));
+        assert!(!ctrl.reject_if_full("slot", TaskId::next(), 2));
     }
 
     #[test]
@@ -654,8 +760,8 @@ mod tests {
             max_slot_queue: 3,
         };
         let ctrl = make_controller(config, bus);
-        assert!(ctrl.reject_if_full("slot", 3));
-        assert!(ctrl.reject_if_full("slot", 10));
+        assert!(ctrl.reject_if_full("slot", TaskId::next(), 3));
+        assert!(ctrl.reject_if_full("slot", TaskId::next(), 10));
     }
 
     #[test]
@@ -835,7 +941,7 @@ mod tests {
             Ok(())
         });
         let mut queue = std::collections::VecDeque::new();
-        queue.push_back(TaskSpec::restartable(queued));
+        queue.push_back((TaskId::next(), TaskSpec::restartable(queued)));
         ctrl.slots.insert(
             Arc::from("s"),
             Arc::new(Mutex::new(SlotState {

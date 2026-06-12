@@ -205,7 +205,7 @@ async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancellation_returning_canceled_error_still_task_stopped() {
+async fn cancellation_returning_canceled_error_yields_task_canceled() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
     let sup = Supervisor::builder(SupervisorConfig {
@@ -240,7 +240,14 @@ async fn cancellation_returning_canceled_error_still_task_stopped() {
         );
 
         let by_id = collector.by_id(id);
-        assert!(by_id.iter().any(|e| e.kind == EventKind::TaskStopped));
+        assert!(
+            by_id.iter().any(|e| e.kind == EventKind::TaskCanceled),
+            "graceful cancellation must surface as TaskCanceled"
+        );
+        assert!(
+            by_id.iter().all(|e| e.kind != EventKind::TaskStopped),
+            "TaskStopped is reserved for successful attempts"
+        );
         assert!(by_id.iter().all(|e| e.kind != EventKind::TaskFailed));
         assert!(by_id.iter().all(|e| e.kind != EventKind::ActorExhausted));
         assert!(by_id.iter().all(|e| e.kind != EventKind::ActorDead));

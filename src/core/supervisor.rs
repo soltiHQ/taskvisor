@@ -238,11 +238,16 @@ impl Supervisor {
     }
 
     /// Adds a new task to the supervisor at runtime, returning its minted [`TaskId`].
-    ///
-    /// Mints the runtime identity, publishes `TaskAddRequested` on bus (observability, fire-and-forget),
-    /// then sends the `Add` command via mpsc (guaranteed delivery).
     pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        let id = TaskId::next();
+        self.add_task_with_id(TaskId::next(), spec)
+    }
+
+    /// Adds a task under a **pre-minted** identity.
+    pub(crate) fn add_task_with_id(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+    ) -> Result<TaskId, RuntimeError> {
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
                 .with_task(spec.task().name())
@@ -408,24 +413,24 @@ impl Supervisor {
         self.wait_task_removed(&mut rx, id, wait_for).await
     }
 
-    /// Submits a task to the controller (if enabled).
+    /// Submits a task to the controller (if enabled), returning the pre-minted [`TaskId`].
     #[cfg(feature = "controller")]
     pub(crate) async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
-    ) -> Result<(), crate::controller::ControllerError> {
+    ) -> Result<TaskId, crate::controller::ControllerError> {
         match self.controller.get() {
             Some(ctrl) => ctrl.handle().submit(spec).await,
             None => Err(crate::controller::ControllerError::NotConfigured),
         }
     }
 
-    /// Tries to submit a task without blocking.
+    /// Tries to submit a task without blocking, returning the pre-minted [`TaskId`].
     #[cfg(feature = "controller")]
     pub(crate) fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,
-    ) -> Result<(), crate::controller::ControllerError> {
+    ) -> Result<TaskId, crate::controller::ControllerError> {
         match self.controller.get() {
             Some(ctrl) => ctrl.handle().try_submit(spec),
             None => Err(crate::controller::ControllerError::NotConfigured),

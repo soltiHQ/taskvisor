@@ -336,7 +336,8 @@ Every lifecycle change publishes an `Event` to the bus. Subscribe to observe the
 |--------------------------------------------|------------------------------------------------------|
 | **Lifecycle**                              |                                                      |
 | `TaskStarting`                             | Attempt is beginning                                 |
-| `TaskStopped`                              | Completed or cancelled gracefully                    |
+| `TaskStopped`                              | Attempt completed successfully                       |
+| `TaskCanceled`                             | Attempt exited via graceful cancellation             |
 | `TaskFailed`                               | Attempt failed (retryable or fatal)                  |
 | `TimeoutHit`                               | Attempt exceeded its timeout                         |
 | `BackoffScheduled`                         | Retry delay scheduled (includes delay duration)      |
@@ -407,7 +408,9 @@ let sup = Supervisor::builder(cfg)
 
 let handle = sup.serve();
 
-handle.submit(ControllerSpec::queue(spec)).await?;
+// submit() returns a pre-allocated TaskId immediately; 
+// the final admission result is reported asynchronously via ControllerSubmitted or ControllerRejected, both carrying the same TaskId.
+let id = handle.submit(ControllerSpec::queue(spec)).await?;
 handle.submit(ControllerSpec::replace(spec)).await?;
 handle.submit(ControllerSpec::drop_if_running(spec)).await?;
 
