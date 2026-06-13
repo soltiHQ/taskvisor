@@ -44,13 +44,11 @@ pub type TaskRef = Arc<dyn Task>;
 pub trait Task: Send + Sync + 'static {
     /// Task name used in logs, metrics, and shutdown diagnostics.
     ///
-    /// Names must be unique among **currently registered** tasks (a duplicate add is rejected),
-    /// but may be reused after the previous holder is removed.
+    /// Names must be unique among **currently registered** tasks (a duplicate add is rejected), but may be reused after the previous holder is removed.
     fn name(&self) -> &str;
 
     /// Creates a new future that runs the task until completion or cancellation.
     ///
-    /// Called once per attempt. Takes `&self` - each call must return an
-    /// independent future with no side effects from previous runs.
+    /// Called once per attempt. Takes `&self` - each call must return an independent future with no side effects from previous runs.
     fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture;
 }

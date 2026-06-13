@@ -34,6 +34,12 @@ impl TaskId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// `TaskId` from its raw value.
+    #[inline]
+    pub fn from_raw(raw: u64) -> Self {
+        TaskId(raw)
+    }
 }
 
 impl std::fmt::Display for TaskId {
@@ -57,5 +63,12 @@ mod tests {
     #[test]
     fn never_mints_zero() {
         assert!(TaskId::next().get() >= 1);
+    }
+
+    #[test]
+    fn from_raw_round_trips() {
+        let id = TaskId::from_raw(42);
+        assert_eq!(id.get(), 42);
+        assert_eq!(id, TaskId::from_raw(42));
     }
 }

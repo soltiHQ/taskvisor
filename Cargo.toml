@@ -1,6 +1,6 @@
 [package]
 name         = "taskvisor"
-version      = "0.2.1"
+version      = "0.3.0"
 edition      = "2024"
 rust-version = "1.90.0"
 
@@ -41,6 +41,10 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 
 [[example]]
 name              = "pipeline"
+required-features = ["controller"]
+
+[[example]]
+name              = "admission"
 required-features = ["controller"]
 
 [[bench]]

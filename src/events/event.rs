@@ -90,13 +90,23 @@ pub enum EventKind {
     /// - `seq`: global sequence
     TaskStarting,
 
-    /// Task has stopped (finished successfully **or** was cancelled gracefully).
+    /// Task attempt finished successfully.
     ///
     /// Sets:
     /// - `task`: task name
+    /// - `attempt`: attempt number
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     TaskStopped,
+
+    /// Task attempt exited via graceful cancellation (`TaskError::Canceled` returned while its token was cancelled).
+    ///
+    /// Sets:
+    /// - `task`: task name
+    /// - `attempt`: attempt number
+    /// - `at`: wall-clock timestamp
+    /// - `seq`: global sequence
+    TaskCanceled,
 
     /// Task failed with a (non-fatal) error for this attempt.
     ///
@@ -210,11 +220,12 @@ pub enum EventKind {
     ActorDead,
 
     #[cfg(feature = "controller")]
-    /// Controller submission rejected (queue full, add failed, etc).
+    /// Controller submission rejected (queue full, add failed, superseded, etc).
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: rejection reason ("queue_full", "add_failed: ...", etc)
+    /// - `id`: the rejected submission's [`TaskId`]
+    /// - `reason`: rejection reason ("queue_full", "add_failed: ...", "superseded_by_replace", "controller_shutting_down", etc)
     ControllerRejected,
 
     #[cfg(feature = "controller")]
@@ -222,6 +233,7 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `task`: slot name
+    /// - `id`: the submission's [`TaskId`]
     /// - `reason`: "admission={admission} status={status} depth={N}"
     ControllerSubmitted,
 

@@ -20,7 +20,7 @@
 //! - **Entry removed** on `TaskRemoved` (not just set to false; the entry is fully cleaned up).
 //! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
 //! - Events with `seq <= last_seq` for the same identity are **rejected** (stale).
-//! - **Alive = false** on `TaskStopped`, `TaskFailed`, `ActorExhausted`, `ActorDead`.
+//! - **Alive = false** on `TaskStopped`, `TaskCanceled`, `TaskFailed`, `ActorExhausted`, `ActorDead`.
 //! - **Alive = true** on `TaskStarting`.
 
 use std::{collections::HashMap, sync::Arc};
@@ -89,6 +89,19 @@ impl AliveTracker {
     /// update(TaskStarting, seq=99)  → ignored (stale)
     /// ```
     pub async fn update(&self, ev: &Event) -> bool {
+        let relevant = matches!(
+            ev.kind,
+            EventKind::TaskStarting
+                | EventKind::TaskStopped
+                | EventKind::TaskCanceled
+                | EventKind::TaskFailed
+                | EventKind::ActorExhausted
+                | EventKind::ActorDead
+                | EventKind::TaskRemoved
+        );
+        if !relevant {
+            return false;
+        }
         let key = match (ev.id, ev.task.as_deref()) {
             (Some(id), _) => AliveKey::Id(id),
             (None, Some(name)) => AliveKey::Name(Arc::from(name)),
@@ -120,6 +133,7 @@ impl AliveTracker {
         let next_alive = match ev.kind {
             EventKind::TaskStarting => true,
             EventKind::TaskStopped
+            | EventKind::TaskCanceled
             | EventKind::TaskFailed
             | EventKind::ActorExhausted
             | EventKind::ActorDead => false,
@@ -172,6 +186,28 @@ mod tests {
         let mut e = Event::new(kind).with_task(task).with_id(id);
         e.seq = seq;
         e
+    }
+
+    #[tokio::test]
+    async fn non_lifecycle_events_do_not_pollute_entries() {
+        let tracker = AliveTracker::new();
+        let id = crate::identity::TaskId::next();
+
+        tracker
+            .update(&evi(EventKind::BackoffScheduled, "slot-name", 1, id))
+            .await;
+        tracker
+            .update(&evi(EventKind::TaskStarting, "real-name", 2, id))
+            .await;
+
+        assert!(
+            tracker.is_alive("real-name").await,
+            "lifecycle event must bind the id to the lifecycle task name"
+        );
+        assert!(
+            !tracker.is_alive("slot-name").await,
+            "non-lifecycle event must not have created an entry"
+        );
     }
 
     #[tokio::test]

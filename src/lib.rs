@@ -2,9 +2,8 @@
 //!
 //! **Taskvisor** is a lightweight task orchestration library for Rust.
 //!
-//! It provides primitives to define, supervise, and restart async tasks
-//! with configurable policies. The crate is designed as a building block
-//! for higher-level orchestrators and agents.
+//! It provides primitives to define, supervise, and restart async tasks with configurable policies.
+//! The crate is designed as a building block for higher-level orchestrators and agents.
 //!
 //! ## Architecture
 //! ### Overview
@@ -96,6 +95,7 @@
 //! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscribe`]                          |
 //! | **Policies**      | Configure restart/backoff strategies for tasks.                        | [`RestartPolicy`], [`BackoffPolicy`]   |
 //! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`], [`SupervisorHandle`]   |
+//! | **Completion**    | Opt in (via `*_and_watch`) to await a task's final result.             | [`TaskWaiter`], [`TaskOutcome`]        |
 //! | **Errors**        | Typed errors for orchestration and task execution.                     | [`TaskError`], [`RuntimeError`]        |
 //! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.           | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
 //! | **Configuration** | Centralize runtime settings.                                           | [`SupervisorConfig`]                   |
@@ -142,7 +142,9 @@ mod identity;
 pub use identity::TaskId;
 
 mod core;
-pub use core::{Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle};
+pub use core::{
+    Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskOutcome, TaskWaiter,
+};
 
 mod tasks;
 pub use tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};

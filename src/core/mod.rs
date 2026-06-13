@@ -27,7 +27,7 @@
 //! - **Supervisor** → `ShutdownRequested`, `TaskAddRequested`, `TaskRemoveRequested`
 //! - **Registry**   → `TaskAdded{name}`, `TaskRemoved{name}`
 //! - **TaskActor**  → `TaskStarting{attempt}`, `BackoffScheduled{delay}`, `ActorExhausted`, `ActorDead`
-//! - **Runner**     → `TaskStopped` (success/cancel), `TaskFailed` (fail/fatal/timeout), `TimeoutHit`
+//! - **Runner**     → `TaskStopped` (success), `TaskCanceled` (graceful cancel), `TaskFailed` (fail/fatal/timeout), `TimeoutHit`
 //! - **SubscriberSet (workers)** → `SubscriberOverflow`, `SubscriberPanicked`
 //!
 //! Consumers (subscribe to Bus):
@@ -57,7 +57,7 @@
 //!   Supervisor ─────────► │ ShutdownRequested                                                  │
 //!   Registry   ─────────► │ TaskAdded / TaskRemoved                                            │
 //!   TaskActor  ─────────► │ TaskStarting / BackoffScheduled / ActorExhausted / ActorDead       │
-//!   Runner     ─────────► │ TaskStopped / TaskFailed / TimeoutHit                              │
+//!   Runner     ─────────► │ TaskStopped / TaskCanceled / TaskFailed / TimeoutHit               │
 //!   SubscriberSet ──────► │ SubscriberOverflow / SubscriberPanicked                            │
 //!                         └──┬──────────────────────────────────────────┬──────────────────────┘
 //!              Supervisor::subscriber_listener()         Registry::spawn_listener()
@@ -82,7 +82,7 @@
 //! runner::run_once()
 //!   - derive child token
 //!   - if timeout set → time::timeout(fut); on elapsed: cancel child, publish TimeoutHit, Timeout
-//!   - on Ok or Err(Canceled) → publish TaskStopped
+//!   - on Ok → publish TaskStopped; on Err(Canceled) → publish TaskCanceled
 //!   - on Err(Fail/Fatal/Timeout) → publish TaskFailed
 //! ```
 //!
@@ -118,11 +118,17 @@ pub use config::SupervisorConfig;
 mod handle;
 pub use handle::SupervisorHandle;
 
+mod outcome;
+pub use outcome::{TaskOutcome, TaskWaiter};
+
 mod supervisor;
 pub use supervisor::Supervisor;
 
 mod actor;
 mod alive;
-mod registry;
 mod runner;
 mod shutdown;
+
+mod registry;
+#[cfg(feature = "controller")]
+pub(crate) use registry::OutcomeTx;
