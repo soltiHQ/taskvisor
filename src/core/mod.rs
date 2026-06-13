@@ -118,11 +118,17 @@ pub use config::SupervisorConfig;
 mod handle;
 pub use handle::SupervisorHandle;
 
+mod outcome;
+pub use outcome::{TaskOutcome, TaskWaiter};
+
 mod supervisor;
 pub use supervisor::Supervisor;
 
 mod actor;
 mod alive;
-mod registry;
 mod runner;
 mod shutdown;
+
+mod registry;
+#[cfg(feature = "controller")]
+pub(crate) use registry::OutcomeTx;

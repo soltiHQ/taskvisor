@@ -16,8 +16,7 @@
 //!
 //! ## Rules
 //!
-//! - Queue overflow drops the event **for this subscriber only** and publishes`EventKind::SubscriberOverflow`;
-//!   other subscribers are unaffected.
+//! - Queue overflow drops the event **for this subscriber only** and publishes`EventKind::SubscriberOverflow`; other subscribers are unaffected.
 //! - Events are processed sequentially (FIFO) per subscriber.
 //! - Subscribers do not block publishers or each other.
 //! - A slow subscriber only affects its own queue.

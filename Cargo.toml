@@ -43,6 +43,10 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 name              = "pipeline"
 required-features = ["controller"]
 
+[[example]]
+name              = "admission"
+required-features = ["controller"]
+
 [[bench]]
 name    = "lifecycle"
 harness = false

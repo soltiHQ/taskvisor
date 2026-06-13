@@ -34,20 +34,25 @@ Supervisor
 
 ## Why taskvisor?
 
-Tokio gives you `spawn` and `JoinHandle`, but no supervision: no restart policies, no backoff, and no events to tell you what happened.
-If a spawned task panics or fails, you only find out when you poll its `JoinHandle` - or never.
+taskvisor gives you a **supervised** handle instead: it restarts the task on failure with backoff, narrates every step through events, and hands you the task's final outcome.
 
-Taskvisor fills that gap:
+|     | Feature                   | What you get                                                                |
+|:---:|---------------------------|-----------------------------------------------------------------------------|
+| 🔁  | **Restart policies**      | `Never`, `OnFailure`, or `Always { interval }`: chosen per task             |
+|  ⏳  | **Backoff with jitter**   | Exponential, constant, or decorrelated; spreads retries out in time         |
+| 📡  | **Structured events**     | Every start, stop, failure, timeout, and backoff on a broadcast bus         |
+| 🔌  | **Pluggable subscribers** | Implement one method (`on_event`) for metrics, alerts, or logging           |
+| 🎯  | **Guaranteed outcomes**   | `await` a task's final `TaskOutcome`, even if events are dropped under load |
+| 🎛️ | **Dynamic management**    | Add, remove, cancel tasks at runtime via `SupervisorHandle`                 |
+| 🚦  | **Admission control**     | Optional slot controller: Queue / Replace / DropIfRunning                   |
+| 🚧  | **Concurrency limits**    | Global semaphore, per-task timeouts, max retries                            |
 
-|     | Feature                   | What you get                                                        |
-|:---:|---------------------------|---------------------------------------------------------------------|
-| 🔁  | **Restart policies**      | `Never`, `OnFailure`, or `Always { interval }`: chosen per task     |
-|  ⏳  | **Backoff with jitter**   | Exponential, constant, or decorrelated; spreads retries out in time |
-| 📡  | **Structured events**     | Every start, stop, failure, timeout, and backoff on a broadcast bus |
-| 🔌  | **Pluggable subscribers** | Implement one method (`on_event`) for metrics, alerts, or logging   |
-| 🎛️ | **Dynamic management**    | Add, remove, cancel tasks at runtime via `SupervisorHandle`         |
-| 🚦  | **Admission control**     | Optional slot controller: Queue / Replace / DropIfRunning           |
-| 🚧  | **Concurrency limits**    | Global semaphore, per-task timeouts, max retries                    |
+**What's distinctive:** most supervision crates stop at restart + backoff:
+
+- **Observability as a first-class plane** - a typed lifecycle event bus with pluggable subscribers, not a status field you poll.
+- **Guaranteed outcomes** - `add_and_watch` / `submit_and_watch` hand you a `TaskOutcome` for every task, on a channel that survives bus lag.
+- **Admission control** - slot policies (Queue / Replace / DropIfRunning) for "only one deploy at a time" or "debounce this", built in.
+- **Plain async fns, no `Clone` bound** - task state lives behind `&self` and survives restarts; you don't rebuild it on every retry.
 
 Taskvisor is not a replacement for tokio or tower. 
 It works at a higher level: you write the task, and taskvisor runs it, restarts it on failure with backoff, and tells you what happened through events.
@@ -55,9 +60,21 @@ It works at a higher level: you write the task, and taskvisor runs it, restarts 
 It is also not an actor framework: there are no addressable actors, mailboxes, or message passing.
 Taskvisor supervises **tasks** (plain async functions), not actors.
 
+## When to use taskvisor
+
+Reach for it when you have **resident background tasks** that must stay up for the life of the process - queue consumers, pollers, sync loops, connection keepers, periodic jobs - and you want them restarted on failure, observable through events, and manageable (add / remove / await) at runtime.
+
+**Not the right tool if:**
+
+| You want…                                  | Use instead                                                                                     |
+|--------------------------------------------|-------------------------------------------------------------------------------------------------|
+| To retry a single future                   | [backon](https://crates.io/crates/backon) / [tokio-retry](https://crates.io/crates/tokio-retry) |
+| Durable, distributed jobs with storage     | [apalis](https://crates.io/crates/apalis)                                                       |
+| The actor model (addresses, mailboxes)     | [ractor](https://crates.io/crates/ractor) / [kameo](https://crates.io/crates/kameo)             |
+| Structured subsystem shutdown, no restarts | [tokio-graceful-shutdown](https://crates.io/crates/tokio-graceful-shutdown)                     |
+
 > **Roadmap:** 
-> taskvisor is the supervision core of *Solti*, a larger task-orchestration toolkit in
-> development on top of it (subprocess execution, HTTP/gRPC API, metrics, dashboards). 
+> taskvisor is the supervision core of *Solti*, a larger task-orchestration toolkit in development on top of it (subprocess execution, HTTP/gRPC API, metrics, dashboards). 
 > 
 > Taskvisor stands on its own today: the rest is future work.
 
@@ -65,7 +82,7 @@ Taskvisor supervises **tasks** (plain async functions), not actors.
 
 ```toml
 [dependencies]
-taskvisor = "0.2"
+taskvisor = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -328,6 +345,22 @@ let spec = TaskSpec::restartable(task)
     .with_restart(RestartPolicy::Always { interval: Some(Duration::from_secs(30)) });
 ```
 
+### Await a task's final result
+
+```rust,ignore
+// add_and_watch returns a TaskWaiter resolving to the final TaskOutcome.
+// Delivery is guaranteed (oneshot, not subject to event-bus lag).
+let (id, waiter) = handle
+    .add_and_watch(TaskSpec::once(job), Duration::from_secs(1))
+    .await?;
+
+match waiter.wait().await? {
+    TaskOutcome::Completed => println!("{id} done"),
+    TaskOutcome::Failed { reason, .. } => eprintln!("{id} failed: {reason}"),
+    other => eprintln!("{id} ended with {other:?}"),
+}
+```
+
 ## Events
 
 Every lifecycle change publishes an `Event` to the bus. Subscribe to observe them.
@@ -414,6 +447,11 @@ let id = handle.submit(ControllerSpec::queue(spec)).await?;
 handle.submit(ControllerSpec::replace(spec)).await?;
 handle.submit(ControllerSpec::drop_if_running(spec)).await?;
 
+// ...or await the outcome directly. If the slot never admits it (busy, queue full,
+// superseded, removed, shutting down) the waiter resolves to TaskOutcome::Rejected.
+let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
+let outcome = waiter.wait().await?;
+
 handle.shutdown().await?;
 ```
 
@@ -440,18 +478,22 @@ cargo run --example periodic
 cargo run --example multiple
 cargo run --example metrics
 cargo run --example dynamic
+cargo run --example outcomes
 cargo run --example pipeline --features controller
+cargo run --example admission --features controller
 ```
 
-| Example                                   | What it shows                                                |
-|-------------------------------------------|--------------------------------------------------------------|
-| [basic.rs](examples/basic.rs)             | Minimal hello-world, one task runs once                      |
-| [worker.rs](examples/worker.rs)           | Long-running worker with graceful Ctrl+C shutdown            |
-| [periodic.rs](examples/periodic.rs)       | Cron-like periodic task via `RestartPolicy::Always`          |
-| [multiple.rs](examples/multiple.rs)       | Three tasks with different policies and backoff              |
-| [metrics.rs](examples/metrics.rs)         | Custom `Subscribe` implementation for metrics                |
-| [dynamic.rs](examples/dynamic.rs)         | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime |
-| [pipeline.rs](examples/pipeline.rs)       | Controller admission policies: Queue, Replace, DropIfRunning |
+| Example                                   | What it shows                                                  |
+|-------------------------------------------|----------------------------------------------------------------|
+| [basic.rs](examples/basic.rs)             | Minimal hello-world, one task runs once                        |
+| [worker.rs](examples/worker.rs)           | Long-running worker with graceful Ctrl+C shutdown              |
+| [periodic.rs](examples/periodic.rs)       | Cron-like periodic task via `RestartPolicy::Always`            |
+| [multiple.rs](examples/multiple.rs)       | Three tasks with different policies and backoff                |
+| [metrics.rs](examples/metrics.rs)         | Custom `Subscribe` implementation for metrics                  |
+| [dynamic.rs](examples/dynamic.rs)         | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime   |
+| [outcomes.rs](examples/outcomes.rs)       | `add_and_watch`: await a task's final `TaskOutcome`            |
+| [pipeline.rs](examples/pipeline.rs)       | Controller admission policies: Queue, Replace, DropIfRunning   |
+| [admission.rs](examples/admission.rs)     | `submit_and_watch`: await admission outcome (incl. `Rejected`) |
 
 ## Optional features
 
@@ -461,7 +503,7 @@ cargo run --example pipeline --features controller
 | `logging`    | Built-in `LogWriter` subscriber - event output to stdout (demo/reference)             |
 
 ```toml
-taskvisor = { version = "0.2", features = ["controller", "logging"] }
+taskvisor = { version = "0.3", features = ["controller", "logging"] }
 ```
 
 ## Contributing

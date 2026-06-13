@@ -1,6 +1,7 @@
 //! # Backoff policy for retrying tasks.
 //!
 //! [`BackoffPolicy`] controls how retry delays grow after repeated failures.
+//! 
 //! It is parameterized by:
 //! - [`BackoffPolicy::factor`] the multiplicative growth factor.
 //! - [`BackoffPolicy::first`] the initial delay.

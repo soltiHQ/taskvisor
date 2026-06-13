@@ -50,6 +50,20 @@ pub(super) enum SlotStatus {
     },
 }
 
+impl SlotStatus {
+    /// Short, stable, human-readable name (for event/outcome reason strings).
+    ///
+    /// Unlike the derived `Debug`, this never leaks the internal `Instant` timestamps.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SlotStatus::Idle => "idle",
+            SlotStatus::Admitting { .. } => "admitting",
+            SlotStatus::Running { .. } => "running",
+            SlotStatus::Terminating { .. } => "terminating",
+        }
+    }
+}
+
 impl SlotState {
     /// Creates a new idle slot.
     pub fn new() -> Self {

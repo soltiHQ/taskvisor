@@ -26,22 +26,23 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
+use crate::core::outcome::TaskOutcome;
 use crate::events::{Bus, Event, EventKind};
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
 
+/// One-shot sender resolving a [`TaskWaiter`](crate::TaskWaiter) with the final outcome.
+pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
+
 /// Command sent via guaranteed-delivery channel (mpsc).
-///
-/// Separated from the broadcast bus to ensure control commands are never lost to `Lagged`.
-/// The Supervisor publishes observability events on the bus before sending the command.
 pub(crate) enum RegistryCommand {
-    /// Add a new task with its runtime identity.
-    Add(TaskId, TaskSpec),
+    /// Add a new task with its runtime identity and an optional outcome watcher.
+    Add(TaskId, TaskSpec, Option<OutcomeTx>),
     /// Remove a task by its runtime identity. Supervisor publishes `TaskRemoveRequested` first.
     Remove(TaskId),
 }
@@ -50,6 +51,7 @@ struct Handle {
     join: JoinHandle<ActorExitReason>,
     cancel: CancellationToken,
     label: Arc<str>,
+    done: Option<OutcomeTx>,
 }
 
 /// Registry maps held under a single lock so identity and label stay consistent.
@@ -180,8 +182,8 @@ impl Registry {
                     _ = rt.cancelled() => break,
 
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(RegistryCommand::Add(id, spec)) => {
-                            me.spawn_and_register(id, spec).await;
+                        Some(RegistryCommand::Add(id, spec, done)) => {
+                            me.spawn_and_register(id, spec, done).await;
                         }
                         Some(RegistryCommand::Remove(id)) => {
                             me.remove_task(id).await;
@@ -280,12 +282,15 @@ impl Registry {
             match tokio::time::timeout_at(deadline, &mut join).await {
                 Ok(res) => {
                     Self::pending_dec(&self.pending_joins, id);
-                    Self::report_join(&self.bus, id, &label, res);
+                    Self::report_join(&self.bus, id, &label, res, h.done);
                 }
                 Err(_elapsed) => {
                     join.abort();
                     let _ = join.await;
                     Self::pending_dec(&self.pending_joins, id);
+                    if let Some(done) = h.done {
+                        let _ = done.send(TaskOutcome::ForceAborted);
+                    }
                     self.bus.publish(
                         Event::new(EventKind::TaskRemoved)
                             .with_task(Arc::clone(&label))
@@ -300,12 +305,16 @@ impl Registry {
     }
 
     /// Spawns an actor and registers its handle under the given runtime identity.
-    async fn spawn_and_register(&self, id: TaskId, spec: TaskSpec) {
+    ///
+    /// On a duplicate label the optional `done` sender is dropped, which resolves a pending [`TaskWaiter`](crate::TaskWaiter) with `RuntimeError::ShuttingDown`;
+    /// `add_and_watch` callers never observe that, because they see `TaskAddFailed` first and the waiter is discarded before being handed out.
+    async fn spawn_and_register(&self, id: TaskId, spec: TaskSpec, done: Option<OutcomeTx>) {
         let label: Arc<str> = Arc::from(spec.task().name());
 
         let mut st = self.state.write().await;
         if st.by_label.contains_key(&label) {
             drop(st);
+            drop(done);
             self.bus.publish(
                 Event::new(EventKind::TaskAddFailed)
                     .with_task(label)
@@ -339,6 +348,7 @@ impl Registry {
                 join: join_handle,
                 cancel: task_token,
                 label: label.clone(),
+                done,
             },
         );
         st.by_label.insert(label.clone(), id);
@@ -358,7 +368,7 @@ impl Registry {
             self.notify_after_remove(len_after);
 
             handle.cancel.cancel();
-            self.spawn_join_report(id, handle.label, handle.join, Some(self.grace));
+            self.spawn_join_report(id, handle.label, handle.join, Some(self.grace), handle.done);
         } else {
             Self::pending_dec(&self.pending_joins, id);
             self.bus.publish(
@@ -374,7 +384,7 @@ impl Registry {
         Self::pending_inc(&self.pending_joins, id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
-            self.spawn_join_report(id, handle.label, handle.join, None);
+            self.spawn_join_report(id, handle.label, handle.join, None, handle.done);
         } else {
             Self::pending_dec(&self.pending_joins, id);
         }
@@ -396,6 +406,7 @@ impl Registry {
         name: Arc<str>,
         join: JoinHandle<ActorExitReason>,
         force_after: Option<Duration>,
+        done: Option<OutcomeTx>,
     ) {
         let bus = self.bus.clone();
         let pending = Arc::clone(&self.pending_joins);
@@ -405,12 +416,15 @@ impl Registry {
                 Some(grace) => match tokio::time::timeout(grace, &mut join).await {
                     Ok(res) => {
                         Self::pending_dec(&pending, id);
-                        Self::report_join(&bus, id, &name, res);
+                        Self::report_join(&bus, id, &name, res, done);
                     }
                     Err(_) => {
                         join.abort();
                         let _ = join.await;
                         Self::pending_dec(&pending, id);
+                        if let Some(done) = done {
+                            let _ = done.send(TaskOutcome::ForceAborted);
+                        }
                         bus.publish(
                             Event::new(EventKind::TaskRemoved)
                                 .with_task(name)
@@ -422,7 +436,7 @@ impl Registry {
                 None => {
                     let res = join.await;
                     Self::pending_dec(&pending, id);
-                    Self::report_join(&bus, id, &name, res);
+                    Self::report_join(&bus, id, &name, res, done);
                 }
             }
         });
@@ -444,9 +458,14 @@ impl Registry {
     }
 
     /// Publish terminal events for a joined actor: `ActorDead` if it panicked, then always `TaskRemoved`.
-    /// A cancelled (force-aborted) join is not a panic.
-    fn report_join(bus: &Bus, id: TaskId, name: &str, res: Result<ActorExitReason, JoinError>) {
-        if let Err(e) = res
+    fn report_join(
+        bus: &Bus,
+        id: TaskId,
+        name: &str,
+        res: Result<ActorExitReason, JoinError>,
+        done: Option<OutcomeTx>,
+    ) {
+        if let Err(e) = &res
             && e.is_panic()
         {
             bus.publish(
@@ -456,11 +475,30 @@ impl Registry {
                     .with_reason("actor_panic"),
             );
         }
+        if let Some(done) = done {
+            let _ = done.send(Self::outcome_of(res));
+        }
         bus.publish(
             Event::new(EventKind::TaskRemoved)
                 .with_task(name)
                 .with_id(id),
         );
+    }
+
+    /// Maps a joined actor result to the public [`TaskOutcome`].
+    fn outcome_of(res: Result<ActorExitReason, JoinError>) -> TaskOutcome {
+        match res {
+            Ok(ActorExitReason::Completed) => TaskOutcome::Completed,
+            Ok(ActorExitReason::Canceled) => TaskOutcome::Canceled,
+            Ok(ActorExitReason::Exhausted { reason, exit_code }) => {
+                TaskOutcome::Failed { reason, exit_code }
+            }
+            Ok(ActorExitReason::Fatal { reason, exit_code }) => {
+                TaskOutcome::Fatal { reason, exit_code }
+            }
+            Err(e) if e.is_panic() => TaskOutcome::Panicked,
+            Err(_aborted) => TaskOutcome::ForceAborted,
+        }
     }
 }
 
@@ -479,7 +517,7 @@ mod tests {
     async fn reap_finished_removes_completed_handles() {
         let reg = registry();
 
-        let join = tokio::spawn(async { ActorExitReason::PolicyExhausted });
+        let join = tokio::spawn(async { ActorExitReason::Completed });
         while !join.is_finished() {
             tokio::task::yield_now().await;
         }
@@ -489,6 +527,7 @@ mod tests {
                 join,
                 cancel: CancellationToken::new(),
                 label: Arc::from("done"),
+                done: None,
             },
         );
         assert!(!reg.is_empty().await);
@@ -508,7 +547,7 @@ mod tests {
         let child = cancel.clone();
         let join = tokio::spawn(async move {
             child.cancelled().await;
-            ActorExitReason::Cancelled
+            ActorExitReason::Canceled
         });
         reg.state.write().await.tasks.insert(
             TaskId::next(),
@@ -516,6 +555,7 @@ mod tests {
                 join,
                 cancel,
                 label: Arc::from("running"),
+                done: None,
             },
         );
 

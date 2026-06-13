@@ -27,13 +27,14 @@ use std::{
 };
 
 use dashmap::DashMap;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::broadcast;
 
 use crate::{
     RuntimeError, Supervisor, TaskSpec,
+    core::{OutcomeTx, TaskOutcome},
     events::{Bus, Event, EventKind},
     identity::TaskId,
 };
@@ -49,6 +50,7 @@ use super::{
 struct Submission {
     id: TaskId,
     spec: ControllerSpec,
+    done: Option<OutcomeTx>,
 }
 
 /// Handle for submitting tasks to the controller.
@@ -64,7 +66,11 @@ impl ControllerHandle {
     pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.tx
-            .send(Submission { id, spec })
+            .send(Submission {
+                id,
+                spec,
+                done: None,
+            })
             .await
             .map_err(|_| ControllerError::Closed)?;
         Ok(id)
@@ -76,12 +82,35 @@ impl ControllerHandle {
     pub fn try_submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.tx
-            .try_send(Submission { id, spec })
+            .try_send(Submission {
+                id,
+                spec,
+                done: None,
+            })
             .map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => ControllerError::Full,
                 mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
             })?;
         Ok(id)
+    }
+
+    /// Submit a task (async) and return a `oneshot` receiver resolving to its final [`TaskOutcome`]:
+    /// `Rejected` if admission is refused, otherwise the task's terminal outcome once it has run.
+    pub async fn submit_and_watch(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
+        let id = TaskId::next();
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Submission {
+                id,
+                spec,
+                done: Some(tx),
+            })
+            .await
+            .map_err(|_| ControllerError::Closed)?;
+        Ok((id, rx))
     }
 }
 
@@ -104,6 +133,7 @@ pub(crate) struct Controller {
 
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
     running: DashMap<TaskId, Arc<str>>,
+    watchers: DashMap<TaskId, OutcomeTx>,
 
     tx: mpsc::Sender<Submission>,
     rx: RwLock<Option<mpsc::Receiver<Submission>>>,
@@ -122,10 +152,22 @@ impl Controller {
             bus,
             slots: DashMap::new(),
             running: DashMap::new(),
+            watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Resolves a watched submission's waiter with [`TaskOutcome::Rejected`], if any.
+    ///
+    /// No-op for unwatched submissions (`submit`/`try_submit`) and for ids already handed to the registry at admission.
+    fn finalize_rejected(&self, id: TaskId, reason: &str) {
+        if let Some((_, tx)) = self.watchers.remove(&id) {
+            let _ = tx.send(TaskOutcome::Rejected {
+                reason: Arc::from(reason),
+            });
+        }
     }
 
     /// Returns `true` once shutdown has been observed on the bus.
@@ -189,6 +231,10 @@ impl Controller {
                     }
                 }
             }
+        }
+        let pending: Vec<TaskId> = self.watchers.iter().map(|e| *e.key()).collect();
+        for id in pending {
+            self.finalize_rejected(id, "controller_shutting_down");
         }
         Ok(())
     }
@@ -276,21 +322,34 @@ impl Controller {
 
     /// Applies the admission policy for a new submission.
     ///
-    /// **Idle**: admit immediately, `add_task` mints the [`TaskId`] and the slot enters `Admitting`;
-    /// it becomes `Running` only when the matching `TaskAdded` is observed.
+    /// The body is a match on `(slot status, admission policy)`;
+    /// this table is the same grid, so it should stay in lockstep with the arms below:
     ///
-    /// **Queue**: push to tail (FIFO); rejected if the per-slot queue is full.
+    /// ```text
+    /// │              │ Queue                   │ Replace                                │ DropIfRunning │
+    /// │──────────────┼─────────────────────────┼────────────────────────────────────────┼───────────────│
+    /// │ Idle         │ admit → Admitting       │ (start_in_slot; same for every policy) │               │
+    /// │──────────────┼─────────────────────────┼────────────────────────────────────────┼───────────────│
+    /// │ Admitting    │ enqueue (or queue_full) │ replace head → Terminating             │ reject        │
+    /// │ Running      │ enqueue (or queue_full) │ remove running → Terminating           │ reject        │
+    /// │ Terminating  │ enqueue (or queue_full) │ replace head (stay)                    │ reject        │
+    /// ```
     ///
-    /// **Replace** (latest-wins): replaces the queue head;
-    /// if the slot is `Running` the current task is removed now,
-    /// if `Admitting` it is removed once it appears (in [`on_task_added`](Self::on_task_added)).
+    /// - **Idle**: admit immediately; slot enters `Admitting`, becomes `Running` on `TaskAdded`.
+    /// - **Queue**: push to tail (FIFO); rejected if the per-slot queue is full.
+    /// - **Replace** (latest-wins): replaces the queue head; the running/admitting task is removed now (Running) or once it appears (Admitting, in [`on_task_added`](Self::on_task_added)).
+    /// - **DropIfRunning**: reject while the slot is busy (`Admitting`/`Running`/`Terminating`).
     ///
-    /// **DropIfRunning**: reject while the slot is busy (`Admitting`/`Running`/`Terminating`).
+    /// A submission carrying a watcher (`done`) is parked in [`watchers`](Self::finalize_rejected) and resolved exactly once:
+    /// handed to the registry on admission, or `Rejected` at any of the rejection arms above (plus `controller_shutting_down` if shutdown was observed).
     async fn handle_submission(&self, sub: Submission) {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
-        let Submission { id, spec } = sub;
+        let Submission { id, spec, done } = sub;
+        if let Some(tx) = done {
+            self.watchers.insert(id, tx);
+        }
         if self.is_shutting_down() {
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
@@ -298,6 +357,7 @@ impl Controller {
                     .with_id(id)
                     .with_reason("controller_shutting_down"),
             );
+            self.finalize_rejected(id, "controller_shutting_down");
             return;
         }
 
@@ -320,12 +380,14 @@ impl Controller {
                         );
                     }
                     Err(e) => {
+                        let reason = format!("add_failed: {e}");
                         self.bus.publish(
                             Event::new(EventKind::ControllerRejected)
                                 .with_task(Arc::clone(&slot_name))
                                 .with_id(id)
-                                .with_reason(format!("add_failed: {e}")),
+                                .with_reason(reason.clone()),
                         );
+                        self.finalize_rejected(id, &reason);
                         drop(slot);
                         self.slots.remove(&*slot_name);
                     }
@@ -335,12 +397,14 @@ impl Controller {
                 if let Some(rid) = slot.running_id
                     && let Err(e) = sup.remove(rid)
                 {
+                    let reason = format!("remove_failed: {e}");
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(&slot_name))
                             .with_id(id)
-                            .with_reason(format!("remove_failed: {e}")),
+                            .with_reason(reason.clone()),
                     );
+                    self.finalize_rejected(id, &reason);
                     return;
                 }
                 self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
@@ -414,12 +478,14 @@ impl Controller {
                 | SlotStatus::Terminating { .. },
                 AdmissionPolicy::DropIfRunning,
             ) => {
+                let reason = format!("dropped: slot busy ({})", slot.status.label());
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
                         .with_id(id)
-                        .with_reason(format!("dropped: slot busy (status={:?})", slot.status)),
+                        .with_reason(reason.clone()),
                 );
+                self.finalize_rejected(id, &reason);
             }
         }
     }
@@ -439,8 +505,7 @@ impl Controller {
         }
     }
 
-    /// `TaskRemoveRequested`: if the id belongs to a queued, not-yet-admitted submission, remove it from its slot queue
-    /// and acknowledge with `ControllerRejected("removed_from_queue")`.
+    /// `TaskRemoveRequested`: if the id belongs to a queued, not-yet-admitted submission, remove it from its slot queue and acknowledge with `ControllerRejected("removed_from_queue")`.
     async fn on_remove_requested(&self, event: &Event) {
         let Some(id) = event.id else {
             return;
@@ -466,6 +531,7 @@ impl Controller {
                     .with_id(id)
                     .with_reason("removed_from_queue"),
             );
+            self.finalize_rejected(id, "removed_from_queue");
             if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
                 drop(slot);
                 self.slots.remove(&*slot_name);
@@ -519,8 +585,7 @@ impl Controller {
         }
     }
 
-    /// `TaskAddFailed`: admission was rejected (e.g. duplicate name)
-    /// free the slot and start the next queued task, so a slot can never wedge in `Admitting`.
+    /// `TaskAddFailed`: admission was rejected (e.g. duplicate name) free the slot and start the next queued task, so a slot can never wedge in `Admitting`.
     async fn on_task_add_failed(&self, event: &Event) {
         self.free_and_advance(event).await;
     }
@@ -533,8 +598,6 @@ impl Controller {
 
     /// Common terminal handling for `TaskRemoved`/`TaskAddFailed`:
     /// resolve the owning slot by [`TaskId`], free it, and advance its queue.
-    ///
-    /// Idempotent: a stale/duplicate event whose id is no longer in the index is a no-op.
     async fn free_and_advance(&self, event: &Event) {
         let Some(id) = event.id else {
             return;
@@ -577,7 +640,8 @@ impl Controller {
         id: TaskId,
         task_spec: TaskSpec,
     ) -> Result<(), RuntimeError> {
-        sup.add_task_with_id(id, task_spec)?;
+        let done = self.watchers.remove(&id).map(|(_, tx)| tx);
+        sup.add_task_with_id_watched(id, task_spec, done)?;
         slot.status = SlotStatus::Admitting {
             since: Instant::now(),
         };
@@ -606,12 +670,14 @@ impl Controller {
                     return;
                 }
                 Err(e) => {
+                    let reason = format!("queue_start_failed: {e}");
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(slot_name))
                             .with_id(next_id)
-                            .with_reason(format!("queue_start_failed: {e}")),
+                            .with_reason(reason.clone()),
                     );
+                    self.finalize_rejected(next_id, &reason);
                 }
             }
         }
@@ -631,15 +697,14 @@ impl Controller {
     #[inline]
     fn reject_if_full(&self, slot_name: &str, id: TaskId, slot_len: usize) -> bool {
         if slot_len >= self.config.max_slot_queue {
+            let reason = format!("queue_full: {}/{}", slot_len, self.config.max_slot_queue);
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(slot_name)
                     .with_id(id)
-                    .with_reason(format!(
-                        "queue_full: {}/{}",
-                        slot_len, self.config.max_slot_queue
-                    )),
+                    .with_reason(reason.clone()),
             );
+            self.finalize_rejected(id, &reason);
             true
         } else {
             false
@@ -648,8 +713,7 @@ impl Controller {
 
     /// Replaces the queue head with the new submission (latest-wins) or pushes it.
     ///
-    /// A displaced queued submission is rejected with `superseded_by_replace`,
-    /// carrying its id, so submitters can observe that it will never run.
+    /// A displaced queued submission is rejected with `superseded_by_replace`, carrying its id, so submitters can observe that it will never run.
     fn replace_head_or_push(
         &self,
         slot: &mut SlotState,
@@ -665,6 +729,7 @@ impl Controller {
                     .with_id(displaced_id)
                     .with_reason("superseded_by_replace"),
             );
+            self.finalize_rejected(displaced_id, "superseded_by_replace");
         } else {
             slot.queue.push_front((id, task_spec));
         }
@@ -826,6 +891,7 @@ mod tests {
             bus,
             slots: DashMap::new(),
             running: DashMap::new(),
+            watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
             shutting_down: std::sync::atomic::AtomicBool::new(false),

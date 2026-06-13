@@ -65,6 +65,7 @@
 //!
 //! | Example                      | What it adds                                    |
 //! |------------------------------|-------------------------------------------------|
+//! | [`outcomes.rs`](outcomes.rs) | Await a task's final result with `add_and_watch` |
 //! | [`pipeline.rs`](pipeline.rs) | Admission control with the `controller` feature |
 
 use std::time::Duration;

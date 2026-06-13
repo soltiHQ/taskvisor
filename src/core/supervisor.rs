@@ -1,7 +1,6 @@
 //! # Supervisor: orchestrates task actors and graceful shutdown.
 //!
-//! The [`Supervisor`] owns the runtime components and orchestrates task execution lifecycle
-//! from spawn to graceful termination.
+//! The [`Supervisor`] owns the runtime components and orchestrates task execution lifecycle from spawn to graceful termination.
 //!
 //! - Spawn task actors via event-driven registry
 //! - Dynamically add/remove tasks at runtime via events
@@ -239,14 +238,36 @@ impl Supervisor {
 
     /// Adds a new task to the supervisor at runtime, returning its minted [`TaskId`].
     pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        self.add_task_with_id(TaskId::next(), spec)
+        self.add_task_inner(TaskId::next(), spec, None)
     }
 
-    /// Adds a task under a **pre-minted** identity.
-    pub(crate) fn add_task_with_id(
+    /// Adds a task under a **pre-minted** identity with an optional outcome watcher.
+    #[cfg(feature = "controller")]
+    pub(crate) fn add_task_with_id_watched(
         &self,
         id: TaskId,
         spec: TaskSpec,
+        done: Option<crate::core::registry::OutcomeTx>,
+    ) -> Result<TaskId, RuntimeError> {
+        self.add_task_inner(id, spec, done)
+    }
+
+    /// Adds a new task and returns a `oneshot` receiver resolving to its final [`TaskOutcome`](crate::TaskOutcome).
+    pub(crate) fn add_task_watched(
+        &self,
+        spec: TaskSpec,
+    ) -> Result<(TaskId, tokio::sync::oneshot::Receiver<crate::TaskOutcome>), RuntimeError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = self.add_task_inner(TaskId::next(), spec, Some(tx))?;
+        Ok((id, rx))
+    }
+
+    /// Publishes `TaskAddRequested` and sends the `Add` command with an optional outcome watcher.
+    fn add_task_inner(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<crate::core::registry::OutcomeTx>,
     ) -> Result<TaskId, RuntimeError> {
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
@@ -254,15 +275,12 @@ impl Supervisor {
                 .with_id(id),
         );
         self.cmd_tx
-            .send(RegistryCommand::Add(id, spec))
+            .send(RegistryCommand::Add(id, spec, done))
             .map_err(|_| RuntimeError::ShuttingDown)?;
         Ok(id)
     }
 
     /// Removes a task from the supervisor at runtime, by its runtime identity.
-    ///
-    /// Publishes `TaskRemoveRequested` on bus (observability, fire-and-forget),
-    /// then sends the `Remove` command via mpsc (guaranteed delivery).
     pub(crate) fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
         self.bus
             .publish(Event::new(EventKind::TaskRemoveRequested).with_id(id));
@@ -433,6 +451,21 @@ impl Supervisor {
     ) -> Result<TaskId, crate::controller::ControllerError> {
         match self.controller.get() {
             Some(ctrl) => ctrl.handle().try_submit(spec),
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
+    }
+
+    /// Submits a task to the controller and returns a watcher for its final outcome.
+    #[cfg(feature = "controller")]
+    pub(crate) async fn submit_and_watch(
+        &self,
+        spec: crate::controller::ControllerSpec,
+    ) -> Result<
+        (TaskId, tokio::sync::oneshot::Receiver<crate::TaskOutcome>),
+        crate::controller::ControllerError,
+    > {
+        match self.controller.get() {
+            Some(ctrl) => ctrl.handle().submit_and_watch(spec).await,
             None => Err(crate::controller::ControllerError::NotConfigured),
         }
     }

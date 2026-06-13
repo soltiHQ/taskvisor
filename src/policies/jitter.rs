@@ -58,9 +58,8 @@ impl Default for JitterPolicy {
 impl JitterPolicy {
     /// Applies jitter to the given delay.
     ///
-    /// `Decorrelated` has no previous-delay context here, so it falls back to **full jitter**
-    /// (random in `[0, delay]`) rather than silently returning the input. For the true
-    /// decorrelated recurrence use [`apply_decorrelated`](Self::apply_decorrelated).
+    /// `Decorrelated` has no previous-delay context here, so it falls back to **full jitter** (random in `[0, delay]`) rather than silently returning the input.
+    /// For the true decorrelated recurrence use [`apply_decorrelated`](Self::apply_decorrelated).
     #[must_use]
     pub fn apply(&self, delay: Duration) -> Duration {
         match self {

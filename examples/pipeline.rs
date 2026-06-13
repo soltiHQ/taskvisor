@@ -1,8 +1,7 @@
 //! # Pipeline
 //!
 //! Uses the optional `controller` feature to demonstrate slot-based admission control.
-//! This is useful when you need to limit concurrency per logical operation - e.g.,
-//! "only one deploy at a time" or "queue report generation".
+//! This is useful when you need to limit concurrency per logical operation - e.g., "only one deploy at a time" or "queue report generation".
 //!
 //! ## What is the controller?
 //!
