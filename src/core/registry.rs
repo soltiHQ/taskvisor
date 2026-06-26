@@ -494,12 +494,24 @@ impl Registry {
         match res {
             Ok(ActorExitReason::Completed) => TaskOutcome::Completed,
             Ok(ActorExitReason::Canceled) => TaskOutcome::Canceled,
-            Ok(ActorExitReason::Exhausted { reason, exit_code }) => {
-                TaskOutcome::Failed { reason, exit_code }
-            }
-            Ok(ActorExitReason::Fatal { reason, exit_code }) => {
-                TaskOutcome::Fatal { reason, exit_code }
-            }
+            Ok(ActorExitReason::Exhausted {
+                reason,
+                exit_code,
+                source,
+            }) => TaskOutcome::Failed {
+                reason,
+                exit_code,
+                source,
+            },
+            Ok(ActorExitReason::Fatal {
+                reason,
+                exit_code,
+                source,
+            }) => TaskOutcome::Fatal {
+                reason,
+                exit_code,
+                source,
+            },
             Err(e) if e.is_panic() => TaskOutcome::Panicked,
             Err(_aborted) => TaskOutcome::ForceAborted,
         }

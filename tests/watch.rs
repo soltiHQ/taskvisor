@@ -52,7 +52,9 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
         .expect("ActorExhausted event for the run");
 
     match outcome {
-        TaskOutcome::Failed { reason, exit_code } => {
+        TaskOutcome::Failed {
+            reason, exit_code, ..
+        } => {
             assert_eq!(
                 &*reason,
                 event.reason.as_deref().expect("event carries a reason"),
@@ -79,7 +81,7 @@ async fn completed_outcome_for_successful_once_task() {
     let outcome = with_timeout(5, waiter.wait())
         .await
         .expect("waiter errored");
-    assert_eq!(outcome, TaskOutcome::Completed);
+    assert!(matches!(outcome, TaskOutcome::Completed));
     assert!(outcome.is_success());
 
     let _ = handle.shutdown().await;
@@ -101,7 +103,9 @@ async fn failed_outcome_carries_reason_and_exit_code() {
         .await
         .expect("waiter errored")
     {
-        TaskOutcome::Failed { reason, exit_code } => {
+        TaskOutcome::Failed {
+            reason, exit_code, ..
+        } => {
             assert!(
                 reason.contains("max_retries_exceeded"),
                 "reason must mention exhausted retries: {reason}"
@@ -130,7 +134,9 @@ async fn fatal_outcome_for_fatal_error() {
         .await
         .expect("waiter errored")
     {
-        TaskOutcome::Fatal { reason, exit_code } => {
+        TaskOutcome::Fatal {
+            reason, exit_code, ..
+        } => {
             assert!(
                 reason.contains("unrecoverable"),
                 "reason must carry the fatal message: {reason}"
@@ -183,10 +189,9 @@ async fn spurious_canceled_return_resolves_canceled_outcome() {
     let outcome = with_timeout(5, waiter.wait())
         .await
         .expect("waiter errored");
-    assert_eq!(
-        outcome,
-        TaskOutcome::Canceled,
-        "a task returning Canceled without cancellation must resolve as Canceled"
+    assert!(
+        matches!(outcome, TaskOutcome::Canceled),
+        "a task returning Canceled without cancellation must resolve as Canceled, got {outcome:?}"
     );
 
     let _ = handle.shutdown().await;
@@ -215,9 +220,8 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
         shutdown_res.is_err(),
         "stubborn task must trip GraceExceeded"
     );
-    assert_eq!(
-        outcome.expect("waiter errored"),
-        TaskOutcome::ForceAborted,
+    assert!(
+        matches!(outcome.expect("waiter errored"), TaskOutcome::ForceAborted),
         "the shutdown drain's force-abort must resolve the waiter as ForceAborted"
     );
 }
@@ -260,7 +264,7 @@ async fn cancelled_outcome_when_task_is_cancelled() {
     let outcome = with_timeout(5, waiter.wait())
         .await
         .expect("waiter errored");
-    assert_eq!(outcome, TaskOutcome::Canceled);
+    assert!(matches!(outcome, TaskOutcome::Canceled));
 
     let _ = handle.shutdown().await;
 }
@@ -288,7 +292,7 @@ async fn force_aborted_outcome_for_noncooperative_task() {
     let outcome = with_timeout(5, waiter.wait())
         .await
         .expect("waiter errored");
-    assert_eq!(outcome, TaskOutcome::ForceAborted);
+    assert!(matches!(outcome, TaskOutcome::ForceAborted));
 
     let _ = handle.shutdown().await;
 }
@@ -331,10 +335,9 @@ async fn shutdown_resolves_pending_waiters() {
     let outcome = with_timeout(5, waiter.wait())
         .await
         .expect("waiter errored");
-    assert_eq!(
-        outcome,
-        TaskOutcome::Canceled,
-        "cooperative task must resolve as Canceled on shutdown"
+    assert!(
+        matches!(outcome, TaskOutcome::Canceled),
+        "cooperative task must resolve as Canceled on shutdown, got {outcome:?}"
     );
 }
 
@@ -386,6 +389,37 @@ async fn outcome_is_delivered_even_under_bus_lag() {
         TaskOutcome::Failed { .. } => {}
         other => panic!("expected Failed despite bus lag, got {other:?}"),
     }
+
+    let _ = handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn task_error_source_survives_end_to_end_to_the_outcome() {
+    let (_sup, handle) = supervisor();
+
+    let task: TaskRef = TaskFn::arc("io-fail", |_ctx: TaskContext| async {
+        Err(TaskError::fail_from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        )))
+    });
+
+    let (_id, waiter) = handle
+        .add_and_watch(TaskSpec::once(task), ADD_TIMEOUT)
+        .await
+        .expect("add_and_watch should succeed");
+
+    let outcome = with_timeout(5, waiter.wait())
+        .await
+        .expect("waiter errored");
+
+    let source = outcome
+        .source()
+        .expect("the task error's source must survive to the completion plane");
+    let io = source
+        .downcast_ref::<std::io::Error>()
+        .expect("source must downcast back to the original io::Error");
+    assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
 
     let _ = handle.shutdown().await;
 }

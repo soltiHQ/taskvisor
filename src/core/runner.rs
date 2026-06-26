@@ -73,10 +73,7 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("non-string panic payload");
-    TaskError::Fail {
-        reason: format!("task panicked: {msg}"),
-        exit_code: None,
-    }
+    TaskError::fail(format!("task panicked: {msg}"))
 }
 
 /// Executes a single attempt of `task`, publishing lifecycle events to `bus`.
@@ -254,12 +251,7 @@ mod tests {
         }
 
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
-            Box::pin(async {
-                Err(TaskError::Fail {
-                    reason: "boom".into(),
-                    exit_code: None,
-                })
-            })
+            Box::pin(async { Err(TaskError::fail("boom")) })
         }
     }
 

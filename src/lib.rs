@@ -156,7 +156,7 @@ mod events;
 pub use events::{BackoffSource, Event, EventKind};
 
 mod error;
-pub use error::{RuntimeError, TaskError};
+pub use error::{BoxError, RuntimeError, SharedError, TaskError};
 
 mod subscribers;
 pub use subscribers::Subscribe;

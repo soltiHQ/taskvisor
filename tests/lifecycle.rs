@@ -65,10 +65,7 @@ async fn never_oneshot_failure_emits_taskfailed_then_exhausted_no_backoff() {
     let sup = Supervisor::new(SupervisorConfig::default(), subs);
 
     let task = TaskFn::arc("fail-once", |_ctx: TaskContext| async move {
-        Err(TaskError::Fail {
-            reason: "boom".to_string(),
-            exit_code: None,
-        })
+        Err(TaskError::fail("boom".to_string()))
     });
     with_timeout(10, sup.run(vec![TaskSpec::once(task)]))
         .await
@@ -108,10 +105,7 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
         async move {
             let prev = r.fetch_sub(1, Ordering::SeqCst);
             if prev > 0 {
-                Err(TaskError::Fail {
-                    reason: "transient-err".to_string(),
-                    exit_code: None,
-                })
+                Err(TaskError::fail("transient-err".to_string()))
             } else {
                 Ok(())
             }
@@ -266,10 +260,7 @@ async fn unlimited_retries_eventual_success_no_max_retries_reason() {
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);
             if c < 3 {
-                Err(TaskError::Fail {
-                    reason: "still-failing".to_string(),
-                    exit_code: None,
-                })
+                Err(TaskError::fail("still-failing".to_string()))
             } else {
                 Ok(())
             }
@@ -408,10 +399,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);
             if c == 0 {
-                Err(TaskError::Fail {
-                    reason: "first-fails".to_string(),
-                    exit_code: None,
-                })
+                Err(TaskError::fail("first-fails".to_string()))
             } else {
                 Ok(())
             }

@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-use crate::error::RuntimeError;
+use crate::error::{RuntimeError, SharedError};
 use crate::identity::TaskId;
 
 /// Final result of a supervised task run.
@@ -74,29 +74,35 @@ use crate::identity::TaskId;
 /// - [`RestartPolicy`](crate::RestartPolicy) / [`BackoffPolicy`](crate::BackoffPolicy) - decide how many attempts happen first
 /// - [`EventKind`](crate::EventKind) - per-attempt observability on the event bus
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum TaskOutcome {
     /// Final attempt succeeded and the restart policy did not require another run.
     Completed,
 
     /// Final attempt failed and no further retries were allowed (non-retryable error, `RestartPolicy::Never`, or `max_retries` exhausted).
+    #[non_exhaustive]
     Failed {
         /// Final failure message (byte-identical to the `ActorExhausted` event reason).
         reason: Arc<str>,
         /// Numeric exit code from a process-like runtime; `None` for logical errors.
         exit_code: Option<i32>,
+        /// Underlying cause, preserved end-to-end from [`TaskError`](crate::TaskError) (see [`source`](Self::source)).
+        source: Option<SharedError>,
     },
 
     /// Task returned [`TaskError::Fatal`](crate::TaskError::Fatal); no retries were attempted.
+    #[non_exhaustive]
     Fatal {
         /// Fatal error message (byte-identical to the `ActorDead` event reason).
         reason: Arc<str>,
         /// Numeric exit code from a process-like runtime; `None` for logical errors.
         exit_code: Option<i32>,
+        /// Underlying cause, preserved end-to-end from [`TaskError`](crate::TaskError) (see [`source`](Self::source)).
+        source: Option<SharedError>,
     },
 
-    /// Task was canceled: shutdown, explicit [`remove`](crate::SupervisorHandle::remove)/
-    /// [`cancel`](crate::SupervisorHandle::cancel), or the task itself returned [`TaskError::Canceled`](crate::TaskError::Canceled).
+    /// Task was canceled:
+    /// shutdown, explicit [`remove`](crate::SupervisorHandle::remove)/[`cancel`](crate::SupervisorHandle::cancel), or the task itself returned [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
     /// Task ignored cooperative cancellation and was force-aborted after the grace period.
@@ -121,6 +127,23 @@ impl TaskOutcome {
     #[must_use]
     pub fn is_success(&self) -> bool {
         matches!(self, TaskOutcome::Completed)
+    }
+
+    /// Returns the underlying error that caused a [`Failed`](Self::Failed)/[`Fatal`](Self::Fatal)
+    /// outcome, if a cause was attached (e.g. via [`TaskError::fail_from`](crate::TaskError::fail_from)).
+    ///
+    /// Enables `downcast_ref` and `anyhow`/`eyre` chaining on the guaranteed completion plane.
+    #[must_use]
+    pub fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TaskOutcome::Failed { source, .. } | TaskOutcome::Fatal { source, .. } => {
+                source.as_ref().map(|e| {
+                    let e: &(dyn std::error::Error + 'static) = e.as_ref();
+                    e
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Stable machine-readable label (for metrics/logging).
@@ -202,10 +225,12 @@ mod tests {
             TaskOutcome::Failed {
                 reason: Arc::from("x"),
                 exit_code: None,
+                source: None,
             },
             TaskOutcome::Fatal {
                 reason: Arc::from("x"),
                 exit_code: Some(1),
+                source: None,
             },
             TaskOutcome::Canceled,
             TaskOutcome::ForceAborted,
@@ -223,12 +248,47 @@ mod tests {
         assert!(!TaskOutcome::Panicked.is_success());
     }
 
+    #[test]
+    fn failed_outcome_exposes_downcastable_source() {
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let outcome = TaskOutcome::Failed {
+            reason: Arc::from("denied"),
+            exit_code: None,
+            source: Some(Arc::new(io)),
+        };
+
+        let src = outcome
+            .source()
+            .expect("a Failed outcome with a cause must expose its source");
+        assert_eq!(
+            src.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn sourceless_outcomes_report_no_source() {
+        assert!(TaskOutcome::Completed.source().is_none());
+        assert!(
+            TaskOutcome::Failed {
+                reason: Arc::from("plain"),
+                exit_code: Some(1),
+                source: None,
+            }
+            .source()
+            .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn waiter_resolves_with_sent_outcome() {
         let (tx, rx) = oneshot::channel();
         let waiter = TaskWaiter::new(TaskId::next(), rx);
         tx.send(TaskOutcome::Completed).unwrap();
-        assert_eq!(waiter.wait().await.unwrap(), TaskOutcome::Completed);
+        assert!(matches!(
+            waiter.wait().await.unwrap(),
+            TaskOutcome::Completed
+        ));
     }
 
     #[tokio::test]

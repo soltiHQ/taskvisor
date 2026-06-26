@@ -48,10 +48,9 @@ async fn submit_and_watch_resolves_completed_for_admitted_task() {
         assert_eq!(waiter.id(), id);
 
         let outcome = waiter.wait().await.expect("waiter errored");
-        assert_eq!(
-            outcome,
-            TaskOutcome::Completed,
-            "an admitted task that succeeds must resolve Completed"
+        assert!(
+            matches!(outcome, TaskOutcome::Completed),
+            "an admitted task that succeeds must resolve Completed, got {outcome:?}"
         );
 
         handle.shutdown().await.expect("shutdown ok");
