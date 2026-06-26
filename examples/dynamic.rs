@@ -73,7 +73,7 @@ use std::time::Duration;
 use taskvisor::prelude::*;
 
 fn make_worker(name: &'static str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
+    let task: TaskRef = TaskFn::arc(name, move |ctx: TaskContext| async move {
         let mut tick = 0u32;
         loop {
             tokio::select! {

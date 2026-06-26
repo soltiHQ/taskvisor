@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A "flaky" task that fails 3 times then succeeds.
     let counter = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx: CancellationToken| {
+    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx: TaskContext| {
         let counter = Arc::clone(&counter);
         async move {
             let n = counter.fetch_add(1, Ordering::Relaxed) + 1;

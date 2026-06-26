@@ -757,11 +757,11 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TaskContext;
     use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef, TaskSpec};
-    use tokio_util::sync::CancellationToken;
 
     fn make_spec(name: &str) -> TaskSpec {
-        let task: TaskRef = TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) });
+        let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
         TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
     }
 
@@ -906,7 +906,7 @@ mod tests {
         let bus = Bus::new(64);
         let ctrl = make_controller(ControllerConfig::default(), bus);
 
-        let task: TaskRef = TaskFn::arc("buffered", |_ctx: CancellationToken| async { Ok(()) });
+        let task: TaskRef = TaskFn::arc("buffered", |_ctx: TaskContext| async { Ok(()) });
         let (_id, waiter) = ctrl
             .handle()
             .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task).with_slot("s")))
@@ -935,7 +935,7 @@ mod tests {
         let mut rx = ctrl.rx.write().await.take().expect("rx present");
         ctrl.finalize_pending_on_shutdown(&mut rx);
 
-        let task: TaskRef = TaskFn::arc("late", |_ctx: CancellationToken| async { Ok(()) });
+        let task: TaskRef = TaskFn::arc("late", |_ctx: TaskContext| async { Ok(()) });
         let result = ctrl
             .handle()
             .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task).with_slot("s")))
@@ -973,7 +973,7 @@ mod tests {
             .build();
         let handle = sup.serve();
 
-        let task: TaskRef = TaskFn::arc("clamped", |_ctx: CancellationToken| async { Ok(()) });
+        let task: TaskRef = TaskFn::arc("clamped", |_ctx: TaskContext| async { Ok(()) });
         handle
             .submit(ControllerSpec::queue(TaskSpec::once(task)))
             .await
@@ -991,7 +991,7 @@ mod tests {
     async fn sup_with_live_task() -> (Arc<Supervisor>, crate::core::SupervisorHandle, TaskId) {
         let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
         let handle = sup.serve();
-        let task: TaskRef = TaskFn::arc("occupant", |ctx: CancellationToken| async move {
+        let task: TaskRef = TaskFn::arc("occupant", |ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });
@@ -1067,7 +1067,7 @@ mod tests {
         let (sup, handle, id) = sup_with_live_task().await;
         let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
 
-        let queued: TaskRef = TaskFn::arc("queued", |ctx: CancellationToken| async move {
+        let queued: TaskRef = TaskFn::arc("queued", |ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });
@@ -1110,7 +1110,7 @@ mod tests {
         let handle = sup.serve();
 
         let mk = |name: &'static str| -> ControllerSpec {
-            let task: TaskRef = TaskFn::arc(name, |ctx: CancellationToken| async move {
+            let task: TaskRef = TaskFn::arc(name, |ctx: TaskContext| async move {
                 ctx.cancelled().await;
                 Ok(())
             });

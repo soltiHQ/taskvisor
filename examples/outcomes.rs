@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1) A one-shot job that succeeds -> Completed.
     println!("=== Completed ===");
-    let job: TaskRef = TaskFn::arc("import", |_ctx: CancellationToken| async {
+    let job: TaskRef = TaskFn::arc("import", |_ctx: TaskContext| async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     });
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    Note the outcome's reason/exit_code are identical to the ActorExhausted event.
     println!("=== Failed (retries exhausted) ===");
     let attempts = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("sync", move |_ctx: CancellationToken| {
+    let flaky: TaskRef = TaskFn::arc("sync", move |_ctx: TaskContext| {
         let attempts = Arc::clone(&attempts);
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3) A long-running worker we cancel -> Canceled.
     println!("=== Canceled ===");
-    let worker: TaskRef = TaskFn::arc("worker", |ctx: CancellationToken| async move {
+    let worker: TaskRef = TaskFn::arc("worker", |ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });

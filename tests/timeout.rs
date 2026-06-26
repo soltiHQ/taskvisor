@@ -16,7 +16,7 @@ async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries()
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
     let sup = Supervisor::new(SupervisorConfig::default(), subs);
 
-    let task = TaskFn::arc("slow", |_ctx: CancellationToken| async move {
+    let task = TaskFn::arc("slow", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         Ok(())
     });
@@ -72,7 +72,7 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
 
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
-    let task = TaskFn::arc("slow-then-ok", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("slow-then-ok", move |_ctx: TaskContext| {
         let nc = nc.clone();
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);
@@ -127,7 +127,7 @@ async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
     let sup = Supervisor::new(SupervisorConfig::default(), subs);
 
-    let task = TaskFn::arc("zero-to", |_ctx: CancellationToken| async move {
+    let task = TaskFn::arc("zero-to", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(())
     });

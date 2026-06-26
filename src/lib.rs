@@ -115,7 +115,7 @@
 //!     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
 //!     // Define a simple task that runs once and exits
-//!     let hello: TaskRef = TaskFn::arc("hello", |ctx: CancellationToken| async move {
+//!     let hello: TaskRef = TaskFn::arc("hello", |ctx: TaskContext| async move {
 //!         if ctx.is_cancelled() { return Ok(()); }
 //!         println!("Hello from task!");
 //!         Ok(())
@@ -147,7 +147,7 @@ pub use core::{
 };
 
 mod tasks;
-pub use tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
+pub use tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
 
 mod policies;
 pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};

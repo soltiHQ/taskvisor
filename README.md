@@ -96,7 +96,7 @@ use taskvisor::prelude::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sup = Supervisor::builder(SupervisorConfig::default()).build();
 
-    let ping: TaskRef = TaskFn::arc("ping", |ctx: CancellationToken| async move {
+    let ping: TaskRef = TaskFn::arc("ping", |ctx: TaskContext| async move {
         tokio::select! {
             _ = ctx.cancelled() => return Err(TaskError::Canceled),
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -137,7 +137,7 @@ impl Subscribe for Printer {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let attempts = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("flaky", move |_ctx: CancellationToken| {
+    let flaky: TaskRef = TaskFn::arc("flaky", move |_ctx: TaskContext| {
         let attempts = Arc::clone(&attempts);
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
@@ -207,7 +207,7 @@ handle.shutdown().await?;
 
 **Task & TaskFn** - A `Task` is any `Send + Sync + 'static` type that implements
 ```rust,ignore
-fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture
+fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture
 ``` 
 `TaskFn` wraps a closure into a `Task` so you don't need a struct. `TaskRef` is just `Arc<dyn Task>`.
 
@@ -275,7 +275,7 @@ Subscribers receive it as `Event::exit_code` on `TaskFailed` / `ActorDead` / `Ac
 
 ### Cancellation
 
-Tasks **must** observe cancellation via the `CancellationToken` passed to `spawn`:
+Tasks **must** observe cancellation via the `TaskContext` passed to `spawn`:
 
 ```rust,ignore
 // Pattern 1: select! (recommended for long-running tasks)

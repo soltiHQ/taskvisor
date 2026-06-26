@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio_util::sync::CancellationToken;
+use taskvisor::TaskContext;
 
 use taskvisor::{
     BackoffPolicy, Event, EventKind, JitterPolicy, Subscribe, TaskError, TaskFn, TaskId, TaskRef,
@@ -122,18 +122,18 @@ pub async fn with_timeout<F: Future>(secs: u64, fut: F) -> F::Output {
 }
 
 pub fn make_coop(name: &str) -> TaskRef {
-    TaskFn::arc(name, |ctx: CancellationToken| async move {
+    TaskFn::arc(name, |ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     })
 }
 
 pub fn make_ok_once(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: CancellationToken| async move { Ok(()) })
+    TaskFn::arc(name, |_ctx: TaskContext| async move { Ok(()) })
 }
 
 pub fn make_fail(name: &str, exit_code: Option<i32>) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: CancellationToken| async move {
+    TaskFn::arc(name, move |_ctx: TaskContext| async move {
         Err(TaskError::Fail {
             reason: "boom".to_string(),
             exit_code,
@@ -142,7 +142,7 @@ pub fn make_fail(name: &str, exit_code: Option<i32>) -> TaskRef {
 }
 
 pub fn make_fatal(name: &str, exit_code: Option<i32>) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: CancellationToken| async move {
+    TaskFn::arc(name, move |_ctx: TaskContext| async move {
         Err(TaskError::Fatal {
             reason: "unrecoverable".to_string(),
             exit_code,
@@ -151,7 +151,7 @@ pub fn make_fatal(name: &str, exit_code: Option<i32>) -> TaskRef {
 }
 
 pub fn make_panic(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: CancellationToken| async move {
+    TaskFn::arc(name, |_ctx: TaskContext| async move {
         panic!("kaboom");
     })
 }

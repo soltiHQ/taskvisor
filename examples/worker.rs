@@ -6,7 +6,7 @@
 //! ## What this shows
 //!
 //! - **Cooperative cancellation** via `tokio::select!` + `ctx.cancelled()`.
-//!   Every long-running task **MUST** observe its `CancellationToken`.
+//!   Every long-running task **MUST** observe cancellation via its `TaskContext`.
 //!   Without it, the task would keep running inside `sleep()` and ignore the shutdown signal until the grace period expires.
 //! - `TaskSpec::restartable(task)` uses `RestartPolicy::OnFailure` by default:
 //!   the worker restarts only if it returns `Err`, not on `Ok`.
@@ -14,7 +14,7 @@
 //! ## Why `ctx.cancelled()` matters
 //!
 //! Tokio **does not kill futures**: it cancels them cooperatively.
-//! When the supervisor shuts down, it cancels the task's `CancellationToken`.
+//! When the supervisor shuts down, it cancels the task's `TaskContext`.
 //! If your task is awaiting `sleep(10s)`, it won't notice until the sleep finishes.
 //! `tokio::select!` with `ctx.cancelled()` lets the task react immediately.
 //!
@@ -58,7 +58,7 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let worker: TaskRef = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
+    let worker: TaskRef = TaskFn::arc("ticker", |ctx: TaskContext| async move {
         let mut tick = 0u64;
         loop {
             tokio::select! {

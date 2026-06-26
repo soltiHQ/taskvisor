@@ -48,7 +48,7 @@ use crate::{
     error::TaskError,
     events::{Bus, Event, EventKind},
     identity::TaskId,
-    tasks::{BoxTaskFuture, Task},
+    tasks::{BoxTaskFuture, Task, TaskContext},
 };
 
 /// Future adapter that traps panics raised by the task body.
@@ -121,8 +121,9 @@ pub async fn run_once<T: Task + ?Sized>(
     bus: &Bus,
 ) -> Result<(), TaskError> {
     let child = parent.child_token();
+    let ctx = TaskContext::from_token(child.clone());
 
-    let fut = match std::panic::catch_unwind(AssertUnwindSafe(|| task.spawn(child.clone()))) {
+    let fut = match std::panic::catch_unwind(AssertUnwindSafe(move || task.spawn(ctx))) {
         Ok(fut) => CatchPanic(fut),
         Err(payload) => {
             let e = panic_to_error(payload.as_ref());
@@ -225,7 +226,7 @@ mod tests {
             "slow-task"
         }
 
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 Ok(())
@@ -240,7 +241,7 @@ mod tests {
             "ok-task"
         }
 
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Ok(()) })
         }
     }
@@ -252,7 +253,7 @@ mod tests {
             "fail-task"
         }
 
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async {
                 Err(TaskError::Fail {
                     reason: "boom".into(),

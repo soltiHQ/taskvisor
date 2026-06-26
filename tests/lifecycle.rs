@@ -64,7 +64,7 @@ async fn never_oneshot_failure_emits_taskfailed_then_exhausted_no_backoff() {
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
     let sup = Supervisor::new(SupervisorConfig::default(), subs);
 
-    let task = TaskFn::arc("fail-once", |_ctx: CancellationToken| async move {
+    let task = TaskFn::arc("fail-once", |_ctx: TaskContext| async move {
         Err(TaskError::Fail {
             reason: "boom".to_string(),
             exit_code: None,
@@ -103,7 +103,7 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
 
     let remaining = Arc::new(AtomicU32::new(2));
     let r = remaining.clone();
-    let task = TaskFn::arc("flaky", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("flaky", move |_ctx: TaskContext| {
         let r = r.clone();
         async move {
             let prev = r.fetch_sub(1, Ordering::SeqCst);
@@ -261,7 +261,7 @@ async fn unlimited_retries_eventual_success_no_max_retries_reason() {
 
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
-    let task = TaskFn::arc("eventual", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("eventual", move |_ctx: TaskContext| {
         let nc = nc.clone();
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);
@@ -311,7 +311,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let cc = counter.clone();
-    let task = TaskFn::arc("rerun", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("rerun", move |_ctx: TaskContext| {
         let cc = cc.clone();
         async move {
             cc.fetch_add(1, Ordering::SeqCst);
@@ -353,7 +353,7 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let cc = counter.clone();
-    let task = TaskFn::arc("periodic", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("periodic", move |_ctx: TaskContext| {
         let cc = cc.clone();
         async move {
             cc.fetch_add(1, Ordering::SeqCst);
@@ -403,7 +403,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
 
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
-    let task = TaskFn::arc("recover", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("recover", move |_ctx: TaskContext| {
         let nc = nc.clone();
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);

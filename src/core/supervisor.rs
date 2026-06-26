@@ -70,7 +70,7 @@
 //! ## Example
 //! ```rust,no_run
 //! use std::time::Duration;
-//! use tokio_util::sync::CancellationToken;
+//! use taskvisor::TaskContext;
 //!
 //! use taskvisor::{SupervisorConfig, Supervisor, TaskSpec, TaskFn, RestartPolicy, BackoffPolicy};
 //!
@@ -79,7 +79,7 @@
 //!     let cfg = SupervisorConfig::default();
 //!     let sup = Supervisor::new(cfg, Vec::new());
 //!
-//!     let task = TaskFn::arc("ticker", |ctx: CancellationToken| async move {
+//!     let task = TaskFn::arc("ticker", |ctx: TaskContext| async move {
 //!         while !ctx.is_cancelled() {
 //!             tokio::time::sleep(Duration::from_millis(250)).await;
 //!         }
@@ -616,7 +616,7 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaskFn, TaskRef};
+    use crate::{TaskContext, TaskFn, TaskRef};
 
     #[tokio::test]
     async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
@@ -669,7 +669,7 @@ mod tests {
         let sup = Supervisor::new(cfg, vec![]);
         let handle = sup.serve();
 
-        let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: CancellationToken| async move {
+        let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
             Ok(())
         });
@@ -702,7 +702,7 @@ mod tests {
         let sup = Supervisor::new(cfg, vec![]);
         let handle = sup.serve();
 
-        let good: TaskRef = TaskFn::arc("good", |ctx: CancellationToken| async move {
+        let good: TaskRef = TaskFn::arc("good", |ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });
@@ -726,7 +726,7 @@ mod tests {
         let handle = sup.serve();
 
         let make = || -> TaskRef {
-            TaskFn::arc("dup", |ctx: CancellationToken| async move {
+            TaskFn::arc("dup", |ctx: TaskContext| async move {
                 ctx.cancelled().await;
                 Ok(())
             })
@@ -756,7 +756,7 @@ mod tests {
         let sup = Supervisor::new(cfg, vec![]);
         let handle = sup.serve();
 
-        let t: TaskRef = TaskFn::arc("laggy", |ctx: CancellationToken| async move {
+        let t: TaskRef = TaskFn::arc("laggy", |ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });
@@ -808,7 +808,7 @@ mod tests {
         let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
         let handle = sup.serve();
 
-        let t: TaskRef = TaskFn::arc("c", |ctx: CancellationToken| async move {
+        let t: TaskRef = TaskFn::arc("c", |ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });

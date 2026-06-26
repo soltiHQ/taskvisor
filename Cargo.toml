@@ -24,10 +24,11 @@ exclude = [
 [features]
 default = []
 logging = []
+tokio-util-interop = []
 controller = ["dashmap"]
 
 [package.metadata.docs.rs]
-features = ["logging", "controller"]
+features = ["logging", "controller", "tokio-util-interop"]
 
 [dependencies]
 tokio      = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }

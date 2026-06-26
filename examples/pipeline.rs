@@ -57,7 +57,7 @@ use std::time::Duration;
 use taskvisor::prelude::*;
 
 fn job(name: &'static str, duration: Duration) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
+    let task: TaskRef = TaskFn::arc(name, move |ctx: TaskContext| async move {
         println!("  [{name}] started");
         let start = tokio::time::Instant::now();
 

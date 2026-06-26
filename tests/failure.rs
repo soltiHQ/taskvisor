@@ -105,7 +105,7 @@ async fn panicking_task_restarts_per_policy_then_succeeds() {
 
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts2 = Arc::clone(&attempts);
-    let flaky: TaskRef = TaskFn::arc("flaky-panic", move |_ctx: CancellationToken| {
+    let flaky: TaskRef = TaskFn::arc("flaky-panic", move |_ctx: TaskContext| {
         let attempts = Arc::clone(&attempts2);
         async move {
             if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
@@ -145,7 +145,7 @@ async fn task_returning_canceled_without_cancellation_is_reaped() {
 
     // The task lies: returns Canceled while its token was never cancelled.
     // Worst case is Always, which would otherwise restart on any other return.
-    let liar: TaskRef = TaskFn::arc("liar", |_ctx: CancellationToken| async move {
+    let liar: TaskRef = TaskFn::arc("liar", |_ctx: TaskContext| async move {
         Err(TaskError::Canceled)
     });
     let spec = TaskSpec::restartable(liar).with_restart(RestartPolicy::Always { interval: None });
@@ -216,7 +216,7 @@ async fn cancellation_returning_canceled_error_yields_task_canceled() {
     .build();
     let handle = sup.serve();
 
-    let task = TaskFn::arc("cancel-err", |ctx: CancellationToken| async move {
+    let task = TaskFn::arc("cancel-err", |ctx: TaskContext| async move {
         ctx.cancelled().await;
         Err(TaskError::Canceled)
     });

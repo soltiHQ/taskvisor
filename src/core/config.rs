@@ -47,7 +47,7 @@ pub struct SupervisorConfig {
     /// Maximum time to wait for graceful shutdown before force-terminating.
     ///
     /// When a shutdown signal is received:
-    /// - Tasks are cancelled via `CancellationToken`
+    /// - Tasks are cancelled via their `TaskContext`
     /// - Supervisor waits up to `grace` for tasks to exit
     /// - If timeout exceeds, returns `RuntimeError::GraceExceeded`
     pub grace: Duration,

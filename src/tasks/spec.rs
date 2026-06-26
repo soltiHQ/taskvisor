@@ -17,11 +17,11 @@ use crate::{
 ///
 /// ## Creating a spec
 /// ```rust
-/// use tokio_util::sync::CancellationToken;
+/// use taskvisor::TaskContext;
 /// use taskvisor::{TaskSpec, TaskFn, SupervisorConfig, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
 /// use std::time::Duration;
 ///
-/// let task: TaskRef = TaskFn::arc("demo", |_ctx: CancellationToken| async move {
+/// let task: TaskRef = TaskFn::arc("demo", |_ctx: TaskContext| async move {
 ///     Ok::<(), TaskError>(())
 /// });
 ///
@@ -208,11 +208,10 @@ impl TaskSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TaskFn;
-    use tokio_util::sync::CancellationToken;
+    use crate::{TaskContext, TaskFn};
 
     fn task(name: &str) -> TaskRef {
-        TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) })
+        TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) })
     }
 
     #[test]

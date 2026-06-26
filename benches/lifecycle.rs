@@ -23,8 +23,8 @@
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use taskvisor::TaskContext;
 use tokio::runtime::Runtime;
-use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
     BackoffPolicy, RestartPolicy, Supervisor, SupervisorConfig, TaskFn, TaskRef, TaskSpec,
@@ -61,12 +61,12 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
     TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
 }
 
 fn work_task(name: &str, iterations: u64) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |_ctx: CancellationToken| async move {
+    let task: TaskRef = TaskFn::arc(name, move |_ctx: TaskContext| async move {
         let mut x = 0u64;
         for i in 0..iterations {
             x = x.wrapping_add(i);
