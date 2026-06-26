@@ -313,4 +313,27 @@ impl SupervisorHandle {
         let (id, rx) = self.inner.submit_and_watch(spec).await?;
         Ok((id, TaskWaiter::new(id, rx)))
     }
+
+    /// Returns a point-in-time [`ControllerSnapshot`](crate::ControllerSnapshot) of the controller's slots.
+    ///
+    /// ## Example
+    /// ```rust,no_run
+    /// # use taskvisor::prelude::*;
+    /// # #[tokio::main] async fn main() {
+    /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+    /// # let handle = sup.serve();
+    /// if let Some(snap) = handle.controller_snapshot().await {
+    ///     println!("{} running, {} queued", snap.running_count(), snap.total_queued());
+    ///     if let Some(web) = snap.slot("web") {
+    ///         println!("web: {:?}, depth {}", web.status, web.queue_depth);
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// Requires the `controller` feature flag.
+    #[cfg(feature = "controller")]
+    pub async fn controller_snapshot(&self) -> Option<crate::controller::ControllerSnapshot> {
+        self.inner.controller_snapshot().await
+    }
 }

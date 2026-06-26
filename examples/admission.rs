@@ -22,6 +22,7 @@
 //! - `handle.submit_and_watch(ControllerSpec::...)`: submit and get `(TaskId, TaskWaiter)`.
 //! - An **admitted** `Queue` job resolving to `Completed`.
 //! - A **rejected** `DropIfRunning` job (slot busy) resolving to `Rejected { reason }`.
+//! - `handle.controller_snapshot()`: pull the live slot state (status, queue depth) without parsing events.
 //!
 //! ## Enabling the feature
 //!
@@ -67,7 +68,7 @@ fn job(name: &'static str, dur: Duration) -> TaskSpec {
             _ = ctx.cancelled() => Err(TaskError::Canceled),
         }
     });
-    // Same slot "deploy" for every submission, so they contend for one slot.
+    // Same slot "deploy" for every submission; they contend for one slot.
     TaskSpec::once(task).with_slot("deploy")
 }
 
@@ -91,6 +92,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Give it a moment to actually occupy the slot.
     tokio::time::sleep(Duration::from_millis(50)).await;
     println!("    deploy-v1 admitted, now running\n");
+
+    // Pull the controller's live state directly: no parsing of bus events.
+    if let Some(snap) = handle.controller_snapshot().await {
+        let deploy = snap.slot("deploy");
+        println!(
+            "    controller: {} running, {} queued; deploy status={:?} depth={}\n",
+            snap.running_count(),
+            snap.total_queued(),
+            deploy.map(|s| s.status),
+            deploy.map_or(0, |s| s.queue_depth),
+        );
+    }
 
     // 2) While deploy-v1 holds the slot, a DropIfRunning submission is refused.
     //     submit() would only fire a ControllerRejected event on the lossy bus;

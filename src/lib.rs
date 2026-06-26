@@ -164,7 +164,10 @@ pub use subscribers::Subscribe;
 #[cfg(feature = "controller")]
 mod controller;
 #[cfg(feature = "controller")]
-pub use controller::{AdmissionPolicy, ControllerConfig, ControllerError, ControllerSpec};
+pub use controller::{
+    AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
+    SlotStatusKind, SlotView,
+};
 
 #[cfg(feature = "logging")]
 pub use subscribers::LogWriter;

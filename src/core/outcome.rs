@@ -33,7 +33,7 @@
 //! - The outcome is delivered via `oneshot` (guaranteed, not subject to bus `Lagged` loss).
 //! - The channel is created **atomically with registration**: there is no window in which the task can finish before the waiter exists.
 //! - **Exactly-once by construction**: the sender has a single owner (the registry `Handle`, or the controller `watchers` map before admission);
-//!   ownership transfers to exactly one resolution site, so the waiter is resolved once and never leaks.
+//!   ownership transfers to exactly one resolution site, and the waiter is resolved once and never leaks.
 //! - Dropping a [`TaskWaiter`] is always safe: the matching `send` becomes a no-op.
 //! - The outcome reflects the **final** attempt only; per-attempt results are observable via [`Subscribe`](crate::Subscribe) events.
 //! - `Rejected` is observed only on the controller path: a submission that never ran - never admitted (slot busy, queue full, superseded, removed while queued, shutting down) or rejected at registration (duplicate task name) - resolves there.
@@ -164,7 +164,7 @@ impl TaskOutcome {
 /// Awaitable handle resolving to the [`TaskOutcome`] of a single task run.
 ///
 /// Created by [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch).
-/// Consumed by [`wait`](Self::wait) (a task terminates exactly once, so the outcome is delivered exactly once).
+/// Consumed by [`wait`](Self::wait) (a task terminates exactly once; the outcome is delivered exactly once).
 ///
 /// ## Example
 /// ```rust,no_run
