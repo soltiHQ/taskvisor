@@ -470,3 +470,26 @@ async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
         );
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_events_carry_attempt_duration() {
+    let collector = EventCollector::new();
+    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
+    let sup = Supervisor::new(SupervisorConfig::default(), subs);
+
+    with_timeout(10, sup.run(vec![TaskSpec::once(make_ok_once("dur"))]))
+        .await
+        .expect("run returns Ok");
+
+    let saw_duration = poll_until(Duration::from_secs(2), || async {
+        collector
+            .find_all(EventKind::TaskStopped)
+            .iter()
+            .any(|e| e.duration_ms.is_some())
+    })
+    .await;
+    assert!(
+        saw_duration,
+        "TaskStopped delivered to a subscriber must carry duration_ms"
+    );
+}
