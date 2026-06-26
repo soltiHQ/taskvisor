@@ -531,18 +531,26 @@ impl Supervisor {
     /// Waits for either shutdown signal or natural completion of all tasks.
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         let res = tokio::select! {
-            _ = crate::core::shutdown::wait_for_shutdown_signal() => {
-                self.bus.publish(Event::new(EventKind::ShutdownRequested));
-                self.drain_with_grace().await
-            }
-            _ = self.registry.wait_until_empty() => {
-                Ok(())
-            }
+            sig = crate::core::shutdown::wait_for_shutdown_signal() => self.on_shutdown_signal(sig).await,
+            _ = self.registry.wait_until_empty() => Ok(()),
         };
         self.runtime_token.cancel();
         self.join_subscriber_listener().await;
         self.subs.close().await;
         res
+    }
+
+    /// Handles the outcome of [`wait_for_shutdown_signal`](crate::core::shutdown::wait_for_shutdown_signal).
+    async fn on_shutdown_signal(&self, res: std::io::Result<()>) -> Result<(), RuntimeError> {
+        match res {
+            Ok(()) => {
+                self.bus.publish(Event::new(EventKind::ShutdownRequested));
+                self.drain_with_grace().await
+            }
+            Err(e) => Err(RuntimeError::SignalSetupFailed {
+                reason: Arc::from(e.to_string()),
+            }),
+        }
     }
 
     /// Cancels all tasks and waits up to `grace` for them to stop, force-aborting stragglers.
@@ -609,6 +617,48 @@ impl Supervisor {
 mod tests {
     use super::*;
     use crate::{TaskFn, TaskRef};
+
+    #[tokio::test]
+    async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
+        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+        let mut rx = sup.bus.subscribe();
+
+        let err = std::io::Error::other("signal registration failed");
+        let out = sup.on_shutdown_signal(Err(err)).await;
+
+        assert!(
+            matches!(out, Err(RuntimeError::SignalSetupFailed { .. })),
+            "a signal-setup error must surface as SignalSetupFailed, got {out:?}"
+        );
+
+        let mut saw_shutdown = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev.kind, EventKind::ShutdownRequested) {
+                saw_shutdown = true;
+            }
+        }
+        assert!(
+            !saw_shutdown,
+            "a signal-setup error must NOT masquerade as a shutdown request"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_signal_publishes_shutdown_requested() {
+        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+        let mut rx = sup.bus.subscribe();
+
+        let out = sup.on_shutdown_signal(Ok(())).await;
+        assert!(out.is_ok(), "a real signal drains gracefully: {out:?}");
+
+        let mut saw_shutdown = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev.kind, EventKind::ShutdownRequested) {
+                saw_shutdown = true;
+            }
+        }
+        assert!(saw_shutdown, "a real signal must publish ShutdownRequested");
+    }
 
     #[tokio::test]
     async fn shutdown_force_terminates_noncooperative_task_within_grace() {
