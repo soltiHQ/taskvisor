@@ -306,15 +306,19 @@ impl Registry {
 
     /// Spawns an actor and registers its handle under the given runtime identity.
     ///
-    /// On a duplicate label the optional `done` sender is dropped, which resolves a pending [`TaskWaiter`](crate::TaskWaiter) with `RuntimeError::ShuttingDown`;
-    /// `add_and_watch` callers never observe that, because they see `TaskAddFailed` first and the waiter is discarded before being handed out.
+    /// On a duplicate label the optional `done` sender is resolved with [`TaskOutcome::Rejected`](crate::TaskOutcome) (reason `already_exists`).
+    /// Plain `add_and_watch` callers still don't observe it: they see `TaskAddFailed` first and discard the waiter before it is handed out.
     async fn spawn_and_register(&self, id: TaskId, spec: TaskSpec, done: Option<OutcomeTx>) {
         let label: Arc<str> = Arc::from(spec.task().name());
 
         let mut st = self.state.write().await;
         if st.by_label.contains_key(&label) {
             drop(st);
-            drop(done);
+            if let Some(done) = done {
+                let _ = done.send(TaskOutcome::Rejected {
+                    reason: Arc::from("already_exists"),
+                });
+            }
             self.bus.publish(
                 Event::new(EventKind::TaskAddFailed)
                     .with_task(label)

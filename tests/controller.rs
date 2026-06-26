@@ -297,7 +297,6 @@ async fn shutdown_does_not_start_queued_tasks() {
     let (handle, collector) = served_controller(ControllerConfig::default());
 
     with_timeout(10, async {
-        // Occupy the slot with a long-running cooperative task.
         handle
             .submit(ControllerSpec::queue(
                 TaskSpec::restartable(make_coop("occupant")).with_slot("s"),
@@ -312,7 +311,6 @@ async fn shutdown_does_not_start_queued_tasks() {
             "occupant must be running before queueing the next task"
         );
 
-        // Queue a successor behind it.
         handle
             .submit(ControllerSpec::queue(
                 TaskSpec::restartable(make_coop("queued")).with_slot("s"),
@@ -560,6 +558,42 @@ async fn same_name_distinct_slots_both_admitted() {
             .await,
             "distinct slot keys run independently"
         );
+        let _ = handle.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_and_watch_duplicate_name_distinct_slots_resolves_rejected() {
+    let (handle, _c) = served_controller(ControllerConfig::default());
+    with_timeout(10, async {
+        let first = TaskSpec::restartable(make_coop("dup")).with_slot("s1");
+        handle
+            .submit(ControllerSpec::queue(first))
+            .await
+            .expect("first submit accepted");
+
+        assert!(
+            poll_until(Duration::from_secs(4), || async {
+                handle.is_alive("dup").await
+            })
+            .await,
+            "first task must be registered before the duplicate is submitted"
+        );
+
+        let (_id, waiter) = handle
+            .submit_and_watch(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("dup")).with_slot("s2"),
+            ))
+            .await
+            .expect("second submit_and_watch accepted into channel");
+
+        let result = waiter.wait().await;
+        assert!(
+            matches!(result, Ok(TaskOutcome::Rejected { .. })),
+            "duplicate task name in a distinct slot must resolve Ok(Rejected), got {result:?}"
+        );
+
         let _ = handle.shutdown().await;
     })
     .await;

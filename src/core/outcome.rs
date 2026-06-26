@@ -36,7 +36,7 @@
 //!   ownership transfers to exactly one resolution site, so the waiter is resolved once and never leaks.
 //! - Dropping a [`TaskWaiter`] is always safe: the matching `send` becomes a no-op.
 //! - The outcome reflects the **final** attempt only; per-attempt results are observable via [`Subscribe`](crate::Subscribe) events.
-//! - `Rejected` is controller-only: a submission that is never admitted (slot busy, queue full, superseded, removed while queued, shutting down) resolves there.
+//! - `Rejected` is observed only on the controller path: a submission that never ran - never admitted (slot busy, queue full, superseded, removed while queued, shutting down) or rejected at registration (duplicate task name) - resolves there.
 
 use std::sync::Arc;
 
@@ -65,7 +65,7 @@ use crate::identity::TaskId;
 /// | [`Canceled`](Self::Canceled)         | `TaskCanceled`, or `ActorExhausted` (reason `task_returned_canceled`) | cooperative stop                                         |
 /// | [`ForceAborted`](Self::ForceAborted) | `TaskRemoved` (reason `force_terminated_after_grace`)                 | ignored cancellation                                     |
 /// | [`Panicked`](Self::Panicked)         | `ActorDead` (reason `actor_panic`)                                    | actor-level panic (not a task-body panic)                |
-/// | [`Rejected`](Self::Rejected)         | `ControllerRejected` (reason = the same string)                       | never admitted; controller path only                     |
+/// | [`Rejected`](Self::Rejected)         | `ControllerRejected`, or `TaskAddFailed` (reason `already_exists`)     | never ran; controller path only                          |
 ///
 /// # Also
 ///
@@ -105,13 +105,13 @@ pub enum TaskOutcome {
     /// The actor itself panicked (a bug guard; panics in the **task body** are caught earlier and surface as [`Failed`](Self::Failed) after retries).
     Panicked,
 
-    /// The submission was never admitted into a running task:
+    /// The submission never ran:
     /// the slot was busy (`DropIfRunning`), the per-slot queue was full, the submission was superseded by a later `Replace`,
-    /// it was removed while still queued, or the controller was shutting down. **The task body never ran.**
+    /// it was removed while still queued, the controller was shutting down, or registration was rejected because the task name already exists. **The task body never ran.**
     ///
-    /// Only produced on the controller path ([`submit_and_watch`](crate::SupervisorHandle::submit_and_watch)).
+    /// Observed on the controller path ([`submit_and_watch`](crate::SupervisorHandle::submit_and_watch)).
     Rejected {
-        /// Why admission was refused (matches the `ControllerRejected` event reason).
+        /// Why the submission was refused (e.g. the `ControllerRejected` event reason, or `already_exists` for a duplicate-name registration rejection).
         reason: Arc<str>,
     },
 }
