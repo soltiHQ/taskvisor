@@ -35,9 +35,9 @@ impl TaskId {
         self.0
     }
 
-    /// `TaskId` from its raw value.
+    /// Reconstructs a `TaskId` from its raw value.
     #[inline]
-    pub fn from_raw(raw: u64) -> Self {
+    pub(crate) fn from_raw(raw: u64) -> Self {
         TaskId(raw)
     }
 }
