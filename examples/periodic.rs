@@ -9,7 +9,7 @@
 //!   *With `interval: None`, restarts happen immediately.*
 //! - The task itself is short-lived (print and exit).
 //!   The supervisor handles the scheduling loop: your task doesn't need its own `loop {}`.
-//! - `CancellationToken` is unused here because the task completes instantly.
+//! - The `TaskContext` is unused here because the task completes instantly.
 //!
 //! ## How it differs from a loop inside the task
 //!
@@ -46,7 +46,7 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let heartbeat: TaskRef = TaskFn::arc("heartbeat", |_ctx: CancellationToken| async move {
+    let heartbeat: TaskRef = TaskFn::arc("heartbeat", |_ctx: TaskContext| async move {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();

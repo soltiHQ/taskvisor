@@ -1,25 +1,24 @@
 //! Closure-based [`Task`] implementation.
 
 use std::{future::Future, sync::Arc};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::TaskError,
+    tasks::TaskContext,
     tasks::task::{BoxTaskFuture, Task},
 };
 
 /// Closure-based [`Task`] implementation.
 ///
-/// - Wraps `F: Fn(CancellationToken) -> Future`
+/// - Wraps `F: Fn(TaskContext) -> Future`
 /// - Each [`spawn`](Task::spawn) invokes the closure to produce a fresh, independent future.
 ///
 /// ## Stateless task
 ///
 /// ```rust
-/// use tokio_util::sync::CancellationToken;
-/// use taskvisor::{TaskFn, TaskRef, TaskError};
+/// use taskvisor::{TaskContext, TaskFn, TaskRef, TaskError};
 ///
-/// let worker: TaskRef = TaskFn::arc("worker", |_ctx: CancellationToken| async move {
+/// let worker: TaskRef = TaskFn::arc("worker", |_ctx: TaskContext| async move {
 ///     // do some work and complete
 ///     Ok(())
 /// });
@@ -30,14 +29,13 @@ use crate::{
 /// ```rust
 /// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 /// use std::time::Duration;
-/// use tokio_util::sync::CancellationToken;
 ///
-/// use taskvisor::{TaskFn, TaskRef, TaskError};
+/// use taskvisor::{TaskContext, TaskFn, TaskRef, TaskError};
 ///
 /// let counter = Arc::new(AtomicU64::new(0));
 /// let task: TaskRef = TaskFn::arc("counter", {
 ///     let counter = counter.clone();
-///     move |ctx: CancellationToken| {
+///     move |ctx: TaskContext| {
 ///         // clone per-attempt; the underlying value persists across restarts.
 ///         let counter = counter.clone();
 ///         async move {
@@ -81,14 +79,14 @@ impl<F> TaskFn<F> {
 
 impl<Fnc, Fut> Task for TaskFn<Fnc>
 where
-    Fnc: Fn(CancellationToken) -> Fut + Send + Sync + 'static,
+    Fnc: Fn(TaskContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn spawn(&self, ctx: CancellationToken) -> BoxTaskFuture {
+    fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture {
         let fut = (self.f)(ctx);
         Box::pin(fut)
     }

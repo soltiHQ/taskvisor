@@ -61,7 +61,7 @@ use taskvisor::prelude::*;
 
 /// A job that runs for `dur`, observing cancellation.
 fn job(name: &'static str, dur: Duration) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: CancellationToken| async move {
+    let task: TaskRef = TaskFn::arc(name, move |ctx: TaskContext| async move {
         tokio::select! {
             _ = tokio::time::sleep(dur) => Ok(()),
             _ = ctx.cancelled() => Err(TaskError::Canceled),

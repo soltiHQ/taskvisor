@@ -128,10 +128,10 @@ mod tests {
     }
 
     fn make_spec(name: &str) -> TaskSpec {
+        use crate::TaskContext;
         use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef};
-        use tokio_util::sync::CancellationToken;
 
-        let task: TaskRef = TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) });
+        let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
         TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
     }
 }

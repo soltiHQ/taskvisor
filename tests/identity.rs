@@ -359,7 +359,7 @@ async fn cancel_with_timeout_true_for_cooperative_task() {
 async fn cancel_with_timeout_errors_on_stuck_task() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
-        let task = TaskFn::arc("stubborn", |_ctx: CancellationToken| async move {
+        let task = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
             Ok(())
         });
@@ -401,7 +401,7 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
     let handle = sup.serve();
 
     with_timeout(10, async {
-        let task = TaskFn::arc("stuck-runner", |_ctx: CancellationToken| async move {
+        let task = TaskFn::arc("stuck-runner", |_ctx: TaskContext| async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
             Ok(())
         });

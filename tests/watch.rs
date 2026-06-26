@@ -172,7 +172,7 @@ async fn failed_outcome_after_task_panic_with_never_policy() {
 async fn spurious_canceled_return_resolves_canceled_outcome() {
     let (_sup, handle) = supervisor();
 
-    let liar: TaskRef = TaskFn::arc("liar-watch", |_ctx: CancellationToken| async {
+    let liar: TaskRef = TaskFn::arc("liar-watch", |_ctx: TaskContext| async {
         Err(TaskError::Canceled)
     });
     let (_id, waiter) = handle
@@ -201,7 +201,7 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let stubborn: TaskRef = TaskFn::arc("stubborn-watch", |_ctx: CancellationToken| async {
+    let stubborn: TaskRef = TaskFn::arc("stubborn-watch", |_ctx: TaskContext| async {
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     });
@@ -274,7 +274,7 @@ async fn force_aborted_outcome_for_noncooperative_task() {
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: CancellationToken| async move {
+    let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(())
     });

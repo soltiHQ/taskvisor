@@ -9,8 +9,7 @@
 //! - `TaskSpec::once(task)` creates a one-shot spec (`RestartPolicy::Never`).
 //! - `Supervisor::run(specs)` blocks until all tasks finish or Ctrl+C is pressed.
 //!
-//! The `CancellationToken` parameter is unused here because the task completes instantly.
-//!
+//! The `TaskContext` parameter is unused here because the task completes instantly.
 //! For long-running tasks that **must react to shut down**, see `worker.rs`.
 //!
 //! ## Runtime flavor
@@ -36,7 +35,7 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let task: TaskRef = TaskFn::arc("hello", |_ctx: CancellationToken| async move {
+    let task: TaskRef = TaskFn::arc("hello", |_ctx: TaskContext| async move {
         println!("Hello from taskvisor!");
         Ok(())
     });

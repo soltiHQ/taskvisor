@@ -10,7 +10,7 @@ use taskvisor::prelude::*;
 
 /// Task that ignores cancellation and sleeps far longer than any test grace.
 fn make_stubborn(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: CancellationToken| async move {
+    TaskFn::arc(name, |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
         Ok(())
     })
@@ -206,7 +206,7 @@ async fn run_blocks_while_gated_task_alive_then_unblocks_on_completion() {
     let gate = Arc::new(tokio::sync::Notify::new());
 
     let g = gate.clone();
-    let task = TaskFn::arc("gated", move |_ctx: CancellationToken| {
+    let task = TaskFn::arc("gated", move |_ctx: TaskContext| {
         let g = g.clone();
         async move {
             g.notified().await;

@@ -57,7 +57,7 @@ use taskvisor::prelude::*;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One-shot: runs once and exits
-    let one_shot: TaskRef = TaskFn::arc("one-shot", |_ctx: CancellationToken| async move {
+    let one_shot: TaskRef = TaskFn::arc("one-shot", |_ctx: TaskContext| async move {
         println!("[one-shot] doing work...");
         tokio::time::sleep(Duration::from_millis(200)).await;
         println!("[one-shot] done.");
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resilient: fails first 2 attempts, succeeds on 3rd
     let attempt = Arc::new(AtomicU32::new(0));
-    let resilient: TaskRef = TaskFn::arc("resilient", move |_ctx: CancellationToken| {
+    let resilient: TaskRef = TaskFn::arc("resilient", move |_ctx: TaskContext| {
         let attempt = Arc::clone(&attempt);
         async move {
             let n = attempt.fetch_add(1, Ordering::Relaxed) + 1;
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Always-on: repeats every 500ms until Ctrl+C
     let cycle = Arc::new(AtomicU32::new(0));
-    let always_on: TaskRef = TaskFn::arc("always-on", move |_ctx: CancellationToken| {
+    let always_on: TaskRef = TaskFn::arc("always-on", move |_ctx: TaskContext| {
         let cycle = Arc::clone(&cycle);
         async move {
             let n = cycle.fetch_add(1, Ordering::Relaxed) + 1;

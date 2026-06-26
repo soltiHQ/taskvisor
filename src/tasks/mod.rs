@@ -40,9 +40,9 @@
 //!
 //! ```rust
 //! use taskvisor::{TaskFn, TaskRef, TaskSpec, TaskError};
-//! use tokio_util::sync::CancellationToken;
+//! use taskvisor::TaskContext;
 //!
-//! let task: TaskRef = TaskFn::arc("worker", |ctx: CancellationToken| async move {
+//! let task: TaskRef = TaskFn::arc("worker", |ctx: TaskContext| async move {
 //!     // ... do work, observe ctx.cancelled() ...
 //!     Ok::<(), TaskError>(())
 //! });
@@ -51,6 +51,9 @@
 //! // TaskSpec::restartable(task);          // restart on failure
 //! // TaskSpec::with_defaults(task, &cfg);  // inherit from config
 //! ```
+
+mod context;
+pub use context::TaskContext;
 
 mod task;
 pub use task::{BoxTaskFuture, Task, TaskRef};

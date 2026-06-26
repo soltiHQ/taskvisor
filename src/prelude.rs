@@ -12,7 +12,7 @@ pub use crate::core::{
 };
 
 // Tasks
-pub use crate::tasks::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
+pub use crate::tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
 
 // Policies
 pub use crate::policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
@@ -29,5 +29,7 @@ pub use crate::error::{RuntimeError, TaskError};
 // Runtime task identity
 pub use crate::identity::TaskId;
 
-// Re-export CancellationToken.
+// Raw cancellation token — only when interop is explicitly opted into.
+// By default the prelude stays free of `tokio-util` types (see `TaskContext`).
+#[cfg(feature = "tokio-util-interop")]
 pub use tokio_util::sync::CancellationToken;

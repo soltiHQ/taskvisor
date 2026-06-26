@@ -28,9 +28,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use taskvisor::TaskContext;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
     BackoffPolicy, ControllerConfig, ControllerSpec, Event, EventKind, RestartPolicy, Subscribe,
@@ -114,12 +114,12 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
     TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
 }
 
 fn short_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |ctx: CancellationToken| async move {
+    let task: TaskRef = TaskFn::arc(name, |ctx: TaskContext| async move {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(5)) => Ok(()),
             _ = ctx.cancelled() => Ok(()),

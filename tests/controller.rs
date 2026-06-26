@@ -24,7 +24,7 @@ fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventColle
 
 fn logging_once(name: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
     let n = name.to_string();
-    TaskFn::arc(name, move |_ctx: CancellationToken| {
+    TaskFn::arc(name, move |_ctx: TaskContext| {
         let log = log.clone();
         let n = n.clone();
         async move {

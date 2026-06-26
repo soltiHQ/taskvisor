@@ -5,7 +5,7 @@
 //! - delays per [`BackoffPolicy`],
 //! - optional per-attempt timeout,
 //!
-//! *Cooperative cancellation via `CancellationToken`.*
+//! *Cooperative cancellation via the task's `TaskContext`.*
 //!
 //! ## Event flow
 //!
@@ -369,6 +369,7 @@ impl TaskActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TaskContext;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -408,7 +409,7 @@ mod tests {
         fn name(&self) -> &str {
             "ok"
         }
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Ok(()) })
         }
     }
@@ -418,7 +419,7 @@ mod tests {
         fn name(&self) -> &str {
             "fail"
         }
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async {
                 Err(TaskError::Fail {
                     reason: "boom".into(),
@@ -433,7 +434,7 @@ mod tests {
         fn name(&self) -> &str {
             "fatal"
         }
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async {
                 Err(TaskError::Fatal {
                     reason: "fatal".into(),
@@ -457,7 +458,7 @@ mod tests {
         fn name(&self) -> &str {
             "counted"
         }
-        fn spawn(&self, _ctx: CancellationToken) -> BoxFut {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             let prev = self.remaining.fetch_sub(1, Ordering::SeqCst);
             if prev > 0 {
                 Box::pin(async {

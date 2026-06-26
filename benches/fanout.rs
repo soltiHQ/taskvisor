@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use taskvisor::TaskContext;
 use tokio::runtime::Runtime;
-use tokio_util::sync::CancellationToken;
 
 use taskvisor::{
     BackoffPolicy, Event, RestartPolicy, Subscribe, Supervisor, SupervisorConfig, TaskFn, TaskRef,
@@ -82,7 +82,7 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: CancellationToken| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
     TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
 }
 
