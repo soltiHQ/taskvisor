@@ -6,9 +6,7 @@
 //!
 //! ```text
 //! Idle ──submit──► Running ──TaskRemoved──► Idle (or start next from queue)
-//!                     │
 //!                     ├──Replace──► Terminating ──TaskRemoved──► Running (queued next)
-//!                     │
 //!                     └──DropIfRunning──► rejected
 //! ```
 //!
@@ -232,11 +230,29 @@ impl Controller {
                 }
             }
         }
+        self.finalize_pending_on_shutdown(&mut rx);
+        Ok(())
+    }
+
+    /// Resolves every still-pending watched submission as `Rejected` during shutdown.
+    fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<Submission>) {
         let pending: Vec<TaskId> = self.watchers.iter().map(|e| *e.key()).collect();
         for id in pending {
             self.finalize_rejected(id, "controller_shutting_down");
         }
-        Ok(())
+        while let Ok(sub) = rx.try_recv() {
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(sub.spec.slot_name().to_owned())
+                    .with_id(sub.id)
+                    .with_reason("controller_shutting_down"),
+            );
+            if let Some(done) = sub.done {
+                let _ = done.send(TaskOutcome::Rejected {
+                    reason: Arc::from("controller_shutting_down"),
+                });
+            }
+        }
     }
 
     /// Recovers slots wedged by a bus lag (a missed `TaskAdded`/`TaskRemoved`).
@@ -880,6 +896,32 @@ mod tests {
         assert!(
             matches!(slot.status, SlotStatus::Running { .. }),
             "non-TaskRemoved events should not affect slot state"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalizes_buffered_submission_as_rejected() {
+        let bus = Bus::new(64);
+        let ctrl = make_controller(ControllerConfig::default(), bus);
+
+        let task: TaskRef = TaskFn::arc("buffered", |_ctx: CancellationToken| async { Ok(()) });
+        let (_id, waiter) = ctrl
+            .handle()
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task).with_slot("s")))
+            .await
+            .expect("submission accepted into channel");
+
+        let mut rx = ctrl.rx.write().await.take().expect("rx present");
+        ctrl.finalize_pending_on_shutdown(&mut rx);
+        drop(rx);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter must resolve, not hang")
+            .expect("waiter must resolve to an outcome, not a dropped sender");
+        assert!(
+            matches!(outcome, TaskOutcome::Rejected { .. }),
+            "a buffered submission on shutdown must resolve Rejected, got {outcome:?}"
         );
     }
 
