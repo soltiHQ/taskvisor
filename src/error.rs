@@ -52,6 +52,12 @@ pub enum RuntimeError {
         /// How long we waited.
         timeout: Duration,
     },
+    /// OS signal-listener registration failed; signal-based shutdown is unavailable.
+    #[error("failed to install shutdown signal handlers: {reason}")]
+    SignalSetupFailed {
+        /// The underlying I/O error from signal registration, rendered as text.
+        reason: Arc<str>,
+    },
     /// The supervisor runtime is shutting down; the command channel is closed.
     #[error("supervisor is shutting down")]
     ShuttingDown,
@@ -66,6 +72,7 @@ impl RuntimeError {
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
             RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
+            RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
         }
     }
