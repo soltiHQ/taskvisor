@@ -236,6 +236,8 @@ impl Controller {
 
     /// Resolves every still-pending watched submission as `Rejected` during shutdown.
     fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<Submission>) {
+        rx.close();
+
         let pending: Vec<TaskId> = self.watchers.iter().map(|e| *e.key()).collect();
         for id in pending {
             self.finalize_rejected(id, "controller_shutting_down");
@@ -923,6 +925,27 @@ mod tests {
             matches!(outcome, TaskOutcome::Rejected { .. }),
             "a buffered submission on shutdown must resolve Rejected, got {outcome:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_after_shutdown_finalize_is_rejected_not_leaked() {
+        let bus = Bus::new(64);
+        let ctrl = make_controller(ControllerConfig::default(), bus);
+
+        let mut rx = ctrl.rx.write().await.take().expect("rx present");
+        ctrl.finalize_pending_on_shutdown(&mut rx);
+
+        let task: TaskRef = TaskFn::arc("late", |_ctx: CancellationToken| async { Ok(()) });
+        let result = ctrl
+            .handle()
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task).with_slot("s")))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a submission after shutdown finalization must be rejected, not handed a doomed waiter"
+        );
+        drop(rx);
     }
 
     fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
