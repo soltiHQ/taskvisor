@@ -547,9 +547,7 @@ impl Supervisor {
                 self.bus.publish(Event::new(EventKind::ShutdownRequested));
                 self.drain_with_grace().await
             }
-            Err(e) => Err(RuntimeError::SignalSetupFailed {
-                reason: Arc::from(e.to_string()),
-            }),
+            Err(e) => Err(RuntimeError::SignalSetupFailed { source: e }),
         }
     }
 

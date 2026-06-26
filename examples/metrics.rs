@@ -114,10 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if n <= 3 {
                 println!("[flaky-job] attempt #{n}: fail");
-                Err(TaskError::Fail {
-                    reason: format!("attempt #{n}"),
-                    exit_code: None,
-                })
+                Err(TaskError::fail(format!("attempt #{n}")))
             } else {
                 println!("[flaky-job] attempt #{n}: success!");
                 Ok(())

@@ -134,19 +134,13 @@ pub fn make_ok_once(name: &str) -> TaskRef {
 
 pub fn make_fail(name: &str, exit_code: Option<i32>) -> TaskRef {
     TaskFn::arc(name, move |_ctx: TaskContext| async move {
-        Err(TaskError::Fail {
-            reason: "boom".to_string(),
-            exit_code,
-        })
+        Err(TaskError::fail("boom").with_exit_code(exit_code))
     })
 }
 
 pub fn make_fatal(name: &str, exit_code: Option<i32>) -> TaskRef {
     TaskFn::arc(name, move |_ctx: TaskContext| async move {
-        Err(TaskError::Fatal {
-            reason: "unrecoverable".to_string(),
-            exit_code,
-        })
+        Err(TaskError::fatal("unrecoverable").with_exit_code(exit_code))
     })
 }
 
