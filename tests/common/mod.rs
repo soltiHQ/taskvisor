@@ -151,10 +151,11 @@ pub fn make_panic(name: &str) -> TaskRef {
 }
 
 pub fn fast_backoff() -> BackoffPolicy {
-    BackoffPolicy {
-        first: Duration::from_millis(1),
-        max: Duration::from_millis(1),
-        factor: 1.0,
-        jitter: JitterPolicy::None,
-    }
+    BackoffPolicy::new(
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        1.0,
+        JitterPolicy::None,
+    )
+    .expect("valid backoff")
 }

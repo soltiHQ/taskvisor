@@ -122,11 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(flaky).with_backoff(BackoffPolicy {
-        first: Duration::from_millis(100),
-        factor: 1.0,
-        ..BackoffPolicy::default()
-    });
+    // first=100ms, factor=1.0 are the defaults already.
+    let spec = TaskSpec::restartable(flaky).with_backoff(BackoffPolicy::default());
 
     let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as _];
     let sup = Supervisor::new(SupervisorConfig::default(), subs);

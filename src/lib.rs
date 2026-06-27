@@ -150,7 +150,7 @@ mod tasks;
 pub use tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
 
 mod policies;
-pub use policies::{BackoffPolicy, JitterPolicy, RestartPolicy};
+pub use policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
 mod events;
 pub use events::{BackoffSource, Event, EventKind};

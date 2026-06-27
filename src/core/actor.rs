@@ -392,12 +392,13 @@ mod tests {
     type BoxFut = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
     fn fast_backoff() -> BackoffPolicy {
-        BackoffPolicy {
-            first: Duration::from_millis(1),
-            max: Duration::from_millis(1),
-            factor: 1.0,
-            jitter: crate::JitterPolicy::None,
-        }
+        BackoffPolicy::new(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            1.0,
+            crate::JitterPolicy::None,
+        )
+        .expect("valid backoff")
     }
 
     fn params(restart: RestartPolicy, max_retries: u32) -> TaskActorParams {

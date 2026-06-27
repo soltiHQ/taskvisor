@@ -17,7 +17,7 @@
 //! - `RestartPolicy::OnFailure` (recommended default for most tasks).
 
 mod backoff;
-pub use backoff::BackoffPolicy;
+pub use backoff::{BackoffError, BackoffPolicy};
 
 mod restart;
 pub use restart::RestartPolicy;

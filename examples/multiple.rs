@@ -100,12 +100,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval: Some(Duration::from_millis(500)),
         }),
         TaskSpec::restartable(resilient)
-            .with_backoff(BackoffPolicy {
-                first: Duration::from_millis(200),
-                max: Duration::from_secs(5),
-                factor: 2.0,
-                ..BackoffPolicy::default()
-            })
+            .with_backoff(
+                BackoffPolicy::new(
+                    Duration::from_millis(200),
+                    Duration::from_secs(5),
+                    2.0,
+                    JitterPolicy::None,
+                )
+                .expect("valid backoff"),
+            )
             .with_max_retries(3),
     ];
 
