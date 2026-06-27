@@ -34,7 +34,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::Notify, sync::broadcast, sync::mpsc, time::timeout};
+use tokio::{sync::broadcast, sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{
@@ -59,7 +59,6 @@ pub(crate) struct SupervisorCore {
     subs: Arc<SubscriberSet>,
     alive: Arc<AliveTracker>,
     registry: Arc<Registry>,
-    ready: Arc<Notify>,
     runtime_token: CancellationToken,
     started: AtomicBool,
     cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
@@ -93,7 +92,6 @@ impl SupervisorCore {
             alive,
             registry,
             runtime_token,
-            ready: Arc::new(Notify::new()),
             started: AtomicBool::new(false),
             cmd_tx,
             subscriber_handle: std::sync::Mutex::new(None),
@@ -184,7 +182,6 @@ impl SupervisorCore {
         }
         self.subscriber_listener();
         self.registry.clone().spawn_listener();
-        self.ready.notify_waiters();
     }
 
     /// Runs task specifications until completion or shutdown signal.
