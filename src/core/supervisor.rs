@@ -470,6 +470,17 @@ impl Supervisor {
         }
     }
 
+    /// Returns a point-in-time snapshot of the controller's slots, or `None` if no controller is configured.
+    #[cfg(feature = "controller")]
+    pub(crate) async fn controller_snapshot(
+        &self,
+    ) -> Option<crate::controller::ControllerSnapshot> {
+        match self.controller.get() {
+            Some(ctrl) => Some(ctrl.snapshot().await),
+            None => None,
+        }
+    }
+
     /// Listens to the internal event bus and distributes each received [`Event`] to all active subscribers.
     ///
     /// The listener also updates the [`AliveTracker`] before distributing them, to keep the latest per-task state in sync.

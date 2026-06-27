@@ -116,6 +116,9 @@
 //! - Slots advance to next task **only** after `TaskRemoved`.
 //! - `Replace` is **latest-wins** (head replace); `Queue` is FIFO.
 
+mod view;
+pub use view::{ControllerSnapshot, SlotStatusKind, SlotView};
+
 mod admission;
 pub use admission::AdmissionPolicy;
 

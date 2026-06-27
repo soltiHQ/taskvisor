@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## See it recover from failure
 
 A task that fails twice, then succeeds - taskvisor retries it with backoff and publishes an event for every step. 
-A subscriber prints them, so you *see* the supervision happen:
+A subscriber prints them, and you *see* the supervision happen:
 
 ```rust,no_run
 use std::sync::Arc;
@@ -447,10 +447,16 @@ let id = handle.submit(ControllerSpec::queue(spec)).await?;
 handle.submit(ControllerSpec::replace(spec)).await?;
 handle.submit(ControllerSpec::drop_if_running(spec)).await?;
 
-// ...or await the outcome directly. If the slot never admits it (busy, queue full,
-// superseded, removed, shutting down) the waiter resolves to TaskOutcome::Rejected.
+// ...or await the outcome directly. If the slot never admits it (busy, queue full, superseded, removed, shutting down) the waiter resolves to TaskOutcome::Rejected.
 let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
 let outcome = waiter.wait().await?;
+
+// Inspect the controller's live state directly - no parsing of bus events.
+// `controller_snapshot()` is the slot-path analogue of `list()`/`snapshot()`.
+if let Some(snap) = handle.controller_snapshot().await {
+    println!("{} running, {} queued", snap.running_count(), snap.total_queued());
+    let depth = snap.slot("deploy").map_or(0, |s| s.queue_depth);
+}
 
 handle.shutdown().await?;
 ```

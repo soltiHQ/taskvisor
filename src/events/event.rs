@@ -281,6 +281,8 @@ pub struct Event {
     pub timeout_ms: Option<u32>,
     /// Backoff delay before next attempt in milliseconds (compact).
     pub delay_ms: Option<u32>,
+    /// Wall-clock duration of the attempt in milliseconds (compact).
+    pub duration_ms: Option<u32>,
     /// Human-readable reason (errors, overflow details, etc.).
     pub reason: Option<Arc<str>>,
     /// Attempt count (starting from 1).
@@ -312,6 +314,7 @@ impl Event {
             backoff_source: None,
             timeout_ms: None,
             delay_ms: None,
+            duration_ms: None,
             attempt: None,
             reason: None,
             task: None,
@@ -359,6 +362,15 @@ impl Event {
     pub fn with_delay(mut self, d: Duration) -> Self {
         let ms = d.as_millis().min(u128::from(u32::MAX)) as u32;
         self.delay_ms = Some(ms);
+        self
+    }
+
+    /// Attaches the attempt's wall-clock duration (stored as milliseconds).
+    #[inline]
+    #[must_use]
+    pub fn with_duration(mut self, d: Duration) -> Self {
+        let ms = d.as_millis().min(u128::from(u32::MAX)) as u32;
+        self.duration_ms = Some(ms);
         self
     }
 
@@ -460,6 +472,9 @@ impl std::fmt::Debug for Event {
         if let Some(delay_ms) = self.delay_ms {
             d.field("delay_ms", &delay_ms);
         }
+        if let Some(duration_ms) = self.duration_ms {
+            d.field("duration_ms", &duration_ms);
+        }
         if let Some(ref src) = self.backoff_source {
             d.field("backoff_source", src);
         }
@@ -490,6 +505,21 @@ mod tests {
         let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
         let ev = Event::new(EventKind::BackoffScheduled).with_delay(huge);
         assert_eq!(ev.delay_ms, Some(u32::MAX));
+    }
+
+    #[test]
+    fn with_duration_sets_and_clamps() {
+        let ev = Event::new(EventKind::TaskStopped).with_duration(Duration::from_millis(42));
+        assert_eq!(ev.duration_ms, Some(42));
+
+        let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
+        let clamped = Event::new(EventKind::TaskStopped).with_duration(huge);
+        assert_eq!(clamped.duration_ms, Some(u32::MAX));
+    }
+
+    #[test]
+    fn new_event_has_no_duration() {
+        assert_eq!(Event::new(EventKind::TaskStopped).duration_ms, None);
     }
 
     #[test]

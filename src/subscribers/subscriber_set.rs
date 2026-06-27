@@ -106,10 +106,9 @@ impl SubscriberSet {
             let handle = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
                     // SAFETY (unwind):
-                    // Each subscriber runs in its own worker task with its own mpsc channel:
-                    // a panic cannot corrupt another subscriber's state.
+                    // Each subscriber runs in its own worker task with its own mpsc channel: a panic cannot corrupt another subscriber's state.
                     //
-                    // `on_event` is synchronous, so a single `catch_unwind` call suffices.
+                    // `on_event` is synchronous: a single `catch_unwind` call suffices.
                     //
                     // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex will be poisoned, which is the expected Rust behavior.
                     // The worker continues processing the next event after reporting the panic via SubscriberPanicked.
