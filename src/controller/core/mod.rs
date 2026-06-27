@@ -46,8 +46,8 @@ use super::{
 };
 
 mod introspect;
-mod shutdown;
 mod recovery;
+mod shutdown;
 
 struct Submission {
     id: TaskId,
