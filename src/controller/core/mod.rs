@@ -5,9 +5,9 @@
 //! ## State machine (per slot)
 //!
 //! ```text
-//! Idle ──submit──► Running ──TaskRemoved──► Idle (or start next from queue)
-//!                     ├──Replace──► Terminating ──TaskRemoved──► Running (queued next)
-//!                     └──DropIfRunning──► rejected
+//! Idle ── submit ──► Running ── TaskRemoved ──► Idle (or start next from queue)
+//!                     ├──Replace ──► Terminating/TaskRemoved ──► Running (queued next)
+//!                     └──DropIfRunning ──► rejected
 //! ```
 //!
 //! ## Architecture
@@ -21,7 +21,7 @@
 
 use std::{
     sync::{Arc, Weak},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use dashmap::DashMap;
@@ -43,8 +43,11 @@ use super::{
     error::ControllerError,
     slot::{SlotState, SlotStatus},
     spec::ControllerSpec,
-    view::{ControllerSnapshot, SlotStatusKind, SlotView},
 };
+
+mod introspect;
+mod shutdown;
+mod recovery;
 
 struct Submission {
     id: TaskId,
@@ -182,39 +185,6 @@ impl Controller {
         }
     }
 
-    /// Builds a point-in-time [`ControllerSnapshot`] of all tracked slots.
-    pub(crate) async fn snapshot(&self) -> ControllerSnapshot {
-        let keys: Vec<Arc<str>> = self.slots.iter().map(|e| Arc::clone(e.key())).collect();
-
-        let mut slots = Vec::with_capacity(keys.len());
-        for key in keys {
-            let Some(slot_arc) = self.slots.get(&*key).map(|e| e.clone()) else {
-                continue;
-            };
-            let slot = slot_arc.lock().await;
-            let (status, status_for) = match slot.status {
-                SlotStatus::Idle => (SlotStatusKind::Idle, Duration::ZERO),
-                SlotStatus::Admitting { since } => (SlotStatusKind::Admitting, since.elapsed()),
-                SlotStatus::Running { started_at } => {
-                    (SlotStatusKind::Running, started_at.elapsed())
-                }
-                SlotStatus::Terminating { cancelled_at } => {
-                    (SlotStatusKind::Terminating, cancelled_at.elapsed())
-                }
-            };
-            slots.push(SlotView {
-                slot: Arc::clone(&key),
-                status,
-                running: slot.running_id,
-                queue_depth: slot.queue.len(),
-                status_for,
-            });
-        }
-
-        slots.sort_by(|a, b| a.slot.cmp(&b.slot));
-        ControllerSnapshot { slots }
-    }
-
     /// Starts the controller loop (spawns in background).
     pub fn run(self: Arc<Self>, token: CancellationToken) {
         let bus = self.bus.clone();
@@ -266,110 +236,6 @@ impl Controller {
         }
         self.finalize_pending_on_shutdown(&mut rx);
         Ok(())
-    }
-
-    /// Resolves every still-pending watched submission as `Rejected` during shutdown.
-    fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<Submission>) {
-        rx.close();
-
-        let pending: Vec<TaskId> = self.watchers.iter().map(|e| *e.key()).collect();
-        for id in pending {
-            self.finalize_rejected(id, "controller_shutting_down");
-        }
-        while let Ok(sub) = rx.try_recv() {
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task(sub.spec.slot_name().to_owned())
-                    .with_id(sub.id)
-                    .with_reason("controller_shutting_down"),
-            );
-            if let Some(done) = sub.done {
-                let _ = done.send(TaskOutcome::Rejected {
-                    reason: Arc::from("controller_shutting_down"),
-                });
-            }
-        }
-    }
-
-    /// Recovers slots wedged by a bus lag (a missed `TaskAdded`/`TaskRemoved`).
-    async fn recover_stale_slots(&self) {
-        const RECOVERY_DEADLINE: Duration = Duration::from_secs(5);
-
-        let Some(sup) = self.supervisor.upgrade() else {
-            return;
-        };
-
-        let slot_keys: Vec<Arc<str>> = self
-            .slots
-            .iter()
-            .map(|entry| Arc::clone(entry.key()))
-            .collect();
-
-        for slot_name in slot_keys {
-            let Some(slot_arc) = self.slots.get(&*slot_name).map(|e| e.clone()) else {
-                continue;
-            };
-            let mut slot = slot_arc.lock().await;
-
-            if matches!(slot.status, SlotStatus::Idle) {
-                continue;
-            }
-            match slot.status {
-                SlotStatus::Admitting { since } if since.elapsed() < RECOVERY_DEADLINE => continue,
-                SlotStatus::Terminating { cancelled_at }
-                    if cancelled_at.elapsed() < RECOVERY_DEADLINE =>
-                {
-                    continue;
-                }
-                _ => {}
-            }
-
-            let alive = match slot.running_id {
-                Some(rid) => sup.contains_id(rid).await,
-                None => false,
-            };
-            if alive {
-                match slot.status {
-                    SlotStatus::Admitting { .. } => {
-                        slot.status = SlotStatus::Running {
-                            started_at: Instant::now(),
-                        };
-                        self.bus.publish(
-                            Event::new(EventKind::ControllerSlotTransition)
-                                .with_task(Arc::clone(&slot_name))
-                                .with_reason("admitting→running (lag recovery)"),
-                        );
-                    }
-                    SlotStatus::Terminating { .. } => {
-                        if let Some(rid) = slot.running_id
-                            && let Err(e) = sup.remove(rid)
-                        {
-                            self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task(Arc::clone(&slot_name))
-                                    .with_reason(format!("recovery_remove_failed: {e}")),
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            if let Some(id) = slot.running_id.take() {
-                self.running.remove(&id);
-            }
-            slot.status = SlotStatus::Idle;
-
-            if !self.is_shutting_down() {
-                self.start_next_from_queue(&sup, &mut slot, &slot_name);
-            }
-
-            if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
-                drop(slot);
-                self.slots.remove(&*slot_name);
-            }
-        }
     }
 
     /// Applies the admission policy for a new submission.
@@ -437,8 +303,7 @@ impl Controller {
                                 .with_reason(reason.clone()),
                         );
                         self.finalize_rejected(id, &reason);
-                        drop(slot);
-                        self.slots.remove(&*slot_name);
+                        self.gc_if_idle(&slot_name, slot);
                     }
                 }
             }
@@ -581,10 +446,7 @@ impl Controller {
                     .with_reason("removed_from_queue"),
             );
             self.finalize_rejected(id, "removed_from_queue");
-            if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
-                drop(slot);
-                self.slots.remove(&*slot_name);
-            }
+            self.gc_if_idle(&slot_name, slot);
             return;
         }
     }
@@ -672,10 +534,7 @@ impl Controller {
             self.start_next_from_queue(&sup, &mut slot, &slot_name);
         }
 
-        if matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty() {
-            drop(slot);
-            self.slots.remove(&*slot_name);
-        }
+        self.gc_if_idle(&slot_name, slot);
     }
 
     /// Admits `task_spec` into the slot under its **pre-minted** identity,
@@ -743,6 +602,18 @@ impl Controller {
             .clone()
     }
 
+    /// Garbage-collects a slot: releases the guard, then drops the slot from the map iff it is `Idle` with an empty queue.
+    ///
+    /// A slot is tracked only while it is busy or has queued work.
+    #[inline]
+    fn gc_if_idle(&self, slot_name: &Arc<str>, slot: tokio::sync::MutexGuard<'_, SlotState>) {
+        let collect = matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty();
+        drop(slot);
+        if collect {
+            self.slots.remove(&**slot_name);
+        }
+    }
+
     #[inline]
     fn reject_if_full(&self, slot_name: &str, id: TaskId, slot_len: usize) -> bool {
         if slot_len >= self.config.max_slot_queue {
@@ -788,6 +659,7 @@ mod tests {
     use super::*;
     use crate::TaskContext;
     use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef, TaskSpec};
+    use std::time::Duration;
 
     fn make_spec(name: &str) -> TaskSpec {
         let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
