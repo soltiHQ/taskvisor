@@ -92,10 +92,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let spec = TaskSpec::restartable(flaky)
-        .with_backoff(BackoffPolicy {
-            first: Duration::from_millis(20),
-            ..BackoffPolicy::default()
-        })
+        .with_backoff(
+            BackoffPolicy::new(
+                Duration::from_millis(20),
+                Duration::from_secs(30),
+                1.0,
+                JitterPolicy::None,
+            )
+            .expect("valid backoff"),
+        )
         .with_max_retries(2);
     match handle
         .add_and_watch(spec, ADD_TIMEOUT)

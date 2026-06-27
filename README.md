@@ -150,10 +150,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Restart on failure, with a short backoff between attempts.
-    let spec = TaskSpec::restartable(flaky).with_backoff(BackoffPolicy {
-        first: Duration::from_millis(50),
-        ..BackoffPolicy::default()
-    });
+    let backoff = BackoffPolicy::new(
+        Duration::from_millis(50),
+        Duration::from_secs(30),
+        1.0,
+        JitterPolicy::None,
+    )
+    .unwrap();
+    let spec = TaskSpec::restartable(flaky).with_backoff(backoff);
 
     let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Printer)];
     Supervisor::new(SupervisorConfig::default(), subs).run(vec![spec]).await?;
@@ -297,12 +301,14 @@ do_work().await
 use std::time::Duration;
 use taskvisor::{BackoffPolicy, JitterPolicy};
 
-let backoff = BackoffPolicy {
-    first: Duration::from_millis(200),
-    max: Duration::from_secs(30),
-    factor: 2.0,                    // 200ms -> 400ms -> 800ms -> ...
-    jitter: JitterPolicy::Equal,    // recommended: [delay/2, delay]
-};
+let backoff = BackoffPolicy::new(
+    Duration::from_millis(200),     // first
+    Duration::from_secs(30),        // max
+    2.0,                            // factor: 200ms -> 400ms -> 800ms -> ...
+    JitterPolicy::Equal,            // recommended: [delay/2, delay]
+)
+.unwrap();
+// optional: .with_floor(Duration::from_millis(50)) to keep jittered delays above a minimum
 ```
 
 ### Per-task timeout with max retries
