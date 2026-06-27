@@ -404,28 +404,29 @@ Each event carries: `kind`, `id` (the task's `TaskId`), `task` (name), `attempt`
 ## Configuration
 
 ```rust,no_run
+use std::num::NonZeroUsize;
 use std::time::Duration;
 use taskvisor::{SupervisorConfig, RestartPolicy, BackoffPolicy};
 
 let mut cfg = SupervisorConfig::default();
-cfg.grace = Duration::from_secs(30);        // shutdown grace period
-cfg.timeout = Duration::from_secs(5);       // default per-task timeout (0 = none)
-cfg.max_retries = 10;                       // default max retries (0 = unlimited)
-cfg.max_concurrent = 4;                     // task concurrency limit (0 = unlimited)
-cfg.bus_capacity = 2048;                    // event bus ring buffer size
+cfg.grace = Duration::from_secs(30);              // shutdown grace period
+cfg.timeout = Some(Duration::from_secs(5));       // default per-task timeout (None = no timeout)
+cfg.max_retries = 10;                             // default max retries (0 = unlimited)
+cfg.max_concurrent = NonZeroUsize::new(4);        // task concurrency limit (None = unlimited)
+cfg.bus_capacity = 2048;                          // event bus ring buffer size
 cfg.restart = RestartPolicy::OnFailure;
 cfg.backoff = BackoffPolicy::default();
 ```
 
-| Field            | Default                  | Meaning                                               |
-|------------------|--------------------------|-------------------------------------------------------|
-| `grace`          | `60s`                    | How long to wait for tasks to stop on shutdown        |
-| `timeout`        | `0s` (none)              | Default per-task attempt timeout                      |
-| `max_retries`    | `0` (unlimited)          | Default max failure-driven retries                    |
-| `max_concurrent` | `0` (unlimited)          | Global semaphore for running tasks                    |
-| `bus_capacity`   | `1024`                   | Broadcast channel size. Slow subscribers see `Lagged` |
-| `restart`        | `OnFailure`              | Default restart policy for tasks                      |
-| `backoff`        | `100ms / 1.0x / 30s max` | Default backoff for tasks                             |
+| Field            | Default                  | Meaning                                                |
+|------------------|--------------------------|--------------------------------------------------------|
+| `grace`          | `60s`                    | How long to wait for tasks to stop on shutdown         |
+| `timeout`        | `None`                   | Default per-task attempt timeout (`None` = no timeout) |
+| `max_retries`    | `0` (unlimited)          | Default max failure-driven retries                     |
+| `max_concurrent` | `None` (unlimited)       | Global semaphore for running tasks (`Some(n)` permits) |
+| `bus_capacity`   | `1024`                   | Broadcast channel size. Slow subscribers see `Lagged`  |
+| `restart`        | `OnFailure`              | Default restart policy for tasks                       |
+| `backoff`        | `100ms / 1.0x / 30s max` | Default backoff for tasks                              |
 
 ## Controller *(feature = `controller`)*
 

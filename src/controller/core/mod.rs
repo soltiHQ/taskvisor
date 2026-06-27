@@ -287,11 +287,18 @@ impl Controller {
             (SlotStatus::Idle, _) => {
                 match self.start_in_slot(&sup, &mut slot, &slot_name, id, task_spec) {
                     Ok(()) => {
+                        let reason: &'static str = match admission {
+                            AdmissionPolicy::Queue => "admission=Queue status=admitting",
+                            AdmissionPolicy::Replace => "admission=Replace status=admitting",
+                            AdmissionPolicy::DropIfRunning => {
+                                "admission=DropIfRunning status=admitting"
+                            }
+                        };
                         self.bus.publish(
                             Event::new(EventKind::ControllerSubmitted)
                                 .with_task(Arc::clone(&slot_name))
                                 .with_id(id)
-                                .with_reason(format!("admission={admission:?} status=admitting")),
+                                .with_reason(reason),
                         );
                     }
                     Err(e) => {

@@ -82,9 +82,8 @@ impl SupervisorBuilder {
 
         let semaphore = self
             .cfg
-            .concurrency_limit()
-            .map(sync::Semaphore::new)
-            .map(Arc::new);
+            .max_concurrent
+            .map(|n| Arc::new(sync::Semaphore::new(n.get())));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let registry = Registry::new(

@@ -121,12 +121,12 @@ impl TaskSpec {
 
     /// Inherit restart, backoff, timeout, and max_retries from global config.
     ///
-    /// A config `timeout` of [`Duration::ZERO`] is treated as "no timeout" (`None`).
+    /// `timeout` is taken from `cfg.timeout` directly (already `Option<Duration>`).
     pub fn with_defaults(task: TaskRef, cfg: &SupervisorConfig) -> Self {
         Self {
             restart: cfg.restart,
             backoff: cfg.backoff,
-            timeout: cfg.default_timeout(),
+            timeout: cfg.timeout,
 
             task,
             slot: None,

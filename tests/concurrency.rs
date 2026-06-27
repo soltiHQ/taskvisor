@@ -3,6 +3,7 @@
 mod common;
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use taskvisor::prelude::*;
 fn served(grace_secs: u64, max_concurrent: usize) -> SupervisorHandle {
     Supervisor::builder(SupervisorConfig {
         grace: Duration::from_secs(grace_secs),
-        max_concurrent,
+        max_concurrent: NonZeroUsize::new(max_concurrent),
         ..Default::default()
     })
     .build()
