@@ -13,7 +13,7 @@
 //!
 //! ## Role in Taskvisor
 //!
-//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission rules, and delegates `add/remove` to the Supervisor.
+//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission rules, and delegates `add/remove` to the runtime (`SupervisorCore`, held via a `Weak`).
 //! It subscribes to the Bus and advances slots strictly on `TaskRemoved` to avoid registry races and double starts.
 //!
 //! ```text
@@ -34,7 +34,7 @@
 //!              add/remove
 //!                  ▼
 //!        ┌──────────────────┐
-//!        │    Supervisor    │
+//!        │  SupervisorCore  │  (runtime; controller holds Weak)
 //!        └─────────┬────────┘
 //!      publishes runtime events
 //!                  ▼
@@ -48,7 +48,7 @@
 //! **Flow summary**
 //! 1. Application calls `handle.submit(ControllerSpec)` (via `SupervisorHandle`).
 //! 2. Controller unwraps `TaskSpec` and applies `Admission` rules.
-//! 3. If accepted, controller calls `Supervisor::add_task(TaskSpec)` or requests remove.
+//! 3. If accepted, controller calls the runtime's add (`SupervisorCore::add_task_with_id_watched`) or requests remove.
 //! 4. On terminal `TaskRemoved` (via Bus), the slot becomes `Idle` and the next queued task (if any) is started.
 //!
 //! ## Per-slot model
