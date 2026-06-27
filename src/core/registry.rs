@@ -332,6 +332,7 @@ impl Registry {
 
         let actor = TaskActor::new(
             self.bus.clone(),
+            label.clone(),
             spec.task().clone(),
             TaskActorParams {
                 restart: spec.restart(),

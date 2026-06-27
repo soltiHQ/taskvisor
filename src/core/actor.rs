@@ -145,6 +145,8 @@ pub(crate) struct TaskActorParams {
 pub(crate) struct TaskActor {
     /// Runtime identity stamped on every lifecycle event this actor publishes.
     id: TaskId,
+    /// Task label.
+    name: Arc<str>,
     /// Task to execute.
     task: Arc<dyn Task>,
     /// Parameters for supervised task executions.
@@ -159,6 +161,7 @@ impl TaskActor {
     /// Creates a new task actor with its runtime identity.
     pub(crate) fn new(
         bus: Bus,
+        name: Arc<str>,
         task: Arc<dyn Task>,
         params: TaskActorParams,
         semaphore: Option<Arc<Semaphore>>,
@@ -166,6 +169,7 @@ impl TaskActor {
     ) -> Self {
         Self {
             id,
+            name,
             task,
             params,
             bus,
@@ -178,7 +182,7 @@ impl TaskActor {
     /// We run each attempt under a **child** cancellation token so that cancelling the current attempt
     /// (including backoff sleep) results in a clean exit without restarting, even with `RestartPolicy::Always`.
     pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
-        let task_name: Arc<str> = Arc::from(self.task.name());
+        let task_name: Arc<str> = self.name.clone();
         let id = self.id;
         let mut attempt: u32 = 0;
         let mut backoff_attempt: u32 = 0;
@@ -411,8 +415,10 @@ mod tests {
     }
 
     fn actor(task: Arc<dyn Task>, restart: RestartPolicy, max_retries: u32) -> TaskActor {
+        let name: Arc<str> = Arc::from(task.name());
         TaskActor::new(
             Bus::new(16),
+            name,
             Arc::clone(&task),
             params(restart, max_retries),
             None,
