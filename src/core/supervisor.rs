@@ -48,10 +48,14 @@ use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 ///
 /// [`SupervisorHandle`]: crate::SupervisorHandle
 pub struct Supervisor {
-    pub(super) core: Arc<SupervisorCore>,
+    core: Arc<SupervisorCore>,
 
     #[cfg(feature = "controller")]
-    pub(super) controller: Option<Arc<crate::controller::Controller>>,
+    controller: Option<Arc<crate::controller::Controller>>,
+    #[cfg(feature = "controller")]
+    runtime_token: tokio_util::sync::CancellationToken,
+    #[cfg(feature = "controller")]
+    controller_started: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Supervisor {
@@ -67,12 +71,28 @@ impl Supervisor {
     pub(super) fn from_parts(
         core: Arc<SupervisorCore>,
         #[cfg(feature = "controller")] controller: Option<Arc<crate::controller::Controller>>,
+        #[cfg(feature = "controller")] runtime_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
             core,
             #[cfg(feature = "controller")]
             controller,
+            #[cfg(feature = "controller")]
+            runtime_token,
+            #[cfg(feature = "controller")]
+            controller_started: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Starts the controller's event loop exactly once.
+    #[cfg(feature = "controller")]
+    fn start_controller(&self) {
+        use std::sync::atomic::Ordering;
+        if let Some(ctrl) = &self.controller
+            && !self.controller_started.swap(true, Ordering::AcqRel)
+        {
+            ctrl.clone().run(self.runtime_token.clone());
+        }
     }
 
     /// Creates a new supervisor with the given config and subscribers (maybe empty).
@@ -95,9 +115,11 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
-    /// Returns a [`SupervisorHandle`] for dynamic task management.
+    /// Returns a [`SupervisorHandle`](crate::SupervisorHandle) for dynamic task management.
     pub fn serve(self: &Arc<Self>) -> super::handle::SupervisorHandle {
         self.core.start();
+        #[cfg(feature = "controller")]
+        self.start_controller();
         let handle = super::handle::SupervisorHandle::new(Arc::clone(&self.core));
         #[cfg(feature = "controller")]
         let handle = handle.with_controller(self.controller.clone());
@@ -105,9 +127,9 @@ impl Supervisor {
     }
 
     /// Runs task specifications until completion or shutdown signal (static mode).
-    ///
-    /// Delegates to the runtime; the controller (if configured) is already running independently.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
+        #[cfg(feature = "controller")]
+        self.start_controller();
         self.core.run(tasks).await
     }
 

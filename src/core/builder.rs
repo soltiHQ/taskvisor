@@ -59,8 +59,7 @@ impl SupervisorBuilder {
 
     /// Enables the controller with the given configuration.
     ///
-    /// The controller manages task slots with admission policies
-    /// (Queue, Replace, DropIfRunning).
+    /// The controller manages task slots with admission policies (Queue, Replace, DropIfRunning).
     ///
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
@@ -108,16 +107,16 @@ impl SupervisorBuilder {
         );
 
         #[cfg(feature = "controller")]
-        let controller = self.controller_config.map(|ctrl_cfg| {
-            let controller = crate::controller::Controller::new(ctrl_cfg, &core, bus.clone());
-            controller.clone().run(runtime_token.clone());
-            controller
-        });
+        let controller = self
+            .controller_config
+            .map(|ctrl_cfg| crate::controller::Controller::new(ctrl_cfg, &core, bus.clone()));
 
         Supervisor::from_parts(
             core,
             #[cfg(feature = "controller")]
             controller,
+            #[cfg(feature = "controller")]
+            runtime_token,
         )
     }
 }
