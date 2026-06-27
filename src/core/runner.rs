@@ -39,7 +39,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -73,10 +73,7 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("non-string panic payload");
-    TaskError::Fail {
-        reason: format!("task panicked: {msg}"),
-        exit_code: None,
-    }
+    TaskError::fail(format!("task panicked: {msg}"))
 }
 
 /// Executes a single attempt of `task`, publishing lifecycle events to `bus`.
@@ -120,6 +117,7 @@ pub async fn run_once<T: Task + ?Sized>(
     id: TaskId,
     bus: &Bus,
 ) -> Result<(), TaskError> {
+    let started = Instant::now();
     let child = parent.child_token();
     let ctx = TaskContext::from_token(child.clone());
 
@@ -127,7 +125,7 @@ pub async fn run_once<T: Task + ?Sized>(
         Ok(fut) => CatchPanic(fut),
         Err(payload) => {
             let e = panic_to_error(payload.as_ref());
-            publish_failed(bus, id, task.name(), attempt, &e);
+            publish_failed(bus, id, task.name(), attempt, &e, started.elapsed());
             return Err(e);
         }
     };
@@ -137,7 +135,7 @@ pub async fn run_once<T: Task + ?Sized>(
             Ok(r) => r,
             Err(_elapsed) => {
                 child.cancel();
-                publish_timeout(bus, id, task.name(), dur, attempt);
+                publish_timeout(bus, id, task.name(), dur, attempt, started.elapsed());
                 Err(TaskError::Timeout { timeout: dur })
             }
         }
@@ -147,50 +145,56 @@ pub async fn run_once<T: Task + ?Sized>(
 
     match res {
         Ok(()) => {
-            publish_stopped(bus, id, task.name(), attempt);
+            publish_stopped(bus, id, task.name(), attempt, started.elapsed());
             Ok(())
         }
         Err(TaskError::Canceled) => {
-            publish_canceled(bus, id, task.name(), attempt);
+            publish_canceled(bus, id, task.name(), attempt, started.elapsed());
             Err(TaskError::Canceled)
         }
         Err(e) => {
-            publish_failed(bus, id, task.name(), attempt, &e);
+            publish_failed(bus, id, task.name(), attempt, &e, started.elapsed());
             Err(e)
         }
     }
 }
 
-/// Publishes `TaskStopped` event.
-///
-/// successful attempt.
-fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32) {
+/// Publishes `TaskStopped` event for a successful attempt, carrying its duration.
+fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Duration) {
     bus.publish(
         Event::new(EventKind::TaskStopped)
             .with_task(name)
             .with_id(id)
-            .with_attempt(attempt),
+            .with_attempt(attempt)
+            .with_duration(duration),
     );
 }
 
-/// Publishes `TaskCanceled` event.
-///
-/// graceful cancellation of an attempt.
-fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32) {
+/// Publishes `TaskCanceled` event for a gracefully cancelled attempt, carrying its duration.
+fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Duration) {
     bus.publish(
         Event::new(EventKind::TaskCanceled)
             .with_task(name)
             .with_id(id)
-            .with_attempt(attempt),
+            .with_attempt(attempt)
+            .with_duration(duration),
     );
 }
 
-/// Publishes `TaskFailed` event with error details.
-fn publish_failed(bus: &Bus, id: TaskId, name: &str, attempt: u32, err: &TaskError) {
+/// Publishes `TaskFailed` event with error details and the attempt's duration.
+fn publish_failed(
+    bus: &Bus,
+    id: TaskId,
+    name: &str,
+    attempt: u32,
+    err: &TaskError,
+    duration: Duration,
+) {
     let mut ev = Event::new(EventKind::TaskFailed)
         .with_task(name)
         .with_id(id)
         .with_attempt(attempt)
+        .with_duration(duration)
         .with_reason(err.to_string());
     if let Some(code) = err.exit_code() {
         ev = ev.with_exit_code(code);
@@ -199,15 +203,21 @@ fn publish_failed(bus: &Bus, id: TaskId, name: &str, attempt: u32, err: &TaskErr
 }
 
 /// Publishes `TimeoutHit` event.
-///
-/// always followed by `TaskFailed`.
-fn publish_timeout(bus: &Bus, id: TaskId, name: &str, dur: Duration, attempt: u32) {
+fn publish_timeout(
+    bus: &Bus,
+    id: TaskId,
+    name: &str,
+    dur: Duration,
+    attempt: u32,
+    duration: Duration,
+) {
     bus.publish(
         Event::new(EventKind::TimeoutHit)
             .with_task(name)
             .with_id(id)
             .with_timeout(dur)
-            .with_attempt(attempt),
+            .with_attempt(attempt)
+            .with_duration(duration),
     );
 }
 
@@ -254,12 +264,7 @@ mod tests {
         }
 
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
-            Box::pin(async {
-                Err(TaskError::Fail {
-                    reason: "boom".into(),
-                    exit_code: None,
-                })
-            })
+            Box::pin(async { Err(TaskError::fail("boom")) })
         }
     }
 
@@ -302,6 +307,42 @@ mod tests {
             stopped_attempt,
             Some(3),
             "TaskStopped must carry the attempt number"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_event_carries_measured_attempt_duration() {
+        struct SleepOk;
+        impl Task for SleepOk {
+            fn name(&self) -> &str {
+                "sleep-ok"
+            }
+            fn spawn(&self, _ctx: TaskContext) -> BoxFut {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Ok(())
+                })
+            }
+        }
+
+        let bus = Bus::new(16);
+        let mut rx = bus.subscribe();
+        let parent = CancellationToken::new();
+
+        run_once(&SleepOk, &parent, None, 1, TaskId::next(), &bus)
+            .await
+            .expect("task succeeds");
+
+        let mut duration_ms = None;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == EventKind::TaskStopped {
+                duration_ms = ev.duration_ms;
+            }
+        }
+        let measured = duration_ms.expect("TaskStopped must carry the attempt duration");
+        assert!(
+            measured >= 20,
+            "attempt duration must reflect the ~30ms of work, got {measured}ms"
         );
     }
 

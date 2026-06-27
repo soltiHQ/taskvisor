@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## See it recover from failure
 
 A task that fails twice, then succeeds - taskvisor retries it with backoff and publishes an event for every step. 
-A subscriber prints them, so you *see* the supervision happen:
+A subscriber prints them, and you *see* the supervision happen:
 
 ```rust,no_run
 use std::sync::Arc;
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
             if n < 3 {
-                Err(TaskError::Fail { reason: format!("boom #{n}"), exit_code: None })
+                Err(TaskError::fail(format!("boom #{n}")))
             } else {
                 Ok(()) // 3rd attempt succeeds
             }
@@ -261,14 +261,14 @@ Each subscriber gets its own bounded queue - a slow subscriber never blocks othe
 
 Return these from your task to control what happens next:
 
-| Return                                        | Retryable | What happens                                                               |
-|-----------------------------------------------|-----------|----------------------------------------------------------------------------|
-| `Ok(())`                                      | -         | Task completed. `RestartPolicy` decides next step.                         |
-| `Err(TaskError::Fail { reason, exit_code })`  | Yes       | Retryable failure. Backoff, then retry.                                    |
-| `Err(TaskError::Timeout { .. })`              | Yes       | Set automatically when per-task timeout is exceeded.                       |
-| `Err(TaskError::Fatal { reason, exit_code })` | No        | Permanent failure. Actor stops, publishes `ActorDead`.                     |
-| `Err(TaskError::Canceled)`                    | No        | Graceful shutdown. Not an error.                                           |
-| `panic!` in the task body                     | Yes       | Caught and converted to `TaskError::Fail`; backoff, then retry per policy. |
+| Return                           | Retryable | What happens                                                                |
+|----------------------------------|-----------|-----------------------------------------------------------------------------|
+| `Ok(())`                         | -         | Task completed. `RestartPolicy` decides next step.                          |
+| `panic!` in the task body        | Yes       | Caught and converted to `TaskError::Fail`; backoff, then retry per policy.  |
+| `Err(TaskError::fail(reason))`   | Yes       | Retryable failure. Backoff, then retry. Wrap a cause with `fail_from(err)`. |
+| `Err(TaskError::Timeout { .. })` | Yes       | Set automatically when per-task timeout is exceeded.                        |
+| `Err(TaskError::fatal(reason))`  | No        | Permanent failure. Actor stops, publishes `ActorDead`. See `fatal_from`.    |
+| `Err(TaskError::Canceled)`       | No        | Graceful shutdown. Not an error.                                            |
 
 `exit_code` is `Option<i32>`: use when the error comes from a process-like runtime, pass `None` for logical errors. 
 Subscribers receive it as `Event::exit_code` on `TaskFailed` / `ActorDead` / `ActorExhausted`.
@@ -447,10 +447,16 @@ let id = handle.submit(ControllerSpec::queue(spec)).await?;
 handle.submit(ControllerSpec::replace(spec)).await?;
 handle.submit(ControllerSpec::drop_if_running(spec)).await?;
 
-// ...or await the outcome directly. If the slot never admits it (busy, queue full,
-// superseded, removed, shutting down) the waiter resolves to TaskOutcome::Rejected.
+// ...or await the outcome directly. If the slot never admits it (busy, queue full, superseded, removed, shutting down) the waiter resolves to TaskOutcome::Rejected.
 let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
 let outcome = waiter.wait().await?;
+
+// Inspect the controller's live state directly - no parsing of bus events.
+// `controller_snapshot()` is the slot-path analogue of `list()`/`snapshot()`.
+if let Some(snap) = handle.controller_snapshot().await {
+    println!("{} running, {} queued", snap.running_count(), snap.total_queued());
+    let depth = snap.slot("deploy").map_or(0, |s| s.queue_depth);
+}
 
 handle.shutdown().await?;
 ```

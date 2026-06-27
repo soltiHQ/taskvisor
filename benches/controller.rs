@@ -14,7 +14,7 @@
 //! | `multi_slot/N`         | N submissions fanned out across `SLOTS` distinct slots, drained.    |
 //!
 //! `queue` and `multi_slot` measure real completion via an event-driven drain (wait for the expected `TaskRemoved` count).
-//! `replace`/`drop_if_running` admit a timing-dependent number of runs, so they time only the admission decisions (teardown is excluded).
+//! `replace`/`drop_if_running` admit a timing-dependent number of runs; time only the admission decisions (teardown is excluded).
 //! `submit_hotpath` isolates the caller-side enqueue cost, and `multi_slot` exercises the per-slot `DashMap` sharding the single-slot benches never touch.
 //!
 //! ## Run

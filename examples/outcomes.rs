@@ -88,10 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
             println!("  sync attempt #{n} failing...");
-            Err(TaskError::Fail {
-                reason: "upstream 503".into(),
-                exit_code: Some(75),
-            })
+            Err(TaskError::fail("upstream 503").with_exit_code(75))
         }
     });
     let spec = TaskSpec::restartable(flaky)
@@ -107,7 +104,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .wait()
         .await?
     {
-        TaskOutcome::Failed { reason, exit_code } => {
+        TaskOutcome::Failed {
+            reason, exit_code, ..
+        } => {
             println!("  sync -> Failed: {reason} (exit_code={exit_code:?})\n");
         }
         other => println!("  sync -> {other:?}\n"),

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::*;
 use taskvisor::prelude::*;
-use taskvisor::{ControllerConfig, ControllerError, ControllerSpec};
+use taskvisor::{ControllerConfig, ControllerError, ControllerSpec, SlotStatusKind};
 
 fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
@@ -48,10 +48,9 @@ async fn submit_and_watch_resolves_completed_for_admitted_task() {
         assert_eq!(waiter.id(), id);
 
         let outcome = waiter.wait().await.expect("waiter errored");
-        assert_eq!(
-            outcome,
-            TaskOutcome::Completed,
-            "an admitted task that succeeds must resolve Completed"
+        assert!(
+            matches!(outcome, TaskOutcome::Completed),
+            "an admitted task that succeeds must resolve Completed, got {outcome:?}"
         );
 
         handle.shutdown().await.expect("shutdown ok");
@@ -322,8 +321,6 @@ async fn shutdown_does_not_start_queued_tasks() {
     })
     .await;
 
-    // Draining the occupant publishes TaskRemoved; the controller must NOT react
-    // by starting the queued task mid-shutdown (it would be force-aborted with no grace).
     assert!(
         collector.by_label("queued").is_empty()
             || collector
@@ -715,6 +712,52 @@ async fn try_submit_full_when_queue_capacity_saturated() {
             "saturated intake channel must yield ControllerError::Full"
         );
         let _ = handle.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn controller_snapshot_reports_running_slot_and_queue_depth() {
+    let (handle, _collector) = served_controller(ControllerConfig {
+        queue_capacity: 16,
+        max_slot_queue: 4,
+    });
+
+    with_timeout(10, async {
+        handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("occupant-snap")).with_slot("s"),
+            ))
+            .await
+            .expect("submit occupant ok");
+        handle
+            .submit(ControllerSpec::queue(
+                TaskSpec::restartable(make_coop("queued-snap")).with_slot("s"),
+            ))
+            .await
+            .expect("submit queued ok");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(snap) = handle.controller_snapshot().await
+                && let Some(view) = snap.slot("s")
+                && view.status == SlotStatusKind::Running
+                && view.queue_depth == 1
+                && snap.running_count() == 1
+                && snap.total_queued() == 1
+            {
+                observed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            observed,
+            "controller_snapshot must report slot 's' Running with queue_depth 1"
+        );
+
+        handle.shutdown().await.expect("shutdown ok");
     })
     .await;
 }

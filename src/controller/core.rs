@@ -43,6 +43,7 @@ use super::{
     error::ControllerError,
     slot::{SlotState, SlotStatus},
     spec::ControllerSpec,
+    view::{ControllerSnapshot, SlotStatusKind, SlotView},
 };
 
 struct Submission {
@@ -179,6 +180,39 @@ impl Controller {
         ControllerHandle {
             tx: self.tx.clone(),
         }
+    }
+
+    /// Builds a point-in-time [`ControllerSnapshot`] of all tracked slots.
+    pub(crate) async fn snapshot(&self) -> ControllerSnapshot {
+        let keys: Vec<Arc<str>> = self.slots.iter().map(|e| Arc::clone(e.key())).collect();
+
+        let mut slots = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(slot_arc) = self.slots.get(&*key).map(|e| e.clone()) else {
+                continue;
+            };
+            let slot = slot_arc.lock().await;
+            let (status, status_for) = match slot.status {
+                SlotStatus::Idle => (SlotStatusKind::Idle, Duration::ZERO),
+                SlotStatus::Admitting { since } => (SlotStatusKind::Admitting, since.elapsed()),
+                SlotStatus::Running { started_at } => {
+                    (SlotStatusKind::Running, started_at.elapsed())
+                }
+                SlotStatus::Terminating { cancelled_at } => {
+                    (SlotStatusKind::Terminating, cancelled_at.elapsed())
+                }
+            };
+            slots.push(SlotView {
+                slot: Arc::clone(&key),
+                status,
+                running: slot.running_id,
+                queue_depth: slot.queue.len(),
+                status_for,
+            });
+        }
+
+        slots.sort_by(|a, b| a.slot.cmp(&b.slot));
+        ControllerSnapshot { slots }
     }
 
     /// Starts the controller loop (spawns in background).
@@ -339,9 +373,6 @@ impl Controller {
     }
 
     /// Applies the admission policy for a new submission.
-    ///
-    /// The body is a match on `(slot status, admission policy)`;
-    /// this table is the same grid, so it should stay in lockstep with the arms below:
     ///
     /// ```text
     /// │              │ Queue                   │ Replace                                │ DropIfRunning │
@@ -603,7 +634,7 @@ impl Controller {
         }
     }
 
-    /// `TaskAddFailed`: admission was rejected (e.g. duplicate name) free the slot and start the next queued task, so a slot can never wedge in `Admitting`.
+    /// `TaskAddFailed`: admission was rejected (e.g. duplicate name) free the slot and start the next queued task.
     async fn on_task_add_failed(&self, event: &Event) {
         self.free_and_advance(event).await;
     }
@@ -730,8 +761,6 @@ impl Controller {
     }
 
     /// Replaces the queue head with the new submission (latest-wins) or pushes it.
-    ///
-    /// A displaced queued submission is rejected with `superseded_by_replace`, carrying its id, so submitters can observe that it will never run.
     fn replace_head_or_push(
         &self,
         slot: &mut SlotState,
@@ -1129,6 +1158,43 @@ mod tests {
             superseded,
             "Replace must supersede run-1 with run-2 in the shared slot, not run both"
         );
+
+        let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_status_running_and_queue_depth() {
+        use crate::controller::SlotStatusKind;
+
+        let (sup, handle, id) = sup_with_live_task().await;
+        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+
+        let queued: TaskRef = TaskFn::arc("queued", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((TaskId::next(), TaskSpec::restartable(queued)));
+        ctrl.slots.insert(
+            Arc::from("s"),
+            Arc::new(Mutex::new(SlotState {
+                status: SlotStatus::Running {
+                    started_at: Instant::now(),
+                },
+                running_id: Some(id),
+                queue,
+            })),
+        );
+
+        let snap = ctrl.snapshot().await;
+        assert_eq!(snap.len(), 1, "one slot tracked");
+        assert_eq!(snap.running_count(), 1);
+        assert_eq!(snap.total_queued(), 1);
+
+        let view = snap.slot("s").expect("slot 's' must be present");
+        assert_eq!(view.status, SlotStatusKind::Running);
+        assert_eq!(view.queue_depth, 1);
+        assert_eq!(view.running, Some(id));
 
         let _ = handle.shutdown().await;
     }

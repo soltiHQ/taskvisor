@@ -70,6 +70,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     TaskError,
     core::runner::run_once,
+    error::SharedError,
     events::{Bus, Event, EventKind},
     identity::TaskId,
     policies::{BackoffPolicy, RestartPolicy},
@@ -80,7 +81,7 @@ use crate::{
 ///
 /// Used to determine what event to publish, whether to clean up the task from registry, and which [`TaskOutcome`](crate::TaskOutcome)
 /// to deliver to a watcher (see [`Registry::report_join`](super::registry::Registry)).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum ActorExitReason {
     /// Final attempt succeeded and the restart policy forbids another run.
     ///
@@ -100,6 +101,8 @@ pub(crate) enum ActorExitReason {
         reason: Arc<str>,
         /// Numeric exit code from a process-like runtime, if any.
         exit_code: Option<i32>,
+        /// Underlying cause from the final [`TaskError`], carried to the completion plane.
+        source: Option<SharedError>,
     },
 
     /// Actor was canceled due shutdown signal, explicit removal, or the task itself reporting `TaskError::Canceled`.
@@ -114,6 +117,8 @@ pub(crate) enum ActorExitReason {
         reason: Arc<str>,
         /// Numeric exit code from a process-like runtime, if any.
         exit_code: Option<i32>,
+        /// Underlying cause from the [`TaskError::Fatal`], carried to the completion plane.
+        source: Option<SharedError>,
     },
 }
 
@@ -274,6 +279,7 @@ impl TaskActor {
                 Err(e) if e.is_fatal() => {
                     let reason: Arc<str> = Arc::from(e.to_string());
                     let exit_code = e.exit_code();
+                    let source: Option<SharedError> = e.into_source().map(Arc::from);
 
                     let mut ev = Event::new(EventKind::ActorDead)
                         .with_task(task_name.clone())
@@ -284,7 +290,11 @@ impl TaskActor {
                         ev = ev.with_exit_code(code);
                     }
                     self.bus.publish(ev);
-                    return ActorExitReason::Fatal { reason, exit_code };
+                    return ActorExitReason::Fatal {
+                        reason,
+                        exit_code,
+                        source,
+                    };
                 }
                 Err(TaskError::Canceled) => {
                     if runtime_token.is_cancelled() {
@@ -318,6 +328,7 @@ impl TaskActor {
                             Arc::from(e.to_string())
                         };
                         let exit_code = e.exit_code();
+                        let source: Option<SharedError> = e.into_source().map(Arc::from);
 
                         let mut ev = Event::new(EventKind::ActorExhausted)
                             .with_task(task_name.clone())
@@ -328,7 +339,11 @@ impl TaskActor {
                             ev = ev.with_exit_code(code);
                         }
                         self.bus.publish(ev);
-                        return ActorExitReason::Exhausted { reason, exit_code };
+                        return ActorExitReason::Exhausted {
+                            reason,
+                            exit_code,
+                            source,
+                        };
                     }
 
                     let delay = self.params.backoff.next(backoff_attempt);
@@ -420,12 +435,7 @@ mod tests {
             "fail"
         }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
-            Box::pin(async {
-                Err(TaskError::Fail {
-                    reason: "boom".into(),
-                    exit_code: None,
-                })
-            })
+            Box::pin(async { Err(TaskError::fail("boom")) })
         }
     }
 
@@ -435,12 +445,7 @@ mod tests {
             "fatal"
         }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
-            Box::pin(async {
-                Err(TaskError::Fatal {
-                    reason: "fatal".into(),
-                    exit_code: None,
-                })
-            })
+            Box::pin(async { Err(TaskError::fatal("fatal")) })
         }
     }
 
@@ -461,12 +466,7 @@ mod tests {
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             let prev = self.remaining.fetch_sub(1, Ordering::SeqCst);
             if prev > 0 {
-                Box::pin(async {
-                    Err(TaskError::Fail {
-                        reason: "transient".into(),
-                        exit_code: None,
-                    })
-                })
+                Box::pin(async { Err(TaskError::fail("transient")) })
             } else {
                 Box::pin(async { Ok(()) })
             }
@@ -477,14 +477,14 @@ mod tests {
     async fn never_ok_returns_completed() {
         let a = actor(Arc::new(OkTask), RestartPolicy::Never, 0);
         let reason = a.run(CancellationToken::new()).await;
-        assert_eq!(reason, ActorExitReason::Completed);
+        assert!(matches!(reason, ActorExitReason::Completed));
     }
 
     #[tokio::test]
     async fn on_failure_ok_returns_completed() {
         let a = actor(Arc::new(OkTask), RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
-        assert_eq!(reason, ActorExitReason::Completed);
+        assert!(matches!(reason, ActorExitReason::Completed));
     }
 
     #[tokio::test]
@@ -492,7 +492,9 @@ mod tests {
         let a = actor(Arc::new(FatalTask), RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
         match reason {
-            ActorExitReason::Fatal { reason, exit_code } => {
+            ActorExitReason::Fatal {
+                reason, exit_code, ..
+            } => {
                 assert!(
                     reason.contains("fatal"),
                     "reason must carry the error: {reason}"
@@ -528,7 +530,7 @@ mod tests {
             0,
         );
         let reason = a.run(token).await;
-        assert_eq!(reason, ActorExitReason::Canceled);
+        assert!(matches!(reason, ActorExitReason::Canceled));
     }
 
     #[tokio::test]
@@ -536,6 +538,6 @@ mod tests {
         let task = Arc::new(CountedTask::new(2));
         let a = actor(task, RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
-        assert_eq!(reason, ActorExitReason::Completed);
+        assert!(matches!(reason, ActorExitReason::Completed));
     }
 }

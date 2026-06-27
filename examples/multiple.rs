@@ -74,10 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             if n < 3 {
-                Err(TaskError::Fail {
-                    reason: format!("attempt #{n} not ready yet"),
-                    exit_code: None,
-                })
+                Err(TaskError::fail(format!("attempt #{n} not ready yet")))
             } else {
                 println!("[resilient] success on attempt #{n}!");
                 Ok(())
