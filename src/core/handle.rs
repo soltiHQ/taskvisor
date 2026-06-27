@@ -1,28 +1,33 @@
 //! # Supervisor handle for dynamic task management.
 //!
-//! [`SupervisorHandle`] is returned by [`Supervisor::serve()`] and provides the full runtime management API.
+//! [`SupervisorHandle`] is returned by [`Supervisor::serve()`](crate::Supervisor::serve) and provides
+//! the full runtime management API. It holds the runtime ([`SupervisorCore`]) directly and, when the
+//! `controller` feature is enabled, the optional controller — delegating to each without going through
+//! the [`Supervisor`](crate::Supervisor) facade.
 //!
 //! This is the **only** way to manage tasks dynamically at runtime.
-//! [`Supervisor::run()`] is a self-contained entry point for static task sets.
+//! [`Supervisor::run()`](crate::Supervisor::run) is a self-contained entry point for static task sets.
+//!
+//! [`SupervisorCore`]: crate::core::SupervisorCore
 
 use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast;
 
+use crate::core::SupervisorCore;
 use crate::error::RuntimeError;
 use crate::events::EventKind;
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
 
 use super::outcome::TaskWaiter;
-use super::supervisor::Supervisor;
 
 /// Handle for managing a running supervisor.
 ///
-/// Obtained via [`Supervisor::serve()`]. Provides the full runtime management API.
+/// Obtained via [`Supervisor::serve()`](crate::Supervisor::serve). Provides the full runtime management API.
 ///
 /// # Also
 ///
-/// - [`Supervisor`](crate::Supervisor) - the runtime behind this handle
+/// - [`Supervisor`](crate::Supervisor) - the facade that produces this handle
 /// - [`SupervisorConfig`](crate::SupervisorConfig) - configuration knobs
 /// - [`TaskSpec`](crate::TaskSpec) - task configuration passed to [`add`](Self::add)
 ///
@@ -50,23 +55,38 @@ use super::supervisor::Supervisor;
 /// ```
 #[derive(Clone)]
 pub struct SupervisorHandle {
-    inner: Arc<Supervisor>,
+    core: Arc<SupervisorCore>,
+
+    #[cfg(feature = "controller")]
+    controller: Option<Arc<crate::controller::Controller>>,
 }
 
 impl std::fmt::Debug for SupervisorHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SupervisorHandle")
-            .field("supervisor", &self.inner)
-            .finish()
+            .field("core", &self.core)
+            .finish_non_exhaustive()
     }
 }
 
 impl SupervisorHandle {
-    /// Creates a new handle wrapping the given supervisor.
-    ///
-    /// The supervisor must already be started (via `serve()`).
-    pub(crate) fn new(supervisor: Arc<Supervisor>) -> Self {
-        Self { inner: supervisor }
+    /// Creates a new handle over the (already-started) runtime.
+    pub(crate) fn new(core: Arc<SupervisorCore>) -> Self {
+        Self {
+            core,
+            #[cfg(feature = "controller")]
+            controller: None,
+        }
+    }
+
+    /// Attaches the optional controller (builder/facade wiring).
+    #[cfg(feature = "controller")]
+    pub(crate) fn with_controller(
+        mut self,
+        controller: Option<Arc<crate::controller::Controller>>,
+    ) -> Self {
+        self.controller = controller;
+        self
     }
 
     /// Adds a new task to the supervisor at runtime.
@@ -74,7 +94,7 @@ impl SupervisorHandle {
     /// Fire-and-forget: mints the [`TaskId`], publishes `TaskAddRequested`, and returns immediately with the id.
     /// The task is spawned asynchronously by the registry listener.
     pub fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        self.inner.add_task(spec)
+        self.core.add_task(spec)
     }
 
     /// Adds a task and waits for registration confirmation.
@@ -94,8 +114,8 @@ impl SupervisorHandle {
         timeout: Duration,
     ) -> Result<TaskId, RuntimeError> {
         let target: Arc<str> = Arc::from(spec.task().name());
-        let mut rx = self.inner.subscribe_bus();
-        let id = self.inner.add_task(spec)?;
+        let mut rx = self.core.subscribe_bus();
+        let id = self.core.add_task(spec)?;
         self.wait_registered(&mut rx, id, target, timeout).await
     }
 
@@ -132,8 +152,8 @@ impl SupervisorHandle {
         timeout: Duration,
     ) -> Result<(TaskId, TaskWaiter), RuntimeError> {
         let target: Arc<str> = Arc::from(spec.task().name());
-        let mut rx = self.inner.subscribe_bus();
-        let (id, done_rx) = self.inner.add_task_watched(spec)?;
+        let mut rx = self.core.subscribe_bus();
+        let (id, done_rx) = self.core.add_task_watched(spec)?;
         self.wait_registered(&mut rx, id, target, timeout).await?;
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
@@ -160,7 +180,7 @@ impl SupervisorHandle {
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if self.inner.contains_id(id).await {
+                        if self.core.contains_id(id).await {
                             return Ok(id);
                         }
                     }
@@ -169,7 +189,7 @@ impl SupervisorHandle {
                     }
                 }
             }
-            if self.inner.contains_id(id).await {
+            if self.core.contains_id(id).await {
                 Ok(id)
             } else {
                 Err(RuntimeError::TaskAddTimeout {
@@ -195,14 +215,14 @@ impl SupervisorHandle {
     /// The task is cancelled and cleaned up asynchronously by the registry;
     /// a task that ignores cancellation is force-aborted after the configured grace period.
     pub fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
-        self.inner.remove(id)
+        self.core.remove(id)
     }
 
     /// Removes the task currently holding `name` (label); `false` if no such task.
     pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        match self.inner.id_for_label(name).await {
+        match self.core.id_for_label(name).await {
             Some(id) => {
-                self.inner.remove(id)?;
+                self.core.remove(id)?;
                 Ok(true)
             }
             None => Ok(false),
@@ -214,7 +234,7 @@ impl SupervisorHandle {
     /// Includes tasks in any state: starting, running, stopping.
     /// See [`snapshot`](Self::snapshot) for only currently executing tasks.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
-        self.inner.list_tasks().await
+        self.core.list_tasks().await
     }
 
     /// Returns a sorted list of currently alive task names (from the alive tracker).
@@ -222,19 +242,19 @@ impl SupervisorHandle {
     /// Only includes tasks whose last lifecycle event was [`TaskStarting`](crate::EventKind::TaskStarting).
     /// See [`list`](Self::list) for all registered tasks regardless of state.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
-        self.inner.snapshot().await
+        self.core.snapshot().await
     }
 
     /// Check whether a given task is currently alive.
     pub async fn is_alive(&self, name: &str) -> bool {
-        self.inner.is_alive(name).await
+        self.core.is_alive(name).await
     }
 
     /// Requests cooperative cancellation of a task and waits up to the configured grace period for it to actually stop (its `TaskRemoved` event).
     ///
     /// A task that ignores cancellation is **force-aborted after the grace period**;
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
-        self.inner.cancel(id).await
+        self.core.cancel(id).await
     }
 
     /// Cancel the task currently holding `name` (label), resolving to its identity.
@@ -242,8 +262,8 @@ impl SupervisorHandle {
     /// Returns `Ok(false)` if no task currently holds that label;
     /// otherwise behaves like [`cancel`](Self::cancel) (including the `TaskRemoveTimeout` case for a task that won't stop).
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        match self.inner.id_for_label(name).await {
-            Some(id) => self.inner.cancel(id).await,
+        match self.core.id_for_label(name).await {
+            Some(id) => self.core.cancel(id).await,
             None => Ok(false),
         }
     }
@@ -259,12 +279,14 @@ impl SupervisorHandle {
         id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        self.inner.cancel_with_timeout(id, wait_for).await
+        self.core.cancel_with_timeout(id, wait_for).await
     }
 
     /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
+    ///
+    /// The controller (if any) winds down via the shared runtime cancellation token.
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
-        self.inner.shutdown().await
+        self.core.shutdown().await
     }
 
     /// Submits a task to the controller (if enabled), returning its pre-minted [`TaskId`].
@@ -278,7 +300,10 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<TaskId, crate::controller::ControllerError> {
-        self.inner.submit(spec).await
+        match &self.controller {
+            Some(ctrl) => ctrl.handle().submit(spec).await,
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
     }
 
     /// Tries to submit a task without blocking, returning its pre-minted [`TaskId`].
@@ -292,7 +317,10 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<TaskId, crate::controller::ControllerError> {
-        self.inner.try_submit(spec)
+        match &self.controller {
+            Some(ctrl) => ctrl.handle().try_submit(spec),
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
     }
 
     /// Submits a task to the controller and returns an awaitable [`TaskWaiter`] resolving to its final [`TaskOutcome`](crate::TaskOutcome)
@@ -310,11 +338,16 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(TaskId, TaskWaiter), crate::controller::ControllerError> {
-        let (id, rx) = self.inner.submit_and_watch(spec).await?;
-        Ok((id, TaskWaiter::new(id, rx)))
+        match &self.controller {
+            Some(ctrl) => {
+                let (id, rx) = ctrl.handle().submit_and_watch(spec).await?;
+                Ok((id, TaskWaiter::new(id, rx)))
+            }
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
     }
 
-    /// Returns a point-in-time [`ControllerSnapshot`](crate::ControllerSnapshot) of the controller's slots.
+    /// Returns a point-in-time [`ControllerSnapshot`](crate::ControllerSnapshot) of the controller's slots, or `None` if no controller is configured.
     ///
     /// ## Example
     /// ```rust,no_run
@@ -334,6 +367,9 @@ impl SupervisorHandle {
     /// Requires the `controller` feature flag.
     #[cfg(feature = "controller")]
     pub async fn controller_snapshot(&self) -> Option<crate::controller::ControllerSnapshot> {
-        self.inner.controller_snapshot().await
+        match &self.controller {
+            Some(ctrl) => Some(ctrl.snapshot().await),
+            None => None,
+        }
     }
 }

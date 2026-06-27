@@ -124,6 +124,9 @@ pub use outcome::{TaskOutcome, TaskWaiter};
 mod supervisor;
 pub use supervisor::Supervisor;
 
+mod runtime;
+pub(crate) use runtime::SupervisorCore;
+
 mod actor;
 mod alive;
 mod runner;

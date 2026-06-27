@@ -13,7 +13,9 @@
 use std::sync::Arc;
 use tokio::{sync, sync::mpsc};
 
-use super::{alive::AliveTracker, registry::Registry, supervisor::Supervisor};
+use super::{
+    alive::AliveTracker, registry::Registry, runtime::SupervisorCore, supervisor::Supervisor,
+};
 use crate::{
     core::SupervisorConfig,
     events::Bus,
@@ -95,7 +97,7 @@ impl SupervisorBuilder {
         );
         let alive = Arc::new(AliveTracker::new());
 
-        let sup = Arc::new(Supervisor::new_internal(
+        let core = SupervisorCore::new_internal(
             self.cfg,
             bus.clone(),
             subs,
@@ -103,15 +105,19 @@ impl SupervisorBuilder {
             registry,
             runtime_token.clone(),
             cmd_tx,
-        ));
+        );
 
         #[cfg(feature = "controller")]
-        if let Some(ctrl_cfg) = self.controller_config {
-            let controller = crate::controller::Controller::new(ctrl_cfg, &sup, bus.clone());
+        let controller = self.controller_config.map(|ctrl_cfg| {
+            let controller = crate::controller::Controller::new(ctrl_cfg, &core, bus.clone());
+            controller.clone().run(runtime_token.clone());
+            controller
+        });
 
-            let _ = sup.controller.set(Arc::clone(&controller));
-            controller.run(runtime_token.clone());
-        }
-        sup
+        Supervisor::from_parts(
+            core,
+            #[cfg(feature = "controller")]
+            controller,
+        )
     }
 }

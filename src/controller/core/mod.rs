@@ -31,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 use tokio::sync::broadcast;
 
 use crate::{
-    RuntimeError, Supervisor, TaskSpec,
-    core::{OutcomeTx, TaskOutcome},
+    RuntimeError, TaskSpec,
+    core::{OutcomeTx, SupervisorCore, TaskOutcome},
     events::{Bus, Event, EventKind},
     identity::TaskId,
 };
@@ -130,7 +130,7 @@ impl ControllerHandle {
 /// - [`SlotState`](super::slot::SlotState) - per-slot status and pending queue
 pub(crate) struct Controller {
     config: ControllerConfig,
-    supervisor: Weak<Supervisor>,
+    supervisor: Weak<SupervisorCore>,
     bus: Bus,
 
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
@@ -145,7 +145,7 @@ pub(crate) struct Controller {
 
 impl Controller {
     /// Creates a new controller (must call [`run`](Self::run) to start it).
-    pub fn new(config: ControllerConfig, supervisor: &Arc<Supervisor>, bus: Bus) -> Arc<Self> {
+    pub fn new(config: ControllerConfig, supervisor: &Arc<SupervisorCore>, bus: Bus) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(config.queue_capacity.max(1));
 
         Arc::new(Self {
@@ -542,7 +542,7 @@ impl Controller {
     /// The slot becomes `Running` on `TaskAdded`.
     fn start_in_slot(
         &self,
-        sup: &Arc<Supervisor>,
+        sup: &Arc<SupervisorCore>,
         slot: &mut SlotState,
         slot_name: &Arc<str>,
         id: TaskId,
@@ -562,7 +562,7 @@ impl Controller {
     /// Leaves the slot `Admitting` (one started) or `Idle` (queue empty / all failed).
     fn start_next_from_queue(
         &self,
-        sup: &Arc<Supervisor>,
+        sup: &Arc<SupervisorCore>,
         slot: &mut SlotState,
         slot_name: &Arc<str>,
     ) {
@@ -657,6 +657,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Supervisor;
     use crate::TaskContext;
     use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef, TaskSpec};
     use std::time::Duration;
@@ -906,7 +907,7 @@ mod tests {
     #[tokio::test]
     async fn recover_promotes_admitting_slot_with_alive_task() {
         let (sup, handle, id) = sup_with_live_task().await;
-        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
         ctrl.slots.insert(
             Arc::from("s"),
@@ -935,7 +936,7 @@ mod tests {
     #[tokio::test]
     async fn recover_reissues_removal_for_terminating_slot_with_alive_task() {
         let (sup, handle, id) = sup_with_live_task().await;
-        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
         ctrl.slots.insert(
             Arc::from("s"),
@@ -952,7 +953,7 @@ mod tests {
         ctrl.recover_stale_slots().await;
 
         let removed = poll_until(Duration::from_secs(2), || async {
-            !sup.contains_id(id).await
+            !sup.core().contains_id(id).await
         })
         .await;
         assert!(
@@ -966,7 +967,7 @@ mod tests {
     #[tokio::test]
     async fn no_queue_advancement_after_shutdown_requested() {
         let (sup, handle, id) = sup_with_live_task().await;
-        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
         let queued: TaskRef = TaskFn::arc("queued", |ctx: TaskContext| async move {
             ctx.cancelled().await;
@@ -996,7 +997,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            sup.id_for_label("queued").await.is_none(),
+            sup.core().id_for_label("queued").await.is_none(),
             "controller must not start queued tasks once shutdown has been requested"
         );
 
@@ -1039,7 +1040,7 @@ mod tests {
         use crate::controller::SlotStatusKind;
 
         let (sup, handle, id) = sup_with_live_task().await;
-        let ctrl = Controller::new(ControllerConfig::default(), &sup, Bus::new(64));
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
         let queued: TaskRef = TaskFn::arc("queued", |ctx: TaskContext| async move {
             ctx.cancelled().await;
