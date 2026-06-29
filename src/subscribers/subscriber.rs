@@ -73,7 +73,8 @@ pub trait Subscribe: Send + Sync + 'static {
     /// Called from a dedicated worker task, not in the publisher context.
     /// Events are delivered in FIFO order per subscriber.
     ///
-    /// Panics are caught; the runtime publishes `EventKind::SubscriberPanicked`.
+    /// Panics are caught and isolated: a panic on an ordinary event is published as `EventKind::SubscriberPanicked`.
+    /// A panic while handling an internal diagnostic event (`SubscriberPanicked`/`SubscriberOverflow`) is intentionally **not** republished, to avoid a self-sustaining diagnostic feedback loop.
     fn on_event(&self, event: &Event);
 
     /// Returns the subscriber name used in logs/metrics and overflow/panic events.

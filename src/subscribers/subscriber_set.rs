@@ -26,8 +26,11 @@
 //! ## Panic handling
 //!
 //! Worker tasks use `AssertUnwindSafe` + `catch_unwind` to isolate panics:
-//! - Panic is caught and converted to `SubscriberPanicked` event
 //! - `on_event` is called inside `catch_unwind`
+//! - A panic on an ordinary event is caught and published as `SubscriberPanicked`
+//! - A panic on an internal diagnostic event (`SubscriberPanicked`/`SubscriberOverflow`)
+//!   is caught but **not** republished — this breaks the feedback loop where a
+//!   subscriber that panics on diagnostics would otherwise storm the bus
 //! - Worker continues processing next event
 //! - Other subscribers are unaffected
 //!
@@ -105,18 +108,13 @@ impl SubscriberSet {
 
             let handle = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
-                    // SAFETY (unwind):
-                    // Each subscriber runs in its own worker task with its own mpsc channel: a panic cannot corrupt another subscriber's state.
-                    //
-                    // `on_event` is synchronous: a single `catch_unwind` call suffices.
-                    //
-                    // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex will be poisoned, which is the expected Rust behavior.
-                    // The worker continues processing the next event after reporting the panic via SubscriberPanicked.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         s.on_event(ev.as_ref());
                     }));
 
-                    if let Err(panic_err) = result {
+                    if let Err(panic_err) = result
+                        && !ev.is_internal_diagnostic()
+                    {
                         let info = extract_panic_info(&panic_err);
                         bus_for_worker.publish(Event::subscriber_panicked(s.name(), info));
                     }
@@ -204,8 +202,12 @@ fn extract_panic_info(panic_err: &Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
     use crate::events::EventKind;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    use std::time::Duration;
+    use tokio::time::sleep;
 
     struct CountingSub {
         count: Arc<AtomicU64>,
@@ -266,7 +268,7 @@ mod tests {
         set.emit_arc(ev2);
         set.emit_arc(ev3);
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         set.close().await;
 
         let mut saw_overflow = false;
@@ -296,7 +298,7 @@ mod tests {
             set.emit_arc(Arc::clone(&internal_ev));
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         set.close().await;
 
         while let Ok(ev) = bus_rx.try_recv() {
@@ -318,7 +320,7 @@ mod tests {
             set.emit_arc(ev);
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
         set.close().await;
 
         let mut panic_count = 0u64;
@@ -332,6 +334,36 @@ mod tests {
             panic_count >= 3,
             "expected at least 3 SubscriberPanicked events, got {panic_count}"
         );
+    }
+
+    #[tokio::test]
+    async fn panic_on_internal_diagnostic_does_not_republish() {
+        // The runtime listener loops every bus event back into the set. A subscriber
+        // that panics on a diagnostic event must NOT republish SubscriberPanicked, or
+        // one panic becomes a self-sustaining storm. Cover BOTH internal diagnostics
+        // (suppression is keyed on is_internal_diagnostic()).
+        for diagnostic in [EventKind::SubscriberPanicked, EventKind::SubscriberOverflow] {
+            let bus = Bus::new(64);
+            let mut bus_rx = bus.subscribe();
+            let set = SubscriberSet::new(vec![Arc::new(PanicSub)], bus.clone());
+
+            set.emit_arc(Arc::new(Event::new(diagnostic).with_task("upstream")));
+
+            sleep(Duration::from_millis(50)).await;
+            set.close().await;
+
+            let mut republished = 0u64;
+            while let Ok(ev) = bus_rx.try_recv() {
+                if matches!(ev.kind, EventKind::SubscriberPanicked) {
+                    republished += 1;
+                }
+            }
+            assert_eq!(
+                republished, 0,
+                "panicking on a {diagnostic:?} event must not republish SubscriberPanicked \
+                 (got {republished}) — that is the feedback loop"
+            );
+        }
     }
 
     #[tokio::test]
