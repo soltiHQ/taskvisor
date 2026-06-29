@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -191,7 +192,7 @@ async fn max_retries_three_yields_four_runs_then_exhausted() {
 
     let spec = TaskSpec::restartable(make_fail("always-fail", Some(42)))
         .with_backoff(fast_backoff())
-        .with_max_retries(3);
+        .with_max_retries(NonZeroU32::new(3).unwrap());
     with_timeout(10, sup.run(vec![spec]))
         .await
         .expect("run() should return Ok");
@@ -222,7 +223,7 @@ async fn max_retries_one_yields_two_runs_boundary() {
 
     let spec = TaskSpec::restartable(make_fail("fail-1", None))
         .with_backoff(fast_backoff())
-        .with_max_retries(1);
+        .with_max_retries(NonZeroU32::new(1).unwrap());
     with_timeout(10, sup.run(vec![spec]))
         .await
         .expect("run() should return Ok");
@@ -405,7 +406,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
     });
     let spec = TaskSpec::restartable(task)
         .with_restart(RestartPolicy::Always { interval: None })
-        .with_max_retries(1)
+        .with_max_retries(NonZeroU32::new(1).unwrap())
         .with_backoff(fast_backoff());
 
     with_timeout(15, async {

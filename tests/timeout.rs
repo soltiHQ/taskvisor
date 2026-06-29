@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -23,7 +24,7 @@ async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries()
     let spec = TaskSpec::restartable(task)
         .with_timeout(Some(Duration::from_millis(50)))
         .with_backoff(fast_backoff())
-        .with_max_retries(1);
+        .with_max_retries(NonZeroU32::new(1).unwrap());
     with_timeout(10, sup.run(vec![spec]))
         .await
         .expect("run() should return Ok");

@@ -64,6 +64,7 @@
 //! - Each attempt gets its own **child_token** for isolation
 
 use std::{
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -141,8 +142,8 @@ pub(crate) struct TaskActorParams {
     pub(crate) backoff: BackoffPolicy,
     /// Optional per-attempt timeout (`None` = no timeout).
     pub(crate) timeout: Option<Duration>,
-    /// Maximum retry attempts after failure (`0` = unlimited).
-    pub(crate) max_retries: u32,
+    /// Maximum retry attempts after failure (`None` = unlimited).
+    pub(crate) max_retries: Option<NonZeroU32>,
 }
 
 /// Supervises execution of a single [`Task`] with retries, backoff, and event publishing.
@@ -345,14 +346,20 @@ impl TaskActor {
                         RestartPolicy::OnFailure | RestartPolicy::Always { .. }
                     );
                     let error_is_retryable = e.is_retryable();
-                    let retries_exhausted =
-                        self.params.max_retries > 0 && backoff_attempt >= self.params.max_retries;
+                    let retries_exhausted = self
+                        .params
+                        .max_retries
+                        .is_some_and(|max| backoff_attempt >= max.get());
 
                     if !(policy_allows_retry && error_is_retryable) || retries_exhausted {
-                        let reason: Arc<str> = if retries_exhausted {
+                        let reason: Arc<str> = if let Some(limit) =
+                            self.params.max_retries.filter(|_| retries_exhausted)
+                        {
                             Arc::from(format!(
                                 "max_retries_exceeded({}/{}): {}",
-                                backoff_attempt, self.params.max_retries, e
+                                backoff_attempt,
+                                limit.get(),
+                                e
                             ))
                         } else {
                             Arc::from(e.to_string())
@@ -436,7 +443,7 @@ mod tests {
             restart,
             backoff: fast_backoff(),
             timeout: None,
-            max_retries,
+            max_retries: NonZeroU32::new(max_retries),
         }
     }
 

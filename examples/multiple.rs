@@ -9,7 +9,7 @@
 //! | Task        | Policy                                   | Behavior                              |
 //! |-------------|------------------------------------------|---------------------------------------|
 //! | `one-shot`  | `RestartPolicy::Never`                   | Runs once, exits.                     |
-//! | `resilient` | `OnFailure` + backoff + `max_retries(3)` | Fails twice, succeeds on 3rd attempt. |
+//! | `resilient` | `OnFailure` + backoff + retry limit 3    | Fails twice, succeeds on 3rd attempt. |
 //! | `always-on` | `Always { interval: 500ms }`             | Runs forever in a loop.               |
 //!
 //! ## What this shows
@@ -48,6 +48,7 @@
 //! | [`metrics.rs`](metrics.rs) | Observe lifecycle events with a subscriber         |
 //! | [`dynamic.rs`](dynamic.rs) | Add/remove tasks at runtime via `SupervisorHandle` |
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -109,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .expect("valid backoff"),
             )
-            .with_max_retries(3),
+            .with_max_retries(NonZeroU32::new(3).unwrap()),
     ];
 
     let cfg = SupervisorConfig {

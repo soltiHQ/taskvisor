@@ -9,11 +9,11 @@
 //! ## Optional / normalized fields
 //!
 //! - `bus_capacity` is normalized to a minimum of `1` by [`bus_capacity_clamped`](SupervisorConfig::bus_capacity_clamped).
-//! - `max_retries = 0` still means "unlimited" (a sentinel that a future change will turn into `Option`).
 //! - `max_concurrent: None` → unlimited (no global semaphore); `Some(n)` → `n` permits.
+//! - `max_retries: None` → unlimited failure-retries; `Some(n)` → at most `n`.
 //! - `timeout: None` → no per-task timeout; `Some(d)` → applied per attempt.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use crate::policies::{BackoffPolicy, RestartPolicy};
@@ -35,7 +35,7 @@ use crate::tasks::{TaskRef, TaskSpec};
 /// - `restart`: Default restart policy (can be overridden per-task)
 /// - `max_concurrent`: Task concurrency limit (`None` = unlimited)
 /// - `timeout`: Default per-task timeout (`None` = no timeout)
-/// - `max_retries`: Default retry limit (`0` = unlimited)
+/// - `max_retries`: Default retry limit (`None` = unlimited)
 ///
 /// # Also
 ///
@@ -82,15 +82,15 @@ pub struct SupervisorConfig {
     /// Used by [`task_spec`](SupervisorConfig::task_spec). Can be overridden per-task.
     pub timeout: Option<Duration>,
 
-    /// Default maximum number of retry attempts after failure.
-    /// - `0` = unlimited retries (default)
-    /// - `n > 0` = at most `n` retries after the initial failure
+    /// Default failure-retry limit.
+    /// - `None` = unlimited retries (default)
+    /// - `Some(n)` = at most `n` retries after the initial failure
     ///
     /// Only counts failure-driven retries, not success-driven restarts
     /// (e.g., `RestartPolicy::Always` after success does not consume retries).
     ///
     /// Used by [`task_spec`](SupervisorConfig::task_spec). Can be overridden per-task.
-    pub max_retries: u32,
+    pub max_retries: Option<NonZeroU32>,
 }
 
 impl SupervisorConfig {
@@ -123,7 +123,7 @@ impl Default for SupervisorConfig {
     /// - `timeout = None` (no timeout)
     /// - `restart = RestartPolicy::OnFailure` (restart on errors only)
     /// - `backoff = BackoffPolicy::default()` (constant 100ms, see [`BackoffPolicy`])
-    /// - `max_retries = 0` (unlimited)
+    /// - `max_retries = None` (unlimited)
     fn default() -> Self {
         Self {
             grace: Duration::from_secs(60),
@@ -132,7 +132,7 @@ impl Default for SupervisorConfig {
             timeout: None,
             restart: RestartPolicy::default(),
             backoff: BackoffPolicy::default(),
-            max_retries: 0,
+            max_retries: None,
         }
     }
 }
@@ -166,5 +166,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.bus_capacity_clamped(), 1);
+    }
+
+    #[test]
+    fn task_spec_carries_config_defaults() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let task: TaskRef = TaskFn::arc("bridge", |_ctx: TaskContext| async { Ok(()) });
+        let cfg = SupervisorConfig {
+            max_retries: NonZeroU32::new(7),
+            timeout: Some(Duration::from_secs(3)),
+            ..Default::default()
+        };
+
+        let spec = cfg.task_spec(task);
+        assert_eq!(
+            spec.max_retries(),
+            NonZeroU32::new(7),
+            "task_spec must bridge max_retries from config into the spec"
+        );
+        assert_eq!(
+            spec.timeout(),
+            Some(Duration::from_secs(3)),
+            "task_spec must bridge timeout from config into the spec"
+        );
     }
 }

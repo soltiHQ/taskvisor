@@ -1,5 +1,6 @@
 //! Task execution specification.
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use crate::{policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef};
@@ -28,6 +29,7 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// ```rust
 /// use taskvisor::TaskContext;
 /// use taskvisor::{TaskSpec, TaskFn, SupervisorConfig, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
+/// use std::num::NonZeroU32;
 /// use std::time::Duration;
 ///
 /// let task: TaskRef = TaskFn::arc("demo", |_ctx: TaskContext| async move {
@@ -40,7 +42,7 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// // Restartable with builder chain:
 /// let spec = TaskSpec::restartable(task.clone())
 ///     .with_timeout(Some(Duration::from_secs(30)))
-///     .with_max_retries(5);
+///     .with_max_retries(NonZeroU32::new(5).unwrap());
 ///
 /// // Inherit from global config:
 /// let cfg = SupervisorConfig::default();
@@ -60,7 +62,7 @@ pub struct TaskSpec {
 
     task: TaskRef,
 
-    max_retries: u32,
+    max_retries: Option<NonZeroU32>,
 }
 
 impl std::fmt::Debug for TaskSpec {
@@ -88,7 +90,7 @@ impl TaskSpec {
             backoff,
             task,
 
-            max_retries: 0,
+            max_retries: None,
             timeout: normalize_timeout(timeout),
         }
     }
@@ -96,13 +98,11 @@ impl TaskSpec {
     /// One-shot: run once, never restart.
     pub fn once(task: TaskRef) -> Self {
         Self {
-            restart: RestartPolicy::Never,
             backoff: BackoffPolicy::default(),
+            restart: RestartPolicy::Never,
+            max_retries: None,
             timeout: None,
-
             task,
-
-            max_retries: 0,
         }
     }
 
@@ -115,7 +115,7 @@ impl TaskSpec {
 
             task,
 
-            max_retries: 0,
+            max_retries: None,
         }
     }
 
@@ -144,8 +144,8 @@ impl TaskSpec {
         self.timeout
     }
 
-    /// Returns the maximum retry attempts (`0` = unlimited).
-    pub fn max_retries(&self) -> u32 {
+    /// Returns the failure-retry limit (`None` = unlimited).
+    pub fn max_retries(&self) -> Option<NonZeroU32> {
         self.max_retries
     }
 
@@ -171,12 +171,11 @@ impl TaskSpec {
         self
     }
 
-    /// Builder: set the failure retry limit (`0` = unlimited).
+    /// Builder: set the failure-retry limit (`None` = unlimited).
     ///
-    /// This counts retries after failed attempts.
-    /// Successful restarts from `RestartPolicy::Always` do not consume this limit.
-    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+    /// Accepts a `NonZeroU32` (a limit) or an `Option<NonZeroU32>` (`None` = unlimited).
+    pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
+        self.max_retries = max_retries.into();
         self
     }
 }
