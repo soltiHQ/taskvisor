@@ -6,7 +6,7 @@
 //! ## What this shows
 //!
 //! - `RestartPolicy::Always { interval: Some(2s) }` - the supervisor waits `interval` after each successful completion before spawning the next run.
-//!   *With `interval: None`, restarts happen immediately.*
+//!   *With `interval: None`, restarts happen with no configured delay (instant tasks are floored to ~1ms).*
 //! - The task itself is short-lived (print and exit).
 //!   The supervisor handles the scheduling loop: your task doesn't need its own `loop {}`.
 //! - The `TaskContext` is unused here because the task completes instantly.

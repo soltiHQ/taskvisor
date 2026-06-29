@@ -1,15 +1,30 @@
 //! # Backoff policy for retrying tasks.
 //!
-//! [`BackoffPolicy`] controls how retry delays grow after repeated failures.
+//! [`BackoffPolicy`] computes the delay before the next retry after a retryable task failure.
 //!
-//! It is parameterized by:
-//! - [`BackoffPolicy::factor`] the multiplicative growth factor.
-//! - [`BackoffPolicy::max`] the maximum delay cap.
-//! - [`BackoffPolicy::first`] the initial delay.
+//! | Field                              | Role                                      |
+//! |------------------------------------|-------------------------------------------|
+//! | [`first`](BackoffPolicy::first)    | Delay before the first retry              |
+//! | [`factor`](BackoffPolicy::factor)  | Growth multiplier (`1.0` = constant)      |
+//! | [`max`](BackoffPolicy::max)        | Maximum delay cap                         |
+//! | [`jitter`](BackoffPolicy::jitter)  | Random spread applied to the base delay   |
+//! | [`floor`](BackoffPolicy::floor)    | User minimum delay after jitter           |
 //!
-//! The delay for attempt `n` is computed as `first × factor^n`, clamped to `max`, then jitter is applied.
+//! ## Formula
 //!
-//! # Example
+//! For retry attempt `n` (`0` = first retry):
+//!
+//! ```text
+//! base = min(first * factor^n, max)
+//! delay = jitter(base)
+//! delay = max(delay, user_floor)
+//! delay = max(delay, 1ms) for non-zero base, capped at max
+//! ```
+//!
+//! The implicit `1ms` floor prevents hot retry loops when jitter produces a near-zero delay.
+//! `first = 0` opts out of this implicit floor, but a user floor set with [`with_floor`](BackoffPolicy::with_floor) still applies.
+//!
+//! ## Example
 //! ```rust
 //! use std::time::Duration;
 //! use taskvisor::{BackoffPolicy, JitterPolicy};
@@ -78,7 +93,7 @@ impl Default for BackoffPolicy {
     /// - `factor = 1.0` (constant delay);
     /// - `first = 100ms`;
     /// - `max = 30s`;
-    /// - `floor = 0` (no floor).
+    /// - `floor = 0` (no user floor; the implicit 1ms non-zero-base safety floor still applies).
     fn default() -> Self {
         Self {
             first: Duration::from_millis(100),
@@ -97,7 +112,8 @@ impl BackoffPolicy {
     /// - [`BackoffError::InvalidFactor`] if `factor` is not finite or `< 1.0`.
     /// - [`BackoffError::FirstExceedsMax`] if `first > max`.
     ///
-    /// The delay floor defaults to `0`; set one with [`with_floor`](Self::with_floor).
+    /// The user delay floor defaults to `0`; set one with [`with_floor`](Self::with_floor).
+    /// (A separate implicit 1ms safety floor still applies to a non-zero base - see [`next`](Self::next).)
     pub fn new(
         first: Duration,
         max: Duration,
@@ -153,17 +169,25 @@ impl BackoffPolicy {
         self.jitter
     }
 
-    /// Minimum delay floor (`0` if unset).
+    /// User-configured minimum delay floor (`0` = none; the implicit 1ms safety floor is separate).
     #[must_use]
     pub fn floor(&self) -> Duration {
         self.floor
     }
 
-    /// Computes the delay for the given attempt number (0-indexed).
+    /// Computes the delay for a retry attempt (`0` = first retry).
     ///
-    /// The base delay is `first × factor^attempt`, clamped to [`BackoffPolicy::max`].
-    /// Jitter is applied to the clamped base, but the result is **never** fed back into subsequent calculations.
-    /// Each attempt derives its base independently.
+    /// The base delay is `first × factor^attempt`, capped at [`Self::max`].
+    /// Jitter is then applied.
+    ///
+    /// For [`JitterPolicy::None`], [`JitterPolicy::Full`], and [`JitterPolicy::Equal`], the jittered delay never exceeds the base.
+    /// [`JitterPolicy::RandomizedBand`] uses a wider band and may return a delay larger than the base.
+    ///
+    /// This method is stateless: the result is never fed back into later calls.
+    ///
+    /// After jitter, the user floor from [`with_floor`](Self::with_floor) is applied.
+    /// For a non-zero base, an extra `1ms` safety floor is also applied, capped at `max`, to avoid zero-delay hot loops.
+    /// `first = 0` disables only this implicit safety floor.
     pub fn next(&self, attempt: u32) -> Duration {
         let max_secs = self.max.as_secs_f64();
         let clamped_exp = attempt.min(i32::MAX as u32) as i32;
@@ -177,9 +201,9 @@ impl BackoffPolicy {
             };
 
         let delay = match self.jitter {
-            JitterPolicy::Decorrelated => {
+            JitterPolicy::RandomizedBand => {
                 self.jitter
-                    .apply_decorrelated(self.first.min(self.max), base, self.max)
+                    .apply_randomized_band(self.first.min(self.max), base, self.max)
             }
             _ => self.jitter.apply(base),
         };
@@ -199,215 +223,133 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[test]
-    fn test_attempt_zero_returns_first() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(30),
-            factor: 2.0,
-            jitter: JitterPolicy::None,
+    fn policy(first: Duration, max: Duration, factor: f64, jitter: JitterPolicy) -> BackoffPolicy {
+        BackoffPolicy {
+            first,
+            max,
+            factor,
+            jitter,
             floor: Duration::ZERO,
-        };
-        assert_eq!(policy.next(0), Duration::from_millis(100));
+        }
     }
 
     #[test]
-    fn test_exponential_growth_no_jitter() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(30),
-            factor: 2.0,
-            jitter: JitterPolicy::None,
-            floor: Duration::ZERO,
-        };
-
-        assert_eq!(policy.next(0), Duration::from_millis(100));
-        assert_eq!(policy.next(1), Duration::from_millis(200));
-        assert_eq!(policy.next(2), Duration::from_millis(400));
-        assert_eq!(policy.next(3), Duration::from_millis(800));
-        assert_eq!(policy.next(4), Duration::from_millis(1600));
+    fn exponential_growth_no_jitter() {
+        let p = policy(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            2.0,
+            JitterPolicy::None,
+        );
+        assert_eq!(p.next(0), Duration::from_millis(100));
+        assert_eq!(p.next(1), Duration::from_millis(200));
+        assert_eq!(p.next(2), Duration::from_millis(400));
+        assert_eq!(p.next(3), Duration::from_millis(800));
+        assert_eq!(p.next(4), Duration::from_millis(1600));
     }
 
     #[test]
-    fn test_constant_factor() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(500),
-            max: Duration::from_secs(30),
-            factor: 1.0,
-            jitter: JitterPolicy::None,
-            floor: Duration::ZERO,
-        };
+    fn constant_factor_is_flat() {
+        let p = policy(
+            Duration::from_millis(500),
+            Duration::from_secs(30),
+            1.0,
+            JitterPolicy::None,
+        );
         for attempt in 0..10 {
             assert_eq!(
-                policy.next(attempt),
+                p.next(attempt),
                 Duration::from_millis(500),
-                "attempt {} should be constant at 500ms",
-                attempt
+                "attempt {attempt}"
             );
         }
     }
 
     #[test]
-    fn test_clamped_to_max() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(1),
-            factor: 2.0,
-            jitter: JitterPolicy::None,
-            floor: Duration::ZERO,
-        };
-        assert_eq!(policy.next(10), Duration::from_secs(1));
+    fn first_exceeding_max_is_clamped_by_next() {
+        let p = policy(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            2.0,
+            JitterPolicy::None,
+        );
+        assert_eq!(p.next(0), Duration::from_secs(5));
     }
 
     #[test]
-    fn test_first_exceeds_max() {
-        let policy = BackoffPolicy {
-            first: Duration::from_secs(10),
-            max: Duration::from_secs(5),
-            factor: 2.0,
-            jitter: JitterPolicy::None,
-            floor: Duration::ZERO,
-        };
-        assert_eq!(policy.next(0), Duration::from_secs(5));
+    fn large_attempt_and_overflow_clamp_to_max() {
+        let p = policy(
+            Duration::from_millis(100),
+            Duration::from_secs(60),
+            2.0,
+            JitterPolicy::None,
+        );
+        assert_eq!(p.next(100), Duration::from_secs(60));
+        assert_eq!(p.next(u32::MAX), Duration::from_secs(60));
     }
 
     #[test]
-    fn test_full_jitter_no_negative_feedback() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(30),
-            factor: 2.0,
-            jitter: JitterPolicy::Full,
-            floor: Duration::ZERO,
-        };
-
+    fn full_jitter_never_exceeds_base_as_it_grows() {
+        let p = policy(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            2.0,
+            JitterPolicy::Full,
+        );
         for attempt in 5..15 {
             let base_ms = 100.0 * 2.0f64.powi(attempt as i32);
-            let delay = policy.next(attempt);
             assert!(
-                delay <= Duration::from_millis(base_ms as u64),
-                "attempt {}: delay {:?} exceeds base {}ms",
-                attempt,
-                delay,
-                base_ms
+                p.next(attempt) <= Duration::from_millis(base_ms as u64),
+                "attempt {attempt}: exceeds base {base_ms}ms"
             );
         }
     }
 
     #[test]
-    fn test_equal_jitter_no_negative_feedback() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(30),
-            factor: 2.0,
-            jitter: JitterPolicy::Equal,
-            floor: Duration::ZERO,
-        };
-
+    fn equal_jitter_stays_within_half_to_full_base() {
+        let p = policy(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            2.0,
+            JitterPolicy::Equal,
+        );
         for attempt in 0..15 {
             let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
-            let half = base_ms / 2.0;
-            let delay = policy.next(attempt);
+            let delay = p.next(attempt);
             assert!(
-                delay >= Duration::from_millis(half as u64),
-                "attempt {}: delay {:?} < half of base {}ms",
-                attempt,
-                delay,
-                base_ms
+                delay >= Duration::from_millis((base_ms / 2.0) as u64),
+                "attempt {attempt}: below half of {base_ms}ms"
             );
             assert!(
                 delay <= Duration::from_millis(base_ms as u64),
-                "attempt {}: delay {:?} > base {}ms",
-                attempt,
-                delay,
-                base_ms
+                "attempt {attempt}: above base {base_ms}ms"
             );
         }
     }
 
     #[test]
-    fn test_decorrelated_jitter_grows_with_attempts() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(30),
-            factor: 2.0,
-            jitter: JitterPolicy::Decorrelated,
-            floor: Duration::ZERO,
-        };
-
-        let mut min_late = Duration::from_secs(999);
-        let mut max_late = Duration::ZERO;
+    fn randomized_band_jitter_grows_with_attempts() {
+        let p = policy(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            2.0,
+            JitterPolicy::RandomizedBand,
+        );
+        let mut lo = Duration::from_secs(999);
+        let mut hi = Duration::ZERO;
         for _ in 0..100 {
-            let delay = policy.next(8);
-            min_late = min_late.min(delay);
-            max_late = max_late.max(delay);
+            let delay = p.next(8);
+            lo = lo.min(delay);
+            hi = hi.max(delay);
         }
-
         assert!(
-            min_late >= Duration::from_millis(100),
-            "min_late {:?} below floor",
-            min_late
+            lo >= Duration::from_millis(100),
+            "lower bound {lo:?} below first"
         );
         assert!(
-            max_late >= Duration::from_secs(5),
-            "max_late {:?} suspiciously low, range too narrow",
-            max_late
+            hi >= Duration::from_secs(5),
+            "upper bound {hi:?}; band too narrow"
         );
-    }
-
-    #[test]
-    fn test_full_jitter_bounds() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(1000),
-            max: Duration::from_secs(30),
-            factor: 1.0,
-            jitter: JitterPolicy::Full,
-            floor: Duration::ZERO,
-        };
-        for attempt in 0..50 {
-            let delay = policy.next(attempt);
-            assert!(delay <= Duration::from_millis(1000));
-        }
-    }
-
-    #[test]
-    fn test_equal_jitter_bounds() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(1000),
-            max: Duration::from_secs(30),
-            factor: 1.0,
-            jitter: JitterPolicy::Equal,
-            floor: Duration::ZERO,
-        };
-        for attempt in 0..50 {
-            let delay = policy.next(attempt);
-            assert!(delay >= Duration::from_millis(500));
-            assert!(delay <= Duration::from_millis(1000));
-        }
-    }
-
-    #[test]
-    fn test_huge_attempt_clamps_to_max() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(60),
-            factor: 2.0,
-            jitter: JitterPolicy::None,
-            floor: Duration::ZERO,
-        };
-        assert_eq!(policy.next(100), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn test_non_finite_overflow_clamps_to_max() {
-        let policy = BackoffPolicy {
-            first: Duration::from_millis(100),
-            max: Duration::from_secs(10),
-            factor: 2.0,
-            jitter: JitterPolicy::None,
-            floor: Duration::ZERO,
-        };
-        assert_eq!(policy.next(u32::MAX), Duration::from_secs(10));
     }
 
     #[test]
@@ -486,8 +428,6 @@ mod tests {
 
     #[test]
     fn sub_ms_nonzero_base_is_floored_to_at_least_one_ms() {
-        // A sub-millisecond `first` would quantize to 0 under jitter and hot-spin the loop;
-        // the granularity floor must keep every attempt at >= 1ms.
         let p = BackoffPolicy::new(
             Duration::from_micros(500),
             Duration::from_secs(1),

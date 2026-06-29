@@ -1,26 +1,29 @@
 //! # Jitter policy for retry delays.
 //!
-//! [`JitterPolicy`] adds randomness to backoff delays so that many tasks do not all retry at the same moment.
-//! - [`JitterPolicy::Equal`] delay = backoff_delay/2 + random[0, backoff_delay/2] (balanced)
-//! - [`JitterPolicy::Decorrelated`] memoryless randomized band that widens with the base delay
-//! - [`JitterPolicy::Full`] random delay in [0, backoff_delay] (most aggressive)
-//! - [`JitterPolicy::None`] no randomization, predictable delays
+//! [`JitterPolicy`] adds random spread to retry delays. This helps avoid many tasks retrying at the same moment.
+//!
+//! | Policy                                           | Range when used by [`BackoffPolicy`](crate::BackoffPolicy) | Use when                       |
+//! |--------------------------------------------------|------------------------------------------------------------|--------------------------------|
+//! | [`None`](JitterPolicy::None)                     | exact base delay                                           | Predictable timing or tests    |
+//! | [`Equal`](JitterPolicy::Equal)                   | `[base / 2, base]`                                         | Balanced spread, good default  |
+//! | [`Full`](JitterPolicy::Full)                     | `[0, base]`                                                | Maximum spread, shorter delays |
+//! | [`RandomizedBand`](JitterPolicy::RandomizedBand) | `[first, min(base * 3, max)]`                              | Widest spread                  |
+//!
+//! [`RandomizedBand`](JitterPolicy::RandomizedBand) is memoryless.
+//! It uses the current retry base delay, not the previous actual delay.
 
 use std::time::Duration;
 
 /// Policy controlling randomization of retry delays.
 ///
-/// Prevents synchronized retries across multiple tasks by adding controlled randomness.
+/// Most users configure this through [`BackoffPolicy`](crate::BackoffPolicy).
 ///
 /// ## Trade-offs
-/// - **None**: Predictable, but many tasks may retry at the same time
-/// - **Equal**: Balanced (recommended for most use cases)
-/// - **Full**: Maximum randomness, aggressive load spreading
-/// - **Decorrelated**: Widest spread; per-attempt randomized band (memoryless approximation)
 ///
-/// # Also
-///
-/// - [`BackoffPolicy`](crate::BackoffPolicy) - uses `JitterPolicy` to randomize computed delays
+/// - [`RandomizedBand`](Self::RandomizedBand): can exceed the base delay when used by [`BackoffPolicy`](crate::BackoffPolicy).
+/// - [`Equal`](Self::Equal): balanced; keeps about 75% of the base delay on average.
+/// - [`None`](Self::None): predictable, but retries can line up.
+/// - [`Full`](Self::Full): widest spread below the base delay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JitterPolicy {
@@ -44,8 +47,15 @@ pub enum JitterPolicy {
     /// Preserves ~75% of the original backoff on average.
     Equal,
 
-    /// Decorrelated-style jitter: delay = random in `[base, min(3 × base, max)]`.
-    Decorrelated,
+    /// Randomized wideband.
+    ///
+    /// When used by [`BackoffPolicy::next`](crate::BackoffPolicy::next), the delay is drawn from:
+    /// ```text
+    /// [first, min(base * 3, max)]
+    /// ```
+    ///
+    /// Here `base` is the current retry delay before jitter: `first * factor^attempt`, capped at `max`.
+    RandomizedBand,
 }
 
 impl Default for JitterPolicy {
@@ -56,42 +66,42 @@ impl Default for JitterPolicy {
 }
 
 impl JitterPolicy {
-    /// Applies jitter to the given delay.
+    /// Applies context-free jitter to `delay`.
     ///
-    /// `Decorrelated` has no previous-delay context here, it falls back to **full jitter** (random in `[0, delay]`) rather than silently returning the input.
-    /// For the true decorrelated recurrence use [`apply_decorrelated`](Self::apply_decorrelated).
+    /// [`RandomizedBand`](Self::RandomizedBand) needs `first` and `max` to build its full band.
+    /// This method does not have that context, so `RandomizedBand` falls back to [`Full`](Self::Full)-style jitter: `[0, delay]`.
+    ///
+    /// For full band behavior, use [`Self::apply_randomized_band`].
     #[must_use]
     pub fn apply(&self, delay: Duration) -> Duration {
         match self {
             JitterPolicy::None => delay,
-            JitterPolicy::Decorrelated | JitterPolicy::Full => self.full_jitter(delay),
+            JitterPolicy::RandomizedBand | JitterPolicy::Full => self.full_jitter(delay),
             JitterPolicy::Equal => self.equal_jitter(delay),
         }
     }
 
-    /// Applies decorrelated jitter with full context.
-    /// - `base`: minimal delay (usually the initial backoff)
-    /// - `prev`: previous actual delay
-    /// - `max`: maximum cap
-    ///
-    /// If called on a non-`Decorrelated` policy, falls back to `apply(base)`.
-    pub fn apply_decorrelated(&self, base: Duration, prev: Duration, max: Duration) -> Duration {
-        if !matches!(self, JitterPolicy::Decorrelated) {
-            return self.apply(base);
+    /// Draws a uniform random delay over the band `[lower, min(upper_seed × 3, max)]`.
+    #[must_use]
+    pub fn apply_randomized_band(
+        &self,
+        lower: Duration,
+        upper_seed: Duration,
+        max: Duration,
+    ) -> Duration {
+        let lower = lower.min(max);
+        if !matches!(self, JitterPolicy::RandomizedBand) {
+            return self.apply(lower);
         }
 
-        let base_ms = (base.as_millis().min(u128::from(u64::MAX))) as u64;
-        let prev_ms = (prev.as_millis().min(u128::from(u64::MAX))) as u64;
+        let lower_ms = (lower.as_millis().min(u128::from(u64::MAX))) as u64;
+        let seed_ms = (upper_seed.as_millis().min(u128::from(u64::MAX))) as u64;
         let max_ms = (max.as_millis().min(u128::from(u64::MAX))) as u64;
-
-        let upper_bound = prev_ms.saturating_mul(3).min(max_ms);
-        let clamped_upper = upper_bound.max(base_ms);
-        if base_ms >= clamped_upper {
-            return base;
+        let upper = seed_ms.saturating_mul(3).min(max_ms).max(lower_ms);
+        if lower_ms >= upper {
+            return lower;
         }
-
-        let jittered_ms = fastrand::u64(base_ms..=clamped_upper);
-        Duration::from_millis(jittered_ms)
+        Duration::from_millis(fastrand::u64(lower_ms..=upper))
     }
 
     /// Full jitter: random in `[0, delay]`.
@@ -139,37 +149,58 @@ mod tests {
     }
 
     #[test]
-    fn decorrelated_apply_falls_back_to_full_jitter() {
+    fn randomized_band_apply_falls_back_to_full_jitter() {
         let delay = Duration::from_millis(500);
         for _ in 0..100 {
-            let d = JitterPolicy::Decorrelated.apply(delay);
+            let d = JitterPolicy::RandomizedBand.apply(delay);
             assert!(
                 d <= delay,
-                "context-free Decorrelated apply() must be ≤ delay"
+                "context-free RandomizedBand apply() must be ≤ delay"
             );
         }
     }
 
     #[test]
-    fn apply_decorrelated_on_full_falls_back_to_apply() {
-        let base = Duration::from_millis(100);
-        let prev = Duration::from_millis(300);
+    fn apply_randomized_band_on_full_falls_back_to_apply() {
+        let lower = Duration::from_millis(100);
+        let upper_seed = Duration::from_millis(300);
         let max = Duration::from_secs(10);
 
         for _ in 0..100 {
-            let result = JitterPolicy::Full.apply_decorrelated(base, prev, max);
-            assert!(result <= base, "Full fallback should be in [0, base]");
+            let result = JitterPolicy::Full.apply_randomized_band(lower, upper_seed, max);
+            assert!(result <= lower, "Full fallback should be in [0, lower]");
         }
     }
 
     #[test]
-    fn apply_decorrelated_base_ge_max_returns_base() {
-        let base = Duration::from_secs(10);
-        let prev = Duration::from_millis(50);
+    fn apply_randomized_band_clamps_lower_to_max() {
+        // A direct caller passing lower > max must still not exceed the cap: lower is
+        // clamped to max, so the result is max (never the out-of-band lower).
+        let lower = Duration::from_secs(10);
+        let upper_seed = Duration::from_millis(50);
         let max = Duration::from_secs(5);
 
-        let result = JitterPolicy::Decorrelated.apply_decorrelated(base, prev, max);
-        assert_eq!(result, base);
+        let result = JitterPolicy::RandomizedBand.apply_randomized_band(lower, upper_seed, max);
+        assert_eq!(
+            result, max,
+            "result must be capped at max, not the out-of-band lower"
+        );
+    }
+
+    #[test]
+    fn apply_randomized_band_draws_within_first_to_3x_band() {
+        // Lower bound is the constant `lower` (first); upper is min(seed*3, max).
+        let lower = Duration::from_millis(100);
+        let upper_seed = Duration::from_secs(1);
+        let max = Duration::from_secs(30);
+        let upper = Duration::from_secs(3); // seed*3 = 3s < max
+        for _ in 0..500 {
+            let d = JitterPolicy::RandomizedBand.apply_randomized_band(lower, upper_seed, max);
+            assert!(
+                d >= lower && d <= upper,
+                "draw {d:?} outside [{lower:?}, {upper:?}]"
+            );
+        }
     }
 
     #[test]

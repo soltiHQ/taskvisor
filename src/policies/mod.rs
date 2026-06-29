@@ -1,20 +1,33 @@
-//! Retry and restart policies.
+//! # Retry and restart policies.
 //!
-//! This module groups the knobs that control **if/when** a task is restarted and **how long** to wait between attempts.
+//! This module contains the policy types that control task restarts.
 //!
-//! ## Contents
-//! - [`BackoffPolicy`] how retry delays evolve (first / factor / max + jitter)
-//! - [`RestartPolicy`] when to restart a task (never / on-failure / always)
-//! - [`JitterPolicy`]  randomization strategy; tasks do not all retry at once
+//! | Type              | Role                                                   |
+//! |-------------------|--------------------------------------------------------|
+//! | [`RestartPolicy`] | Decides if a task starts again after success or failure |
+//! | [`BackoffPolicy`] | Computes retry delay after a retryable failure          |
+//! | [`JitterPolicy`]  | Adds random spread to retry delays                      |
+//! | [`BackoffError`]  | Error returned by invalid backoff settings              |
 //!
-//! ## Wiring
+//! ## Flow
 //!
-//! All three policies are configured through [`TaskSpec`](crate::TaskSpec).
+//! [`TaskSpec`](crate::TaskSpec) stores one [`RestartPolicy`] and one [`BackoffPolicy`].
+//! [`BackoffPolicy`] stores the [`JitterPolicy`] used for retry delays.
+//!
+//! ```text
+//! RestartPolicy ─┐
+//!                ├──► TaskSpec ──► Supervisor
+//! BackoffPolicy ─┘
+//!      └── JitterPolicy
+//! ```
 //!
 //! ## Defaults
-//! - `BackoffPolicy::default()` first=100ms, factor=1.0 (constant), max=30s, jitter=None.
-//! - `JitterPolicy::None` by default; consider `Equal` for balanced randomness.
-//! - `RestartPolicy::OnFailure` (recommended default for most tasks).
+//!
+//! - [`RestartPolicy::OnFailure`] - restart only after retryable failures.
+//! - [`BackoffPolicy::default()`] - constant `100ms` retry delay, capped at `30s`.
+//! - [`JitterPolicy::None`] - no random delay by default.
+//!
+//! For balanced retry spreading, use [`JitterPolicy::Equal`].
 
 mod backoff;
 pub use backoff::{BackoffError, BackoffPolicy};

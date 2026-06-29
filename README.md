@@ -39,7 +39,7 @@ taskvisor gives you a **supervised** handle instead: it restarts the task on fai
 |     | Feature                   | What you get                                                                |
 |:---:|---------------------------|-----------------------------------------------------------------------------|
 | 🔁  | **Restart policies**      | `Never`, `OnFailure`, or `Always { interval }`: chosen per task             |
-|  ⏳  | **Backoff with jitter**   | Exponential, constant, or decorrelated; spreads retries out in time         |
+|  ⏳  | **Backoff with jitter**   | Exponential, constant, or randomized-band; spreads retries out in time      |
 | 📡  | **Structured events**     | Every start, stop, failure, timeout, and backoff on a broadcast bus         |
 | 🔌  | **Pluggable subscribers** | Implement one method (`on_event`) for metrics, alerts, or logging           |
 | 🎯  | **Guaranteed outcomes**   | `await` a task's final `TaskOutcome`, even if events are dropped under load |
@@ -239,7 +239,8 @@ let spec = TaskSpec::new(task, RestartPolicy::Always { interval: None }, backoff
 | `Always { interval }`   | Always restarts.                                |
 
 **BackoffPolicy** - Controls retry delay after failure. 
-Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied:
+Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied.
+A non-zero delay is floored to at least `1ms` (capped at `max`) to avoid a restart hot-spin (`first = 0` opts out):
 
 | Field    | Default  | Meaning                                      |
 |----------|----------|----------------------------------------------|
@@ -255,7 +256,7 @@ Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is appl
 | `None`                  | exact delay                      | Single task, predictable timing        |
 | `Full`                  | `[0, delay]`                     | Maximum spread needed                  |
 | `Equal` *(recommended)* | `[delay/2, delay]`               | Balanced; keeps about 75% of the delay |
-| `Decorrelated`          | `[base, base*3]` capped at `max` | Self-adjusting; widens with each retry |
+| `RandomizedBand`        | `[first, min(base*3, max)]`      | Widest spread; can exceed the base     |
 
 **Events & Subscribe** - Every lifecycle change is published to a broadcast bus. 
 Implement `Subscribe` to observe them. 
