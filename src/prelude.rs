@@ -18,7 +18,7 @@ pub use crate::tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSp
 pub use crate::policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
 // Events
-pub use crate::events::{Event, EventKind};
+pub use crate::events::{BackoffSource, Event, EventKind};
 
 // Subscribers
 pub use crate::subscribers::Subscribe;

@@ -1,32 +1,32 @@
-//! # Event bus for broadcasting runtime events.
+//! # Internal event bus.
 //!
-//! [`Bus`] is a thin wrapper around [`tokio::sync::broadcast`] that provides non-blocking
-//! event publishing from multiple sources (actors, runner, supervisor).
+//! [`Bus`] is a small wrapper around [`tokio::sync::broadcast`].
+//! Runtime components use it to publish [`Event`](crate::Event) values without blocking each other.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Publishers (many):                 Subscriber (one):
-//!   Actor 1 ──┐
-//!   Actor 2 ──┼──────► Bus ───────► subscriber_listener ────► SubscriberSet
-//!   Actor N ──┤  (broadcast chan)     (in Supervisor)
-//!   Runner  ──┘
+//! Publishers:
+//!   Supervisor ─┐
+//!   Registry    ├──► Bus ──► receiver: subscriber_listener ──► SubscriberSet ──► Subscribe impls
+//!   TaskActor   ┤       ├──► receiver: registry listener
+//!   Runner      ┤       └──► receiver: controller (feature = "controller")
+//!   Subscribers ┘
 //! ```
 //!
-//! taskvisor uses a single internal listener that distributes events to multiple user-defined subscribers via `SubscriberSet`.
+//! Each `subscribe()` call creates an independent receiver cursor.
+//! The channel storage itself is shared: one bounded ring keeps the most recent events.
 //!
-//! ## Rules
+//! ## Delivery model
 //!
-//! - **Non-blocking publish**: `publish()` never blocks; it calls `broadcast::Sender::send`.
-//! - **Lag handling**: slow receivers get `RecvError::Lagged(n)` and skip `n` oldest items.
-//! - **No persistence**: events are lost if there are no active subscribers at send time.
-//! - **Bounded capacity**: a single ring buffer stores recent events for all receivers.
+//! - Publishing is non-blocking.
+//! - Delivery is best-effort.
+//! - A new receiver only sees events sent after it subscribes.
+//! - If a receiver is too slow, it gets `RecvError::Lagged(n)` and skips old events.
+//! - If there are no active receivers, published events are dropped.
 //!
-//! ## Capacity behavior
-//!
-//! When the channel reaches capacity and new events are sent:
-//! - Receivers that fell behind observe `RecvError::Lagged(n)` on the next `recv()`, indicating how many events were skipped.
-//! - The ring buffer keeps only the most recent `capacity` events.
+//! This bus is for observability and runtime coordination.
+//! It is not durable storage and does not provide exactly-once delivery.
 
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -48,29 +48,36 @@ pub(crate) struct Bus {
     tx: broadcast::Sender<Arc<Event>>,
 }
 
+/// Broadcast channel for runtime events.
+///
+/// This is an internal runtime primitive.
+/// Public user code normally consumes events through [`Subscribe`](crate::Subscribe), not by subscribing to `Bus` directly.
+///
+/// The bus is cloneable and multi-producer.
+/// Receivers are independent, but they share one bounded broadcast buffer.
 impl Bus {
-    /// Creates a new bus with the given channel capacity.
+    /// Creates a new bus.
     ///
-    /// ### Notes
-    ///
-    /// - Capacity is **shared** across all receivers (not per-subscriber).
-    /// - When receivers lag, they will observe `RecvError::Lagged`.
-    /// - The minimum capacity is 1 (clamped).
+    /// `capacity` is the number of recent events kept in the shared broadcast ring.
+    /// The value is clamped to at least `1`.
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         let (tx, _rx) = broadcast::channel::<Arc<Event>>(capacity);
         Self { tx }
     }
 
-    /// Publishes an event to all active subscribers.
+    /// Publishes an event to all active bus receivers.
+    ///
+    /// This never waits for receivers.
+    /// If there are no receivers, or a receiver is too slow, the event may be dropped for that receiver.
     pub fn publish(&self, ev: Event) {
         let _ = self.tx.send(Arc::new(ev));
     }
 
-    /// Creates a new receiver that will observe subsequent events.
-    /// - Slow receivers get `RecvError::Lagged(n)` and skip over missed items.
-    /// - A receiver only gets events **sent after** it subscribes.
-    /// - Each call creates an **independent** receiver.
+    /// Creates an independent receiver.
+    ///
+    /// The receiver observes only events sent after this call.
+    /// If it falls behind, `recv()` returns `RecvError::Lagged(n)` before continuing with retained events.
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
         self.tx.subscribe()
     }
@@ -80,6 +87,7 @@ impl Bus {
 mod tests {
     use super::*;
     use crate::EventKind;
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
     #[tokio::test]
     async fn capacity_zero_clamps_to_one() {
@@ -91,11 +99,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscriber_receives_event_after_subscribe() {
+    async fn every_receiver_observes_each_event() {
         let bus = Bus::new(16);
-        let mut rx = bus.subscribe();
+        let mut a = bus.subscribe();
+        let mut b = bus.subscribe();
+
         bus.publish(Event::new(EventKind::TaskStarting));
-        let ev = rx.recv().await.unwrap();
-        assert_eq!(ev.kind, EventKind::TaskStarting);
+
+        assert_eq!(a.recv().await.unwrap().kind, EventKind::TaskStarting);
+        assert_eq!(b.recv().await.unwrap().kind, EventKind::TaskStarting);
+    }
+
+    #[tokio::test]
+    async fn publish_without_subscribers_is_dropped() {
+        let bus = Bus::new(16);
+        bus.publish(Event::new(EventKind::TaskStarting));
+
+        let mut rx = bus.subscribe();
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn slow_receiver_observes_lagged_then_resumes() {
+        let bus = Bus::new(2);
+        let mut rx = bus.subscribe();
+
+        for _ in 0..4 {
+            bus.publish(Event::new(EventKind::TaskStarting));
+        }
+
+        let err = rx
+            .recv()
+            .await
+            .expect_err("lagged receiver must report the skip");
+        assert!(
+            matches!(err, RecvError::Lagged(_)),
+            "expected Lagged, got {err:?}"
+        );
+        assert_eq!(rx.recv().await.unwrap().kind, EventKind::TaskStarting);
     }
 }
