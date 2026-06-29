@@ -54,8 +54,8 @@ pub enum EventKind {
     /// Subscriber dropped an event (queue full or worker closed).
     ///
     /// Sets:
-    /// - `task`: subscriber name
-    /// - `reason`: reason string (e.g., "full", "closed")
+    /// - `task`: subscriber name (or the internal consumer that lagged)
+    /// - `reason`: bare cause — `"full"`, `"closed"`, or `"lagged(n)"`
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     SubscriberOverflow,
@@ -410,9 +410,11 @@ impl Event {
     #[inline]
     #[must_use]
     pub fn subscriber_overflow(subscriber: &'static str, reason: &'static str) -> Self {
+        // The subscriber name lives in `task`; `reason` is the bare cause
+        // ("full" / "closed") — no duplication, machine-readable.
         Event::new(EventKind::SubscriberOverflow)
             .with_task(subscriber)
-            .with_reason(format!("subscriber={subscriber} reason={reason}"))
+            .with_reason(reason)
     }
 
     /// Creates a subscriber panic event.
@@ -537,9 +539,16 @@ mod tests {
     fn subscriber_overflow_factory_sets_fields() {
         let ev = Event::subscriber_overflow("my-sub", "full");
         assert_eq!(ev.kind, EventKind::SubscriberOverflow);
-        assert_eq!(ev.task.as_deref(), Some("my-sub"));
-        assert!(ev.reason.as_deref().unwrap().contains("subscriber=my-sub"));
-        assert!(ev.reason.as_deref().unwrap().contains("reason=full"));
+        assert_eq!(
+            ev.task.as_deref(),
+            Some("my-sub"),
+            "subscriber name lives in `task`"
+        );
+        assert_eq!(
+            ev.reason.as_deref(),
+            Some("full"),
+            "`reason` is the bare cause, not a re-encoding of the subscriber name"
+        );
     }
 
     #[test]

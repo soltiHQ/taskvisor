@@ -283,7 +283,7 @@ impl Registry {
                             me.bus.publish(
                                 Event::new(EventKind::SubscriberOverflow)
                                     .with_task("registry")
-                                    .with_reason(format!("registry_listener_lagged({})", n))
+                                    .with_reason(format!("lagged({n})")),
                             );
                             me.reap_finished().await;
                             continue;
