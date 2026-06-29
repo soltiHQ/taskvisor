@@ -268,7 +268,7 @@ Return these from your task to control what happens next:
 | Return                           | Retryable | What happens                                                                |
 |----------------------------------|-----------|-----------------------------------------------------------------------------|
 | `Ok(())`                         | -         | Task completed. `RestartPolicy` decides next step.                          |
-| `panic!` in the task body        | Yes       | Caught and converted to `TaskError::Fail`; backoff, then retry per policy.  |
+| `panic!` in the task body        | Yes\*     | Caught and converted to `TaskError::Fail`; backoff, then retry per policy.  |
 | `Err(TaskError::fail(reason))`   | Yes       | Retryable failure. Backoff, then retry. Wrap a cause with `fail_from(err)`. |
 | `Err(TaskError::Timeout { .. })` | Yes       | Set automatically when per-task timeout is exceeded.                        |
 | `Err(TaskError::fatal(reason))`  | No        | Permanent failure. Actor stops, publishes `ActorDead`. See `fatal_from`.    |

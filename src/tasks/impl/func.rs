@@ -56,10 +56,17 @@ use crate::{
 ///
 /// - See the [`Task`](crate::Task) trait documentation.
 /// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
-#[derive(Debug)]
 pub struct TaskFn<F> {
     name: Arc<str>,
     f: F,
+}
+
+impl<F> std::fmt::Debug for TaskFn<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskFn")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<F> TaskFn<F> {
@@ -73,8 +80,7 @@ impl<F> TaskFn<F> {
 
     /// Creates a shared task handle.
     ///
-    /// The return value can be assigned to [`TaskRef`](crate::TaskRef):
-    /// `let task: TaskRef = TaskFn::arc("name", f);`.
+    /// The return value can be assigned to [`TaskRef`](crate::TaskRef): `let task: TaskRef = TaskFn::arc("name", f);`.
     pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {
         Arc::new(Self::new(name, f))
     }
@@ -92,5 +98,55 @@ where
     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture {
         let fut = (self.f)(ctx);
         Box::pin(fut)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
+
+    fn ctx() -> TaskContext {
+        TaskContext::from_token(CancellationToken::new())
+    }
+
+    #[test]
+    fn name_round_trips() {
+        let t = TaskFn::new("worker-7", |_ctx: TaskContext| async { Ok(()) });
+        assert_eq!(t.name(), "worker-7");
+    }
+
+    #[test]
+    fn spawn_invokes_closure_once_per_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let t = TaskFn::new("counter", move |_ctx: TaskContext| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+
+        for _ in 0..3 {
+            drop(t.spawn(ctx()));
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "spawn must invoke the closure (a fresh future) on every attempt"
+        );
+    }
+
+    #[test]
+    fn debug_works_for_closure_backed_task_and_shows_name() {
+        let t = TaskFn::new("dbg", |_ctx: TaskContext| async { Ok::<(), TaskError>(()) });
+        let rendered = format!("{t:?}");
+        assert!(
+            rendered.contains("TaskFn"),
+            "debug must name the type: {rendered}"
+        );
+        assert!(
+            rendered.contains("dbg"),
+            "debug must include the task name: {rendered}"
+        );
     }
 }

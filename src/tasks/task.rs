@@ -36,7 +36,7 @@ pub type TaskRef = Arc<dyn Task>;
 /// |----------------------------|----------------------|----------------------------------------------------|
 /// | `Ok(())`                   | Completed            | Depends on [`RestartPolicy`](crate::RestartPolicy) |
 /// | `Err(TaskError::Fail)`     | Retryable failure    | Per policy, with backoff                           |
-/// | `Err(TaskError::Timeout)`  | Attempt timed out    | Per policy, with backoff                           |
+/// | `Err(TaskError::Timeout)`  | Attempt timed out*   | Per policy, with backoff                           |
 /// | `Err(TaskError::Canceled)` | Graceful cancel      | Never                                              |
 /// | `Err(TaskError::Fatal)`    | Permanent failure    | Never                                              |
 ///
