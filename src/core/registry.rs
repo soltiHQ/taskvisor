@@ -64,49 +64,84 @@ struct Inner {
 }
 
 #[derive(Default)]
+struct PendingInner {
+    /// Refcount of in-flight joins per identity.
+    counts: HashMap<TaskId, usize>,
+    /// Human label per in-flight identity, for stuck-diagnostics on a grace timeout.
+    labels: HashMap<TaskId, Arc<str>>,
+}
+
+#[derive(Default)]
 struct PendingJoins {
-    counts: std::sync::Mutex<HashMap<TaskId, usize>>,
+    inner: std::sync::Mutex<PendingInner>,
     drained: Notify,
 }
 
 impl PendingJoins {
     /// Registers an in-flight join for `id`.
     fn inc(&self, id: TaskId) {
-        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
-        *map.entry(id).or_insert(0) += 1;
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *g.counts.entry(id).or_insert(0) += 1;
+    }
+
+    /// Records the human label for an in-flight join (for stuck-diagnostics on timeout).
+    ///
+    /// No-op if `id` is not currently in flight.
+    fn label(&self, id: TaskId, label: Arc<str>) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.counts.contains_key(&id) {
+            g.labels.insert(id, label);
+        }
     }
 
     /// Marks one in-flight join for `id` as finished; wakes `wait_drained` when none remain.
     fn dec(&self, id: TaskId) {
-        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = map.get_mut(&id) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = g.counts.get_mut(&id) {
             *n -= 1;
             if *n == 0 {
-                map.remove(&id);
+                g.counts.remove(&id);
+                g.labels.remove(&id);
             }
         }
-        if map.is_empty() {
+        if g.counts.is_empty() {
             self.drained.notify_waiters();
         }
     }
 
     /// Returns `true` if a join for `id` is still in flight.
     fn contains(&self, id: TaskId) -> bool {
-        self.counts
+        self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .counts
             .contains_key(&id)
     }
 
     /// Returns `true` if no joins are in flight.
     fn is_empty(&self) -> bool {
-        self.counts
+        self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .counts
             .is_empty()
     }
 
+    /// Labels of joins still in flight (best-effort: an id incremented but not yet labeled is omitted).
+    fn pending_labels(&self) -> Vec<Arc<str>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .labels
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// Resolves once no joins are in flight.
+    ///
+    /// Register-before-check: `notified()` is created **before** testing `is_empty` so a
+    /// concurrent `dec` cannot slip its wakeup between the check and the await.
     async fn wait_drained(&self) {
         loop {
             let notified = self.drained.notified();
@@ -169,6 +204,20 @@ impl Registry {
             return false;
         }
         !self.pending_joins.contains(id)
+    }
+
+    /// Waits up to `grace` for all in-flight detached joins to finish.
+    ///
+    /// Detached join-reporters (from a `remove`/cleanup) live outside `state.tasks`, so
+    /// [`cancel_all_within`](Self::cancel_all_within) does not cover them. Graceful shutdown
+    /// calls this *before* cancelling the runtime token — while the subscriber listener is
+    /// still alive — so each joiner's final `TaskRemoved` is delivered (not lost to the
+    /// shutdown race) and the grace verdict reflects them. Returns the labels of any joins
+    /// **still in flight** after `grace` (empty if all drained), so the caller can fold them
+    /// into the shutdown "stuck" set.
+    pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
+        let _ = tokio::time::timeout(grace, self.pending_joins.wait_drained()).await;
+        self.pending_joins.pending_labels()
     }
 
     #[inline]
@@ -482,6 +531,7 @@ impl Registry {
     ) {
         let bus = self.bus.clone();
         let pending = Arc::clone(&self.pending_joins);
+        pending.label(id, Arc::clone(&name));
         tokio::spawn(async move {
             let mut join = join;
             match force_after {
@@ -625,6 +675,43 @@ mod tests {
         let token = CancellationToken::new();
         let (_tx, rx) = mpsc::unbounded_channel();
         Registry::new(bus, token, None, Duration::from_secs(5), rx)
+    }
+
+    #[tokio::test]
+    async fn wait_joins_within_reports_stuck_labels_then_drains() {
+        let reg = registry();
+
+        // No in-flight joins → drains immediately (no stuck labels).
+        assert!(
+            reg.wait_joins_within(Duration::from_millis(50))
+                .await
+                .is_empty(),
+            "an empty join set must drain immediately"
+        );
+
+        // A labeled in-flight join → reported as stuck (by label) on timeout.
+        let id = TaskId::next();
+        reg.pending_joins.inc(id);
+        reg.pending_joins.label(id, Arc::from("stuck-task"));
+        let stuck = reg.wait_joins_within(Duration::from_millis(30)).await;
+        assert_eq!(
+            stuck,
+            vec![Arc::<str>::from("stuck-task")],
+            "an in-flight join must be reported with its label on timeout"
+        );
+
+        // Drains (no stuck) once the in-flight join is decremented within the budget.
+        let p = Arc::clone(&reg.pending_joins);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            p.dec(id);
+        });
+        assert!(
+            reg.wait_joins_within(Duration::from_secs(1))
+                .await
+                .is_empty(),
+            "must drain once the in-flight join is decremented"
+        );
     }
 
     #[tokio::test]

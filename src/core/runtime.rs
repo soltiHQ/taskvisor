@@ -353,7 +353,18 @@ impl SupervisorCore {
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         let res = tokio::select! {
             sig = crate::core::shutdown::wait_for_shutdown_signal() => self.on_shutdown_signal(sig).await,
-            _ = self.registry.wait_until_empty() => Ok(()),
+            _ = self.registry.wait_until_empty() => {
+                // Natural completion: tasks finished; drain their cleanup joiners while the
+                // subscriber listener is alive so each final `TaskRemoved` is delivered. A
+                // joiner that overruns grace is surfaced as `GraceExceeded`, not swallowed.
+                let stuck = self.registry.wait_joins_within(self.cfg.grace).await;
+                if stuck.is_empty() {
+                    Ok(())
+                } else {
+                    self.bus.publish(Event::new(EventKind::GraceExceeded));
+                    Err(RuntimeError::GraceExceeded { grace: self.cfg.grace, stuck })
+                }
+            }
         };
         self.mark_shutting_down();
         self.runtime_token.cancel();
@@ -378,7 +389,15 @@ impl SupervisorCore {
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         self.mark_shutting_down();
         let grace = self.cfg.grace;
-        let stuck = self.registry.cancel_all_within(grace).await;
+        let deadline = tokio::time::Instant::now() + grace;
+        // Map-resident tasks: cancel + join within grace; `stuck` are those force-aborted.
+        let mut stuck = self.registry.cancel_all_within(grace).await;
+        // Detached joiners (e.g. a `remove` just before shutdown) live outside the map; wait
+        // for them within the *remaining* grace, before `runtime_token.cancel()`, so their
+        // final `TaskRemoved` is delivered while the subscriber listener is still alive. Any
+        // that overrun are folded into `stuck` by label, so the verdict names who is stuck.
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        stuck.extend(self.registry.wait_joins_within(remaining).await);
         if stuck.is_empty() {
             self.bus
                 .publish(Event::new(EventKind::AllStoppedWithinGrace));
