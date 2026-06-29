@@ -66,9 +66,9 @@ pub trait Subscribe: Send + Sync + 'static {
     fn on_event(&self, event: &Event);
 
     /// Returns the subscriber name used in logs and diagnostic events.
+    /// The runtime snapshots it once at registration.
     ///
-    /// Prefer short names, for example `"metrics"`, `"audit"`, or `"slack"`.
-    /// The name may be dynamic. The runtime snapshots it once at registration.
+    /// The default returns the fully-qualified type path via [`type_name`](std::any::type_name).
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }

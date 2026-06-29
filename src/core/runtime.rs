@@ -317,11 +317,10 @@ impl SupervisorCore {
                             set.emit_arc(arc_ev);
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            let e = Event::new(EventKind::SubscriberOverflow)
-                                .with_task("subscriber_listener")
-                                .with_reason(format!("lagged({skipped})"));
-
-                            let arc_e = Arc::new(e);
+                            let arc_e = Arc::new(Event::subscriber_overflow(
+                                "subscriber_listener",
+                                format!("lagged({skipped})"),
+                            ));
                             alive.update(&arc_e).await;
                             set.emit_arc(arc_e);
 
@@ -465,13 +464,91 @@ mod tests {
 
     /// Builds a started-on-demand `SupervisorCore` directly (mirrors the builder's core wiring).
     fn core(cfg: SupervisorConfig) -> Arc<SupervisorCore> {
+        core_with_subs(cfg, Vec::new())
+    }
+
+    /// Like [`core`], but wires the given subscribers into the runtime.
+    fn core_with_subs(
+        cfg: SupervisorConfig,
+        subs: Vec<Arc<dyn crate::subscribers::Subscribe>>,
+    ) -> Arc<SupervisorCore> {
         let bus = Bus::new(cfg.bus_capacity_clamped());
-        let subs = Arc::new(SubscriberSet::new(Vec::new(), bus.clone()));
+        let subs = Arc::new(SubscriberSet::new(subs, bus.clone()));
         let token = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let registry = Registry::new(bus.clone(), token.clone(), None, cfg.grace, cmd_rx);
         let alive = Arc::new(AliveTracker::new());
         SupervisorCore::new_internal(cfg, bus, subs, alive, registry, token, cmd_tx)
+    }
+
+    #[tokio::test]
+    async fn subscriber_listener_reports_bus_lag_as_overflow() {
+        use crate::subscribers::Subscribe;
+        use std::sync::Mutex;
+
+        // Records the reason of every SubscriberOverflow. A large queue so the
+        // recorder never lags itself — only the listener's bus receiver should.
+        struct OverflowRecorder {
+            reasons: Arc<Mutex<Vec<String>>>,
+        }
+        impl Subscribe for OverflowRecorder {
+            fn on_event(&self, e: &Event) {
+                if e.kind == EventKind::SubscriberOverflow
+                    && let Some(r) = e.reason.as_deref()
+                {
+                    self.reasons.lock().unwrap().push(r.to_string());
+                }
+            }
+            fn name(&self) -> &str {
+                "overflow-recorder"
+            }
+            fn queue_capacity(&self) -> usize {
+                8192
+            }
+        }
+
+        let reasons = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = Arc::new(OverflowRecorder {
+            reasons: Arc::clone(&reasons),
+        });
+
+        // Tiny bus so the listener's own receiver lags under a synchronous burst.
+        let cfg = SupervisorConfig {
+            bus_capacity: 2,
+            ..Default::default()
+        };
+        let core = core_with_subs(cfg, vec![recorder]);
+        core.start();
+
+        // Publish far beyond capacity before the listener can drain: its recv() lags,
+        // and the listener must synthesize SubscriberOverflow { reason: "lagged(n)" }.
+        for i in 0..500 {
+            core.bus
+                .publish(Event::new(EventKind::TaskStarting).with_task(format!("f{i}")));
+        }
+
+        let saw_lag = timeout(Duration::from_secs(2), async {
+            loop {
+                if reasons
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.starts_with("lagged("))
+                {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        let _ = core.shutdown().await;
+        assert!(
+            saw_lag,
+            "subscriber_listener must report bus lag as SubscriberOverflow(lagged(n)); saw {:?}",
+            reasons.lock().unwrap()
+        );
     }
 
     #[tokio::test]

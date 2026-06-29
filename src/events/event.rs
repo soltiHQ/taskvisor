@@ -422,24 +422,10 @@ impl Event {
     /// Creates a subscriber panic event.
     #[inline]
     #[must_use]
-    pub fn subscriber_panicked(subscriber: impl Into<Arc<str>>, info: String) -> Self {
+    pub fn subscriber_panicked(subscriber: impl Into<Arc<str>>, info: impl Into<Arc<str>>) -> Self {
         Event::new(EventKind::SubscriberPanicked)
             .with_task(subscriber)
             .with_reason(info)
-    }
-
-    /// Returns `true` if this is a [`EventKind::SubscriberOverflow`] event.
-    #[inline]
-    #[must_use]
-    pub fn is_subscriber_overflow(&self) -> bool {
-        matches!(self.kind, EventKind::SubscriberOverflow)
-    }
-
-    /// Returns `true` if this is a [`EventKind::SubscriberPanicked`] event.
-    #[inline]
-    #[must_use]
-    pub fn is_subscriber_panic(&self) -> bool {
-        matches!(self.kind, EventKind::SubscriberPanicked)
     }
 
     /// Returns `true` for internal diagnostic events.

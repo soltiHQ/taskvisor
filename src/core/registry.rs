@@ -280,11 +280,8 @@ impl Registry {
                         Ok(ev) => me.handle_bus_event(&ev).await,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            me.bus.publish(
-                                Event::new(EventKind::SubscriberOverflow)
-                                    .with_task("registry")
-                                    .with_reason(format!("lagged({n})")),
-                            );
+                            me.bus
+                                .publish(Event::subscriber_overflow("registry", format!("lagged({n})")));
                             me.reap_finished().await;
                             continue;
                         }

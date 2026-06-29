@@ -202,9 +202,37 @@ mod tests {
     use super::*;
     use crate::events::EventKind;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     };
+    use tokio::sync::broadcast;
+
+    fn ev(task: &str) -> Arc<Event> {
+        Arc::new(Event::new(EventKind::TaskStarting).with_task(task))
+    }
+
+    fn kind_ev(kind: EventKind) -> Arc<Event> {
+        Arc::new(Event::new(kind).with_task("t"))
+    }
+
+    fn count(rx: &mut broadcast::Receiver<Arc<Event>>, kind: EventKind) -> usize {
+        let mut n = 0;
+        while let Ok(e) = rx.try_recv() {
+            if e.kind == kind {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn first(rx: &mut broadcast::Receiver<Arc<Event>>, kind: EventKind) -> Option<Arc<Event>> {
+        while let Ok(e) = rx.try_recv() {
+            if e.kind == kind {
+                return Some(e);
+            }
+        }
+        None
+    }
 
     struct CountingSub {
         count: Arc<AtomicU64>,
@@ -234,25 +262,24 @@ mod tests {
         }
     }
 
-    struct PanicSub;
-
-    impl Subscribe for PanicSub {
-        fn on_event(&self, _event: &Event) {
-            panic!("boom");
-        }
-        fn name(&self) -> &str {
-            "panicking"
-        }
-        fn queue_capacity(&self) -> usize {
-            16
-        }
-    }
-
-    struct DynamicNameSub {
+    struct PanicSub {
         name: String,
     }
 
-    impl Subscribe for DynamicNameSub {
+    impl PanicSub {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                name: "panicking".to_string(),
+            })
+        }
+        fn named(name: &str) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.to_string(),
+            })
+        }
+    }
+
+    impl Subscribe for PanicSub {
         fn on_event(&self, _event: &Event) {
             panic!("boom");
         }
@@ -264,86 +291,55 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn dynamic_subscriber_name_surfaces_in_diagnostics() {
-        let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
-        let sub = Arc::new(DynamicNameSub {
-            name: format!("slack-{}", "#alerts"),
-        });
-        let set = SubscriberSet::new(vec![sub], bus.clone());
+    struct RecordingSub {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
 
-        set.emit_arc(Arc::new(Event::new(EventKind::TaskStarting).with_task("t")));
-        set.close().await;
-
-        let mut saw = false;
-        while let Ok(ev) = bus_rx.try_recv() {
-            if matches!(ev.kind, EventKind::SubscriberPanicked) {
-                assert_eq!(
-                    ev.task.as_deref(),
-                    Some("slack-#alerts"),
-                    "a subscriber's dynamic name must surface in the diagnostic event's `task`"
-                );
-                saw = true;
+    impl Subscribe for RecordingSub {
+        fn on_event(&self, e: &Event) {
+            if let Some(t) = e.task.as_deref() {
+                self.seen.lock().unwrap().push(t.to_string());
             }
         }
-        assert!(
-            saw,
-            "expected a SubscriberPanicked event carrying the dynamic name"
-        );
+        fn name(&self) -> &str {
+            "recorder"
+        }
+        fn queue_capacity(&self) -> usize {
+            64
+        }
     }
 
     #[tokio::test]
-    async fn overflow_publishes_subscriber_overflow() {
-        let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
+    async fn overflow_reported_for_ordinary_but_not_diagnostic_events() {
+        {
+            let bus = Bus::new(64);
+            let mut rx = bus.subscribe();
+            let (_c, sub) = CountingSub::new(1);
+            let set = SubscriberSet::new(vec![sub], bus.clone());
 
-        let (count, sub) = CountingSub::new(1);
-        let set = SubscriberSet::new(vec![sub], bus.clone());
-
-        let ev1 = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-        let ev2 = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-        let ev3 = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-
-        set.emit_arc(ev1);
-        set.emit_arc(ev2);
-        set.emit_arc(ev3);
-
-        set.close().await;
-
-        let mut saw_overflow = false;
-        while let Ok(ev) = bus_rx.try_recv() {
-            if matches!(ev.kind, EventKind::SubscriberOverflow) {
-                saw_overflow = true;
+            for _ in 0..3 {
+                set.emit_arc(ev("t"));
             }
-        }
-
-        assert!(
-            saw_overflow,
-            "expected SubscriberOverflow on bus (count={})",
-            count.load(Ordering::Relaxed)
-        );
-    }
-
-    #[tokio::test]
-    async fn overflow_of_internal_event_does_not_publish_further_overflow() {
-        let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
-
-        let (_count, sub) = CountingSub::new(1);
-        let set = SubscriberSet::new(vec![sub], bus.clone());
-
-        let internal_ev = Arc::new(Event::new(EventKind::SubscriberOverflow).with_task("test"));
-        for _ in 0..5 {
-            set.emit_arc(Arc::clone(&internal_ev));
-        }
-
-        set.close().await;
-
-        while let Ok(ev) = bus_rx.try_recv() {
+            set.close().await;
             assert!(
-                !matches!(ev.kind, EventKind::SubscriberOverflow),
-                "internal event overflow must not publish further SubscriberOverflow"
+                count(&mut rx, EventKind::SubscriberOverflow) > 0,
+                "a dropped ordinary event must be reported"
+            );
+        }
+        {
+            let bus = Bus::new(64);
+            let mut rx = bus.subscribe();
+            let (_c, sub) = CountingSub::new(1);
+            let set = SubscriberSet::new(vec![sub], bus.clone());
+
+            for _ in 0..5 {
+                set.emit_arc(kind_ev(EventKind::SubscriberOverflow));
+            }
+            set.close().await;
+            assert_eq!(
+                count(&mut rx, EventKind::SubscriberOverflow),
+                0,
+                "dropping a diagnostic event must not publish further overflow"
             );
         }
     }
@@ -351,25 +347,17 @@ mod tests {
     #[tokio::test]
     async fn panic_in_subscriber_publishes_subscriber_panicked_and_continues() {
         let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
-        let set = SubscriberSet::new(vec![Arc::new(PanicSub)], bus.clone());
+        let mut rx = bus.subscribe();
+        let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
 
         for _ in 0..3 {
-            let ev = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-            set.emit_arc(ev);
+            set.emit_arc(ev("t"));
         }
         set.close().await;
 
-        let mut panic_count = 0u64;
-        while let Ok(ev) = bus_rx.try_recv() {
-            if matches!(ev.kind, EventKind::SubscriberPanicked) {
-                panic_count += 1;
-            }
-        }
-
         assert!(
-            panic_count >= 3,
-            "expected at least 3 SubscriberPanicked events, got {panic_count}"
+            count(&mut rx, EventKind::SubscriberPanicked) >= 3,
+            "each ordinary-event panic must be reported, and the worker must continue"
         );
     }
 
@@ -377,24 +365,57 @@ mod tests {
     async fn panic_on_internal_diagnostic_does_not_republish() {
         for diagnostic in [EventKind::SubscriberPanicked, EventKind::SubscriberOverflow] {
             let bus = Bus::new(64);
-            let mut bus_rx = bus.subscribe();
-            let set = SubscriberSet::new(vec![Arc::new(PanicSub)], bus.clone());
+            let mut rx = bus.subscribe();
+            let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
 
-            set.emit_arc(Arc::new(Event::new(diagnostic).with_task("upstream")));
+            set.emit_arc(kind_ev(diagnostic));
             set.close().await;
 
-            let mut republished = 0u64;
-            while let Ok(ev) = bus_rx.try_recv() {
-                if matches!(ev.kind, EventKind::SubscriberPanicked) {
-                    republished += 1;
-                }
-            }
             assert_eq!(
-                republished, 0,
-                "panicking on a {diagnostic:?} event must not republish SubscriberPanicked \
-                 (got {republished}) — that is the feedback loop"
+                count(&mut rx, EventKind::SubscriberPanicked),
+                0,
+                "panicking on a {diagnostic:?} event must not republish — that is the feedback loop"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dynamic_subscriber_name_surfaces_in_diagnostics() {
+        let bus = Bus::new(64);
+        let mut rx = bus.subscribe();
+        let set = SubscriberSet::new(vec![PanicSub::named("slack-#alerts")], bus.clone());
+
+        set.emit_arc(ev("t"));
+        set.close().await;
+
+        let panicked =
+            first(&mut rx, EventKind::SubscriberPanicked).expect("the panic must be reported");
+        assert_eq!(
+            panicked.task.as_deref(),
+            Some("slack-#alerts"),
+            "a subscriber's dynamic name must surface in the diagnostic event's `task`"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_subscriber_does_not_affect_others_and_order_is_fifo() {
+        let bus = Bus::new(64);
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = Arc::new(RecordingSub {
+            seen: Arc::clone(&seen),
+        });
+        let set = SubscriberSet::new(vec![PanicSub::new(), recorder], bus);
+
+        for i in 0..5 {
+            set.emit_arc(ev(&format!("e{i}")));
+        }
+        set.close().await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["e0", "e1", "e2", "e3", "e4"],
+            "the healthy subscriber must see every event in FIFO order, unaffected by the panicking one"
+        );
     }
 
     #[tokio::test]
@@ -405,8 +426,7 @@ mod tests {
 
         let n = 10u64;
         for _ in 0..n {
-            let ev = Arc::new(Event::new(EventKind::TaskStopped).with_task("t"));
-            set.emit_arc(ev);
+            set.emit_arc(Arc::new(Event::new(EventKind::TaskStopped).with_task("t")));
         }
         set.close().await;
 
