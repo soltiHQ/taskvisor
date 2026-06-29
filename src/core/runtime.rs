@@ -61,6 +61,7 @@ pub(crate) struct SupervisorCore {
     registry: Arc<Registry>,
     runtime_token: CancellationToken,
     started: AtomicBool,
+    shutting_down: AtomicBool,
     cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
     subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -93,9 +94,20 @@ impl SupervisorCore {
             registry,
             runtime_token,
             started: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             cmd_tx,
             subscriber_handle: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Returns `true` once shutdown has begun (the admission gate is closed).
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Marks the runtime as shutting down (idempotent). Closes the admission gate.
+    fn mark_shutting_down(&self) {
+        self.shutting_down.store(true, Ordering::Release);
     }
 
     /// Adds a new task to the runtime, returning its minted [`TaskId`].
@@ -131,6 +143,9 @@ impl SupervisorCore {
         spec: TaskSpec,
         done: Option<crate::core::registry::OutcomeTx>,
     ) -> Result<TaskId, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
                 .with_task(spec.task().name())
@@ -240,6 +255,7 @@ impl SupervisorCore {
         self.bus.publish(Event::new(EventKind::ShutdownRequested));
         let res = self.drain_with_grace().await;
         self.runtime_token.cancel();
+        self.registry.join_listener().await;
         self.join_subscriber_listener().await;
         self.subs.close().await;
         res
@@ -287,6 +303,7 @@ impl SupervisorCore {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
         let alive = Arc::clone(&self.alive);
+        let registry = Arc::clone(&self.registry);
         let rt = self.runtime_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -307,6 +324,14 @@ impl SupervisorCore {
                             let arc_e = Arc::new(e);
                             alive.update(&arc_e).await;
                             set.emit_arc(arc_e);
+
+                            let live: std::collections::HashSet<TaskId> = registry
+                                .list()
+                                .await
+                                .into_iter()
+                                .map(|(id, _)| id)
+                                .collect();
+                            alive.reconcile(&live).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
@@ -337,9 +362,22 @@ impl SupervisorCore {
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         let res = tokio::select! {
             sig = crate::core::shutdown::wait_for_shutdown_signal() => self.on_shutdown_signal(sig).await,
-            _ = self.registry.wait_until_empty() => Ok(()),
+            _ = self.registry.wait_until_empty() => {
+                // Natural completion: tasks finished; drain their cleanup joiners while the
+                // subscriber listener is alive so each final `TaskRemoved` is delivered. A
+                // joiner that overruns grace is surfaced as `GraceExceeded`, not swallowed.
+                let stuck = self.registry.wait_joins_within(self.cfg.grace).await;
+                if stuck.is_empty() {
+                    Ok(())
+                } else {
+                    self.bus.publish(Event::new(EventKind::GraceExceeded));
+                    Err(RuntimeError::GraceExceeded { grace: self.cfg.grace, stuck })
+                }
+            }
         };
+        self.mark_shutting_down();
         self.runtime_token.cancel();
+        self.registry.join_listener().await;
         self.join_subscriber_listener().await;
         self.subs.close().await;
         res
@@ -358,8 +396,17 @@ impl SupervisorCore {
 
     /// Cancels all tasks and waits up to `grace` for them to stop, force-aborting stragglers.
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
+        self.mark_shutting_down();
         let grace = self.cfg.grace;
-        let stuck = self.registry.cancel_all_within(grace).await;
+        let deadline = tokio::time::Instant::now() + grace;
+        // Map-resident tasks: cancel + join within grace; `stuck` are those force-aborted.
+        let mut stuck = self.registry.cancel_all_within(grace).await;
+        // Detached joiners (e.g. a `remove` just before shutdown) live outside the map; wait
+        // for them within the *remaining* grace, before `runtime_token.cancel()`, so their
+        // final `TaskRemoved` is delivered while the subscriber listener is still alive. Any
+        // that overrun are folded into `stuck` by label, so the verdict names who is stuck.
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        stuck.extend(self.registry.wait_joins_within(remaining).await);
         if stuck.is_empty() {
             self.bus
                 .publish(Event::new(EventKind::AllStoppedWithinGrace));
@@ -425,6 +472,34 @@ mod tests {
         let registry = Registry::new(bus.clone(), token.clone(), None, cfg.grace, cmd_rx);
         let alive = Arc::new(AliveTracker::new());
         SupervisorCore::new_internal(cfg, bus, subs, alive, registry, token, cmd_tx)
+    }
+
+    #[tokio::test]
+    async fn add_is_rejected_once_shutting_down() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        core.start();
+
+        let early: TaskRef = TaskFn::arc("early", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        assert!(core.add_task(TaskSpec::restartable(early)).is_ok());
+
+        core.mark_shutting_down();
+
+        let late: TaskRef = TaskFn::arc("late", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let res = core.add_task(TaskSpec::restartable(late));
+        assert!(
+            matches!(res, Err(RuntimeError::ShuttingDown)),
+            "add() after shutdown began must be rejected, got {res:?}"
+        );
+
+        let _ = core.shutdown().await;
     }
 
     #[tokio::test]

@@ -63,6 +63,96 @@ struct Inner {
     by_label: HashMap<Arc<str>, TaskId>,
 }
 
+#[derive(Default)]
+struct PendingInner {
+    /// Refcount of in-flight joins per identity.
+    counts: HashMap<TaskId, usize>,
+    /// Human label per in-flight identity, for stuck-diagnostics on a grace timeout.
+    labels: HashMap<TaskId, Arc<str>>,
+}
+
+#[derive(Default)]
+struct PendingJoins {
+    inner: std::sync::Mutex<PendingInner>,
+    drained: Notify,
+}
+
+impl PendingJoins {
+    /// Registers an in-flight join for `id`.
+    fn inc(&self, id: TaskId) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *g.counts.entry(id).or_insert(0) += 1;
+    }
+
+    /// Records the human label for an in-flight join (for stuck-diagnostics on timeout).
+    ///
+    /// No-op if `id` is not currently in flight.
+    fn label(&self, id: TaskId, label: Arc<str>) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.counts.contains_key(&id) {
+            g.labels.insert(id, label);
+        }
+    }
+
+    /// Marks one in-flight join for `id` as finished; wakes `wait_drained` when none remain.
+    fn dec(&self, id: TaskId) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = g.counts.get_mut(&id) {
+            *n -= 1;
+            if *n == 0 {
+                g.counts.remove(&id);
+                g.labels.remove(&id);
+            }
+        }
+        if g.counts.is_empty() {
+            self.drained.notify_waiters();
+        }
+    }
+
+    /// Returns `true` if a join for `id` is still in flight.
+    fn contains(&self, id: TaskId) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .counts
+            .contains_key(&id)
+    }
+
+    /// Returns `true` if no joins are in flight.
+    fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .counts
+            .is_empty()
+    }
+
+    /// Labels of joins still in flight (best-effort: an id incremented but not yet labeled is omitted).
+    fn pending_labels(&self) -> Vec<Arc<str>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .labels
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Resolves once no joins are in flight.
+    ///
+    /// Register-before-check: `notified()` is created **before** testing `is_empty` so a
+    /// concurrent `dec` cannot slip its wakeup between the check and the await.
+    async fn wait_drained(&self) {
+        loop {
+            let notified = self.drained.notified();
+            if self.is_empty() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 /// Event-driven registry of active task actors.
 ///
 /// See the [module-level documentation](self) for the dual-channel architecture.
@@ -80,7 +170,8 @@ pub(crate) struct Registry {
     grace: Duration,
     empty_notify: Notify,
     cmd_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryCommand>>>,
-    pending_joins: Arc<std::sync::Mutex<HashMap<TaskId, usize>>>,
+    pending_joins: Arc<PendingJoins>,
+    listener_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Registry {
@@ -100,25 +191,9 @@ impl Registry {
             grace,
             empty_notify: Notify::new(),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
-            pending_joins: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_joins: Arc::new(PendingJoins::default()),
+            listener_handle: std::sync::Mutex::new(None),
         })
-    }
-
-    /// Increments the pending-join refcount for `id`.
-    fn pending_inc(pending: &std::sync::Mutex<HashMap<TaskId, usize>>, id: TaskId) {
-        let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
-        *map.entry(id).or_insert(0) += 1;
-    }
-
-    /// Decrements the pending-join refcount for `id`, dropping the entry at zero.
-    fn pending_dec(pending: &std::sync::Mutex<HashMap<TaskId, usize>>, id: TaskId) {
-        let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = map.get_mut(&id) {
-            *n -= 1;
-            if *n == 0 {
-                map.remove(&id);
-            }
-        }
     }
 
     /// Returns `true` once the task is fully terminated: not registered and not awaiting join.
@@ -128,11 +203,21 @@ impl Registry {
         if self.state.read().await.tasks.contains_key(&id) {
             return false;
         }
-        !self
-            .pending_joins
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&id)
+        !self.pending_joins.contains(id)
+    }
+
+    /// Waits up to `grace` for all in-flight detached joins to finish.
+    ///
+    /// Detached join-reporters (from a `remove`/cleanup) live outside `state.tasks`, so
+    /// [`cancel_all_within`](Self::cancel_all_within) does not cover them. Graceful shutdown
+    /// calls this *before* cancelling the runtime token — while the subscriber listener is
+    /// still alive — so each joiner's final `TaskRemoved` is delivered (not lost to the
+    /// shutdown race) and the grace verdict reflects them. Returns the labels of any joins
+    /// **still in flight** after `grace` (empty if all drained), so the caller can fold them
+    /// into the shutdown "stuck" set.
+    pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
+        let _ = tokio::time::timeout(grace, self.pending_joins.wait_drained()).await;
+        self.pending_joins.pending_labels()
     }
 
     #[inline]
@@ -174,7 +259,7 @@ impl Registry {
         let rt = self.runtime_token.clone();
         let me = self.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -206,8 +291,38 @@ impl Registry {
                     }
                 }
             }
+
+            cmd_rx.close();
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    RegistryCommand::Add(id, spec, done) => {
+                        me.spawn_and_register(id, spec, done).await;
+                    }
+                    RegistryCommand::Remove(id) => {
+                        me.remove_task(id).await;
+                    }
+                }
+            }
             me.cancel_all_within(Duration::ZERO).await;
+            me.pending_joins.wait_drained().await;
         });
+
+        *self
+            .listener_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// Awaits the listener task, driving the shutdown drain + join barrier to completion.
+    pub async fn join_listener(&self) {
+        let handle = self
+            .listener_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     /// Handles lifecycle events from the bus.
@@ -269,7 +384,7 @@ impl Registry {
             drained
         };
         for (id, h) in &handles {
-            Self::pending_inc(&self.pending_joins, *id);
+            self.pending_joins.inc(*id);
             h.cancel.cancel();
         }
 
@@ -281,13 +396,13 @@ impl Registry {
             let mut join = h.join;
             match tokio::time::timeout_at(deadline, &mut join).await {
                 Ok(res) => {
-                    Self::pending_dec(&self.pending_joins, id);
+                    self.pending_joins.dec(id);
                     Self::report_join(&self.bus, id, &label, res, h.done);
                 }
                 Err(_elapsed) => {
                     join.abort();
                     let _ = join.await;
-                    Self::pending_dec(&self.pending_joins, id);
+                    self.pending_joins.dec(id);
                     if let Some(done) = h.done {
                         let _ = done.send(TaskOutcome::ForceAborted);
                     }
@@ -301,6 +416,7 @@ impl Registry {
                 }
             }
         }
+        let _ = tokio::time::timeout_at(deadline, self.pending_joins.wait_drained()).await;
         stuck
     }
 
@@ -368,14 +484,14 @@ impl Registry {
 
     /// Removes a task by identity.
     async fn remove_task(&self, id: TaskId) {
-        Self::pending_inc(&self.pending_joins, id);
+        self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
 
             handle.cancel.cancel();
             self.spawn_join_report(id, handle.label, handle.join, Some(self.grace), handle.done);
         } else {
-            Self::pending_dec(&self.pending_joins, id);
+            self.pending_joins.dec(id);
             self.bus.publish(
                 Event::new(EventKind::TaskRemoved)
                     .with_id(id)
@@ -386,12 +502,12 @@ impl Registry {
 
     /// Cleanup finished task by identity.
     async fn cleanup_task(&self, id: TaskId) {
-        Self::pending_inc(&self.pending_joins, id);
+        self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
-            self.spawn_join_report(id, handle.label, handle.join, None, handle.done);
+            self.spawn_join_report(id, handle.label, handle.join, Some(self.grace), handle.done);
         } else {
-            Self::pending_dec(&self.pending_joins, id);
+            self.pending_joins.dec(id);
         }
     }
 
@@ -415,18 +531,19 @@ impl Registry {
     ) {
         let bus = self.bus.clone();
         let pending = Arc::clone(&self.pending_joins);
+        pending.label(id, Arc::clone(&name));
         tokio::spawn(async move {
             let mut join = join;
             match force_after {
                 Some(grace) => match tokio::time::timeout(grace, &mut join).await {
                     Ok(res) => {
-                        Self::pending_dec(&pending, id);
+                        pending.dec(id);
                         Self::report_join(&bus, id, &name, res, done);
                     }
                     Err(_) => {
                         join.abort();
                         let _ = join.await;
-                        Self::pending_dec(&pending, id);
+                        pending.dec(id);
                         if let Some(done) = done {
                             let _ = done.send(TaskOutcome::ForceAborted);
                         }
@@ -440,7 +557,7 @@ impl Registry {
                 },
                 None => {
                     let res = join.await;
-                    Self::pending_dec(&pending, id);
+                    pending.dec(id);
                     Self::report_join(&bus, id, &name, res, done);
                 }
             }
@@ -523,11 +640,78 @@ impl Registry {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn pending_wait_drained_resolves_after_last_dec() {
+        let p = Arc::new(PendingJoins::default());
+        let a = TaskId::next();
+        let b = TaskId::next();
+        p.inc(a);
+        p.inc(b);
+        assert!(!p.is_empty());
+
+        let p2 = Arc::clone(&p);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            p2.dec(a);
+            p2.dec(b);
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), p.wait_drained())
+            .await
+            .expect("wait_drained must resolve once every join is decremented");
+        assert!(p.is_empty(), "no joins should remain after draining");
+    }
+
+    #[tokio::test]
+    async fn pending_wait_drained_returns_immediately_when_empty() {
+        let p = PendingJoins::default();
+        tokio::time::timeout(Duration::from_millis(100), p.wait_drained())
+            .await
+            .expect("an empty PendingJoins must resolve immediately");
+    }
+
     fn registry() -> Arc<Registry> {
         let bus = Bus::new(64);
         let token = CancellationToken::new();
         let (_tx, rx) = mpsc::unbounded_channel();
         Registry::new(bus, token, None, Duration::from_secs(5), rx)
+    }
+
+    #[tokio::test]
+    async fn wait_joins_within_reports_stuck_labels_then_drains() {
+        let reg = registry();
+
+        // No in-flight joins → drains immediately (no stuck labels).
+        assert!(
+            reg.wait_joins_within(Duration::from_millis(50))
+                .await
+                .is_empty(),
+            "an empty join set must drain immediately"
+        );
+
+        // A labeled in-flight join → reported as stuck (by label) on timeout.
+        let id = TaskId::next();
+        reg.pending_joins.inc(id);
+        reg.pending_joins.label(id, Arc::from("stuck-task"));
+        let stuck = reg.wait_joins_within(Duration::from_millis(30)).await;
+        assert_eq!(
+            stuck,
+            vec![Arc::<str>::from("stuck-task")],
+            "an in-flight join must be reported with its label on timeout"
+        );
+
+        // Drains (no stuck) once the in-flight join is decremented within the budget.
+        let p = Arc::clone(&reg.pending_joins);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            p.dec(id);
+        });
+        assert!(
+            reg.wait_joins_within(Duration::from_secs(1))
+                .await
+                .is_empty(),
+            "must drain once the in-flight join is decremented"
+        );
     }
 
     #[tokio::test]
@@ -578,5 +762,53 @@ mod tests {
 
         reg.reap_finished().await;
         assert!(!reg.is_empty().await, "a running actor must not be reaped");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_buffered_command_and_never_silently_drops() {
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let bus = Bus::new(64);
+        let token = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let reg = Registry::new(bus, token.clone(), None, Duration::from_millis(50), rx);
+        reg.clone().spawn_listener();
+
+        let task: TaskRef = TaskFn::arc("buffered", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Err(TaskError::Canceled)
+        });
+        let (done_tx, done_rx) = oneshot::channel();
+        let id = TaskId::next();
+        tx.send(RegistryCommand::Add(
+            id,
+            TaskSpec::restartable(task),
+            Some(done_tx),
+        ))
+        .expect("channel is open before shutdown");
+
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), reg.join_listener())
+            .await
+            .expect("join_listener must not hang");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), done_rx)
+            .await
+            .expect("watcher must resolve")
+            .expect("watcher sender must not be dropped — the buffered Add must be acted on");
+        assert!(
+            matches!(outcome, TaskOutcome::Canceled | TaskOutcome::ForceAborted),
+            "a buffered task drained at shutdown must terminate, got {outcome:?}"
+        );
+
+        assert!(
+            reg.pending_joins.is_empty(),
+            "wait_drained must leave no in-flight joins after shutdown"
+        );
+
+        assert!(
+            tx.send(RegistryCommand::Remove(TaskId::next())).is_err(),
+            "after shutdown the command channel is closed; sends must return Err"
+        );
     }
 }

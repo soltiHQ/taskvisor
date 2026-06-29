@@ -18,9 +18,19 @@ tasks:
       - task: rust:check
 
   ci/clippy:
-    desc: Run 'cargo clippy'.
+    desc: "Run 'cargo clippy' for one feature set. FEATURE = none|all|<feature-name> (default: all)."
+    vars:
+      FEATURE: '{{.FEATURE | default "all"}}'
+      FEATURE_FLAGS:
+        sh: |
+          case "{{.FEATURE}}" in
+            none) echo '--no-default-features' ;;
+            all)  echo '--all-features' ;;
+            *)    echo "--no-default-features --features {{.FEATURE}}" ;;
+          esac
     cmds:
       - task: rust:clippy
+        vars: { CLIPPY_ARGS: '--all {{.FEATURE_FLAGS}} -- -D warnings' }
 
   ci/test:
     desc: Run 'cargo test' (all targets, all features).

@@ -232,11 +232,11 @@ let spec = TaskSpec::new(task, RestartPolicy::Always { interval: None }, backoff
 
 **RestartPolicy** - Controls when a task restarts after it exits:
 
-| Policy                  | Behavior                                                       |
-|-------------------------|----------------------------------------------------------------|
-| `Never`                 | Runs once, then stops.                                         |
-| `OnFailure` *(default)* | Restarts only after an error; stops on success.                |
-| `Always { interval }`   | Always restarts. `interval: Some(10s)` waits between runs.     |
+| Policy                  | Behavior                                        |
+|-------------------------|-------------------------------------------------|
+| `Never`                 | Runs once, then stops.                          |
+| `OnFailure` *(default)* | Restarts only after an error; stops on success. |
+| `Always { interval }`   | Always restarts.                                |
 
 **BackoffPolicy** - Controls retry delay after failure. 
 Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied:

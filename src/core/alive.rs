@@ -18,12 +18,19 @@
 //!   Names are labels and may be **reused across runs**: a late event from a previous run (same name, different id) never corrupts the current run's state.
 //! - State toggles only on selected events (see below); all others just advance `last_seq`.
 //! - **Entry removed** on `TaskRemoved` (not just set to false; the entry is fully cleaned up).
-//! - Read operations (`snapshot`, `is_alive`) are **eventually consistent**.
+//! - Read operations (`snapshot`, `is_alive`) are **eventually consistent** (best-effort): they
+//!   are derived from the lossy event bus, so they may briefly trail reality.
+//! - On broadcast **lag** a dropped `TaskRemoved` is reconciled against the registry's live id set
+//!   (see [`reconcile`](AliveTracker::reconcile)), so a lost removal cannot leak a stale `alive`
+//!   entry — or an unbounded map — for the lifetime of the process.
 //! - Events with `seq <= last_seq` for the same identity are **rejected** (stale).
 //! - **Alive = false** on `TaskStopped`, `TaskCanceled`, `TaskFailed`, `ActorExhausted`, `ActorDead`.
 //! - **Alive = true** on `TaskStarting`.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 use crate::events::{Event, EventKind};
@@ -146,10 +153,18 @@ impl AliveTracker {
         changed
     }
 
+    /// Prunes id-keyed entries whose task is no longer present in `live_ids`.
+    pub async fn reconcile(&self, live_ids: &HashSet<TaskId>) {
+        let mut map = self.state.write().await;
+        map.retain(|key, _| match key {
+            AliveKey::Id(id) => live_ids.contains(id),
+            AliveKey::Name(_) => true,
+        });
+    }
+
     /// Returns a sorted, deduplicated list of currently alive task names.
     ///
     /// Exposed via [`SupervisorHandle::snapshot`](crate::SupervisorHandle::snapshot):
-    /// tasks whose last lifecycle event was `TaskStarting`.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         let state = self.state.read().await;
         let mut alive: Vec<Arc<str>> = state
@@ -389,5 +404,39 @@ mod tests {
                 "{kind:?} should make task dead"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reconcile_prunes_entries_absent_from_the_live_set() {
+        let tracker = AliveTracker::new();
+        let kept = crate::identity::TaskId::next();
+        let orphan = crate::identity::TaskId::next();
+
+        // Both look alive; `orphan` is the task whose `TaskRemoved` was lost to lag.
+        tracker
+            .update(&evi(EventKind::TaskStarting, "kept", 1, kept))
+            .await;
+        tracker
+            .update(&evi(EventKind::TaskStarting, "orphan", 2, orphan))
+            .await;
+        assert!(tracker.is_alive("orphan").await);
+
+        // Registry's authoritative live set no longer contains `orphan`.
+        let live: HashSet<TaskId> = [kept].into_iter().collect();
+        tracker.reconcile(&live).await;
+
+        assert!(
+            tracker.is_alive("kept").await,
+            "a task still in the live set must be retained"
+        );
+        assert!(
+            !tracker.is_alive("orphan").await,
+            "an entry absent from the live set (lost TaskRemoved) must be pruned"
+        );
+        assert_eq!(
+            tracker.snapshot().await,
+            vec![Arc::<str>::from("kept")],
+            "snapshot must reflect the reconciled state"
+        );
     }
 }

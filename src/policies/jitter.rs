@@ -94,28 +94,32 @@ impl JitterPolicy {
         Duration::from_millis(jittered_ms)
     }
 
-    /// Full jitter: random in [0, delay].
+    /// Full jitter: random in `[0, delay]`.
+    ///
+    /// Nanosecond-faithful: a sub-millisecond `delay` is **not** truncated to zero.
     fn full_jitter(&self, delay: Duration) -> Duration {
-        let ms = (delay.as_millis().min(u128::from(u64::MAX))) as u64;
-        if ms == 0 {
+        let ns = (delay.as_nanos().min(u128::from(u64::MAX))) as u64;
+        if ns == 0 {
             return Duration::ZERO;
         }
-        Duration::from_millis(fastrand::u64(0..=ms))
+        Duration::from_nanos(fastrand::u64(0..=ns))
     }
 
-    /// Equal jitter: delay/2 + random[0, delay/2].
+    /// Equal jitter: `delay/2 + random[0, delay/2]`.
+    ///
+    /// Nanosecond-faithful: a sub-millisecond `delay` is **not** truncated to zero.
     fn equal_jitter(&self, delay: Duration) -> Duration {
-        let ms = (delay.as_millis().min(u128::from(u64::MAX))) as u64;
-        if ms == 0 {
+        let ns = (delay.as_nanos().min(u128::from(u64::MAX))) as u64;
+        if ns == 0 {
             return Duration::ZERO;
         }
-        let half = ms / 2;
+        let half = ns / 2;
         let jitter = if half == 0 {
             0
         } else {
             fastrand::u64(0..=half)
         };
-        Duration::from_millis(half + jitter)
+        Duration::from_nanos(half + jitter)
     }
 }
 
@@ -166,5 +170,36 @@ mod tests {
 
         let result = JitterPolicy::Decorrelated.apply_decorrelated(base, prev, max);
         assert_eq!(result, base);
+    }
+
+    #[test]
+    fn full_and_equal_jitter_preserve_sub_millisecond_delays() {
+        let d = Duration::from_micros(500);
+        let mut full_nonzero = false;
+        let mut equal_nonzero = false;
+        for _ in 0..1000 {
+            let f = JitterPolicy::Full.apply(d);
+            assert!(f <= d, "full jitter must stay within [0, delay]");
+            if f > Duration::ZERO {
+                full_nonzero = true;
+            }
+
+            let e = JitterPolicy::Equal.apply(d);
+            assert!(
+                e >= d / 2 && e <= d,
+                "equal jitter must stay within [delay/2, delay]"
+            );
+            if e > Duration::ZERO {
+                equal_nonzero = true;
+            }
+        }
+        assert!(
+            full_nonzero,
+            "sub-ms full jitter must not be systematically zero"
+        );
+        assert!(
+            equal_nonzero,
+            "sub-ms equal jitter must not be systematically zero"
+        );
     }
 }
