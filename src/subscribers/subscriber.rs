@@ -1,42 +1,48 @@
 //! # Event subscriber trait.
 //!
-//! [`Subscribe`] is the extension point for plugging custom event handlers into the runtime.
+//! [`Subscribe`] is the extension point for observing runtime events.
 //!
 //! Each subscriber gets:
-//! - **Dedicated worker task** (runs independently)
-//! - **Per-subscriber bounded queue** (capacity via [`Subscribe::queue_capacity`])
-//! - **Panic isolation** (panics are caught and reported as `EventKind::SubscriberPanicked`)
+//! - a dedicated worker task,
+//! - a bounded queue,
+//! - panic isolation.
 //!
-//! ## Architecture
+//! Delivery is best-effort.
+//! If a subscriber falls behind, new events may be dropped for that subscriber only.
+//! Other subscribers and task execution are not blocked.
+//!
+//! ## Flow
 //!
 //! ```text
-//! SubscriberSet ──► [bounded queue] ──► worker task  ──► subscriber.on_event()
-//!                                   └─► panic caught ──► EventKind::SubscriberPanicked
+//! SubscriberSet ──► [bounded queue] ──► worker ──► subscriber.on_event()
+//!                                   └─► panic ──► SubscriberPanicked
 //! ```
 //!
 //! ## Rules
 //!
-//! - Queue overflow drops the event **for this subscriber only** and publishes`EventKind::SubscriberOverflow`; other subscribers are unaffected.
+//! - Ordinary overflows are reported as [`EventKind::SubscriberOverflow`](crate::EventKind::SubscriberOverflow).
+//! - Ordinary panics are reported as [`EventKind::SubscriberPanicked`](crate::EventKind::SubscriberPanicked).
+//! - Diagnostic events are not re-reported if they overflow or panic, to avoid feedback loops.
 //! - Events are processed sequentially (FIFO) per subscriber.
-//! - Subscribers do not block publishers or each other.
+//! - Queue overflow drops the event for this subscriber only.
 //! - A slow subscriber only affects its own queue.
 //!
 //! ## Example
 //!
 //! ```rust
-//! use taskvisor::{Subscribe, Event, EventKind};
+//! use taskvisor::{Event, EventKind, Subscribe};
 //!
 //! struct Metrics;
 //!
 //! impl Subscribe for Metrics {
 //!     fn on_event(&self, ev: &Event) {
 //!         if matches!(ev.kind, EventKind::TaskFailed) {
-//!             // update counters, push to channel, etc.
+//!             // update counters, push to a channel, etc.
 //!         }
 //!     }
 //!
-//!     fn name(&self) -> &'static str { "metrics" }   // prefer short, descriptive names
-//!     fn queue_capacity(&self) -> usize { 2048 }     // larger buffer for metrics
+//!     fn name(&self) -> &str { "metrics" }
+//!     fn queue_capacity(&self) -> usize { 2048 }
 //! }
 //! ```
 
@@ -44,57 +50,35 @@ use crate::events::Event;
 
 /// Event subscriber for runtime observability.
 ///
-/// Each subscriber runs in isolation:
-/// - **Panic isolation**: panics are caught and published as `SubscriberPanicked`.
-/// - **Bounded queue** buffers events (capacity via [`Self::queue_capacity`]).
-/// - **Dedicated worker task** processes events sequentially (FIFO).
+/// `Subscribe` is synchronous by design.
+/// The runtime already moves delivery to a dedicated worker task for each subscriber.
 ///
-/// ### Implementation requirements
+/// Keep [`on_event`](Self::on_event) fast; for async I/O, send data to a channel and process it elsewhere.
 ///
-/// - Keep `on_event` fast: it runs on a dedicated worker task but blocks that worker's event loop.
-///   For async I/O, send to a channel and process elsewhere.
-/// - Slow processing affects only this subscriber's queue.
-/// - Handle errors internally; do not panic.
-///
-/// ### Synchronous design
-///
-/// `on_event` is intentionally synchronous:
-/// - The `SubscriberSet` infrastructure already provides async distribution via per-subscriber `mpsc` channels and dedicated worker tasks.
-/// - If a subscriber needs async I/O, send events to a channel inside `on_event` and process them in a separate task.
-/// - Adding async to `on_event` would force a `Box::pin` allocation per event per subscriber with no benefit, since subscribers are synchronous in practice.
-///
-/// ## Also
-///
-/// - See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for the event structure.
-/// - For a built-in reference implementation see `LogWriter` *(feature = `logging`)*.
+/// Panics are caught and isolated.
+/// A panic while handling an ordinary event is reported as `SubscriberPanicked`.
+/// A panic while handling an internal diagnostic event is not reported again, to avoid a feedback loop.
 pub trait Subscribe: Send + Sync + 'static {
-    /// Processes a single event synchronously.
+    /// Processes one event.
     ///
-    /// Called from a dedicated worker task, not in the publisher context.
+    /// Called from this subscriber's worker task, not from the publisher.
     /// Events are delivered in FIFO order per subscriber.
-    ///
-    /// Panics are caught and isolated: a panic on an ordinary event is published as `EventKind::SubscriberPanicked`.
-    /// A panic while handling an internal diagnostic event (`SubscriberPanicked`/`SubscriberOverflow`) is intentionally **not** republished, to avoid a self-sustaining diagnostic feedback loop.
     fn on_event(&self, event: &Event);
 
-    /// Returns the subscriber name used in logs/metrics and overflow/panic events.
+    /// Returns the subscriber name used in logs and diagnostic events.
     ///
-    /// Prefer short, descriptive names (e.g., "metrics", "audit", "slack").
-    /// The default uses `type_name::<Self>()`, which can be verbose - override it when possible.
-    fn name(&self) -> &'static str {
+    /// Prefer short names, for example `"metrics"`, `"audit"`, or `"slack"`.
+    /// The name may be dynamic. The runtime snapshots it once at registration.
+    fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 
-    /// Returns the preferred queue capacity for this subscriber.
+    /// Returns this subscriber's preferred queue capacity.
     ///
-    /// Overflow behavior:
-    /// 1) The new event is dropped for this subscriber only,
-    /// 2) an `EventKind::SubscriberOverflow` is published,
-    /// 3) other subscribers are unaffected.
+    /// The runtime clamps this value to at least `1`.
+    /// If the queue is full, ordinary events are dropped for this subscriber and reported as `SubscriberOverflow`.
     ///
-    /// The runtime clamps capacity to a minimum of 1.
-    ///
-    /// Default: 1024.
+    /// Default: `1024`.
     fn queue_capacity(&self) -> usize {
         1024
     }

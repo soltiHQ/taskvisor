@@ -409,9 +409,11 @@ impl Event {
     /// Creates a subscriber overflow event.
     #[inline]
     #[must_use]
-    pub fn subscriber_overflow(subscriber: &'static str, reason: &'static str) -> Self {
-        // The subscriber name lives in `task`; `reason` is the bare cause
-        // ("full" / "closed") — no duplication, machine-readable.
+    pub fn subscriber_overflow(
+        subscriber: impl Into<Arc<str>>,
+        reason: impl Into<Arc<str>>,
+    ) -> Self {
+        // Name lives in `task`; `reason` is the bare cause ("full"/"closed"/"lagged(n)").
         Event::new(EventKind::SubscriberOverflow)
             .with_task(subscriber)
             .with_reason(reason)
@@ -420,7 +422,7 @@ impl Event {
     /// Creates a subscriber panic event.
     #[inline]
     #[must_use]
-    pub fn subscriber_panicked(subscriber: &'static str, info: String) -> Self {
+    pub fn subscriber_panicked(subscriber: impl Into<Arc<str>>, info: String) -> Self {
         Event::new(EventKind::SubscriberPanicked)
             .with_task(subscriber)
             .with_reason(info)

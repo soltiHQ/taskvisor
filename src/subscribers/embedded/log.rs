@@ -48,7 +48,7 @@ impl Subscribe for LogWriter {
         self.print_event(e);
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "LogWriter"
     }
 }

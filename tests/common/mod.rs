@@ -89,7 +89,7 @@ impl Subscribe for EventCollector {
         self.events.lock().unwrap().push(ev.clone());
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "collector"
     }
 
