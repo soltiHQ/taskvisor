@@ -1,19 +1,28 @@
 //! Task execution specification.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{
-    core::SupervisorConfig, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
-};
+use crate::{policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef};
 
-/// Describes *how* a [`Task`](crate::Task) should run under supervision.
+/// Converts `Some(Duration::ZERO)` to `None`.
+#[inline]
+fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
+    timeout.filter(|d| !d.is_zero())
+}
+
+/// Describes how a [`Task`](crate::Task) should run.
 ///
-/// Bundles restart policy, backoff strategy, timeout, and max retries.
+/// A `TaskSpec` combines:
+/// - the task itself,
+/// - restart policy,
+/// - backoff policy,
+/// - optional timeout,
+/// - retry limit.
 ///
-/// - [`once`](Self::once) for fire-and-forget tasks.
-/// - [`new`](Self::new) for full control over all parameters.
-/// - [`restartable`](Self::restartable) for long-lived workers.
+/// Use:
+/// - [`restartable`](Self::restartable) for tasks that restart after failure.
+/// - [`new`](Self::new) when you want to set all main options directly.
+/// - [`once`](Self::once) for tasks that run once and do not restart.
 ///
 /// ## Creating a spec
 /// ```rust
@@ -35,7 +44,7 @@ use crate::{
 ///
 /// // Inherit from global config:
 /// let cfg = SupervisorConfig::default();
-/// let spec = TaskSpec::with_defaults(task, &cfg);
+/// let spec = cfg.task_spec(task);
 /// ```
 ///
 /// ## Also
@@ -50,7 +59,6 @@ pub struct TaskSpec {
     backoff: BackoffPolicy,
 
     task: TaskRef,
-    slot: Option<Arc<str>>,
 
     max_retries: u32,
 }
@@ -62,17 +70,13 @@ impl std::fmt::Debug for TaskSpec {
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
             .field("task", &self.task.name())
-            .field("slot", &self.slot())
             .field("max_retries", &self.max_retries)
             .finish()
     }
 }
 
 impl TaskSpec {
-    /// Creates a spec with core parameters.
-    ///
-    /// Sets `max_retries` to `0` (unlimited).
-    /// Use [`.with_max_retries()`](Self::with_max_retries) to limit retry attempts.
+    /// Creates a spec with custom restart, backoff, and timeout settings.
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
@@ -82,12 +86,10 @@ impl TaskSpec {
         Self {
             restart,
             backoff,
-            timeout,
-
             task,
-            slot: None,
 
             max_retries: 0,
+            timeout: normalize_timeout(timeout),
         }
     }
 
@@ -99,7 +101,6 @@ impl TaskSpec {
             timeout: None,
 
             task,
-            slot: None,
 
             max_retries: 0,
         }
@@ -113,29 +114,12 @@ impl TaskSpec {
             timeout: None,
 
             task,
-            slot: None,
 
             max_retries: 0,
         }
     }
 
-    /// Inherit restart, backoff, timeout, and max_retries from global config.
-    ///
-    /// `timeout` is taken from `cfg.timeout` directly (already `Option<Duration>`).
-    pub fn with_defaults(task: TaskRef, cfg: &SupervisorConfig) -> Self {
-        Self {
-            restart: cfg.restart,
-            backoff: cfg.backoff,
-            timeout: cfg.timeout,
-
-            task,
-            slot: None,
-
-            max_retries: cfg.max_retries,
-        }
-    }
-
-    /// Returns reference to the task.
+    /// Returns the task handle.
     pub fn task(&self) -> &TaskRef {
         &self.task
     }
@@ -143,11 +127,6 @@ impl TaskSpec {
     /// Returns the task name.
     pub fn name(&self) -> &str {
         self.task.name()
-    }
-
-    /// Returns the slot key used for admission control.
-    pub fn slot(&self) -> &str {
-        self.slot.as_deref().unwrap_or_else(|| self.task.name())
     }
 
     /// Returns the restart policy.
@@ -170,9 +149,13 @@ impl TaskSpec {
         self.max_retries
     }
 
-    /// Builder: set timeout.
+    /// Builder: sets the timeout.
+    ///
+    /// - Stored `Some(d)` is always a positive duration.
+    /// - `Some(Duration::ZERO)` is normalized to `None`.
+    /// - `None` means no timeout.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = timeout;
+        self.timeout = normalize_timeout(timeout);
         self
     }
 
@@ -188,19 +171,12 @@ impl TaskSpec {
         self
     }
 
-    /// Builder: set max retries (`0` = unlimited).
+    /// Builder: set the failure retry limit (`0` = unlimited).
     ///
-    /// Only counts failure-driven retries, not success-driven restarts.
+    /// This counts retries after failed attempts.
+    /// Successful restarts from `RestartPolicy::Always` do not consume this limit.
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
-        self
-    }
-
-    /// Builder: set the admission slot key.
-    ///
-    /// Defaults to the task name.
-    pub fn with_slot(mut self, slot: impl Into<Arc<str>>) -> Self {
-        self.slot = Some(slot.into());
         self
     }
 }
@@ -215,15 +191,31 @@ mod tests {
     }
 
     #[test]
-    fn slot_falls_back_to_task_name() {
-        let spec = TaskSpec::once(task("my-task"));
-        assert_eq!(spec.slot(), "my-task");
-    }
+    fn zero_timeout_normalizes_to_none() {
+        let via_builder = TaskSpec::once(task("z")).with_timeout(Some(Duration::ZERO));
+        assert_eq!(
+            via_builder.timeout(),
+            None,
+            "with_timeout(Some(ZERO)) must normalize to None"
+        );
 
-    #[test]
-    fn with_slot_overrides_slot_but_not_name() {
-        let spec = TaskSpec::once(task("runner-web-7")).with_slot("web");
-        assert_eq!(spec.slot(), "web");
-        assert_eq!(spec.name(), "runner-web-7");
+        let via_new = TaskSpec::new(
+            task("z"),
+            RestartPolicy::Never,
+            BackoffPolicy::default(),
+            Some(Duration::ZERO),
+        );
+        assert_eq!(
+            via_new.timeout(),
+            None,
+            "new(.., Some(ZERO)) must normalize to None"
+        );
+
+        let positive = TaskSpec::once(task("p")).with_timeout(Some(Duration::from_secs(1)));
+        assert_eq!(
+            positive.timeout(),
+            Some(Duration::from_secs(1)),
+            "a positive timeout must be preserved"
+        );
     }
 }

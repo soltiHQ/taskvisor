@@ -818,7 +818,7 @@ mod tests {
         let task: TaskRef = TaskFn::arc("buffered", |_ctx: TaskContext| async { Ok(()) });
         let (_id, waiter) = ctrl
             .handle()
-            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task).with_slot("s")))
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("s"))
             .await
             .expect("submission accepted into channel");
 
@@ -847,7 +847,7 @@ mod tests {
         let task: TaskRef = TaskFn::arc("late", |_ctx: TaskContext| async { Ok(()) });
         let result = ctrl
             .handle()
-            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task).with_slot("s")))
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("s"))
             .await;
 
         assert!(
@@ -1023,7 +1023,7 @@ mod tests {
                 ctx.cancelled().await;
                 Ok(())
             });
-            ControllerSpec::replace(TaskSpec::restartable(task).with_slot("s"))
+            ControllerSpec::replace(TaskSpec::restartable(task)).with_slot("s")
         };
 
         handle.submit(mk("run-1")).await.unwrap();

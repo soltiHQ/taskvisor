@@ -3,13 +3,16 @@
 //! [`ControllerSpec`] pairs an [`AdmissionPolicy`] with a [`TaskSpec`] to describe
 //! what to run and how to handle concurrent submissions to the same slot.
 
+use std::sync::Arc;
+
 use super::admission::AdmissionPolicy;
 use crate::TaskSpec;
 
 /// Request to submit a task to the controller.
 ///
 /// Combines an admission policy and the actual task specification.
-/// The slot name comes from the task spec's slot (which falls back to the task name) via [`slot_name`](Self::slot_name).
+/// The slot name is admission metadata on the submission (set via [`with_slot`](Self::with_slot)),
+/// falling back to the task name; read it via [`slot_name`](Self::slot_name).
 ///
 /// # Also
 ///
@@ -24,6 +27,9 @@ pub struct ControllerSpec {
 
     /// Task specification to run.
     pub task_spec: TaskSpec,
+
+    /// Admission slot key; `None` falls back to the task name. Set via [`with_slot`](Self::with_slot).
+    slot: Option<Arc<str>>,
 }
 
 impl std::fmt::Debug for ControllerSpec {
@@ -31,6 +37,7 @@ impl std::fmt::Debug for ControllerSpec {
         f.debug_struct("ControllerSpec")
             .field("admission", &self.admission)
             .field("task_spec", &self.task_spec)
+            .field("slot", &self.slot_name())
             .finish()
     }
 }
@@ -45,12 +52,25 @@ impl ControllerSpec {
         Self {
             admission,
             task_spec,
+            slot: None,
         }
     }
 
-    /// Returns the slot name (admission key).
+    /// Builder: set the admission slot key.
+    ///
+    /// Defaults to the task name. The slot is the controller's concurrency unit
+    /// (one running task per slot); it is admission metadata, not part of the
+    /// task's execution model.
+    pub fn with_slot(mut self, slot: impl Into<Arc<str>>) -> Self {
+        self.slot = Some(slot.into());
+        self
+    }
+
+    /// Returns the slot name (admission key); falls back to the task name when unset.
     pub fn slot_name(&self) -> &str {
-        self.task_spec.slot()
+        self.slot
+            .as_deref()
+            .unwrap_or_else(|| self.task_spec.name())
     }
 
     /// Convenience: Queue admission.
@@ -107,7 +127,7 @@ mod tests {
 
     #[test]
     fn slot_name_uses_explicit_slot() {
-        let cs = ControllerSpec::queue(make_spec("runner-web-7").with_slot("web"));
+        let cs = ControllerSpec::queue(make_spec("runner-web-7")).with_slot("web");
         assert_eq!(cs.slot_name(), "web");
         assert_eq!(cs.task_spec.name(), "runner-web-7");
     }

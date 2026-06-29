@@ -1,62 +1,50 @@
 //! # Task abstractions.
 //!
-//! | Type              | Role                                        |
-//! |-------------------|---------------------------------------------|
-//! | [`TaskSpec`]      | Execution config: restart, backoff, timeout |
-//! | [`TaskRef`]       | Shared handle - `Arc<dyn Task>`             |
-//! | [`TaskFn`]        | Closure-based [`Task`] (most common)        |
-//! | [`Task`]          | **Trait**; async, cancelable unit of work   |
-//! | [`BoxTaskFuture`] | Return type of [`Task::spawn`]              |
+//! This module contains the types used to define work and describe how it runs.
 //!
-//! ## Flow
+//! | Type              | Role                                                |
+//! |-------------------|-----------------------------------------------------|
+//! | [`Task`]          | Trait for user work                                 |
+//! | [`TaskFn`]        | Closure-based [`Task`]                              |
+//! | [`TaskRef`]       | Shared task handle: `Arc<dyn Task>`                 |
+//! | [`TaskSpec`]      | Run config: restart, backoff, timeout, retry limit  |
+//! | [`BoxTaskFuture`] | Future returned by [`Task::spawn`]                  |
 //!
-//! There are two ways to create a task:
+//! ## Creating A Task
 //!
-//! **[`TaskFn`]** - pass a name and an async closure.
+//! - Use [`TaskFn`] for most tasks. Pass a name and an async closure.
+//! - Use `impl Task` when the task needs its own type or shared dependencies.
 //!
-//! The closure is called on every start and restart, producing a fresh future each time.
-//! No struct, no trait impl - just a function. Suitable for most use cases.
+//! ## Data Flow
 //!
-//! See examples on [`TaskFn`].
-//!
-//! **`impl Task`** - define your own struct and implement the [`Task`] trait manually.
-//! Gives full control over [`name()`](Task::name) and [`spawn()`](Task::spawn).
-//! Use when you need custom initialization, dependency injection, or behavior that a closure cannot express.
-//!
-//! See example on [`Task`].
-//!
-//! ## Schema
-//!
-//! Both paths produce a [`TaskRef`] (`Arc<dyn Task>`), which is then wrapped
-//! in a [`TaskSpec`] to configure restart policy, backoff, and timeout.
+//! Both paths create a [`TaskRef`]. Wrap it in a [`TaskSpec`] to choose restart policy, backoff, timeout, and retry limit.
 //!
 //! ```text
 //! TaskFn::arc(name, closure) ─┐
 //!                             ├──► TaskRef ──► TaskSpec ──► Supervisor
-//! struct MyTask impl Task    ─┘
+//! impl Task                  ─┘
 //! ```
 //!
-//! ## Quick start
+//! ## Quick Start
 //!
 //! ```rust
-//! use taskvisor::{TaskFn, TaskRef, TaskSpec, TaskError};
-//! use taskvisor::TaskContext;
+//! use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
 //!
-//! let task: TaskRef = TaskFn::arc("worker", |ctx: TaskContext| async move {
-//!     // ... do work, observe ctx.cancelled() ...
+//! let task: TaskRef = TaskFn::arc("worker", |_ctx: TaskContext| async move {
 //!     Ok::<(), TaskError>(())
 //! });
 //!
-//! let spec = TaskSpec::once(task);         // run once
-//! // TaskSpec::restartable(task);          // restart on failure
-//! // TaskSpec::with_defaults(task, &cfg);  // inherit from config
+//! let once = TaskSpec::once(task.clone());
+//! let restartable = TaskSpec::restartable(task.clone());
 //! ```
-
-mod context;
-pub use context::TaskContext;
+//!
+//! Use [`SupervisorConfig::task_spec`](crate::SupervisorConfig::task_spec) when you want a task to inherit supervisor defaults.
 
 mod task;
 pub use task::{BoxTaskFuture, Task, TaskRef};
+
+mod context;
+pub use context::TaskContext;
 
 mod r#impl;
 pub use r#impl::func::TaskFn;

@@ -8,33 +8,37 @@ use crate::tasks::TaskContext;
 /// Boxed, pinned, `Send` future: the return type of [`Task::spawn`].
 pub type BoxTaskFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
-/// Shared handle to a task: `Arc<dyn Task>`.
+/// Shared task handle: `Arc<dyn Task>`.
 pub type TaskRef = Arc<dyn Task>;
 
-/// Async, cancelable unit of work managed by a [`Supervisor`](crate::Supervisor).
+/// Async unit of work managed by a [`Supervisor`](crate::Supervisor).
 ///
 /// ## Contract
 ///
-/// [`spawn`](Task::spawn) is called once per attempt and must return a fresh, independent future.
-/// Implementations must observe `ctx.cancelled()` and return `Err(`[`TaskError::Canceled`]`)` promptly.
-/// Non-cooperative tasks will be force-terminated after the grace period ([`GraceExceeded`](crate::RuntimeError::GraceExceeded)).
+/// [`spawn`](Task::spawn) is called for each attempt.
+/// It _must_ create a new future every time.
 ///
-/// | Return value               | Meaning                 | Restarted?                                         |
-/// |----------------------------|-------------------------|----------------------------------------------------|
-/// | `Ok(())`                   | Task completed normally | Depends on [`RestartPolicy`](crate::RestartPolicy) |
-/// | `Err(TaskError::Canceled)` | Cooperative shutdown    | Never                                              |
-/// | `Err(TaskError::Fail)`     | Transient failure       | Per policy, with backoff                           |
-/// | `Err(TaskError::Timeout)`  | Attempt timed out       | Per policy, with backoff                           |
-/// | `Err(TaskError::Fatal)`    | Permanent failure       | Never                                              |
+/// The same task may be started many times when a restart policy is used.
+/// Shared state is allowed, but the returned future must not be reused.
 ///
 /// ## Cancellation
 ///
-/// The [`TaskContext`] `ctx` is cancelled by the supervisor during shutdown or when the task is removed at runtime.
-/// - Long-running tasks should await `ctx.cancelled()` (or poll `ctx.is_cancelled()`): tasks that ignore it will block graceful shutdown until the grace period expires.
-/// - Short-lived, one-shot tasks that complete quickly may omit this check.
+/// Long-running tasks must listen for cancellation.
+/// Use [`TaskContext::cancelled`] or [`TaskContext::is_cancelled`].
 ///
-/// A task that loops forever and only exits via `ctx.cancelled()` should return `Err(TaskError::Canceled)`;
-/// A one-shot task that finishes its work should return `Ok(())`.
+/// When a task stops because of cancellation, it should return `Err(TaskError::Canceled)`.
+/// This lets the runtime report it as a graceful cancellation.
+///
+/// Short or one-shot tasks may ignore cancellation if they finish quickly.
+/// Tasks that ignore cancellation during shutdown may be force-aborted after the supervisor grace period.
+///
+/// | Return value               | Meaning              | Restarted?                                         |
+/// |----------------------------|----------------------|----------------------------------------------------|
+/// | `Ok(())`                   | Completed            | Depends on [`RestartPolicy`](crate::RestartPolicy) |
+/// | `Err(TaskError::Fail)`     | Retryable failure    | Per policy, with backoff                           |
+/// | `Err(TaskError::Timeout)`  | Attempt timed out    | Per policy, with backoff                           |
+/// | `Err(TaskError::Canceled)` | Graceful cancel      | Never                                              |
+/// | `Err(TaskError::Fatal)`    | Permanent failure    | Never                                              |
 ///
 /// # Also
 ///
@@ -43,11 +47,11 @@ pub type TaskRef = Arc<dyn Task>;
 pub trait Task: Send + Sync + 'static {
     /// Task name used in logs, metrics, and shutdown diagnostics.
     ///
-    /// Names must be unique among **currently registered** tasks (a duplicate add is rejected), but may be reused after the previous holder is removed.
+    /// Names must be unique among **currently registered** tasks, but may be reused after the previous holder is removed.
     fn name(&self) -> &str;
 
-    /// Creates a new future that runs the task until completion or cancellation.
+    /// Creates a new future for one task attempt.
     ///
-    /// Called once per attempt. Takes `&self` - each call must return an independent future with no side effects from previous runs.
+    /// Called once per attempt. Each call must return a fresh future.
     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture;
 }

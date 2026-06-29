@@ -2,15 +2,14 @@
 
 use tokio_util::sync::CancellationToken;
 
-/// Execution context passed to a [`Task`](crate::Task) on every attempt.
+/// Context passed to a [`Task`](crate::Task) for one attempt.
 ///
-/// Carries the per-attempt cancellation signal and is the only argument to [`Task::spawn`](crate::Task::spawn).
+/// It tells the task when it should stop.
 ///
 /// ## Cancellation
 ///
 /// The context is cancelled by the supervisor during shutdown or when the task is removed at runtime.
-/// - Long-running tasks should await [`cancelled`](Self::cancelled) (or poll [`is_cancelled`](Self::is_cancelled));
-///   tasks that ignore it block graceful shutdown until the grace period expires.
+/// - Long-running tasks should await [`cancelled`](Self::cancelled) or check [`is_cancelled`](Self::is_cancelled).
 /// - Short-lived, one-shot tasks that finish quickly may ignore it.
 #[derive(Clone, Debug)]
 pub struct TaskContext {
@@ -23,7 +22,7 @@ impl TaskContext {
         Self { cancel }
     }
 
-    /// Resolves once the context is cancelled.
+    /// Waits until the context is cancelled.
     ///
     /// Safe to call repeatedly and to use as a branch in `tokio::select!`.
     pub async fn cancelled(&self) {
@@ -36,7 +35,10 @@ impl TaskContext {
         self.cancel.is_cancelled()
     }
 
-    /// Derives a child context: cancelled when this context is cancelled, but cancelling the child does **not** affect this context.
+    /// Creates a child context.
+    ///
+    /// The child is cancelled when this context is cancelled.
+    /// If the child is cancelled through interop APIs, this context is not cancelled.
     #[must_use]
     pub fn child(&self) -> TaskContext {
         TaskContext {
@@ -44,14 +46,12 @@ impl TaskContext {
         }
     }
 
-    /// Returns a clone of the underlying [`tokio_util`] cancellation token.
+    /// Returns the raw [`tokio_util`] cancellation token.
     ///
-    /// Escape hatch for interop with third-party `tokio-util`-aware APIs. The
-    /// returned token shares cancellation state with this context.
+    /// Use this only when another API needs a `CancellationToken`.
+    /// The returned token shares cancellation state with this context.
     ///
     /// Requires the `tokio-util-interop` feature.
-    /// **Enabling it makes `tokio-util` a public dependency of your crate** (its semver leaks into yours);
-    /// prefer [`cancelled`](Self::cancelled)/[`child`](Self::child) where possible.
     #[cfg(feature = "tokio-util-interop")]
     #[must_use]
     pub fn cancellation_token(&self) -> CancellationToken {

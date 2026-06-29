@@ -4,7 +4,7 @@
 //! It enforces per-slot admission rules (`Queue`, `Replace`, `DropIfRunning`) and starts
 //! the *next* task **only after** a terminal `TaskRemoved` event is observed on the runtime bus.
 //!
-//! **one slot = one logical key** *(`slot key = TaskSpec::slot()`, which defaults to the task name and can be overridden via `TaskSpec::with_slot`)*.
+//! **one slot = one logical key** *(`slot key = ControllerSpec::slot_name()`, which defaults to the task name and can be overridden via `ControllerSpec::with_slot`)*.
 //! Several differently-named tasks may therefore share a single slot (sequentially).
 //!
 //! ## Note:
@@ -53,7 +53,7 @@
 //!
 //! ## Per-slot model
 //!
-//! - **Key**: `task_spec.slot()` defaults to `name()`, override with `with_slot` (exactly one running task per slot).
+//! - **Key**: `ControllerSpec::slot_name()` defaults to the task `name()`, override with `ControllerSpec::with_slot` (exactly one running task per slot).
 //! - **State**: `Idle | Running | Terminating`, with a FIFO queue per slot.
 //! - **Replace (latest-wins)**: does **not** grow the queue; it **replaces the head** (the immediate successor).
 //!   The next task actually starts **only after `TaskRemoved`**.

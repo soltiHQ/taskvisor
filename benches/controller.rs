@@ -153,8 +153,11 @@ fn bench_queue(c: &mut Criterion) {
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
-                                let spec = instant_task(&format!("q-{i}")).with_slot("slot-q");
-                                handle.submit(ControllerSpec::queue(spec)).await.unwrap();
+                                let spec = instant_task(&format!("q-{i}"));
+                                handle
+                                    .submit(ControllerSpec::queue(spec).with_slot("slot-q"))
+                                    .await
+                                    .unwrap();
                             }
                             let _ = tokio::time::timeout(
                                 Duration::from_secs(10),
@@ -196,8 +199,11 @@ fn bench_replace(c: &mut Criterion) {
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
-                                let spec = short_task(&format!("r-{i}")).with_slot("slot-r");
-                                handle.submit(ControllerSpec::replace(spec)).await.unwrap();
+                                let spec = short_task(&format!("r-{i}"));
+                                handle
+                                    .submit(ControllerSpec::replace(spec).with_slot("slot-r"))
+                                    .await
+                                    .unwrap();
                             }
                             let elapsed = start.elapsed();
 
@@ -234,9 +240,11 @@ fn bench_drop_if_running(c: &mut Criterion) {
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
-                                let spec = short_task(&format!("d-{i}")).with_slot("slot-d");
+                                let spec = short_task(&format!("d-{i}"));
                                 handle
-                                    .submit(ControllerSpec::drop_if_running(spec))
+                                    .submit(
+                                        ControllerSpec::drop_if_running(spec).with_slot("slot-d"),
+                                    )
                                     .await
                                     .unwrap();
                             }
@@ -322,9 +330,14 @@ fn bench_multi_slot(c: &mut Criterion) {
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
-                                let spec = instant_task(&format!("ms-{i}"))
-                                    .with_slot(format!("slot-{}", i % SLOTS));
-                                handle.submit(ControllerSpec::queue(spec)).await.unwrap();
+                                let spec = instant_task(&format!("ms-{i}"));
+                                handle
+                                    .submit(
+                                        ControllerSpec::queue(spec)
+                                            .with_slot(format!("slot-{}", i % SLOTS)),
+                                    )
+                                    .await
+                                    .unwrap();
                             }
                             let _ = tokio::time::timeout(
                                 Duration::from_secs(10),

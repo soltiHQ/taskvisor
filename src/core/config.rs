@@ -4,7 +4,7 @@
 //!
 //! Config is used in two ways:
 //! 1. **Supervisor creation**: `Supervisor::new(config, subscribers)`
-//! 2. **TaskSpec defaults**: `TaskSpec::with_defaults(task, &config)`
+//! 2. **TaskSpec defaults**: [`config.task_spec(task)`](SupervisorConfig::task_spec)
 //!
 //! ## Optional / normalized fields
 //!
@@ -17,6 +17,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::policies::{BackoffPolicy, RestartPolicy};
+use crate::tasks::{TaskRef, TaskSpec};
 
 /// Global configuration for the supervisor runtime.
 ///
@@ -39,7 +40,7 @@ use crate::policies::{BackoffPolicy, RestartPolicy};
 /// # Also
 ///
 /// - [`SupervisorBuilder`](crate::SupervisorBuilder) - consumes config to build a [`Supervisor`](crate::Supervisor)
-/// - [`TaskSpec`](crate::TaskSpec) - inherits defaults from config via `with_defaults`
+/// - [`TaskSpec`](crate::TaskSpec) - inherits defaults from config via [`task_spec`](SupervisorConfig::task_spec)
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
     /// Maximum time to wait for graceful shutdown before force-terminating.
@@ -64,12 +65,12 @@ pub struct SupervisorConfig {
 
     /// Default restart policy for tasks.
     ///
-    /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
+    /// Used by [`task_spec`](SupervisorConfig::task_spec). Can be overridden per-task.
     pub restart: RestartPolicy,
 
     /// Default backoff policy for retries.
     ///
-    /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
+    /// Used by [`task_spec`](SupervisorConfig::task_spec). Can be overridden per-task.
     pub backoff: BackoffPolicy,
 
     /// Default per-task timeout.
@@ -78,7 +79,7 @@ pub struct SupervisorConfig {
     ///
     /// Note: `Some(Duration::ZERO)` is also treated as "no timeout" by the runner.
     ///
-    /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
+    /// Used by [`task_spec`](SupervisorConfig::task_spec). Can be overridden per-task.
     pub timeout: Option<Duration>,
 
     /// Default maximum number of retry attempts after failure.
@@ -88,7 +89,7 @@ pub struct SupervisorConfig {
     /// Only counts failure-driven retries, not success-driven restarts
     /// (e.g., `RestartPolicy::Always` after success does not consume retries).
     ///
-    /// Used by `TaskSpec::with_defaults()`. Can be overridden per-task.
+    /// Used by [`task_spec`](SupervisorConfig::task_spec). Can be overridden per-task.
     pub max_retries: u32,
 }
 
@@ -100,6 +101,17 @@ impl SupervisorConfig {
     #[must_use]
     pub fn bus_capacity_clamped(&self) -> usize {
         self.bus_capacity.max(1)
+    }
+
+    /// Builds a [`TaskSpec`] for `task` that inherits this config's restart policy,
+    /// backoff, timeout, and max-retries defaults.
+    ///
+    /// Lives on the config (not `TaskSpec`) so the `tasks` layer stays free of any
+    /// dependency on the runtime `core` layer. Per-task overrides still compose:
+    /// `cfg.task_spec(task).with_timeout(..)`.
+    pub fn task_spec(&self, task: TaskRef) -> TaskSpec {
+        TaskSpec::new(task, self.restart, self.backoff, self.timeout)
+            .with_max_retries(self.max_retries)
     }
 }
 
