@@ -189,7 +189,7 @@ impl BackoffPolicy {
         if base.is_zero() {
             floored
         } else {
-            floored.max(MIN_NONZERO_DELAY)
+            floored.max(MIN_NONZERO_DELAY.min(self.max))
         }
     }
 }
@@ -517,5 +517,22 @@ mod tests {
             Duration::ZERO,
             "an explicit zero `first` must stay zero (no implicit floor)"
         );
+    }
+
+    #[test]
+    fn next_never_exceeds_a_sub_ms_max() {
+        let p = BackoffPolicy::new(
+            Duration::from_micros(500),
+            Duration::from_micros(500),
+            1.0,
+            JitterPolicy::Full,
+        )
+        .expect("valid");
+        for attempt in 0..100 {
+            assert!(
+                p.next(attempt) <= Duration::from_micros(500),
+                "next() must never exceed max, even when max < 1ms"
+            );
+        }
     }
 }

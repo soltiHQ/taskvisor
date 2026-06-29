@@ -303,6 +303,7 @@ impl SupervisorCore {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
         let alive = Arc::clone(&self.alive);
+        let registry = Arc::clone(&self.registry);
         let rt = self.runtime_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -323,6 +324,14 @@ impl SupervisorCore {
                             let arc_e = Arc::new(e);
                             alive.update(&arc_e).await;
                             set.emit_arc(arc_e);
+
+                            let live: std::collections::HashSet<TaskId> = registry
+                                .list()
+                                .await
+                                .into_iter()
+                                .map(|(id, _)| id)
+                                .collect();
+                            alive.reconcile(&live).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
