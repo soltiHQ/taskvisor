@@ -63,7 +63,10 @@
 //! - Events have **monotonic sequence numbers** (ordering guarantees)
 //! - Each attempt gets its own **child_token** for isolation
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -76,6 +79,13 @@ use crate::{
     policies::{BackoffPolicy, RestartPolicy},
     tasks::Task,
 };
+
+/// Minimum cadence for an immediate `RestartPolicy::Always { interval: None }` restart loop.
+///
+/// A task that returns `Ok` instantly would otherwise respawn as fast as the scheduler allows,
+/// pegging a runtime thread and flooding the event bus. We floor only the *idle* portion: a task
+/// that does real work (>= this) restarts with no added latency.
+const IMMEDIATE_RESTART_FLOOR: Duration = Duration::from_millis(1);
 
 /// Reason why a task actor exited, carrying the final result of the last attempt.
 ///
@@ -223,7 +233,7 @@ impl TaskActor {
             }
 
             let child = runtime_token.child_token();
-            attempt += 1;
+            attempt = attempt.saturating_add(1);
 
             self.bus.publish(
                 Event::new(EventKind::TaskStarting)
@@ -231,6 +241,7 @@ impl TaskActor {
                     .with_id(id)
                     .with_attempt(attempt),
             );
+            let attempt_start = Instant::now();
             let res = run_once(
                 self.task.as_ref(),
                 &child,
@@ -261,7 +272,22 @@ impl TaskActor {
                                     return ActorExitReason::Canceled;
                                 }
                             } else {
-                                tokio::task::yield_now().await;
+                                // Immediate restart, floored so an instantly-returning task
+                                // cannot peg a runtime thread / flood the bus. A task that did
+                                // real work (>= the floor) restarts with no added latency.
+                                let elapsed = attempt_start.elapsed();
+                                if elapsed < IMMEDIATE_RESTART_FLOOR {
+                                    if !Self::sleep_cancellable(
+                                        IMMEDIATE_RESTART_FLOOR - elapsed,
+                                        &runtime_token,
+                                    )
+                                    .await
+                                    {
+                                        return ActorExitReason::Canceled;
+                                    }
+                                } else {
+                                    tokio::task::yield_now().await;
+                                }
                             }
                             continue;
                         }
@@ -351,7 +377,7 @@ impl TaskActor {
                     }
 
                     let delay = self.params.backoff.next(backoff_attempt);
-                    backoff_attempt += 1;
+                    backoff_attempt = backoff_attempt.saturating_add(1);
 
                     self.bus.publish(
                         Event::new(EventKind::BackoffScheduled)
@@ -546,5 +572,42 @@ mod tests {
         let a = actor(task, RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
         assert!(matches!(reason, ActorExitReason::Completed));
+    }
+
+    #[tokio::test]
+    async fn always_none_instant_ok_is_rate_limited() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct Counting(Arc<AtomicU32>);
+        impl Task for Counting {
+            fn name(&self) -> &str {
+                "spin"
+            }
+            fn spawn(&self, _ctx: TaskContext) -> BoxFut {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let task = Arc::new(Counting(Arc::clone(&counter)));
+        let a = actor(task, RestartPolicy::Always { interval: None }, 0);
+
+        let token = CancellationToken::new();
+        let child = token.clone();
+        let handle = tokio::spawn(async move { a.run(child).await });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        token.cancel();
+        let _ = handle.await;
+
+        let n = counter.load(Ordering::Relaxed);
+        // With the ~1ms floor, a 25ms window yields on the order of tens of restarts; an
+        // unfloored yield-only loop would produce many thousands. A generous bound keeps the
+        // test robust on slow CI while still failing loudly on a regression.
+        assert!(
+            (1..=200).contains(&n),
+            "Always {{ interval: None }} with an instant-Ok task must be floored, got {n} restarts in 25ms"
+        );
     }
 }

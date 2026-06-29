@@ -183,7 +183,14 @@ impl BackoffPolicy {
             }
             _ => self.jitter.apply(base),
         };
-        delay.max(self.floor)
+
+        const MIN_NONZERO_DELAY: Duration = Duration::from_millis(1);
+        let floored = delay.max(self.floor);
+        if base.is_zero() {
+            floored
+        } else {
+            floored.max(MIN_NONZERO_DELAY)
+        }
     }
 }
 
@@ -475,5 +482,40 @@ mod tests {
         .expect("valid")
         .with_floor(Duration::from_secs(999));
         assert!(p.next(0) <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sub_ms_nonzero_base_is_floored_to_at_least_one_ms() {
+        // A sub-millisecond `first` would quantize to 0 under jitter and hot-spin the loop;
+        // the granularity floor must keep every attempt at >= 1ms.
+        let p = BackoffPolicy::new(
+            Duration::from_micros(500),
+            Duration::from_secs(1),
+            1.0,
+            JitterPolicy::Full,
+        )
+        .expect("valid");
+        for attempt in 0..100 {
+            assert!(
+                p.next(attempt) >= Duration::from_millis(1),
+                "non-zero sub-ms backoff must floor to >= 1ms (never a zero-delay hot-spin)"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_first_opts_out_of_the_floor() {
+        let p = BackoffPolicy::new(
+            Duration::ZERO,
+            Duration::from_secs(1),
+            1.0,
+            JitterPolicy::None,
+        )
+        .expect("valid");
+        assert_eq!(
+            p.next(0),
+            Duration::ZERO,
+            "an explicit zero `first` must stay zero (no implicit floor)"
+        );
     }
 }
