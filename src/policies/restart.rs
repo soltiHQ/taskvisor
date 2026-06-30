@@ -41,7 +41,8 @@ pub enum RestartPolicy {
     /// Restart after success and after retryable failures.
     ///
     /// `interval` applies only after successful completions:
-    /// - `Some(dur)` waits `dur` before the next run.
+    /// - `Some(dur)` waits at least `dur` before the next run — but never less than the small
+    ///   internal floor for an instantly-completing task, so a tiny or zero `dur` cannot hot-loop.
     /// - `None` restarts with no configured delay.
     ///
     /// Instantly-completing tasks are still rate-limited by a small internal floor to avoid a hot restart loop.

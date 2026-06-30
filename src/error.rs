@@ -70,6 +70,9 @@ pub enum RuntimeError {
     /// The supervisor runtime is shutting down; the command channel is closed.
     #[error("supervisor is shutting down")]
     ShuttingDown,
+    /// [`run`](crate::Supervisor::run) was called more than once on the same supervisor; it is single-shot.
+    #[error("supervisor run() was already started")]
+    AlreadyRunning,
 }
 
 impl RuntimeError {
@@ -83,6 +86,7 @@ impl RuntimeError {
             RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
+            RuntimeError::AlreadyRunning => "runtime_already_running",
         }
     }
 }

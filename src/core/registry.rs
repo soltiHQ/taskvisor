@@ -1,30 +1,57 @@
-//! # Task registry - event-driven task lifecycle manager.
+//! # Task registry.
 //!
-//! Manages active task actors using two input channels:
-//! - **Command channel** (`mpsc`): guaranteed delivery for `Add`/`Remove` commands.
-//! - **Event bus** (`broadcast`): lifecycle events from actors (`ActorExhausted`, `ActorDead`).
+//! Owns registered task actors and their runtime identity.
 //!
-//! ## Architecture
+//! The registry is the authoritative owner of active task membership.
+//! It keeps:
+//! - `TaskId -> actor handle`,
+//! - task name -> `TaskId`,
+//! - detached join bookkeeping for shutdown and removal.
+//!
+//! ## Input Planes
+//!
 //! ```text
-//! Supervisor ─► bus.publish(TaskAddRequested) ─► Bus (observability, fire-and-forget)
-//!            ─► cmd_tx.send(Add(id, spec)) ────► Registry.spawn_listener()
-//!                                                   ├─► Add(id, spec)      ─► spawn_and_register
-//!                                                   ├─► Remove(id)         ─► cancel_and_remove
-//!                                                   ├─► ActorExhausted(id) ─► cleanup_task
-//!                                                   └─► ActorDead(id)      ─► cleanup_task
+//! Management plane:
+//!   SupervisorCore -> mpsc -> RegistryCommand::Add / Remove
 //!
-//! Tasks are keyed by the runtime [`TaskId`] (identity); the task name is a human label.
+//! Event plane:
+//!   TaskActor -> broadcast bus -> ActorExhausted / ActorDead -> cleanup
+//! ```
+//!
+//! Add and remove commands use the management channel, not the lossy event bus.
+//! Actor terminal events arrive through the bus and trigger registry cleanup.
+//!
+//! ## Flow
+//!
+//! ```text
+//! Add(id, spec)
+//!   -> spawn actor
+//!   -> insert id/name indexes
+//!   -> publish TaskAdded
+//!
+//! Remove(id)
+//!   -> remove handle from registry
+//!   -> cancel actor token
+//!   -> join actor
+//!   -> publish TaskRemoved
+//!
+//! ActorExhausted(id) / ActorDead(id)
+//!   -> remove handle from registry
+//!   -> join actor
+//!   -> publish TaskRemoved
 //! ```
 //!
 //! ## Rules
 //!
-//! - Does **not** react to `TaskStopped` directly (cleanup happens on actor terminal events)
-//! - Cleanup is event-driven *(no polling)* and idempotent (safe on duplicates/races)
-//! - Exposes `wait_until_empty` via internal notifier for shutdown coordination
-//! - Registry owns JoinHandle + CancellationToken for each actor
-//! - Publishes `TaskAdded`/`TaskRemoved` for observability
+//! - Watched tasks resolve their `TaskOutcome` when the actor join is reported.
+//! - Cleanup is idempotent. Duplicate or stale terminal events become no-ops.
+//! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
+//! - Task name is a human label and a duplicate-name admission gate.
+//!   Cleanup waits for actor-level terminal events.
+//! - `TaskRemoved` means the registry has finished cleanup for that identity.
+//! - `TaskId` is the canonical identity.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use tokio::sync::{Notify, RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
@@ -36,17 +63,20 @@ use crate::events::{Bus, Event, EventKind};
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
 
-/// One-shot sender resolving a [`TaskWaiter`](crate::TaskWaiter) with the final outcome.
+/// Sender used to resolve a watched task with its final [`TaskOutcome`].
 pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
 
-/// Command sent via guaranteed-delivery channel (mpsc).
+/// Command sent to the registry over the management channel.
 pub(crate) enum RegistryCommand {
-    /// Add a new task with its runtime identity and an optional outcome watcher.
+    /// Register a task under a pre-minted runtime identity.
     Add(TaskId, TaskSpec, Option<OutcomeTx>),
-    /// Remove a task by its runtime identity. Supervisor publishes `TaskRemoveRequested` first.
+    /// Remove a task by runtime identity.
+    ///
+    /// The public caller publishes `TaskRemoveRequested` before sending this.
     Remove(TaskId),
 }
 
+/// Registry-owned actor handle for one registered task.
 struct Handle {
     join: JoinHandle<ActorExitReason>,
     cancel: CancellationToken,
@@ -54,23 +84,31 @@ struct Handle {
     done: Option<OutcomeTx>,
 }
 
-/// Registry maps held under a single lock so identity and label stay consistent.
+/// Registry indexes guarded by one lock.
+///
+/// Keeping both maps under the same lock keeps identity and label lookup in sync.
 #[derive(Default)]
 struct Inner {
-    /// Identity → handle (the canonical map; the [`TaskId`] is the key).
+    /// Canonical task map keyed by runtime identity.
     tasks: HashMap<TaskId, Handle>,
-    /// Label → identity (optional dedup gate + label-addressed cancel/remove).
+
+    /// Label lookup used for duplicate-name checks and label-based operations.
     by_label: HashMap<Arc<str>, TaskId>,
 }
 
+/// Mutable state for detached join tracking.
 #[derive(Default)]
 struct PendingInner {
-    /// Refcount of in-flight joins per identity.
+    /// Number of in-flight join reporters per task identity.
     counts: HashMap<TaskId, usize>,
-    /// Human label per in-flight identity, for stuck-diagnostics on a grace timeout.
+
+    /// Human labels used for shutdown diagnostics when joins do not finish in time.
     labels: HashMap<TaskId, Arc<str>>,
 }
 
+/// Tracks actor joins that are running outside the registry map.
+///
+/// This is used after remove/cleanup paths move a handle out of `state.tasks` but still need to wait for the actor join and final `TaskRemoved`.
 #[derive(Default)]
 struct PendingJoins {
     inner: std::sync::Mutex<PendingInner>,
@@ -78,15 +116,15 @@ struct PendingJoins {
 }
 
 impl PendingJoins {
-    /// Registers an in-flight join for `id`.
+    /// Marks one join reporter for `id` as in flight.
     fn inc(&self, id: TaskId) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         *g.counts.entry(id).or_insert(0) += 1;
     }
 
-    /// Records the human label for an in-flight join (for stuck-diagnostics on timeout).
+    /// Stores the label for an in-flight join.
     ///
-    /// No-op if `id` is not currently in flight.
+    /// No-op if `id` is not currently tracked.
     fn label(&self, id: TaskId, label: Arc<str>) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.counts.contains_key(&id) {
@@ -94,7 +132,9 @@ impl PendingJoins {
         }
     }
 
-    /// Marks one in-flight join for `id` as finished; wakes `wait_drained` when none remain.
+    /// Marks one in-flight join for `id` as finished.
+    ///
+    /// Wakes waiters when no joins remain.
     fn dec(&self, id: TaskId) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = g.counts.get_mut(&id) {
@@ -127,7 +167,9 @@ impl PendingJoins {
             .is_empty()
     }
 
-    /// Labels of joins still in flight (best-effort: an id incremented but not yet labeled is omitted).
+    /// Returns labels for joins still in flight.
+    ///
+    /// Best-effort: an id that was incremented but not labeled yet is omitted.
     fn pending_labels(&self) -> Vec<Arc<str>> {
         self.inner
             .lock()
@@ -138,10 +180,9 @@ impl PendingJoins {
             .collect()
     }
 
-    /// Resolves once no joins are in flight.
+    /// Waits until no joins are in flight.
     ///
-    /// Register-before-check: `notified()` is created **before** testing `is_empty` so a
-    /// concurrent `dec` cannot slip its wakeup between the check and the await.
+    /// Uses register-before-check: `notified()` is created before checking `is_empty`; a concurrent `dec` cannot lose the wakeup.
     async fn wait_drained(&self) {
         loop {
             let notified = self.drained.notified();
@@ -153,15 +194,16 @@ impl PendingJoins {
     }
 }
 
-/// Event-driven registry of active task actors.
+/// Owns registered task actors and task membership.
 ///
-/// See the [module-level documentation](self) for the dual-channel architecture.
+/// The registry accepts add/remove commands, listens for actor terminal events, joins actors after removal or completion, and publishes
+/// registry-level lifecycle events such as `TaskAdded` and `TaskRemoved`.
 ///
 /// # Also
 ///
-/// - [`Supervisor`](super::supervisor::Supervisor) - sends commands via mpsc, owns the registry
-/// - [`TaskActor`](super::actor::TaskActor) - per-task supervisor spawned by this registry
-/// - [`Bus`](crate::events::Bus) - delivers actor terminal events for cleanup
+/// - [`TaskActor`](super::actor::TaskActor) - per-task actor spawned by the registry
+/// - [`SupervisorCore`](super::runtime::SupervisorCore) - sends registry commands
+/// - [`TaskOutcome`] - final result for watched tasks
 pub(crate) struct Registry {
     state: RwLock<Inner>,
     bus: Bus,
@@ -175,7 +217,7 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    /// Creates a new registry instance.
+    /// Creates a registry with its command receiver and runtime dependencies.
     pub fn new(
         bus: Bus,
         runtime_token: CancellationToken,
@@ -196,9 +238,9 @@ impl Registry {
         })
     }
 
-    /// Returns `true` once the task is fully terminated: not registered and not awaiting join.
+    /// Returns true when `id` is no longer registered and has no join in flight.
     ///
-    /// Used as a state fallback when a `TaskRemoved` event may have been lost to broadcast lag.
+    /// Used as a fallback when a `TaskRemoved` event may have been missed because of broadcast lag.
     pub async fn is_terminated(&self, id: TaskId) -> bool {
         if self.state.read().await.tasks.contains_key(&id) {
             return false;
@@ -206,15 +248,12 @@ impl Registry {
         !self.pending_joins.contains(id)
     }
 
-    /// Waits up to `grace` for all in-flight detached joins to finish.
+    /// Waits for detached join reporters to finish.
     ///
-    /// Detached join-reporters (from a `remove`/cleanup) live outside `state.tasks`, so
-    /// [`cancel_all_within`](Self::cancel_all_within) does not cover them. Graceful shutdown
-    /// calls this *before* cancelling the runtime token — while the subscriber listener is
-    /// still alive — so each joiner's final `TaskRemoved` is delivered (not lost to the
-    /// shutdown race) and the grace verdict reflects them. Returns the labels of any joins
-    /// **still in flight** after `grace` (empty if all drained), so the caller can fold them
-    /// into the shutdown "stuck" set.
+    /// Detached join reporters are created after remove/cleanup paths take a task out of `state.tasks`.
+    /// They are no longer covered by [`cancel_all_within`](Self::cancel_all_within), but shutdown still needs their final `TaskRemoved` events before the subscriber listener stops.
+    ///
+    /// Returns labels for joins still in flight after `grace`.
     pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let _ = tokio::time::timeout(grace, self.pending_joins.wait_drained()).await;
         self.pending_joins.pending_labels()
@@ -227,10 +266,12 @@ impl Registry {
         }
     }
 
-    /// Wait until the registry becomes empty.
+    /// Waits until no tasks remain registered.
     ///
-    /// Uses the register-before-check pattern to avoid race conditions:
-    /// `notified()` is created **before** checking the condition, but `.await`ed **after**.
+    /// This only checks the registry map.
+    /// Detached joins may still be in flight; use [`wait_joins_within`](Self::wait_joins_within) for those.
+    ///
+    /// Uses register-before-check to avoid losing a wakeup.
     pub async fn wait_until_empty(&self) {
         loop {
             let notified = self.empty_notify.notified();
@@ -241,12 +282,14 @@ impl Registry {
         }
     }
 
-    /// Spawns the event listener task.
+    /// Starts the registry listener task.
     ///
-    /// Consumes the command receiver stored during construction.
-    /// Listens on two channels via `select!`:
-    /// - **cmd_rx** (mpsc): guaranteed-delivery commands (`Add`, `Remove`).
-    /// - **bus_rx** (broadcast): actor lifecycle events (`ActorExhausted`, `ActorDead`)
+    /// The listener consumes the command receiver stored during construction.
+    /// It listens to:
+    /// - management commands from `cmd_rx`,
+    /// - actor terminal events from the broadcast bus.
+    ///
+    /// On runtime shutdown, it closes the command receiver, drains already buffered commands, cancels remaining actors with zero extra grace, and waits for all join reporters to finish.
     pub fn spawn_listener(self: Arc<Self>) {
         let mut cmd_rx = self
             .cmd_rx
@@ -268,21 +311,22 @@ impl Registry {
 
                     cmd = cmd_rx.recv() => match cmd {
                         Some(RegistryCommand::Add(id, spec, done)) => {
-                            me.spawn_and_register(id, spec, done).await;
+                            me.guarded("registry", me.spawn_and_register(id, spec, done))
+                            .await;
                         }
                         Some(RegistryCommand::Remove(id)) => {
-                            me.remove_task(id).await;
+                            me.guarded("registry", me.remove_task(id)).await;
                         }
                         None => break,
                     },
 
                     msg = bus_rx.recv() => match msg {
-                        Ok(ev) => me.handle_bus_event(&ev).await,
+                        Ok(ev) => me.guarded("registry", me.handle_bus_event(&ev)).await,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             me.bus
                                 .publish(Event::subscriber_overflow("registry", format!("lagged({n})")));
-                            me.reap_finished().await;
+                            me.guarded("registry", me.reap_finished()).await;
                             continue;
                         }
                     }
@@ -293,10 +337,11 @@ impl Registry {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     RegistryCommand::Add(id, spec, done) => {
-                        me.spawn_and_register(id, spec, done).await;
+                        me.guarded("registry", me.spawn_and_register(id, spec, done))
+                            .await;
                     }
                     RegistryCommand::Remove(id) => {
-                        me.remove_task(id).await;
+                        me.guarded("registry", me.remove_task(id)).await;
                     }
                 }
             }
@@ -310,7 +355,10 @@ impl Registry {
             .unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
-    /// Awaits the listener task, driving the shutdown drain + join barrier to completion.
+    /// Waits for the registry listener task to finish.
+    ///
+    /// Safe to call after shutdown has started.
+    /// If the listener was never started, this is a no-op.
     pub async fn join_listener(&self) {
         let handle = self
             .listener_handle
@@ -322,9 +370,22 @@ impl Registry {
         }
     }
 
-    /// Handles lifecycle events from the bus.
+    /// Runs one listener operation under a panic boundary.
     ///
-    /// Only processes actor terminal events.
+    /// A panic while processing one command/event is reported as a diagnostic event instead of killing the whole registry listener.
+    async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
+        if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
+            self.bus.publish(Event::subscriber_panicked(
+                who,
+                format!("listener panic: {msg}"),
+            ));
+        }
+    }
+
+    /// Handles registry-relevant lifecycle events from the bus.
+    ///
+    /// Only actor terminal events trigger cleanup.
+    /// Attempt-level events such as `TaskStopped` or `TaskFailed` are ignored here.
     async fn handle_bus_event(&self, event: &Event) {
         match event.kind {
             EventKind::ActorExhausted | EventKind::ActorDead => {
@@ -336,7 +397,7 @@ impl Registry {
         }
     }
 
-    /// Returns active tasks as `(id, label)` pairs, sorted by identity.
+    /// Returns registered tasks as `(id, label)` pairs, sorted by identity.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         let st = self.state.read().await;
         let mut v: Vec<(TaskId, Arc<str>)> = st
@@ -348,7 +409,7 @@ impl Registry {
         v
     }
 
-    /// Returns `true` if a task with the given identity is registered.
+    /// Returns true if `id` is currently registered.
     pub async fn contains(&self, id: TaskId) -> bool {
         self.state.read().await.tasks.contains_key(&id)
     }
@@ -358,19 +419,23 @@ impl Registry {
         self.state.read().await.by_label.get(name).copied()
     }
 
-    /// Returns `true` if registry is empty.
+    /// Returns true if no tasks are currently registered.
+    ///
+    /// Detached joins may still be running after the map becomes empty.
     pub async fn is_empty(&self) -> bool {
         self.state.read().await.tasks.is_empty()
     }
 
-    /// Cancels all tasks, waits up to `grace` for cooperative exit, then force-aborts stragglers.
+    /// Cancels all registered tasks and waits for them within one shared grace window.
     ///
     /// Steps:
-    /// - drain the registry and cancel every task token,
-    /// - join each actor, bounded by a single shared `grace` deadline,
-    /// - any actor still running when the deadline passes is force-terminated via [`JoinHandle::abort`] and reported in the returned "stuck" set.
+    /// - remove all handles from the registry map,
+    /// - cancel every actor token,
+    /// - join each actor until the shared deadline,
+    /// - abort actors that do not finish in time,
+    /// - publish `TaskRemoved` for each drained task.
     ///
-    /// Always publishes `TaskRemoved` for every task (and `ActorDead` on panic).
+    /// Returns labels of tasks that were force-aborted.
     pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
         let handles: Vec<(TaskId, Handle)> = {
@@ -417,10 +482,12 @@ impl Registry {
         stuck
     }
 
-    /// Spawns an actor and registers its handle under the given runtime identity.
+    /// Spawns an actor and registers it under `id`.
     ///
-    /// On a duplicate label the optional `done` sender is resolved with [`TaskOutcome::Rejected`](crate::TaskOutcome) (reason `already_exists`).
-    /// Plain `add_and_watch` callers still don't observe it: they see `TaskAddFailed` first and discard the waiter before it is handed out.
+    /// Duplicate task names are rejected.
+    /// If a watched add supplied `done`, it is resolved as [`TaskOutcome::Rejected`] with reason `already_exists`.
+    ///
+    /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) because registration confirmation fails before the waiter is returned.
     async fn spawn_and_register(&self, id: TaskId, spec: TaskSpec, done: Option<OutcomeTx>) {
         let label: Arc<str> = Arc::from(spec.task().name());
 
@@ -480,6 +547,10 @@ impl Registry {
     }
 
     /// Removes a task by identity.
+    ///
+    /// If the task exists, its actor token is cancelled and a detached join reporter publishes the final `TaskRemoved`.
+    ///
+    /// If the task is unknown, publishes `TaskRemoved` with reason `task_not_found`.
     async fn remove_task(&self, id: TaskId) {
         self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
@@ -497,7 +568,10 @@ impl Registry {
         }
     }
 
-    /// Cleanup finished task by identity.
+    /// Cleans up a finished actor by identity.
+    ///
+    /// Called after `ActorExhausted` or `ActorDead`.
+    /// Duplicate/stale cleanup events are no-ops.
     async fn cleanup_task(&self, id: TaskId) {
         self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
@@ -508,7 +582,9 @@ impl Registry {
         }
     }
 
-    /// Atomically remove a handle by identity (and its label-index entry), returning it with the new task count.
+    /// Removes a handle and its label index entry atomically.
+    ///
+    /// Returns the removed handle and the number of registered tasks left.
     async fn take_handle(&self, id: TaskId) -> Option<(Handle, usize)> {
         let mut st = self.state.write().await;
         let h = st.tasks.remove(&id)?;
@@ -517,7 +593,12 @@ impl Registry {
         Some((h, len_after))
     }
 
-    /// Joins the actor handle in a detached task and reports its terminal events.
+    /// Joins an actor in a detached task and reports its final result.
+    ///
+    /// If `force_after` is `Some`, the join is bounded by that duration.
+    /// When the actor does not finish in time, it is aborted and watched tasks resolve to [`TaskOutcome::ForceAborted`].
+    ///
+    /// On normal join, this resolves the optional outcome sender and publishes the final `TaskRemoved`.
     fn spawn_join_report(
         &self,
         id: TaskId,
@@ -534,13 +615,12 @@ impl Registry {
             match force_after {
                 Some(grace) => match tokio::time::timeout(grace, &mut join).await {
                     Ok(res) => {
-                        pending.dec(id);
                         Self::report_join(&bus, id, &name, res, done);
+                        pending.dec(id);
                     }
                     Err(_) => {
                         join.abort();
                         let _ = join.await;
-                        pending.dec(id);
                         if let Some(done) = done {
                             let _ = done.send(TaskOutcome::ForceAborted);
                         }
@@ -550,18 +630,21 @@ impl Registry {
                                 .with_id(id)
                                 .with_reason("force_terminated_after_grace"),
                         );
+                        pending.dec(id);
                     }
                 },
                 None => {
                     let res = join.await;
-                    pending.dec(id);
                     Self::report_join(&bus, id, &name, res, done);
+                    pending.dec(id);
                 }
             }
         });
     }
 
-    /// Removes and reports any actors whose task has already finished.
+    /// Reaps actors whose join handle has already finished.
+    ///
+    /// Used as recovery after broadcast lag, when an actor terminal event may have been skipped by the registry listener.
     async fn reap_finished(&self) {
         let finished: Vec<TaskId> = {
             let st = self.state.read().await;
@@ -576,7 +659,9 @@ impl Registry {
         }
     }
 
-    /// Publish terminal events for a joined actor: `ActorDead` if it panicked, then always `TaskRemoved`.
+    /// Reports the result of a joined actor.
+    ///
+    /// Sends the watched [`TaskOutcome`] if present, publishes `ActorDead` for an actor panic, and always publishes `TaskRemoved` for this joined actor.
     fn report_join(
         bus: &Bus,
         id: TaskId,
@@ -678,7 +763,6 @@ mod tests {
     async fn wait_joins_within_reports_stuck_labels_then_drains() {
         let reg = registry();
 
-        // No in-flight joins → drains immediately (no stuck labels).
         assert!(
             reg.wait_joins_within(Duration::from_millis(50))
                 .await
@@ -686,7 +770,6 @@ mod tests {
             "an empty join set must drain immediately"
         );
 
-        // A labeled in-flight join → reported as stuck (by label) on timeout.
         let id = TaskId::next();
         reg.pending_joins.inc(id);
         reg.pending_joins.label(id, Arc::from("stuck-task"));
@@ -697,7 +780,6 @@ mod tests {
             "an in-flight join must be reported with its label on timeout"
         );
 
-        // Drains (no stuck) once the in-flight join is decremented within the budget.
         let p = Arc::clone(&reg.pending_joins);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;

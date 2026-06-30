@@ -1,12 +1,13 @@
-//! # Supervisor handle for dynamic task management.
+//! # Dynamic supervisor handle.
 //!
-//! [`SupervisorHandle`] is returned by [`Supervisor::serve()`](crate::Supervisor::serve) and provides
-//! the full runtime management API. It holds the runtime ([`SupervisorCore`]) directly and, when the
-//! `controller` feature is enabled, the optional controller — delegating to each without going through
-//! the [`Supervisor`](crate::Supervisor) facade.
+//! [`SupervisorHandle`] is returned by [`Supervisor::serve`](crate::Supervisor::serve).
+//! It is the runtime API for adding, removing, cancelling, listing, and shutting down tasks after the supervisor has been started.
 //!
-//! This is the **only** way to manage tasks dynamically at runtime.
-//! [`Supervisor::run()`](crate::Supervisor::run) is a self-contained entry point for static task sets.
+//! The handle talks directly to [`SupervisorCore`].
+//! With the `controller` feature enabled, it may also hold a controller handle for slot-based submissions.
+//!
+//! [`Supervisor::run`](crate::Supervisor::run) is the static entry point for a fixed task set.
+//! Use `serve` when tasks must be managed at runtime.
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
@@ -21,19 +22,18 @@ use crate::tasks::TaskSpec;
 
 use super::outcome::TaskWaiter;
 
-/// Handle for managing a running supervisor.
+/// Handle for managing a started supervisor.
 ///
-/// Obtained via [`Supervisor::serve()`](crate::Supervisor::serve). Provides the full runtime management API.
-///
-/// # Also
-///
-/// - [`Supervisor`](crate::Supervisor) - the facade that produces this handle
-/// - [`SupervisorConfig`](crate::SupervisorConfig) - configuration knobs
-/// - [`TaskSpec`](crate::TaskSpec) - task configuration passed to [`add`](Self::add)
+/// A handle is created by [`Supervisor::serve`](crate::Supervisor::serve).
+/// It can be cloned and shared between tasks.
 ///
 /// ## Example
+///
 /// ```rust,no_run
-/// use taskvisor::prelude::*;
+/// use std::time::Duration;
+/// use taskvisor::{
+///     Supervisor, SupervisorConfig, TaskContext, TaskError, TaskFn, TaskSpec,
+/// };
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,14 +41,18 @@ use super::outcome::TaskWaiter;
 ///     let handle = sup.serve();
 ///
 ///     let task = TaskFn::arc("worker", |ctx: TaskContext| async move {
-///         while !ctx.is_cancelled() {
-///             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+///         loop {
+///             tokio::select! {
+///                 _ = ctx.cancelled() => return Err(TaskError::Canceled),
+///                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
+///                     // do one unit of work
+///                 }
+///             }
 ///         }
-///         Ok(())
 ///     });
-///     handle.add(TaskSpec::restartable(task))?;
 ///
-///     // ... later ...
+///     let id = handle.add(TaskSpec::restartable(task))?;
+///     let _ = handle.cancel(id).await?;
 ///     handle.shutdown().await?;
 ///     Ok(())
 /// }
@@ -70,7 +74,7 @@ impl std::fmt::Debug for SupervisorHandle {
 }
 
 impl SupervisorHandle {
-    /// Creates a new handle over the (already-started) runtime.
+    /// Creates a new handle over an already-started runtime core.
     pub(crate) fn new(core: Arc<SupervisorCore>) -> Self {
         Self {
             core,
@@ -79,7 +83,7 @@ impl SupervisorHandle {
         }
     }
 
-    /// Attaches the optional controller (builder/facade wiring).
+    /// Attaches the optional controller to this handle.
     #[cfg(feature = "controller")]
     pub(crate) fn with_controller(
         mut self,
@@ -89,25 +93,29 @@ impl SupervisorHandle {
         self
     }
 
-    /// Adds a new task to the supervisor at runtime.
+    /// Adds a task to the supervisor at runtime.
     ///
-    /// Fire-and-forget: mints the [`TaskId`], publishes `TaskAddRequested`, and returns immediately with the id.
-    /// The task is spawned asynchronously by the registry listener.
+    /// This is fire-and-forget.
+    /// It mints a [`TaskId`], publishes `TaskAddRequested`, sends an `Add` command to the registry, and returns the id as soon as the command is queued.
+    ///
+    /// `Ok(id)` means the add command was accepted by the runtime command channel.
+    /// It does not mean the registry has accepted the task yet.
+    ///
+    /// For duplicate-name errors or registration confirmation, use [`add_and_wait`](Self::add_and_wait).
     pub fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         self.core.add_task(spec)
     }
 
-    /// Adds a task and waits for registration confirmation.
+    /// Adds a task and waits for registry confirmation.
     ///
-    /// Subscribes to the event bus **before** publishing `TaskAddRequested`,
-    /// then waits for the matching `TaskAdded`/`TaskAddFailed` event from the registry.
+    /// This subscribes to the event bus before sending the add command, then waits for the matching `TaskAdded` or `TaskAddFailed` event.
     ///
     /// Returns:
-    /// - `Ok(TaskId)` when the task is confirmed running,
-    /// - `Err(RuntimeError::TaskAlreadyExists)` if a task with the same name is already registered,
-    /// - `Err(RuntimeError::TaskAddTimeout)` if no confirmation arrives within `timeout`.
+    /// - `Ok(TaskId)` when the task is registered,
+    /// - `Err(RuntimeError::TaskAddTimeout)` when no confirmation arrives in time,
+    /// - `Err(RuntimeError::TaskAlreadyExists)` when the task name is already in use.
     ///
-    /// Correlation is by the minted [`TaskId`] (the canonical key), not the task name.
+    /// Correlation uses the minted [`TaskId`], not the task name.
     pub async fn add_and_wait(
         &self,
         spec: TaskSpec,
@@ -119,25 +127,27 @@ impl SupervisorHandle {
         self.wait_registered(&mut rx, id, target, timeout).await
     }
 
-    /// Adds a task, waits for registration confirmation, and returns an awaitable [`TaskWaiter`] resolving to the task's final [`TaskOutcome`](crate::TaskOutcome).
+    /// Adds a task, waits for registration, and returns a [`TaskWaiter`].
     ///
-    /// The outcome channel is created **atomically with registration** (it travels with the `Add` command over the guaranteed-delivery mpsc).
-    /// There is no window in which the task can finish before the waiter exists, and the outcome cannot be lost to event-bus lag.
+    /// The waiter resolves to the final [`TaskOutcome`](crate::TaskOutcome) of the supervised task run.
     ///
-    /// Registration semantics are identical to [`add_and_wait`](Self::add_and_wait):
-    ///
-    /// - `Ok((TaskId, TaskWaiter))` when the task is confirmed running,
-    /// - `Err(RuntimeError::TaskAlreadyExists)` if the name is already registered,
-    /// - `Err(RuntimeError::TaskAddTimeout)` if no confirmation arrives within `timeout`.
+    /// Registration semantics are the same as [`add_and_wait`](Self::add_and_wait):
+    /// - `Ok((TaskId, TaskWaiter))` when the task is registered,
+    /// - `Err(RuntimeError::TaskAddTimeout)` when no confirmation arrives in time,
+    /// - `Err(RuntimeError::TaskAlreadyExists)` when the task name is already in use.
     ///
     /// ## Example
+    ///
     /// ```rust,no_run
     /// # use std::time::Duration;
     /// # use taskvisor::prelude::*;
     /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
     /// # let handle = sup.serve();
-    /// let job: TaskRef = TaskFn::arc("job", |_ctx: TaskContext| async { Ok(()) });
+    /// let job: TaskRef = TaskFn::arc("job", |_ctx: TaskContext| async {
+    ///     Ok::<(), TaskError>(())
+    /// });
+    ///
     /// let (_id, waiter) = handle
     ///     .add_and_watch(TaskSpec::once(job), Duration::from_secs(1))
     ///     .await?;
@@ -158,9 +168,10 @@ impl SupervisorHandle {
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
-    /// Waits for the registry's `TaskAdded`/`TaskAddFailed` confirmation for `id`.
+    /// Waits for the registry confirmation event for `id`.
     ///
-    /// On bus `Lagged`/`Closed` falls back to the registry state (`contains_id`) instead of failing spuriously.
+    /// On bus lag or closure, this falls back to registry state before returning a timeout.
+    /// The fallback prevents false negatives when the confirmation event was missed but the task is still registered.
     async fn wait_registered(
         &self,
         rx: &mut broadcast::Receiver<Arc<crate::Event>>,
@@ -210,15 +221,23 @@ impl SupervisorHandle {
 
     /// Removes a task by identity.
     ///
-    /// Fire-and-forget: publishes `TaskRemoveRequested` and returns immediately.
+    /// This is fire-and-forget.
+    /// It publishes `TaskRemoveRequested`, sends a remove command to the registry, and returns when the command is queued.
     ///
-    /// The task is cancelled and cleaned up asynchronously by the registry;
-    /// a task that ignores cancellation is force-aborted after the configured grace period.
+    /// `Ok(())` does not mean the task existed or has already stopped.
+    /// Unknown ids are handled by the registry as no-op removals.
+    ///
+    /// Use [`cancel`](Self::cancel) when you need to wait for `TaskRemoved`, or [`remove_by_label`](Self::remove_by_label) when you only have a task name.
     pub fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
         self.core.remove(id)
     }
 
-    /// Removes the task currently holding `name` (label); `false` if no such task.
+    /// Removes the task currently holding `name`.
+    ///
+    /// Returns:
+    /// - `Ok(true)` when a task with this label was found and the remove command was queued,
+    /// - `Ok(false)` when no registered task currently has this label,
+    /// - `Err(RuntimeError::ShuttingDown)` if the runtime command channel is closed.
     pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         match self.core.id_for_label(name).await {
             Some(id) => {
@@ -229,38 +248,53 @@ impl SupervisorHandle {
         }
     }
 
-    /// Returns a sorted list of registered task names (from the registry).
+    /// Returns registered tasks as `(id, label)` pairs.
     ///
-    /// Includes tasks in any state: starting, running, stopping.
-    /// See [`snapshot`](Self::snapshot) for only currently executing tasks.
+    /// The list comes from the registry and is sorted by [`TaskId`].
+    /// It includes registered tasks in any lifecycle state, including starting, running, and stopping.
+    ///
+    /// See [`snapshot`](Self::snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.core.list_tasks().await
     }
 
-    /// Returns a sorted list of currently alive task names (from the alive tracker).
+    /// Returns task names currently marked alive.
     ///
-    /// Only includes tasks whose last lifecycle event was [`TaskStarting`](crate::EventKind::TaskStarting).
-    /// See [`list`](Self::list) for all registered tasks regardless of state.
+    /// This is a best-effort view from the alive tracker, which is fed by the lossy event bus.
+    /// The result is sorted and deduplicated by task name.
+    ///
+    /// See [`list`](Self::list) for the authoritative registry view of registered tasks.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         self.core.snapshot().await
     }
 
-    /// Check whether a given task is currently alive.
+    /// Returns true if any task run with this name is currently marked alive.
+    ///
+    /// This is a best-effort label query from the alive tracker.
+    /// It does not check task identity.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core.is_alive(name).await
     }
 
-    /// Requests cooperative cancellation of a task and waits up to the configured grace period for it to actually stop (its `TaskRemoved` event).
+    /// Requests cancellation of a task and waits for removal confirmation.
     ///
-    /// A task that ignores cancellation is **force-aborted after the grace period**;
+    /// The task receives cooperative cancellation.
+    /// The method waits up to the configured shutdown grace period for the matching `TaskRemoved` event.
+    ///
+    /// Returns:
+    /// - `Ok(true)` when the task was present and removal was confirmed,
+    /// - `Ok(false)` when no registered task has this id,
+    /// - `Err(RuntimeError::TaskRemoveTimeout)` when removal was not confirmed in time.
+    ///
+    /// A task that ignores cancellation is force-aborted by the registry after the configured grace period.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         self.core.cancel(id).await
     }
 
-    /// Cancel the task currently holding `name` (label), resolving to its identity.
+    /// Cancels the task currently holding `name`.
     ///
-    /// Returns `Ok(false)` if no task currently holds that label;
-    /// otherwise behaves like [`cancel`](Self::cancel) (including the `TaskRemoveTimeout` case for a task that won't stop).
+    /// Returns `Ok(false)` if no registered task currently has this label.
+    /// Otherwise behaves like [`cancel`](Self::cancel).
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         match self.core.id_for_label(name).await {
             Some(id) => self.core.cancel(id).await,
@@ -268,12 +302,15 @@ impl SupervisorHandle {
         }
     }
 
-    /// Cancel a task with an explicit confirmation window `wait_for` (instead of the configured grace).
+    /// Cancels a task with an explicit confirmation window.
     ///
-    /// Returns `Ok(true)` once the task confirms termination within `wait_for`, `Ok(false)`
-    /// if no such task is registered, or `Err(RuntimeError::TaskRemoveTimeout)`.
+    /// `wait_for` controls how long this call waits for `TaskRemoved`.
+    /// It does not change the registry's force-abort grace period.
     ///
-    /// Regardless of `wait_for`, a task that ignores cancellation is still force-aborted after the supervisor's grace period.
+    /// Returns:
+    /// - `Ok(true)` when removal is confirmed within `wait_for`,
+    /// - `Ok(false)` when no registered task has this id,
+    /// - `Err(RuntimeError::TaskRemoveTimeout)` when confirmation does not arrive in time.
     pub async fn cancel_with_timeout(
         &self,
         id: TaskId,
@@ -282,19 +319,25 @@ impl SupervisorHandle {
         self.core.cancel_with_timeout(id, wait_for).await
     }
 
-    /// Initiates graceful shutdown: cancels all tasks and waits for them to stop.
+    /// Initiates graceful shutdown of the supervisor runtime.
     ///
-    /// The controller (if any) winds down via the shared runtime cancellation token.
+    /// Shutdown cancels all registered tasks, waits up to the configured grace period, force-aborts tasks that do not stop,
+    /// joins internal listeners, and closes subscriber workers.
+    ///
+    /// With the `controller` feature enabled, the controller stops through the shared runtime cancellation token.
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
         self.core.shutdown().await
     }
 
-    /// Submits a task to the controller (if enabled), returning its pre-minted [`TaskId`].
+    /// Submits a task to the controller and returns its pre-minted [`TaskId`].
     ///
-    /// Fire-and-forget: `Ok(id)` means the submission was enqueued, not admitted.
-    /// To **await the final outcome** (including admission rejection), use [`submit_and_watch`](Self::submit_and_watch).
+    /// This waits for controller queue capacity when needed.
+    /// `Ok(id)` means the submission was queued for controller processing, not that it was admitted to a slot or registered in the core runtime.
     ///
-    /// Requires the `controller` feature flag.
+    /// Use [`try_submit`](Self::try_submit) to fail fast when the controller queue is full.
+    /// Use [`submit_and_watch`](Self::submit_and_watch) to observe the final outcome, including admission rejection.
+    ///
+    /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
     pub async fn submit(
         &self,
@@ -306,12 +349,12 @@ impl SupervisorHandle {
         }
     }
 
-    /// Tries to submit a task without blocking, returning its pre-minted [`TaskId`].
+    /// Tries to submit a task to the controller without waiting.
     ///
-    /// Returns `ControllerError::Full` if the queue is full.
-    /// See [`submit`](Self::submit) for the enqueued-vs-admitted semantics.
+    /// Returns `ControllerError::Full` if the controller queue has no capacity.
+    /// `Ok(id)` has the same queued-not-admitted meaning as [`submit`](Self::submit).
     ///
-    /// Requires the `controller` feature flag.
+    /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
     pub fn try_submit(
         &self,
@@ -323,16 +366,15 @@ impl SupervisorHandle {
         }
     }
 
-    /// Submits a task to the controller and returns an awaitable [`TaskWaiter`] resolving to its final [`TaskOutcome`](crate::TaskOutcome)
-    /// the controller-path analogue of [`add_and_watch`](Self::add_and_watch).
+    /// Submits a task to the controller and returns a [`TaskWaiter`].
     ///
-    /// The outcome is delivered on the guaranteed completion plane (a `oneshot`, immune to bus lag).
-    /// If the controller never admits the submission (slot busy under `DropIfRunning`, queue full, superseded by a later `Replace`, removed while queued, or shutting down)
-    /// the waiter resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) - the task body never ran.
+    /// This is the controller-path version of [`add_and_watch`](Self::add_and_watch).
+    /// The waiter resolves on the guaranteed completion plane, not through the lossy event bus.
     ///
-    /// Otherwise, it resolves like [`add_and_watch`](Self::add_and_watch) once the admitted task fully terminates.
+    /// If the controller never admits the submission, the waiter resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
+    /// If the submission is admitted, the waiter resolves like [`add_and_watch`](Self::add_and_watch) after the task fully terminates.
     ///
-    /// Requires the `controller` feature flag.
+    /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
     pub async fn submit_and_watch(
         &self,
@@ -347,9 +389,12 @@ impl SupervisorHandle {
         }
     }
 
-    /// Returns a point-in-time [`ControllerSnapshot`](crate::ControllerSnapshot) of the controller's slots, or `None` if no controller is configured.
+    /// Returns a point-in-time snapshot of controller slots.
+    ///
+    /// Returns `None` when the controller feature is enabled but this supervisor was built without a controller.
     ///
     /// ## Example
+    ///
     /// ```rust,no_run
     /// # use taskvisor::prelude::*;
     /// # #[tokio::main] async fn main() {
@@ -357,6 +402,7 @@ impl SupervisorHandle {
     /// # let handle = sup.serve();
     /// if let Some(snap) = handle.controller_snapshot().await {
     ///     println!("{} running, {} queued", snap.running_count(), snap.total_queued());
+    ///
     ///     if let Some(web) = snap.slot("web") {
     ///         println!("web: {:?}, depth {}", web.status, web.queue_depth);
     ///     }
@@ -364,7 +410,7 @@ impl SupervisorHandle {
     /// # }
     /// ```
     ///
-    /// Requires the `controller` feature flag.
+    /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
     pub async fn controller_snapshot(&self) -> Option<crate::controller::ControllerSnapshot> {
         match &self.controller {

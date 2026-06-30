@@ -1,14 +1,14 @@
-//! # Supervisor: public facade over the runtime ([`SupervisorCore`]) and optional controller.
+//! # Public supervisor facade.
 //!
-//! [`Supervisor`] is a thin composition root:
-//! it owns an `Arc<SupervisorCore>` and, when the `controller` feature is enabled, an `Arc<Controller>`.
+//! [`Supervisor`] is the public entry point for running taskvisor.
 //!
-//! The controller depends only on [`SupervisorCore`] (via a `Weak`).
-//! The cycle that previously coupled the two is gone: see [`SupervisorCore`].
+//! It owns the runtime core and, when the `controller` feature is enabled, an optional controller.
+//! The runtime implementation lives in [`SupervisorCore`]; this type keeps the public API small and stable.
 //!
-//! ## Two usage modes
-//! - **Static**: [`run`](Supervisor::run) a known set of tasks until completion or Ctrl+C.
-//! - **Dynamic**: [`serve`](Supervisor::serve) returns a [`SupervisorHandle`] to add/remove/cancel/submit at runtime.
+//! ## Modes
+//!
+//! - [`run`](Supervisor::run): run a fixed set of tasks until natural completion or an OS shutdown signal.
+//! - [`serve`](Supervisor::serve): start the runtime and return a [`SupervisorHandle`](crate::SupervisorHandle) for dynamic task management.
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
@@ -17,36 +17,43 @@ use std::sync::Arc;
 use crate::core::{SupervisorConfig, SupervisorCore, builder::SupervisorBuilder};
 use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 
-/// Orchestrates task actors, event delivery, and graceful shutdown.
+/// Public facade for the taskvisor runtime.
 ///
-/// ## Two usage modes
+/// Use [`new`](Self::new) for simple construction, or [`builder`](Self::builder) when you need to configure optional features.
 ///
-/// **Static**: run a known set of tasks until completion or Ctrl+C:
+/// ## Static Mode
+///
+/// Static mode runs a known task set:
+///
 /// ```rust,no_run
 /// # use taskvisor::prelude::*;
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-/// sup.run(vec![/* specs */]).await?;
+/// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+/// supervisor.run(vec![/* task specs */]).await?;
 /// # Ok(()) }
 /// ```
 ///
-/// **Dynamic**: add/remove/cancel tasks at runtime via [`SupervisorHandle`]:
+/// ## Dynamic Mode
+///
+/// Dynamic mode returns a handle for runtime task management:
+///
 /// ```rust,no_run
 /// # use taskvisor::prelude::*;
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-/// let handle = sup.serve();
-/// // handle.add(...), handle.cancel(...), handle.shutdown().await
+/// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+/// let handle = supervisor.serve();
+///
+/// // handle.add(...)?;
+/// // handle.cancel(id).await?;
+/// // handle.shutdown().await?;
 /// # Ok(()) }
 /// ```
 ///
 /// # Also
 ///
-/// - [`SupervisorHandle`](crate::SupervisorHandle) - runtime management API returned by [`serve`](Self::serve)
+/// - [`SupervisorHandle`](crate::SupervisorHandle) - dynamic runtime management API
 /// - [`SupervisorBuilder`](crate::SupervisorBuilder) - step-by-step construction
-/// - [`SupervisorConfig`] - configuration knobs
-///
-/// [`SupervisorHandle`]: crate::SupervisorHandle
+/// - [`SupervisorConfig`] - runtime defaults and limits
 pub struct Supervisor {
     core: Arc<SupervisorCore>,
 
@@ -67,7 +74,7 @@ impl std::fmt::Debug for Supervisor {
 }
 
 impl Supervisor {
-    /// Internal facade constructor used by the builder.
+    /// Creates a supervisor from already-built runtime parts.
     pub(super) fn from_parts(
         core: Arc<SupervisorCore>,
         #[cfg(feature = "controller")] controller: Option<Arc<crate::controller::Controller>>,
@@ -84,7 +91,7 @@ impl Supervisor {
         })
     }
 
-    /// Starts the controller's event loop exactly once.
+    /// Starts the controller loop once, if a controller is configured.
     #[cfg(feature = "controller")]
     fn start_controller(&self) {
         use std::sync::atomic::Ordering;
@@ -95,19 +102,22 @@ impl Supervisor {
         }
     }
 
-    /// Creates a new supervisor with the given config and subscribers (maybe empty).
+    /// Creates a new supervisor with config and subscribers.
+    ///
+    /// The returned supervisor is not started yet.
+    /// Call [`run`](Self::run) for a fixed task set or [`serve`](Self::serve) for dynamic management.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
 
-    /// Creates a builder for constructing a Supervisor.
+    /// Creates a builder for constructing a supervisor.
     ///
     /// ## Example
     ///
     /// ```rust
-    /// use taskvisor::{SupervisorConfig, Supervisor};
+    /// use taskvisor::{Supervisor, SupervisorConfig};
     ///
-    /// let sup = Supervisor::builder(SupervisorConfig::default())
+    /// let supervisor = Supervisor::builder(SupervisorConfig::default())
     ///     .with_subscribers(vec![])
     ///     .build();
     /// ```
@@ -115,7 +125,10 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
-    /// Returns a [`SupervisorHandle`](crate::SupervisorHandle) for dynamic task management.
+    /// Starts the runtime and returns a handle for dynamic task management.
+    ///
+    /// Safe to call more than once.
+    /// Runtime listeners are started once, and each call returns a handle to the same runtime.
     pub fn serve(self: &Arc<Self>) -> super::handle::SupervisorHandle {
         self.core.start();
         #[cfg(feature = "controller")]
@@ -126,14 +139,20 @@ impl Supervisor {
         handle
     }
 
-    /// Runs task specifications until completion or shutdown signal (static mode).
+    /// Runs a fixed task set until natural completion or OS shutdown signal.
+    ///
+    /// This is static mode.
+    /// It starts the runtime, submits the provided tasks, and waits until all tasks complete or a shutdown signal is received.
+    ///
+    /// `run` is single-shot for one supervisor instance.
+    /// A second call returns [`RuntimeError::AlreadyRunning`].
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         #[cfg(feature = "controller")]
         self.start_controller();
         self.core.run(tasks).await
     }
 
-    /// Test-only access to the runtime, for constructing a standalone controller against a live core.
+    /// Returns the runtime core for controller tests.
     #[cfg(all(test, feature = "controller"))]
     pub(crate) fn core(&self) -> &Arc<SupervisorCore> {
         &self.core
