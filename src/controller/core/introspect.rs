@@ -1,4 +1,7 @@
-//! Pull-introspection: point-in-time snapshot of the controller's slots.
+//! Pull-side controller introspection.
+//!
+//! This module builds [`ControllerSnapshot`] from internal slot state.
+//! It is used by `SupervisorHandle::controller_snapshot`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,9 +12,13 @@ use crate::controller::view::{ControllerSnapshot, SlotStatusKind, SlotView};
 use super::Controller;
 
 impl Controller {
-    /// Builds a point-in-time [`ControllerSnapshot`] of all tracked slots.
+    /// Builds a point-in-time snapshot of currently tracked slots.
     ///
-    /// Slots are sampled one at a time (keys collected first, then each slot locked).
+    /// This snapshot is not globally atomic.
+    /// The controller first collects slot keys, then locks each slot one by one.
+    /// A slot may be removed between those two steps; such slots are skipped.
+    ///
+    /// The result is sorted by slot key for stable output in tests, logs, and dashboards.
     pub(crate) async fn snapshot(&self) -> ControllerSnapshot {
         let keys: Vec<Arc<str>> = self.slots.iter().map(|e| Arc::clone(e.key())).collect();
 
@@ -20,6 +27,7 @@ impl Controller {
             let Some(slot_arc) = self.slots.get(&*key).map(|e| e.clone()) else {
                 continue;
             };
+
             let slot = slot_arc.lock().await;
             let (status, status_for) = match slot.status {
                 SlotStatus::Idle => (SlotStatusKind::Idle, Duration::ZERO),
@@ -31,6 +39,7 @@ impl Controller {
                     (SlotStatusKind::Terminating, cancelled_at.elapsed())
                 }
             };
+
             slots.push(SlotView {
                 slot: Arc::clone(&key),
                 status,

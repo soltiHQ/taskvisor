@@ -158,14 +158,35 @@ impl SupervisorCore {
     /// Queues a task add command under a pre-minted identity.
     ///
     /// Used by the controller so a submission keeps the same [`TaskId`] from admission through registry registration.
+    ///
+    /// Unlike [`add_task`](Self::add_task), this **hands the watcher `done` back** in the error
+    /// tuple on failure instead of dropping it, so the controller can resolve the submission's
+    /// waiter with `Rejected` rather than leaving it to observe a canceled oneshot.
     #[cfg(feature = "controller")]
     pub(crate) fn add_task_with_id_watched(
         &self,
         id: TaskId,
         spec: TaskSpec,
         done: Option<crate::core::registry::OutcomeTx>,
-    ) -> Result<TaskId, RuntimeError> {
-        self.add_task_inner(id, spec, done)
+    ) -> Result<TaskId, (RuntimeError, Option<crate::core::registry::OutcomeTx>)> {
+        if self.is_shutting_down() {
+            return Err((RuntimeError::ShuttingDown, done));
+        }
+        self.bus.publish(
+            Event::new(EventKind::TaskAddRequested)
+                .with_task(spec.task().name())
+                .with_id(id),
+        );
+        match self.cmd_tx.send(RegistryCommand::Add(id, spec, done)) {
+            Ok(()) => Ok(id),
+            Err(mpsc::error::SendError(cmd)) => {
+                let done = match cmd {
+                    RegistryCommand::Add(_, _, done) => done,
+                    RegistryCommand::Remove(_) => None,
+                };
+                Err((RuntimeError::ShuttingDown, done))
+            }
+        }
     }
 
     /// Queues a watched task add command.
@@ -757,6 +778,31 @@ mod tests {
         );
 
         let _ = core.shutdown().await;
+    }
+
+    #[cfg(feature = "controller")]
+    #[tokio::test]
+    async fn add_task_with_id_watched_returns_watcher_on_failure() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        core.mark_shutting_down(); // close the admission gate so the add fails
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task: TaskRef = TaskFn::arc("x", |_ctx: TaskContext| async { Ok(()) });
+
+        let res = core.add_task_with_id_watched(TaskId::next(), TaskSpec::once(task), Some(tx));
+        match res {
+            Err((RuntimeError::ShuttingDown, Some(returned))) => {
+                returned
+                    .send(crate::TaskOutcome::Rejected {
+                        reason: Arc::from("rejected"),
+                    })
+                    .expect("returned watcher must still be live");
+                assert!(matches!(rx.await, Ok(crate::TaskOutcome::Rejected { .. })));
+            }
+            other => panic!("add must hand the watcher back on failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]

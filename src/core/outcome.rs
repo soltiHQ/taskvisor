@@ -39,7 +39,7 @@
 //!
 //! [`TaskOutcome::Rejected`] means the task body never ran.
 //!
-//! It is normally observed from [`submit_and_watch`](crate::SupervisorHandle::submit_and_watch), when the controller rejects a submission before it becomes a running task.
+//! It is normally observed from `submit_and_watch` (feature = `controller`), when the controller rejects a submission before it becomes a running task.
 //! A duplicate-name registration failure is also resolved as `Rejected` inside the registry, but direct [`add_and_watch`](crate::SupervisorHandle::add_and_watch)
 //! returns [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) before handing the waiter to the caller.
 
@@ -79,7 +79,10 @@ use crate::identity::TaskId;
 /// # Also
 ///
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) - direct watched task add
-/// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - controller watched submission
+#[cfg_attr(
+    feature = "controller",
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - controller watched submission"
+)]
 /// - [`TaskWaiter`] - awaitable handle that returns this outcome
 /// - [`EventKind`](crate::EventKind) - live observability events
 #[non_exhaustive]
@@ -191,7 +194,10 @@ impl TaskOutcome {
 ///
 /// Created by:
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
-/// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)
+#[cfg_attr(
+    feature = "controller",
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)"
+)]
 ///
 /// A waiter is consumed by [`wait`](Self::wait).
 /// It resolves once the watched task reaches a terminal outcome, or returns an error if the sender is dropped before an outcome is produced.

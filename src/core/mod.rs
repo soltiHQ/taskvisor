@@ -95,9 +95,10 @@ pub use handle::SupervisorHandle;
 mod supervisor;
 pub use supervisor::Supervisor;
 
+pub(crate) mod panic_guard;
+
 mod actor;
 mod alive;
-mod panic_guard;
 mod runner;
 mod shutdown;
 

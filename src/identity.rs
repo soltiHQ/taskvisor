@@ -8,7 +8,7 @@
 //!   Use it to correlate lifecycle [`Event`](crate::Event)s and to address a task for cancellation/removal.
 //! - **name** ([`Task::name`](crate::Task::name)) - *label*: free-form, used for logs, metrics, and external resource naming.
 //!   At most one **currently registered** task may hold a given name (a duplicate add is rejected with `TaskAddFailed`/`TaskAlreadyExists`).
-//! - **slot** ([`TaskSpec::slot`](crate::TaskSpec::slot)) - *admission key*: the logical unit the controller admits one-at-a-time.
+//! - **slot** (`ControllerSpec::slot_name`, feature = `controller`) - *admission key*: the logical unit the controller admits one-at-a-time.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

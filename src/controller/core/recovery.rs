@@ -1,4 +1,13 @@
-//! Bus-lag recovery: reconcile slots wedged by a missed `TaskAdded`/`TaskRemoved`.
+//! Controller recovery after bus lag.
+//!
+//! The controller normally advances slots from runtime events:
+//! - `TaskRemoved` frees a slot and starts the next queued submission,
+//! - `TaskAddFailed` frees a slot after a failed registry add,
+//! - `TaskAdded` promotes `Admitting` to `Running`.
+//!
+//! The bus is lossy.
+//! If the controller listener lags, one of those events may be missed.
+//! This module performs a conservative reconciliation pass against the runtime registry.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,7 +18,7 @@ use crate::events::{Event, EventKind};
 use super::Controller;
 
 impl Controller {
-    /// Recovers slots wedged by a bus lag (a missed `TaskAdded`/`TaskRemoved`).
+    /// Reconciles stale non-idle slots after the controller misses bus events.
     pub(super) async fn recover_stale_slots(&self) {
         const RECOVERY_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -32,13 +41,14 @@ impl Controller {
             if matches!(slot.status, SlotStatus::Idle) {
                 continue;
             }
+
             match slot.status {
                 SlotStatus::Admitting { since } if since.elapsed() < RECOVERY_DEADLINE => continue,
                 SlotStatus::Terminating { cancelled_at }
-                    if cancelled_at.elapsed() < RECOVERY_DEADLINE =>
-                {
-                    continue;
-                }
+                if cancelled_at.elapsed() < RECOVERY_DEADLINE =>
+                    {
+                        continue;
+                    }
                 _ => {}
             }
 
@@ -46,6 +56,7 @@ impl Controller {
                 Some(rid) => sup.contains_id(rid).await,
                 None => false,
             };
+
             if alive {
                 match slot.status {
                     SlotStatus::Admitting { .. } => {

@@ -267,15 +267,16 @@ pub enum EventKind {
     /// Sets:
     /// - `task`: slot name
     /// - `id`: the submission's [`TaskId`]
-    /// - `reason`: "admission={admission} status={status} depth={N}"
+    /// - `reason`: a human-readable admission summary, e.g. `admission=Queue status=admitting` or
+    ///   `started_from_queue depth=N` (exact text is diagnostic, not a stable contract)
     ControllerSubmitted,
 
     #[cfg(feature = "controller")]
-    /// Slot transitioned state (Running → Terminating, etc).
+    /// Slot transitioned state (e.g. Admitting → Running, Running → Terminating).
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: "running→terminating" (Replace), "terminating→idle", etc
+    /// - `reason`: the transition, e.g. `admitting→running`, `running→terminating (replace)`, `admitting→running (lag recovery)`
     ControllerSlotTransition,
 }
 
