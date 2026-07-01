@@ -45,10 +45,10 @@ impl Controller {
             match slot.status {
                 SlotStatus::Admitting { since } if since.elapsed() < RECOVERY_DEADLINE => continue,
                 SlotStatus::Terminating { cancelled_at }
-                if cancelled_at.elapsed() < RECOVERY_DEADLINE =>
-                    {
-                        continue;
-                    }
+                    if cancelled_at.elapsed() < RECOVERY_DEADLINE =>
+                {
+                    continue;
+                }
                 _ => {}
             }
 
