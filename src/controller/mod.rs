@@ -1,120 +1,88 @@
-//! # Controller: slot-based admission & start-on-`TaskRemoved`
+//! # Controller
 //!
-//! The **controller** is a thin policy layer (wrapper) over `TaskSpec` submission.
-//! It enforces per-slot admission rules (`Queue`, `Replace`, `DropIfRunning`) and starts
-//! the *next* task **only after** a terminal `TaskRemoved` event is observed on the runtime bus.
+//! Slot-based admission control for supervised tasks.
 //!
-//! **one slot = one logical key** *(`slot key = TaskSpec::slot()`, which defaults to the task name and can be overridden via `TaskSpec::with_slot`)*.
-//! Several differently-named tasks may therefore share a single slot (sequentially).
+//! The controller is an optional layer above direct task submission.
+//! It accepts [`ControllerSpec`] values and decides when each task may enter the runtime.
 //!
-//! ## Note:
+//! Use it when several submissions should share one sequential lane:
+//! - skip or replace duplicate work while a slot is busy,
+//! - only one deploy per environment,
+//! - one job per customer/resource,
+//! - one rebuild per index.
 //!
-//! Task **names stay globally unique** in the registry - submitting a name that is already running will be rejected by the registry (`TaskAddFailed`), which frees the slot and advances its queue.
+//! ## Slot Model
 //!
-//! ## Role in Taskvisor
+//! The controller admits by **slot**, not by task name.
 //!
-//! The controller accepts `ControllerSpec`, unwraps its `TaskSpec`, applies admission rules, and delegates `add/remove` to the runtime (`SupervisorCore`, held via a `Weak`).
-//! It subscribes to the Bus and advances slots strictly on `TaskRemoved` to avoid registry races and double starts.
+//! A slot is the key returned by [`ControllerSpec::slot_name`].
+//! If no slot is set, it defaults to the task name.
+//! Use [`ControllerSpec::with_slot`] to group several different task names into one slot.
 //!
-//! ```text
-//! ┌───────────────────────────────┐
-//! │     Application code          │
-//! │ handle.submit(ControllerSpec) │
-//! └──────────────┬────────────────┘
-//!                │
-//!                ▼
-//!        ┌──────────────────┐
-//!        │    Controller    │  (per-slot admission FSM)
-//!        └─────────┬────────┘
-//!      unwraps & applies policy
-//!                  ▼
-//!        ┌──────────────────┐
-//!        │     TaskSpec     │  (from ControllerSpec)
-//!        └─────────┬────────┘
-//!              add/remove
-//!                  ▼
-//!        ┌──────────────────┐
-//!        │  SupervisorCore  │  (runtime; controller holds Weak)
-//!        └─────────┬────────┘
-//!      publishes runtime events
-//!                  ▼
-//!        ┌──────────────────┐   subscribes
-//!        │       Bus        │◄────────────── Controller
-//!        └─────────┬────────┘
-//!                  ▼
-//!             Task Actors
-//! ```
-//!
-//! **Flow summary**
-//! 1. Application calls `handle.submit(ControllerSpec)` (via `SupervisorHandle`).
-//! 2. Controller unwraps `TaskSpec` and applies `Admission` rules.
-//! 3. If accepted, controller calls the runtime's add (`SupervisorCore::add_task_with_id_watched`) or requests remove.
-//! 4. On terminal `TaskRemoved` (via Bus), the slot becomes `Idle` and the next queued task (if any) is started.
-//!
-//! ## Per-slot model
-//!
-//! - **Key**: `task_spec.slot()` defaults to `name()`, override with `with_slot` (exactly one running task per slot).
-//! - **State**: `Idle | Running | Terminating`, with a FIFO queue per slot.
-//! - **Replace (latest-wins)**: does **not** grow the queue; it **replaces the head** (the immediate successor).
-//!   The next task actually starts **only after `TaskRemoved`**.
+//! Task names still belong to the runtime registry and must be unique among currently registered tasks.
 //!
 //! ```text
-//! State machine (per slot)
-//!
-//!   Idle ── submit(any) → start → Running
-//!    ▲                              │
-//!    │                    ┌─────────┼──────────────┐
-//!    │                    │         │              │
-//!    │            submit(Queue)  submit(Replace)  submit(DropIfRunning)
-//!    │            → enqueue      → enqueue head   → reject (silent)
-//!    │                           → Terminating
-//!    │                                  │
-//!    │                      submit(Queue) → enqueue
-//!    │                      submit(Replace) → replace head
-//!    │                      submit(DropIfRunning) → reject
-//!    │                                  │
-//!    └──────── on TaskRemoved ◄─────────┘
-//!                 ├─ queue empty → Idle (slot removed)
-//!                 └─ queue has next → start next → Running
+//! task "deploy-main-42" ┐
+//! task "deploy-main-43" ├── slot "deploy-main"
+//! task "deploy-main-44" ┘
 //! ```
 //!
-//! Queue operations
-//! - **Queue**: push to tail (FIFO).
-//! - **Replace**: replace head (latest-wins), not increasing depth.
+//! All three tasks are different runtime tasks, but the controller admits them through the same slot.
+//!
+//! ## Admission Policies
+//!
+//! When a slot is idle, every policy admits the submission.
+//! When a slot is busy, the policy decides what happens.
+//!
+//! | Policy                             | Busy slot behavior                                         |
+//! |------------------------------------|------------------------------------------------------------|
+//! | [`AdmissionPolicy::Queue`]         | enqueue behind older queued submissions                    |
+//! | [`AdmissionPolicy::Replace`]       | keep the latest next submission; supersede the queued head |
+//! | [`AdmissionPolicy::DropIfRunning`] | reject the submission                                      |
+//!
+//! A rejected watched submission resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
+//!
+//! ## Slot States
 //!
 //! ```text
-//! Queue example (head on the left):
-//!   [ next, a, b ] --(Replace c)--> [ c, a, b ] --(Replace d)--> [ d, a, b ]
-//!                  (head replaced)                  (head replaced)
+//! Idle
+//!   submit
+//!   │
+//!   ▼
+//! Admitting ── TaskAdded ──► Running ── TaskRemoved ──► Idle or next queued task
+//!   │                           │
+//!   └── TaskAddFailed ──────────┘
+//!
+//! Running + Replace
+//!   └── request remove ──► Terminating ── TaskRemoved ──► next queued task
 //! ```
 //!
-//! ## Why gate on `TaskRemoved`
+//! The controller starts the next queued task only after `TaskRemoved`.
+//! This avoids racing the registry while the previous task is still being deregistered.
 //!
-//! `ActorExhausted/ActorDead` may arrive **before** full deregistration of the actor.
-//! Starting the next task on those signals can race the registry and cause `task_already_exists`.
+//! ## Public Surface
 //!
-//! Gating advancement on **`TaskRemoved`** prevents double-adds.
+//! - Build submissions with [`ControllerSpec::queue`], [`ControllerSpec::replace`], or [`ControllerSpec::drop_if_running`].
+//! - Configure with `Supervisor::builder(...).with_controller(ControllerConfig)`.
+//! - Submit with `SupervisorHandle::submit`, `try_submit`, or `submit_and_watch`.
+//! - Inspect live slot state with `SupervisorHandle::controller_snapshot`.
 //!
-//! ## Concurrency & scalability
+//! ## Events
 //!
-//! - `DashMap<Arc<str>, Arc<Mutex<SlotState>>>` avoids global map lock contention.
-//! - Per-slot `Mutex` ensures updates to one slot don’t block others.
+//! The controller publishes:
+//! - [`EventKind::ControllerSlotTransition`](crate::EventKind::ControllerSlotTransition)
+//! - [`EventKind::ControllerSubmitted`](crate::EventKind::ControllerSubmitted)
+//! - [`EventKind::ControllerRejected`](crate::EventKind::ControllerRejected)
 //!
-//! ## Public surface
-//!
-//! - Configure via `Supervisor::builder(..).with_controller(ControllerConfig)`.
-//! - Submit via `handle.submit(ControllerSpec::{queue, replace, drop_if_running}(...))`.
-//! - Policies: [`AdmissionPolicy`] = `Queue | Replace | DropIfRunning`.
-//! - Controller emits [`ControllerSubmitted`](crate::EventKind::ControllerSubmitted),
-//!   [`ControllerRejected`](crate::EventKind::ControllerRejected), and
-//!   [`ControllerSlotTransition`](crate::EventKind::ControllerSlotTransition) events;
-//!   readable with `LogWriter` (feature = `logging`).
+//! Events are observability. For guaranteed final result of a watched submission, use `submit_and_watch`.
 //!
 //! ## Invariants
 //!
-//! - At most **one** running task per slot.
-//! - Slots advance to next task **only** after `TaskRemoved`.
-//! - `Replace` is **latest-wins** (head replace); `Queue` is FIFO.
+//! - At most one runtime task may occupy a slot.
+//! - Queued submissions are not handed to the runtime until they become the slot owner.
+//! - `Queue` is FIFO.
+//! - `Replace` is latest-wins for the next queued submission.
+//! - Slot advancement is gated on `TaskRemoved`.
 
 mod view;
 pub use view::{ControllerSnapshot, SlotStatusKind, SlotView};

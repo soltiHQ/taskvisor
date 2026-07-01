@@ -1,55 +1,54 @@
-//! # Restart policies for task actors.
+//! # Restart policies.
 //!
-//! [`RestartPolicy`] determines whether a task should be restarted after it finishes or fails.
-//! - [`RestartPolicy::Always`] the task is restarted unconditionally, with optional delay between successful completions.
-//! - [`RestartPolicy::OnFailure`] the task is restarted only if it fails (default).
-//! - [`RestartPolicy::Never`] the task runs once and is never restarted.
+//! [`RestartPolicy`] decides whether a task is started again after an attempt finishes.
 //!
-//! ## Choosing the right policy
+//! It answers only the "restart or stop?" question. Retry delay is handled by [`BackoffPolicy`](crate::BackoffPolicy).
 //!
-//! **One-shot tasks** (run once, exit):
-//! ```text
-//! RestartPolicy::Never          → Task runs once, exits permanently
-//! ```
+//! | Policy                                  | On `Ok(())`                     | On retryable error        |
+//! |-----------------------------------------|---------------------------------|---------------------------|
+//! | [`Never`](RestartPolicy::Never)         | Stop                            | Stop                      |
+//! | [`OnFailure`](RestartPolicy::OnFailure) | Stop                            | Restart with backoff      |
+//! | [`Always`](RestartPolicy::Always)       | Restart after optional interval | Restart with backoff      |
 //!
-//! **Periodic tasks** (complete, wait, repeat):
-//! ```text
-//! RestartPolicy::Always {
-//!     interval: Some(Duration)  → Task runs, waits interval, repeats
-//! }
-//! ```
+//! Fatal errors and cooperative cancellation stop the task for all policies.
 //!
-//! **Long-running tasks** (infinite loop inside):
-//! ```text
-//! RestartPolicy::OnFailure      → Task crashes → restart with backoff
-//! RestartPolicy::Always {
-//!     interval: None            → Task exits (success/fail) → restart immediately
-//! }
-//! ```
+//! ## Choosing a policy
 //!
-//! **Failure recovery**:
-//! ```text
-//! RestartPolicy::OnFailure      → Restart only on errors (default)
-//! ```
+//! - Use [`Never`](RestartPolicy::Never) for one-shot tasks.
+//! - Use [`OnFailure`](RestartPolicy::OnFailure) for long-running workers.
+//! - Use [`Always`](RestartPolicy::Always) for periodic tasks that finish and should run again.
 
-/// Policy controlling whether a task is restarted after completion or failure.
+/// Policy controlling whether a task is restarted after an attempt finishes.
+///
+/// This policy decides restart eligibility. Retry timing is controlled by [`BackoffPolicy`](crate::BackoffPolicy).
 ///
 /// # Also
 ///
-/// - [`BackoffPolicy`](crate::BackoffPolicy) - how retry delays grow between attempts
-/// - [`JitterPolicy`](crate::JitterPolicy) - randomization strategy for backoff delays
-/// - [`TaskSpec`](crate::TaskSpec) - wires restart + backoff + timeout together
+/// - [`BackoffPolicy`](crate::BackoffPolicy) - retry delays after failures
+/// - [`TaskSpec`](crate::TaskSpec) - stores restart, backoff, timeout, and retry limit
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum RestartPolicy {
-    /// Never restart: the task runs once and exits permanently.
+    /// Run once and never restart.
+    ///
+    /// The task stops after success, retryable error, fatal error, or cancellation.
     Never,
-    /// Restart only on failure (default).
+    /// Restart only after retryable failures.
+    ///
+    /// A successful completion stops the task. Fatal errors and cooperative
+    /// cancellation also stop the task.
     OnFailure,
-    /// Always restart: the task restarts unconditionally after it finishes or fails.
-    ///   - `interval`: Optional delay between successful completions.
-    ///   - `Some(dur)` → wait `dur` before next cycle
-    ///   - `None` → restart immediately after success
+    /// Restart after success and after retryable failures.
+    ///
+    /// `interval` applies only after successful completions:
+    /// - `Some(dur)` waits at least `dur` before the next run — but never less than the small
+    ///   internal floor for an instantly-completing task, so a tiny or zero `dur` cannot hot-loop.
+    /// - `None` restarts with no configured delay.
+    ///
+    /// Instantly-completing tasks are still rate-limited by a small internal floor to avoid a hot restart loop.
+    ///
+    /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
+    /// Fatal errors and cooperative cancellation stop the task.
     Always {
         interval: Option<std::time::Duration>,
     },

@@ -1,30 +1,57 @@
-//! Runtime events: types and broadcast bus.
+//! # Runtime events.
 //!
-//! This module groups the event **data model** and the **bus** used to publish/subscribe to runtime events
-//! emitted by the supervisor, registry, task actors, runner and subscriber workers.
+//! This module contains the event data model used by taskvisor.
 //!
-//! ## Contents
+//! Events describe task lifecycle, runtime management, shutdown, subscriber diagnostics, and optional controller activity.
 //!
-//! - [`EventKind`], [`Event`] event classification and payload metadata
-//! - [`Bus`] thin wrapper over `tokio::sync::broadcast`
+//! | Type              | Role                                       |
+//! |-------------------|--------------------------------------------|
+//! | [`EventKind`]     | Event classification                       |
+//! | [`Event`]         | Event payload and metadata                 |
+//! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
 //!
-//! ## Flow
+//! Events are delivered through an internal broadcast bus.
+//! Delivery is best-effort: slow consumers may miss events.
+//! Use events for observability, not as the only source of correctness.
+//!
+//! ## Common Flow
 //!
 //! ```text
-//! TaskAddRequested → TaskAdded → TaskStarting ──┬── TaskStopped ─► ActorExhausted
-//!                                               ├── TaskFailed  ─► BackoffScheduled ─► TaskStarting
-//!                                               ├── TimeoutHit  ─► BackoffScheduled ─► TaskStarting
-//!                                               └── Fatal       ─► ActorDead
+//! Add:
+//!   TaskAddRequested ──► TaskAdded ──► TaskStarting
+//!                   └──► TaskAddFailed
 //!
-//! TaskRemoveRequested → TaskStopped → TaskRemoved
+//! Attempt:
+//!   TaskStarting ──► TaskStopped
+//!              ├──► TaskCanceled
+//!              ├──► TaskFailed
+//!              └──► TimeoutHit ──► TaskFailed
 //!
-//! ShutdownRequested → AllStoppedWithinGrace | GraceExceeded
+//! After success:
+//!   TaskStopped ──► ActorExhausted
+//!              └──► BackoffScheduled(Success) ──► TaskStarting
+//!
+//! After retryable failure:
+//!   TaskFailed ──► BackoffScheduled(Failure) ──► TaskStarting
+//!             └──► ActorExhausted
+//!
+//! After fatal failure:
+//!   TaskFailed ──► ActorDead
+//!
+//! Remove:
+//!   TaskRemoveRequested ──► TaskRemoved
+//!
+//! Shutdown:
+//!   ShutdownRequested ──► AllStoppedWithinGrace | GraceExceeded
 //! ```
 //!
-//! ## Wiring
+//! [`TaskRemoved`] is a registry cleanup confirmation.
+//! It is emitted after the task actor has been joined or cleaned up.
 //!
-//! Events are consumed by user-defined [`Subscribe`](crate::Subscribe) implementations.
-//! See `LogWriter` (feature = `logging`) for a built-in example.
+//! ## Subscribers
+//!
+//! User code consumes events by implementing [`Subscribe`](crate::Subscribe).
+//! With the `logging` feature, `LogWriter` provides a small built-in example.
 
 mod event;
 pub use event::{BackoffSource, Event, EventKind};

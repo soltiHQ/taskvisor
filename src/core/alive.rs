@@ -1,31 +1,34 @@
-//! # Task lifecycle tracker with sequence-based ordering.
+//! # Best-effort alive-task tracker.
 //!
-//! Maintains authoritative state of which tasks are currently alive, using event
-//! sequence numbers to handle out-of-order delivery.
+//! Tracks which task runs are currently marked alive based on lifecycle events.
 //!
-//! ## Architecture
+//! This is a read-side cache used for snapshots and shutdown diagnostics.
+//! The registry remains the authoritative owner of task membership.
+//!
+//! ## Flow
 //!
 //! ```text
-//! Supervisor ──► Bus ──► subscriber_listener() ──► AliveTracker::update()
-//!                                                         ▼
-//!                                              HashMap<AliveKey, TaskState>
-//!                                              (TaskId → {name, seq, alive})
+//! runtime bus -> subscriber listener -> AliveTracker::update() -> HashMap<AliveKey, TaskState>
 //! ```
+//!
+//! ## Keys
+//!
+//! Entries are keyed by [`TaskId`] when an event has one.
+//! For older/id-less events, the task name is used as a fallback key.
+//!
+//! Task names are labels and may be reused across runs.
+//! A late event from an old run with a different id cannot change the new run's state.
 //!
 //! ## Rules
 //!
-//! - Entries are keyed by [`TaskId`] (identity), falling back to the name only for id-less events.
-//!   Names are labels and may be **reused across runs**: a late event from a previous run (same name, different id) never corrupts the current run's state.
-//! - State toggles only on selected events (see below); all others just advance `last_seq`.
-//! - **Entry removed** on `TaskRemoved` (not just set to false; the entry is fully cleaned up).
-//! - Read operations (`snapshot`, `is_alive`) are **eventually consistent** (best-effort): they
-//!   are derived from the lossy event bus, so they may briefly trail reality.
-//! - On broadcast **lag** a dropped `TaskRemoved` is reconciled against the registry's live id set
-//!   (see [`reconcile`](AliveTracker::reconcile)), so a lost removal cannot leak a stale `alive`
-//!   entry — or an unbounded map — for the lifetime of the process.
-//! - Events with `seq <= last_seq` for the same identity are **rejected** (stale).
-//! - **Alive = false** on `TaskStopped`, `TaskCanceled`, `TaskFailed`, `ActorExhausted`, `ActorDead`.
-//! - **Alive = true** on `TaskStarting`.
+//! - Other events are ignored and do not create entries or advance `last_seq`.
+//! - Events with `seq <= last_seq` for the same key are ignored as stale.
+//! - A fresh `TaskRemoved` removes the entry entirely.
+//! - Only lifecycle events are tracked.
+//! - `TaskStopped`, `TaskCanceled`, `TaskFailed`, `ActorExhausted`, and`ActorDead` mark a task as not alive.
+//! - `snapshot` and `is_alive` are eventually consistent because they are based on the lossy event bus.
+//! - `reconcile` prunes id-keyed entries that are no longer present in the registry live-id set.
+//! - `TaskStarting` marks a task as alive.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -36,40 +39,28 @@ use tokio::sync::RwLock;
 use crate::events::{Event, EventKind};
 use crate::identity::TaskId;
 
-/// Tracker key: runtime identity when the event carries one, name otherwise.
+/// Tracker key: task id when available, task name as fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AliveKey {
     Id(TaskId),
     Name(Arc<str>),
 }
 
-/// Per-task state for ordering validation.
+/// Cached alive state for one tracker key.
 #[derive(Debug, Clone)]
 struct TaskState {
-    /// Label of the task run (what `is_alive`/`snapshot` report).
+    /// Task name reported by `is_alive` and `snapshot`.
     name: Arc<str>,
-    /// Last seen sequence number for this task run.
+    /// Last applied event sequence for this key.
     last_seq: u64,
-    /// Current status *(true = alive, false = stopped)*.
+    /// Whether this task run is currently marked alive.
     alive: bool,
 }
 
-/// Thread-safe tracker of alive tasks.
+/// Thread-safe best-effort tracker of alive tasks.
 ///
-/// ### Responsibilities
-///
-/// - Provides snapshots for graceful shutdown (stuck task detection)
-/// - Maintains authoritative state of which tasks are alive
-/// - Rejects stale events using sequence numbers
-///
-/// ### Ordering
-///
-/// - Events are applied only if `ev.seq > last_seq` for the task.
-///
-/// # Also
-///
-/// - [`Event`](crate::Event) - event payload with `seq` used for ordering
-/// - [`EventKind`](crate::EventKind) - classification that drives alive/dead transitions
+/// Used by runtime snapshots and shutdown diagnostics.
+/// The tracker applies only lifecycle events and rejects stale events per key.
 pub(crate) struct AliveTracker {
     state: RwLock<HashMap<AliveKey, TaskState>>,
 }
@@ -82,18 +73,21 @@ impl AliveTracker {
         }
     }
 
-    /// Updates the tracked state for a task if the incoming event is newer than the last one observed.
+    /// Applies a lifecycle event to the tracked state.
     ///
-    /// Removes the task entry entirely when receiving [`EventKind::TaskRemoved`].
-    /// Returns `true` if the **alive flag** changed; returns `false` otherwise.
+    /// Only task lifecycle events are tracked.
+    /// Other events are ignored and do not create entries or advance `last_seq`.
     ///
-    /// ### Ordering guarantees
+    /// A fresh [`EventKind::TaskRemoved`] removes the entry entirely.
+    /// Stale `TaskRemoved` events are ignored like other stale events.
     ///
-    /// Events are applied strictly in sequence order:  only if `ev.seq > last_seq` for this task.
-    /// This prevents out-of-order updates from corrupting state:
+    /// ### Stale events
+    ///
+    /// Events are applied only when `ev.seq > last_seq` for the same identity:
+    ///
     /// ```text
-    /// update(TaskStopped,  seq=100) → alive=false, last_seq=100
-    /// update(TaskStarting, seq=99)  → ignored (stale)
+    /// update(TaskStopped,  seq=100) -> alive=false, last_seq=100
+    /// update(TaskStarting, seq=99)  -> ignored as stale
     /// ```
     pub async fn update(&self, ev: &Event) -> bool {
         let relevant = matches!(
@@ -109,11 +103,13 @@ impl AliveTracker {
         if !relevant {
             return false;
         }
+
         let key = match (ev.id, ev.task.as_deref()) {
             (Some(id), _) => AliveKey::Id(id),
             (None, Some(name)) => AliveKey::Name(Arc::from(name)),
             (None, None) => return false,
         };
+
         let mut map = self.state.write().await;
 
         if matches!(ev.kind, EventKind::TaskRemoved) {
@@ -125,14 +121,17 @@ impl AliveTracker {
                 _ => false,
             };
         }
+
         let Some(name) = ev.task.as_deref() else {
             return false;
         };
+
         let entry = map.entry(key).or_insert_with(|| TaskState {
             name: Arc::from(name),
             last_seq: 0,
             alive: false,
         });
+
         if ev.seq <= entry.last_seq {
             return false;
         }
@@ -153,7 +152,7 @@ impl AliveTracker {
         changed
     }
 
-    /// Prunes id-keyed entries whose task is no longer present in `live_ids`.
+    /// Prunes id-keyed entries that are no longer present in the registry live set.
     pub async fn reconcile(&self, live_ids: &HashSet<TaskId>) {
         let mut map = self.state.write().await;
         map.retain(|key, _| match key {
@@ -162,9 +161,7 @@ impl AliveTracker {
         });
     }
 
-    /// Returns a sorted, deduplicated list of currently alive task names.
-    ///
-    /// Exposed via [`SupervisorHandle::snapshot`](crate::SupervisorHandle::snapshot):
+    /// Returns a sorted, deduplicated list of task names currently marked alive.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         let state = self.state.read().await;
         let mut alive: Vec<Arc<str>> = state
@@ -269,16 +266,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_stopped_sets_dead() {
-        let tracker = AliveTracker::new();
-        tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await;
-
-        let changed = tracker.update(&ev(EventKind::TaskStopped, "t1", 2)).await;
-        assert!(changed);
-        assert!(!tracker.is_alive("t1").await);
-    }
-
-    #[tokio::test]
     async fn stale_event_rejected() {
         let tracker = AliveTracker::new();
         tracker.update(&ev(EventKind::TaskStopped, "t1", 100)).await;
@@ -372,25 +359,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_lifecycle_event_advances_seq_but_keeps_alive() {
+    async fn non_lifecycle_event_is_ignored_and_keeps_alive() {
         let tracker = AliveTracker::new();
         tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await;
 
         let changed = tracker
             .update(&ev(EventKind::BackoffScheduled, "t1", 2))
             .await;
-        assert!(!changed, "non-lifecycle event should not change alive flag");
+        assert!(!changed, "non-lifecycle event should be ignored");
         assert!(tracker.is_alive("t1").await);
 
-        let changed = tracker.update(&ev(EventKind::TaskStopped, "t1", 1)).await;
-        assert!(!changed, "seq=1 is stale after seq=2");
-        assert!(tracker.is_alive("t1").await);
+        let changed = tracker.update(&ev(EventKind::TaskStopped, "t1", 2)).await;
+        assert!(changed, "TaskStopped with seq=2 should still apply");
+        assert!(!tracker.is_alive("t1").await);
     }
 
     #[tokio::test]
     async fn all_death_events_set_alive_false() {
         for kind in [
             EventKind::TaskStopped,
+            EventKind::TaskCanceled,
             EventKind::TaskFailed,
             EventKind::ActorExhausted,
             EventKind::ActorDead,

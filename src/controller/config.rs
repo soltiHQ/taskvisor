@@ -1,28 +1,55 @@
-//! # Configuration for the [`Controller`](super::Controller).
+//! Controller configuration.
+//!
+//! [`ControllerConfig`] controls controller buffering:
+//! - `max_slot_queue` limits pending submissions inside each slot,
+//! - `queue_capacity` limits the controller's intake channel.
+//!
+//! These are different queues.
+//! `queue_capacity` is about getting a submission into the controller.
+//! `max_slot_queue` is about how many accepted submissions may wait behind a busy slot.
 
 /// Configuration for the controller.
 ///
-/// # Also
+/// Passed to `SupervisorBuilder::with_controller`.
 ///
-/// - `SupervisorBuilder::with_controller` - where config is wired in
-/// - [`ControllerSpec`](super::ControllerSpec) - per-submission parameters
-/// - `Controller` - consumes this config
+/// # Example
+///
+/// ```rust
+/// use taskvisor::ControllerConfig;
+///
+/// let config = ControllerConfig {
+///     queue_capacity: 1024,
+///     max_slot_queue: 100,
+/// };
+/// ```
 #[derive(Clone, Debug)]
 pub struct ControllerConfig {
-    /// Capacity of the submission queue.
+    /// Capacity of the controller intake channel.
     ///
-    /// When full, `submit()` will wait and `try_submit()` will return `Full` error.
+    /// This is the queue in front of the controller loop.
+    /// When it is full:
+    /// - `submit()` waits for capacity,
+    /// - `submit_and_watch()` waits for capacity,
+    /// - `try_submit()` returns [`ControllerError::Full`](crate::ControllerError::Full).
+    ///
+    /// A value of `0` is clamped to `1`.
     pub queue_capacity: usize,
 
-    /// Maximum number of pending tasks per slot (per-slot queue depth limit).
+    /// Maximum number of pending submissions per slot.
     ///
-    /// When exceeded, new submissions are rejected with `ControllerRejected` event.
+    /// This is the queue behind a busy slot.
+    /// It does not include the current slot owner.
+    ///
+    /// When the limit is reached, new `Queue` submissions for that slot are rejected with `ControllerRejected`.
+    /// The current owner may still run, but no extra submission may wait behind it.
+    /// A value of `0` disables queueing behind busy slots.
     pub max_slot_queue: usize,
 }
 
 impl Default for ControllerConfig {
-    /// Default configuration:
+    /// Returns the default controller configuration.
     ///
+    /// Defaults:
     /// - `queue_capacity = 1024`
     /// - `max_slot_queue = 100`
     fn default() -> Self {

@@ -1,59 +1,80 @@
-//! # Slot state for the [`Controller`](super::Controller).
+//! Internal slot state for the controller.
 //!
-//! [`SlotState`] tracks the current status and pending queue for a single named slot.
+//! A slot is one controller admission lane.
+//! It may have one current owner and a FIFO queue of submissions waiting behind it.
+//!
+//! This module only stores slot state.
+//! The transition logic lives in `controller::core`.
 
 use std::{collections::VecDeque, time::Instant};
 
 use crate::TaskSpec;
 use crate::identity::TaskId;
 
-/// State of a single task slot.
+/// Mutable state for one controller slot.
 ///
-/// # Also
+/// Invariants expected by the controller:
+/// - `queue` contains only submissions that have not been handed to the runtime yet.
+/// - `Admitting`, `Running`, and `Terminating` slots normally have a `running_id`.
+/// - `queue` does not include the current slot owner.
+/// - `Idle` slots have no `running_id`.
 ///
-/// - [`AdmissionPolicy`](super::AdmissionPolicy) - determines how submissions interact with slot state
-/// - [`Controller`](super::Controller) - owns and manages slot states
+/// The controller stores each `SlotState` behind a per-slot mutex.
 pub(super) struct SlotState {
-    /// Current status (idle, admitting, running, or terminating).
+    /// Current lifecycle state of the slot owner.
     pub status: SlotStatus,
 
-    /// Runtime identity of the task currently occupying the slot.
-    /// The canonical key used to address the task (removal) and correlate its events.
+    /// Runtime identity of the current slot owner.
+    ///
+    /// Used to remove the task and to correlate runtime events back to this slot.
     pub running_id: Option<TaskId>,
 
-    /// Queue of pending tasks (FIFO order).
+    /// Pending submissions for this slot.
+    ///
+    /// The front item is the next submission to admit after the current owner is removed.
     pub queue: VecDeque<(TaskId, TaskSpec)>,
 }
 
-/// Status of a task slot.
+/// Internal lifecycle state of one controller slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SlotStatus {
-    /// No task running, ready to accept new submissions.
+    /// No current owner.
     Idle,
 
-    /// A task was submitted (`add_task` issued) and the slot is awaiting the `TaskAdded` confirmation before it is considered `Running`.
+    /// The controller sent the task to the runtime, but the registry has not confirmed it yet.
+    ///
+    /// The slot becomes `Running` when `TaskAdded` is observed.
+    /// It becomes `Idle` or advances to the next queued task if `TaskAddFailed` is observed.
     Admitting {
-        /// When admission was requested (for the admit deadline during lag recovery).
+        /// Time when admission was requested.
+        ///
+        /// Used by lag recovery to decide whether an `Admitting` slot is stale.
         since: Instant,
     },
 
-    /// Task currently running.
+    /// The runtime confirmed the task with `TaskAdded`.
     Running {
-        /// When the task started.
+        /// Time when the slot entered `Running`.
+        ///
+        /// Used for controller snapshots.
         started_at: Instant,
     },
 
-    /// Task is being cancelled (waiting for TaskRemoved event).
+    /// The current owner is being removed.
+    ///
+    /// The slot waits for `TaskRemoved` before it starts the next queued submission.
     Terminating {
-        /// When cancellation was requested.
+        /// Time when removal was requested.
+        ///
+        /// Used by lag recovery to re-issue cleanup if the slot stays stuck.
         cancelled_at: Instant,
     },
 }
 
 impl SlotStatus {
-    /// Short, stable, human-readable name (for event/outcome reason strings).
+    /// Returns a short stable label for diagnostics.
     ///
-    /// Unlike the derived `Debug`, this never leaks the internal `Instant` timestamps.
+    /// This avoids formatting internal timestamps into event reasons.
     pub fn label(&self) -> &'static str {
         match self {
             SlotStatus::Idle => "idle",
@@ -65,7 +86,7 @@ impl SlotStatus {
 }
 
 impl SlotState {
-    /// Creates a new idle slot.
+    /// Creates an idle slot with no owner and no queued submissions.
     pub fn new() -> Self {
         Self {
             status: SlotStatus::Idle,
@@ -83,33 +104,38 @@ mod tests {
     fn new_slot_is_idle_with_empty_queue() {
         let slot = SlotState::new();
         assert_eq!(slot.status, SlotStatus::Idle);
+        assert!(slot.running_id.is_none());
         assert!(slot.queue.is_empty());
     }
 
     #[test]
-    fn idle_ne_running_ne_terminating() {
-        let idle = SlotStatus::Idle;
+    fn only_idle_is_treated_as_a_free_slot() {
         let now = Instant::now();
-        let running = SlotStatus::Running { started_at: now };
-        let terminating = SlotStatus::Terminating { cancelled_at: now };
-
-        assert_ne!(idle, running);
-        assert_ne!(idle, terminating);
-        assert_ne!(running, terminating);
+        assert!(matches!(SlotStatus::Idle, SlotStatus::Idle));
+        for occupied in [
+            SlotStatus::Admitting { since: now },
+            SlotStatus::Running { started_at: now },
+            SlotStatus::Terminating { cancelled_at: now },
+        ] {
+            assert!(
+                !matches!(occupied, SlotStatus::Idle),
+                "{} must count as occupied, not free",
+                occupied.label()
+            );
+        }
     }
 
     #[test]
-    fn matches_idle_works_on_all_variants() {
+    fn labels_are_stable_and_do_not_include_timestamps() {
         let now = Instant::now();
-        assert!(matches!(SlotStatus::Idle, SlotStatus::Idle));
-        assert!(!matches!(
-            SlotStatus::Running { started_at: now },
-            SlotStatus::Idle
-        ));
-        assert!(!matches!(
-            SlotStatus::Terminating { cancelled_at: now },
-            SlotStatus::Idle
-        ));
+
+        assert_eq!(SlotStatus::Idle.label(), "idle");
+        assert_eq!(SlotStatus::Admitting { since: now }.label(), "admitting");
+        assert_eq!(SlotStatus::Running { started_at: now }.label(), "running");
+        assert_eq!(
+            SlotStatus::Terminating { cancelled_at: now }.label(),
+            "terminating"
+        );
     }
 
     #[test]

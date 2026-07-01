@@ -69,7 +69,7 @@ fn job(name: &'static str, dur: Duration) -> TaskSpec {
         }
     });
     // Same slot "deploy" for every submission; they contend for one slot.
-    TaskSpec::once(task).with_slot("deploy")
+    TaskSpec::once(task)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -84,10 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1) The slot is idle: this submission is admitted and starts running.
     println!("1) submit deploy-v1 (Queue) to the idle slot");
     let (_id, v1) = handle
-        .submit_and_watch(ControllerSpec::queue(job(
-            "deploy-v1",
-            Duration::from_millis(200),
-        )))
+        .submit_and_watch(
+            ControllerSpec::queue(job("deploy-v1", Duration::from_millis(200))).with_slot("deploy"),
+        )
         .await?;
     // Give it a moment to actually occupy the slot.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -110,10 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     submit_and_watch() lets us *await* the rejection as a guaranteed result.
     println!("2) submit deploy-v2 (DropIfRunning) while the slot is busy");
     let (_id, v2) = handle
-        .submit_and_watch(ControllerSpec::drop_if_running(job(
-            "deploy-v2",
-            Duration::from_millis(200),
-        )))
+        .submit_and_watch(
+            ControllerSpec::drop_if_running(job("deploy-v2", Duration::from_millis(200)))
+                .with_slot("deploy"),
+        )
         .await?;
     match v2.wait().await? {
         TaskOutcome::Rejected { reason } => {

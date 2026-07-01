@@ -1,39 +1,49 @@
-//! # Run a single attempt of a task execution.
+//! # Single task attempt runner.
 //!
-//! Executes one attempt of a [`Task`] with optional timeout, publishes lifecycle events to [`Bus`].
-//! - **Apply timeout** if configured (wraps execution in `tokio::time::timeout`)
-//! - **Execute ONE attempt** of the task with child cancellation token
-//! - **Publish events** for observability (stopped/failed/timeout)
+//! Runs one attempt of a [`Task`].
 //!
-//! ## Event flow
+//! `run_once` is called by [`TaskActor`](super::actor::TaskActor).
+//! It does not decide whether the task should restart.
+//! It only:
+//! - creates a child cancellation token for this attempt,
+//! - calls [`Task::spawn`](crate::Task::spawn),
+//! - applies the optional per-attempt timeout,
+//! - catches task panics and turns them into retryable failures,
+//! - publishes attempt-level lifecycle events.
+//!
+//! ## Event Flow
 //!
 //! ```text
-//! Success:
-//!   task.spawn() ─► Ok(()) ─► publish TaskStopped
+//! Ok(())
+//!   -> TaskStopped
+//!   -> return Ok(())
 //!
-//! Cancellation:
-//!   task.spawn() ─► Err(Canceled) ─► publish TaskCanceled (graceful exit)
+//! Err(TaskError::Canceled)
+//!   -> TaskCanceled
+//!   -> return Err(Canceled)
 //!
-//! Failure:
-//!   task.spawn() ─► Err(Fail/Fatal) ─► publish TaskFailed
+//! Err(TaskError::Fail | TaskError::Fatal)
+//!   -> TaskFailed
+//!   -> return the same error
 //!
-//! Panic:
-//!   task panics ─► caught ─► treated as Err(Fail) ─► publish TaskFailed
+//! panic in spawn() or task future
+//!   -> TaskFailed(reason="task panicked: ...")
+//!   -> return Err(TaskError::Fail)
 //!
-//! Timeout:
-//!   timeout exceeded ─► cancel child ─► publish TimeoutHit
-//!                                    ─► return Timeout error
-//!                                    ─► publish TaskFailed (timeout)
+//! timeout
+//!   -> cancel child token
+//!   -> TimeoutHit
+//!   -> TaskFailed
+//!   -> return Err(TaskError::Timeout)
 //! ```
 //!
 //! ## Rules
 //!
-//! - `TimeoutHit` is an **informational** event published **before** `TaskFailed` on timeout *(it is not a terminal event itself)*
-//! - `Canceled` is treated as graceful exit → `TaskCanceled` (not `TaskFailed`).
-//! - A **panic** in the task body (or in `spawn()` itself) is caught and converted to a retryable [`TaskError::Fail`] with reason `task panicked: ...` - restart policy applies.
-//! - Always publishes **exactly one** terminal event per attempt: `TaskStopped`, `TaskCanceled`, or `TaskFailed`.
-//! - Derives **child token** per attempt (isolated cancellation).
-//! - Child cancellation does **not** affect parent.
+//! - Exactly one terminal attempt event is published per call: `TaskStopped`, `TaskCanceled`, or `TaskFailed`.
+//! - `TimeoutHit` is extra context. It is published before `TaskFailed` and is not terminal by itself.
+//! - `TaskError::Canceled` is treated as cooperative cancellation, not failure.
+//! - A child token is created per attempt. Parent cancellation reaches the child, but cancelling the child does not cancel the parent.
+//! - Panics inside the task body become retryable [`TaskError::Fail`] values. The actor's restart policy decides what happens next.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -51,10 +61,10 @@ use crate::{
     tasks::{BoxTaskFuture, Task, TaskContext},
 };
 
-/// Future adapter that traps panics raised by the task body.
+/// Future adapter that catches panics while polling a task future.
 ///
-/// Polls the inner future inside [`std::panic::catch_unwind`], converting a panic into a retryable [`TaskError::Fail`];
-/// actor applies the normal restart/backoff policy instead of unwinding (which would leave the task unreaped in the registry and never restarted).
+/// A panic is converted to a retryable [`TaskError::Fail`].
+/// This keeps task-body panics on the normal failure/retry path instead of letting them unwind through the actor task.
 struct CatchPanic(BoxTaskFuture);
 
 impl Future for CatchPanic {
@@ -66,7 +76,7 @@ impl Future for CatchPanic {
     }
 }
 
-/// Maps a panic payload to a retryable [`TaskError::Fail`] with the panic message.
+/// Converts a panic payload into a retryable [`TaskError::Fail`].
 fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
     let msg = payload
         .downcast_ref::<&'static str>()
@@ -76,39 +86,37 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
     TaskError::fail(format!("task panicked: {msg}"))
 }
 
-/// Executes a single attempt of `task`, publishing lifecycle events to `bus`.
+/// Executes one attempt of `task`.
 ///
-/// # Also
+/// This function publishes attempt-level lifecycle events and returns the raw attempt result to the actor.
+/// The actor applies restart policy and backoff.
 ///
-/// - [`TaskActor`](super::actor::TaskActor) - calls `run_once` in a retry loop
-/// - [`Event`](crate::Event) / [`EventKind`](crate::EventKind) - published lifecycle events
+/// ### Steps
 ///
-/// ### Flow
+/// 1. Create a child cancellation token.
+/// 2. Call [`Task::spawn`](crate::Task::spawn).
+/// 3. Run the returned future, optionally wrapped in `tokio::time::timeout`.
+/// 4. Publish the attempt event.
+/// 5. Return the attempt result.
 ///
-/// 1. Derive child cancellation token from parent
-/// 2. Execute task with optional timeout wrapper
-/// 3. Publish terminal event based on result
+/// ### Timeout
 ///
-/// ### Timeout behavior
+/// If `timeout` is `Some(dur)` and `dur > Duration::ZERO`, the attempt is bounded by `dur`.
 ///
-/// If `timeout` is `Some(dur)` and `dur > 0`:
-/// - Wraps execution in `tokio::time::timeout`
-/// - On timeout: cancels child token, publishes `TimeoutHit`, returns `Timeout` error
+/// On timeout, the child token is cancelled, `TimeoutHit` is published, and the final attempt event is `TaskFailed` with [`TaskError::Timeout`].
 ///
-/// ### Cancellation semantics
+/// `None` and `Some(Duration::ZERO)` both mean no timeout.
 ///
-/// - Parent cancellation propagates to child token
-/// - Task **should** return `Err(TaskError::Canceled)` when detecting cancellation
-/// - `Canceled` is treated as **graceful exit**, publishes `TaskCanceled` (not `TaskFailed`)
-/// - Child cancellation does **not** affect parent (isolated per attempt)
+/// ### Cancellation
 ///
-/// ### Event semantics
+/// Parent cancellation propagates to the child token.
+/// A cooperative task should observe [`TaskContext::cancelled`](crate::TaskContext::cancelled) and return [`TaskError::Canceled`].
 ///
-/// Always publishes **exactly one** terminal event per attempt:
-/// - `TaskStopped` on `Ok(())`, `TaskCanceled` on `Err(Canceled)` (graceful exits)
-/// - `TaskFailed` on `Err(Fail/Fatal/Timeout)` (actual errors)
+/// `TaskError::Canceled` publishes `TaskCanceled`, not `TaskFailed`.
 ///
-/// `TimeoutHit` is informational and published **before** `TaskFailed` on timeout.
+/// ### Panic Handling
+///
+/// Panics from `spawn()` or from polling the task future are caught and returned as retryable [`TaskError::Fail`] values with reason `task panicked: ...`.
 pub async fn run_once<T: Task + ?Sized>(
     task: &T,
     parent: &CancellationToken,
@@ -159,7 +167,7 @@ pub async fn run_once<T: Task + ?Sized>(
     }
 }
 
-/// Publishes `TaskStopped` event for a successful attempt, carrying its duration.
+/// Publishes `TaskStopped` for a successful attempt.
 fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Duration) {
     bus.publish(
         Event::new(EventKind::TaskStopped)
@@ -170,7 +178,7 @@ fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Du
     );
 }
 
-/// Publishes `TaskCanceled` event for a gracefully cancelled attempt, carrying its duration.
+/// Publishes `TaskCanceled` for a cooperative cancellation attempt.
 fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Duration) {
     bus.publish(
         Event::new(EventKind::TaskCanceled)
@@ -181,7 +189,7 @@ fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: D
     );
 }
 
-/// Publishes `TaskFailed` event with error details and the attempt's duration.
+/// Publishes `TaskFailed` with error details and attempt duration.
 fn publish_failed(
     bus: &Bus,
     id: TaskId,
@@ -202,7 +210,7 @@ fn publish_failed(
     bus.publish(ev);
 }
 
-/// Publishes `TimeoutHit` event.
+/// Publishes `TimeoutHit` before the final timeout `TaskFailed` event.
 fn publish_timeout(
     bus: &Bus,
     id: TaskId,
@@ -269,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout_returns_timeout_variant_not_fail() {
+    async fn timeout_returns_timeout_variant_not_fail() {
         let bus = Bus::new(16);
         let parent = CancellationToken::new();
         let timeout = Some(Duration::from_millis(50));
@@ -290,7 +298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_success_publishes_stopped_with_attempt() {
+    async fn success_publishes_stopped_with_attempt() {
         let bus = Bus::new(16);
         let mut rx = bus.subscribe();
         let parent = CancellationToken::new();
@@ -347,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_success_returns_ok() {
+    async fn success_returns_ok() {
         let bus = Bus::new(16);
         let parent = CancellationToken::new();
 
@@ -356,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failure_returns_fail_variant() {
+    async fn failure_returns_fail_variant() {
         let bus = Bus::new(16);
         let parent = CancellationToken::new();
 
@@ -369,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout_publishes_timeout_hit_event() {
+    async fn timeout_publishes_timeout_hit_event() {
         let bus = Bus::new(16);
         let mut rx = bus.subscribe();
         let parent = CancellationToken::new();

@@ -14,7 +14,7 @@
 //! | `Replace`       | Cancels running task, starts new one                 | Search-as-you-type |
 //! | `DropIfRunning` | Silently ignores if slot is busy                     | Debounced actions  |
 //!
-//! The slot key is `TaskSpec::slot()` (defaults to the task name; override with `.with_slot(...)`).
+//! The slot key is `ControllerSpec::slot_name()` (defaults to the task name; override with `ControllerSpec::with_slot(...)`).
 //! **Tasks with different slot keys go to different slots and never interfere.**
 //!
 //! ## What this shows

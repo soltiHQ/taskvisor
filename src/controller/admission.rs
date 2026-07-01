@@ -1,48 +1,73 @@
-//! # Per-task admission policy
+//! Per-slot admission policies.
 //!
-//! The controller admits **one task per slot**.
-//! The slot is the spec's slot key ([`TaskSpec::slot`](crate::TaskSpec::slot)), which falls back to the task
-//! name when not set explicitly - so the admission unit is the *slot*, not the task name (several differently-named runs may share one slot).
+//! The controller admits work by **slot**, not by task name.
+//! At most one task may occupy a slot at a time.
 //!
-//! At any given time **one** task may run in a slot.
-//! When a new request for the same slot arrives, the admission policy decides what to do.
+//! Use [`ControllerSpec::with_slot`](crate::ControllerSpec::with_slot) when several differently named tasks should share one admission lane.
+//! A slot is the submission key returned by [`ControllerSpec::slot_name`](crate::ControllerSpec::slot_name).
+//! If no slot is set, it defaults to the task name.
 //!
-//! ## Variants
+//! ## Busy Slots
 //!
-//! - `DropIfRunning`: If the slot is already running, **ignore** the new request.
-//! - `Replace`: **Stop** the running task (cancel/remove) and start the new one.
-//! - `Queue`: **Enqueue** the new request (FIFO).
+//! A slot is busy while it is:
+//! - `Terminating`: the task is being removed, and the controller waits for `TaskRemoved`,
+//! - `Admitting`: the task was sent to the runtime, but `TaskAdded` is not seen yet,
+//! - `Running`: the task is registered and running.
 //!
-//! ## Invariants
+//! When a new submission targets a busy slot, [`AdmissionPolicy`] decides what happens.
 //!
-//! - Tasks within the same slot never run in parallel (use distinct slots if you need parallel execution).
-//! - Queued requests are executed strictly in submission order.
+//! ## Policy Summary
+//!
+//! | Policy                                            | Busy slot behavior                                   | Common use                           |
+//! |---------------------------------------------------|------------------------------------------------------|--------------------------------------|
+//! | [`Queue`](AdmissionPolicy::Queue)                 | Wait behind older queued work                        | Job queue, ordered pipeline          |
+//! | [`Replace`](AdmissionPolicy::Replace)             | Keep the latest next task, supersede older next task | Debounce, latest deploy              |
+//! | [`DropIfRunning`](AdmissionPolicy::DropIfRunning) | Reject while busy                                    | Periodic checks, skip duplicate work |
+//!
+//! ## Rejection
+//!
+//! Rejected submissions emit `ControllerRejected`.
+//! If submitted through `submit_and_watch`, the waiter resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
 
-/// Policy controlling how new submissions are handled when a slot is busy.
+/// Policy for handling a submission when its target slot is busy.
+///
+/// If the slot is idle, all policies admit the submission immediately.
+/// This enum is non-exhaustive. Match with a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmissionPolicy {
-    /// Skip task if already running.
+    /// Reject the submission if the slot is busy.
     ///
-    /// Use when:
-    /// - You only care about the latest state
-    /// - Redundant work should be avoided
-    /// - Example: periodic health checks
+    /// No queued work is added and the current slot owner is left untouched.
+    /// Use this when duplicate or stale work should be skipped.
+    /// Good fits:
+    /// - periodic health checks,
+    /// - cache refreshes,
+    /// - debounce-style "do not overlap" jobs.
     DropIfRunning,
 
-    /// Stop current task and start new one immediately.
+    /// Replace the next pending submission for this slot.
     ///
-    /// Use when:
-    /// - New request invalidates old one
-    /// - Priority to latest submission
-    /// - Example: deployment pipeline (new commit cancels old build)
+    /// If the slot is running, the controller asks the runtime to remove the current owner.
+    /// The replacement starts only after `TaskRemoved` is observed.
+    ///
+    /// Repeated `Replace` submissions do not grow the queue.
+    /// They supersede the queued head, so the latest replacement wins.
+    /// Use this when newer work makes older work obsolete.
+    /// Good fits:
+    /// - latest deployment for an environment,
+    /// - search/index rebuild for the newest revision,
+    /// - "only the newest request matters" workflows.
     Replace,
 
-    /// Queue the task (FIFO order).
+    /// Queue the submission behind the current slot owner.
     ///
-    /// Use when:
-    /// - All submissions must execute
-    /// - Order matters
-    /// - Example: sequential processing pipeline
+    /// Queued submissions run in FIFO order for this slot.
+    /// The queue is limited by [`ControllerConfig::max_slot_queue`](crate::ControllerConfig::max_slot_queue).
+    /// Use this when every submission should run and order matters.
+    /// Good fits:
+    /// - sequential job processing,
+    /// - ordered pipelines,
+    /// - per-customer or per-resource command lanes.
     Queue,
 }

@@ -1,113 +1,87 @@
-//! Runtime core: orchestration and lifecycle.
+//! # Runtime core.
 //!
-//! This module contains the embedded implementation of the taskvisor runtime.
+//! This module contains the taskvisor runtime implementation.
 //!
-//! ## Files & responsibilities
+//! Public API:
 //!
-//! - **supervisor.rs**: public facade;
-//!   owns the runtime (Bus, Registry, SubscriberSet, AliveTracker), wires listeners,
-//!   sends `Add`/`Remove` commands via mpsc to Registry, publishes `ShutdownRequested`, drives graceful shutdown.
-//! - **registry.rs**: task lifecycle manager with two input channels:
-//!   - mpsc for commands (`Add`/`Remove`: guaranteed delivery),
-//!   - broadcast bus for lifecycle events (`ActorExhausted`/`ActorDead`: cleanup).
+//! | File            | Role                                      |
+//! |-----------------|-------------------------------------------|
+//! | `supervisor.rs` | Public facade and composition root        |
+//! | `handle.rs`     | Dynamic task management API               |
+//! | `config.rs`     | Runtime defaults and limits               |
+//! | `outcome.rs`    | Guaranteed task completion results        |
+//! | `builder.rs`    | Runtime construction                      |
 //!
-//!   Publishes `TaskAdded`/`TaskRemoved` as confirmations.
-//! - **actor.rs**: per-task supervision loop (sequential attempts):
-//!   - applies Restart/Backoff/Timeout
-//!   - calls `runner::run_once`
-//!   - publishes TaskStarting/BackoffScheduled and terminal ActorExhausted/ActorDead.
-//! - **runner.rs**: executes ONE attempt with optional timeout and child token;
-//!   - publishes TaskStopped / TaskFailed / TimeoutHit for observability.
-//! - **alive.rs**: sequence-aware "alive" state tracker.
-//! - **shutdown.rs**: cross-platform OS signal handling used by `Supervisor`.
+//! Internal runtime:
 //!
-//! ## Event data-plane (who publishes & who consumes)
+//! | File             | Role                                      |
+//! |------------------|-------------------------------------------|
+//! | `runtime.rs`     | Owns Bus, Registry, subscribers, shutdown |
+//! | `registry.rs`    | Owns active task actors and add/remove    |
+//! | `actor.rs`       | Runs one task with restart/backoff policy |
+//! | `runner.rs`      | Executes one task attempt                 |
+//! | `alive.rs`       | Best-effort live-task snapshot            |
+//! | `shutdown.rs`    | OS signal handling                        |
+//! | `panic_guard.rs` | Panic boundary for long-lived listeners   |
 //!
-//! Producers (publish to Bus):
-//! - **Supervisor** → `ShutdownRequested`, `TaskAddRequested`, `TaskRemoveRequested`
-//! - **Registry**   → `TaskAdded{name}`, `TaskRemoved{name}`
-//! - **TaskActor**  → `TaskStarting{attempt}`, `BackoffScheduled{delay}`, `ActorExhausted`, `ActorDead`
-//! - **Runner**     → `TaskStopped` (success), `TaskCanceled` (graceful cancel), `TaskFailed` (fail/fatal/timeout), `TimeoutHit`
-//! - **SubscriberSet (workers)** → `SubscriberOverflow`, `SubscriberPanicked`
+//! ## Planes
 //!
-//! Consumers (subscribe to Bus):
-//! - **Supervisor::subscriber_listener()** (single distribution point)
-//!     - updates **AliveTracker** (sequence-based ordering)
-//!     - emits to **SubscriberSet** (per-subscriber mpsc queues)
-//! - **Registry** (cmd_rx + bus_rx): commands via mpsc, lifecycle cleanup via bus
-//!
-//! ## Wiring (module-level flow)
+//! taskvisor has three important runtime planes:
 //!
 //! ```text
-//! Application code
-//!   └─ builds TaskSpec, creates Supervisor, calls Supervisor::run(specs)
+//! Management plane:
+//!   SupervisorHandle ──► SupervisorCore ──mpsc──► Registry
 //!
-//! Supervisor::run()
-//!   ├─ spawn subscriber_listener()   ──┐
-//!   ├─ Registry::spawn_listener()      │ both subscribe to Bus
-//!   ├─ cmd_tx.send(Add(id, spec))      │ commands via mpsc (guaranteed)
-//!   └─ wait: shutdown signal OR registry empty
+//! Event plane:
+//!   runtime components ──broadcast──► subscriber_listener ──► Subscribe impls
 //!
-//!   Supervisor ──cmd_tx──► Registry (mpsc, guaranteed delivery)
-//!                            ├─► Add(id, spec) → spawn → publish TaskAdded
-//!                            └─► Remove(id)    → cancel → publish TaskRemoved
-//!
-//!                         ┌──────────────────────────── Bus (broadcast) ───────────────────────┐
-//! Publishers:             │                                                                    │
-//!   Supervisor ─────────► │ ShutdownRequested                                                  │
-//!   Registry   ─────────► │ TaskAdded / TaskRemoved                                            │
-//!   TaskActor  ─────────► │ TaskStarting / BackoffScheduled / ActorExhausted / ActorDead       │
-//!   Runner     ─────────► │ TaskStopped / TaskCanceled / TaskFailed / TimeoutHit               │
-//!   SubscriberSet ──────► │ SubscriberOverflow / SubscriberPanicked                            │
-//!                         └──┬──────────────────────────────────────────┬──────────────────────┘
-//!              Supervisor::subscriber_listener()         Registry::spawn_listener()
-//!                ├─ AliveTracker::update(ev)               └─ on ActorExhausted/ActorDead → cleanup
-//!                └─ SubscriberSet::emit_arc(ev)
-//!
-//! TaskActor::run()  (per task)
-//! loop {
-//!   acquire global semaphore (optional, cancellable)
-//!   publish TaskStarting{attempt}
-//!   result = runner::run_once(task, timeout, attempt, bus)
-//!   match result {
-//!     Ok                → if RestartPolicy::Always continue; else publish ActorExhausted & exit
-//!     Err(Fatal)        → publish ActorDead & exit
-//!     Err(Canceled)     → exit (cooperative shutdown)
-//!     Err(Timeout/Fail) → if policy allows retry:
-//!                          - delay = backoff.next(attempt); publish BackoffScheduled{delay}; sleep
-//!                          - else publish ActorExhausted & exit
-//!   }
-//! }
-//!
-//! runner::run_once()
-//!   - derive child token
-//!   - if timeout set → time::timeout(fut); on elapsed: cancel child, publish TimeoutHit, Timeout
-//!   - on Ok → publish TaskStopped; on Err(Canceled) → publish TaskCanceled
-//!   - on Err(Fail/Fatal/Timeout) → publish TaskFailed
+//! Completion plane:
+//!   Registry ──oneshot──► TaskWaiter
 //! ```
 //!
-//! ## Shutdown timeline
+//! The management plane uses an mpsc command channel. Add/remove commands are not delivered through the lossy event bus.
+//! The event plane is best-effort and used for logs, metrics, snapshots, and subscriber integrations. Slow consumers can lag and miss events.
+//! The completion plane is used by `add_and_watch` and `submit_and_watch`. It is the authoritative final result for one task run.
+//!
+//! ## Main Flow
 //!
 //! ```text
-//! OS signal → Supervisor publishes ShutdownRequested
-//! → Supervisor.drain_with_grace() → Registry.cancel_all_within(grace):
-//!     cancel each task token, join bounded by grace, force-abort (JoinHandle::abort) stragglers, publish TaskRemoved
-//! → AllStoppedWithinGrace OR GraceExceeded{grace, stuck} → cancel runtime_token → close subscribers
+//! Supervisor::run(tasks)
+//!   ├─ start subscriber listener
+//!   ├─ start registry listener
+//!   ├─ send initial Add commands
+//!   ├─ wait until initial tasks are accepted/rejected
+//!   └─ wait for OS shutdown signal or natural completion
+//!
+//! Supervisor::serve()
+//!   ├─ start listeners
+//!   └─ return SupervisorHandle
 //! ```
+//!
+//! ## Events
+//!
+//! Events are published by:
+//!
+//! - `SupervisorCore`: add/remove/shutdown requests and final runtime verdicts.
+//! - `TaskActor`: attempt starts, retry scheduling, actor terminal state.
+//! - `SubscriberSet`: subscriber overflow and panic diagnostics.
+//! - `Registry`: task added/removed confirmations.
+//! - `runner`: per-attempt result events.
+//!
+//! `AllStoppedWithinGrace` can be emitted after explicit shutdown or after natural completion when all cleanup joins finish within the grace period.
 //!
 //! ## Notes
 //!
-//! - Event ordering is maintained via a global monotonic sequence number.
-//! - Event delivery is fire-and-forget (bounded broadcast + per-subscriber mpsc).
-//! - Attempts within a TaskActor are strictly sequential (never parallel for the same task).
-//!
-//! Internal modules:
-//! - [`runner`]     one attempt with timeout/cancellation & lifecycle events
-//! - [`supervisor`] orchestrator; owns Bus/Registry/Alive/Subscribers; shutdown
-//! - [`actor`]      single-task supervisor with restart/backoff/jitter/timeouts
-//! - [`shutdown`]   OS signal handling
-//! - [`registry`]   task lifecycle: spawn/cancel/join/cleanup
-//! - [`alive`]      sequence-based alive tracking
+//! - `Supervisor::run` is single-shot for one supervisor instance.
+//! - Attempts within one `TaskActor` are sequential; the same actor never runs two attempts in parallel.
+//! - Event sequence numbers are useful for stale-event filtering and sorting, but they are not a causal ordering guarantee across concurrent producers.
+//! - A panic in a long-lived listener is caught and reported as a diagnostic event instead of silently killing the control loop.
+
+mod outcome;
+pub use outcome::{TaskOutcome, TaskWaiter};
+
+mod runtime;
+pub(crate) use runtime::SupervisorCore;
 
 mod builder;
 pub use builder::SupervisorBuilder;
@@ -118,14 +92,10 @@ pub use config::SupervisorConfig;
 mod handle;
 pub use handle::SupervisorHandle;
 
-mod outcome;
-pub use outcome::{TaskOutcome, TaskWaiter};
-
 mod supervisor;
 pub use supervisor::Supervisor;
 
-mod runtime;
-pub(crate) use runtime::SupervisorCore;
+pub(crate) mod panic_guard;
 
 mod actor;
 mod alive;

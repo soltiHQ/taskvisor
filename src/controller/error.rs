@@ -1,28 +1,49 @@
-//! # Errors produced by the controller (feature = `controller`).
-//!
-//! [`ControllerError`] covers submission-path failures: the controller being
-//! absent, its queue being full, or its channel being closed.
+//! Controller submission errors.
 
 use thiserror::Error;
 
-/// Errors returned by [`SupervisorHandle::submit`](crate::SupervisorHandle::submit)
-/// and [`try_submit`](crate::SupervisorHandle::try_submit).
+/// Error returned by controller submission methods.
 #[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {
-    /// Controller is not configured (builder didn't call `with_controller`).
+    /// The supervisor was built without a controller.
+    ///
+    /// Enable the `controller` feature and configure the supervisor with `with_controller(...)` before using controller submission methods.
     #[error("controller not configured")]
     NotConfigured,
 
-    /// Submission queue is full (try again later or use async `submit`).
+    /// The controller intake queue is full.
+    ///
+    /// Returned only by `try_submit`.
+    /// Use async `submit` or `submit_and_watch` if the caller should wait for intake capacity instead of failing fast.
     #[error("submission queue full")]
     Full,
 
-    /// Controller channel is closed (controller task died).
+    /// The controller intake channel is closed.
+    ///
+    /// This usually means the controller loop has stopped or the supervisor is shutting down.
     #[error("controller channel closed")]
     Closed,
 
-    /// Controller is already running (double `run()` call).
+    /// The controller loop was started more than once.
+    ///
+    /// This is an internal lifecycle guard. Normal submission APIs do not return this variant.
     #[error("controller already running")]
     AlreadyRunning,
+}
+
+impl ControllerError {
+    /// Returns a short stable label for logs and metrics.
+    ///
+    /// The label is not the same as `Display`.
+    /// It is intended for machine-readable dimensions.
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            ControllerError::AlreadyRunning => "controller_already_running",
+            ControllerError::NotConfigured => "controller_not_configured",
+            ControllerError::Closed => "controller_closed",
+            ControllerError::Full => "controller_full",
+        }
+    }
 }

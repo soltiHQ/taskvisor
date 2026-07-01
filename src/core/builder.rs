@@ -1,13 +1,13 @@
-//! # Builder for [`Supervisor`](crate::Supervisor) construction.
+//! # Supervisor builder.
 //!
-//! [`SupervisorBuilder`] assembles all runtime components from a [`SupervisorConfig`].
+//! Builds a [`Supervisor`](crate::Supervisor) from [`SupervisorConfig`] and optional runtime extensions.
 //!
-//! ## Usage
+//! ## Example
 //!
 //! ```rust
 //! use taskvisor::{SupervisorBuilder, SupervisorConfig};
 //!
-//! let sv = SupervisorBuilder::new(SupervisorConfig::default()).build();
+//! let supervisor = SupervisorBuilder::new(SupervisorConfig::default()).build();
 //! ```
 
 use std::sync::Arc;
@@ -22,13 +22,18 @@ use crate::{
     subscribers::{Subscribe, SubscriberSet},
 };
 
-/// Builder for constructing a [`Supervisor`](crate::Supervisor) with optional features.
+/// Builder for constructing a [`Supervisor`](crate::Supervisor).
+///
+/// Use this when you need to customize runtime config, subscribers, or optional feature-backed components before starting the supervisor.
+///
+/// The produced supervisor is not started yet.
+/// Calling `build` only creates the runtime graph and stores the pieces that will be used later by `Supervisor::run` or `Supervisor::serve`.
 ///
 /// # Also
 ///
-/// - [`Supervisor`](crate::Supervisor) - the runtime produced by this builder
-/// - [`SupervisorConfig`] - configuration knobs (grace period, bus capacity, concurrency)
-/// - [`Subscribe`](crate::Subscribe) - event handler trait wired via [`with_subscribers`](Self::with_subscribers)
+/// - [`Supervisor`](crate::Supervisor) - runtime facade produced by this builder
+/// - [`SupervisorConfig`] - runtime defaults and limits
+/// - [`Subscribe`](crate::Subscribe) - event subscriber trait
 pub struct SupervisorBuilder {
     cfg: SupervisorConfig,
     subscribers: Vec<Arc<dyn Subscribe>>,
@@ -38,7 +43,7 @@ pub struct SupervisorBuilder {
 }
 
 impl SupervisorBuilder {
-    /// Creates a new builder with the given configuration.
+    /// Creates a new builder with the given runtime configuration.
     pub fn new(cfg: SupervisorConfig) -> Self {
         Self {
             cfg,
@@ -49,9 +54,12 @@ impl SupervisorBuilder {
         }
     }
 
-    /// Sets event subscribers for observability.
+    /// Sets event subscribers for runtime observability.
     ///
-    /// Subscribers receive runtime events through dedicated workers with bounded queues.
+    /// Each subscriber gets its own bounded queue and worker task.
+    /// The workers are created during [`build`](Self::build), and events are delivered after the supervisor starts its runtime listener.
+    ///
+    /// Passing a new list replaces any subscribers previously set on this builder.
     pub fn with_subscribers(mut self, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         self.subscribers = subscribers;
         self
@@ -59,22 +67,22 @@ impl SupervisorBuilder {
 
     /// Enables the controller with the given configuration.
     ///
-    /// The controller manages task slots with admission policies (Queue, Replace, DropIfRunning).
+    /// The controller adds slot-based task admission on top of the core supervisor.
+    /// It can queue, replace, or drop submissions depending on the configured slot policy.
     ///
-    /// Requires the `controller` feature flag.
+    /// Available only with the `controller` feature.
     #[cfg(feature = "controller")]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
         self
     }
 
-    /// Builds and returns the Supervisor instance.
+    /// Builds the supervisor.
     ///
-    /// This consumes the builder and initializes all runtime components:
-    /// - Event bus for broadcasting
-    /// - Registry for task lifecycle management
-    /// - Subscriber workers
-    /// - Optional controller (if configured)
+    /// This consumes the builder and creates all runtime components.
+    ///
+    /// The supervisor is returned in a stopped state.
+    /// Task execution starts when the caller runs or serves the supervisor.
     pub fn build(self) -> Arc<Supervisor> {
         let bus = Bus::new(self.cfg.bus_capacity_clamped());
         let subs = Arc::new(SubscriberSet::new(self.subscribers, bus.clone()));

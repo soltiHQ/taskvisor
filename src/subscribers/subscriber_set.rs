@@ -1,38 +1,37 @@
-//! # Non-blocking event fan-out to multiple subscribers.
+//! # Non-blocking event fan-out to subscribers.
 //!
-//! [`SubscriberSet`] distributes events to multiple subscribers concurrently without blocking the publisher.
+//! [`SubscriberSet`] sends each event to every registered subscriber.
 //!
-//! ## Architecture
+//! Each subscriber has its own bounded queue and one worker task.
+//! `emit_arc` uses `try_send`; it does not wait for slow subscribers.
+//! A slow subscriber can only overflow its own queue.
+//!
+//! ## Flow
 //!
 //! ```text
 //! emit(event)
 //!     │
 //!     ├──► [queue 1] ──► worker 1 ──► subscriber1.on_event()
-//!     │    (bounded)         └──────► panic → SubscriberPanicked
 //!     ├──► [queue 2] ──► worker 2 ──► subscriber2.on_event()
-//!     │    (bounded)
 //!     └──► [queue N] ──► worker N ──► subscriberN.on_event()
-//!          (bounded)
 //! ```
 //!
 //! ## Rules
 //!
-//! - **No cross-subscriber ordering**: subscriber A may process event N while B processes N+5
-//! - **Overflow**: event is dropped for that subscriber only, `SubscriberOverflow` is published
-//! - **Non-blocking**: `emit()` returns immediately (uses `try_send`)
-//! - **Isolation**: a slow or panicking subscriber doesn't affect others
-//! - **Per-subscriber FIFO**: each subscriber sees events in order
+//! - No cross-subscriber ordering: subscribers may process different events at the same time.
+//! - Diagnostic events are not re-reported on overflow or panic, to avoid feedback loops.
+//! - Per-subscriber FIFO: each subscriber sees events in queue order.
+//! - Ordinary overflow is reported as `SubscriberOverflow`.
+//! - Ordinary panic is reported as `SubscriberPanicked`.
+//! - `emit_arc` is non-blocking and uses `try_send`.
 //!
-//! ## Panic handling
+//! ## Panic Handling
 //!
-//! Worker tasks use `AssertUnwindSafe` + `catch_unwind` to isolate panics:
-//! - Panic is caught and converted to `SubscriberPanicked` event
-//! - `on_event` is called inside `catch_unwind`
-//! - Worker continues processing next event
-//! - Other subscribers are unaffected
+//! Worker tasks wrap `on_event` in `catch_unwind`.
 //!
-//! **Warning**: `AssertUnwindSafe` is used, which can leave shared state inconsistent
-//! if a subscriber uses `Arc<Mutex<T>>` and panics while holding the lock.
+//! This protects the runtime and other subscribers from a panicking subscriber.
+//! It does not protect the subscriber's own shared state.
+//! For example, a panic while holding a `Mutex` may poison that mutex.
 //!
 //! See [`Subscribe`] for the subscriber trait contract.
 
@@ -44,22 +43,24 @@ use crate::subscribers::Subscribe;
 
 /// Per-subscriber channel metadata.
 struct SubscriberChannel {
-    name: &'static str,
+    name: Arc<str>,
     sender: mpsc::Sender<Arc<Event>>,
 }
 
-/// Distributes events to multiple subscribers.
+/// Distributes events to subscribers.
 ///
-/// Manages per-subscriber queues and worker tasks, providing:
-/// - **Concurrent delivery**: events are dispatched to all subscriber queues in a single pass
-/// - **Panic safety**: panics are caught and reported, do not crash the runtime
-/// - **Overflow handling**: dropped events are reported via `SubscriberOverflow`
-/// - **Isolation**: each subscriber has a dedicated queue and worker
+/// `SubscriberSet` owns:
+/// - one bounded queue per subscriber,
+/// - one worker task per subscriber,
+/// - snapshotted subscriber names for diagnostics.
+///
+/// Delivery is best-effort.
+/// Slow subscribers may drop events from their own queue, but they do not block other subscribers or task execution.
 ///
 /// ## Shutdown
 ///
-/// Call [`close`](Self::close) to gracefully drain all subscriber queues.
-/// Workers finish processing remaining events before exiting.
+/// [`close`](Self::close) drops all senders and waits for workers to finish draining queued events.
+/// There is no timeout here: subscriber `on_event` implementations must return promptly.
 ///
 /// ## Also
 ///
@@ -79,17 +80,10 @@ pub(crate) struct SubscriberSet {
 }
 
 impl SubscriberSet {
-    /// Creates a new set and spawns one worker task per subscriber.
+    /// Creates a new set and starts one worker task per subscriber.
     ///
-    /// ### Per-subscriber setup
-    ///
-    /// - Bounded `mpsc` queue (capacity from [`Subscribe::queue_capacity`], clamped to >= 1)
-    /// - Panic isolation via `catch_unwind` around synchronous `on_event` call
-    /// - Dedicated worker task (runs until the queue is closed)
-    ///
-    /// ### Notes
-    ///
-    /// - Workers start immediately and process events until shutdown
+    /// The subscriber name is read once and stored as `Arc<str>`.
+    /// This supports dynamic names while keeping diagnostic events stable for the lifetime of the subscriber worker.
     #[must_use]
     pub(crate) fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
         let mut channels = Vec::with_capacity(subs.len());
@@ -97,28 +91,27 @@ impl SubscriberSet {
 
         for sub in subs {
             let cap = sub.queue_capacity().max(1);
-            let name = sub.name();
+            let name: Arc<str> = Arc::from(sub.name());
 
             let (tx, mut rx) = mpsc::channel::<Arc<Event>>(cap);
             let s = Arc::clone(&sub);
+            let name_for_worker = Arc::clone(&name);
             let bus_for_worker = bus.clone();
 
             let handle = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
-                    // SAFETY (unwind):
-                    // Each subscriber runs in its own worker task with its own mpsc channel: a panic cannot corrupt another subscriber's state.
-                    //
-                    // `on_event` is synchronous: a single `catch_unwind` call suffices.
-                    //
-                    // If the panicking subscriber holds an Arc<Mutex<T>>, that mutex will be poisoned, which is the expected Rust behavior.
-                    // The worker continues processing the next event after reporting the panic via SubscriberPanicked.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         s.on_event(ev.as_ref());
                     }));
 
-                    if let Err(panic_err) = result {
+                    if let Err(panic_err) = result
+                        && !ev.is_internal_diagnostic()
+                    {
                         let info = extract_panic_info(&panic_err);
-                        bus_for_worker.publish(Event::subscriber_panicked(s.name(), info));
+                        bus_for_worker.publish(Event::subscriber_panicked(
+                            Arc::clone(&name_for_worker),
+                            info,
+                        ));
                     }
                 }
             });
@@ -134,15 +127,14 @@ impl SubscriberSet {
         }
     }
 
-    /// Emits a pre-allocated `Arc<Event>` to all subscribers.
-    /// - Uses `try_send` (non-blocking)
-    /// - On queue full: drops the event, publishes `SubscriberOverflow`
-    /// - On queue closed: publishes `SubscriberOverflow` with reason "closed"
+    /// Sends an event to all subscriber queues.
     ///
-    /// ### Overflow prevention
+    /// This method does not wait for subscribers.
+    /// It tries to enqueue the event for each subscriber and returns after one pass over the channel list.
     ///
-    /// Prevents infinite loops and event storms: if the **incoming** event is `SubscriberOverflow` **or** `SubscriberPanicked`,
-    /// we do not publish further overflow diagnostics for it.
+    /// Ordinary events that cannot be queued are dropped for that subscriber and reported as `SubscriberOverflow`.
+    /// Internal diagnostic events (`SubscriberOverflow` and `SubscriberPanicked`) are not re-reported if they overflow.
+    /// This avoids diagnostic feedback loops.
     pub(crate) fn emit_arc(&self, event: Arc<Event>) {
         let is_internal_event = event.is_internal_diagnostic();
         let channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
@@ -152,25 +144,30 @@ impl SubscriberSet {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if !is_internal_event {
-                        self.bus
-                            .publish(Event::subscriber_overflow(channel.name, "full"));
+                        self.bus.publish(Event::subscriber_overflow(
+                            Arc::clone(&channel.name),
+                            "full",
+                        ));
                     }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     if !is_internal_event {
-                        self.bus
-                            .publish(Event::subscriber_overflow(channel.name, "closed"));
+                        self.bus.publish(Event::subscriber_overflow(
+                            Arc::clone(&channel.name),
+                            "closed",
+                        ));
                     }
                 }
             }
         }
     }
 
-    /// Gracefully closes all subscriber channels and waits for workers to drain.
-    /// - Drops all channel senders (workers observe channel closure and drain remaining events)
-    /// - Awaits all worker tasks to finish processing
+    /// Closes subscriber queues and waits for workers to drain.
     ///
-    /// Safe to call multiple times: subsequent calls are no-ops.
+    /// Safe to call more than once. Later calls are no-ops.
+    ///
+    /// This does not abort stuck workers.
+    /// If a subscriber blocks inside `on_event`, this method may wait until that call returns.
     pub(crate) async fn close(&self) {
         {
             let mut channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
@@ -204,8 +201,38 @@ fn extract_panic_info(panic_err: &Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
     use crate::events::EventKind;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+    use tokio::sync::broadcast;
+
+    fn ev(task: &str) -> Arc<Event> {
+        Arc::new(Event::new(EventKind::TaskStarting).with_task(task))
+    }
+
+    fn kind_ev(kind: EventKind) -> Arc<Event> {
+        Arc::new(Event::new(kind).with_task("t"))
+    }
+
+    fn count(rx: &mut broadcast::Receiver<Arc<Event>>, kind: EventKind) -> usize {
+        let mut n = 0;
+        while let Ok(e) = rx.try_recv() {
+            if e.kind == kind {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn first(rx: &mut broadcast::Receiver<Arc<Event>>, kind: EventKind) -> Option<Arc<Event>> {
+        while let Ok(e) = rx.try_recv() {
+            if e.kind == kind {
+                return Some(e);
+            }
+        }
+        None
+    }
 
     struct CountingSub {
         count: Arc<AtomicU64>,
@@ -227,7 +254,7 @@ mod tests {
         fn on_event(&self, _event: &Event) {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "counting"
         }
         fn queue_capacity(&self) -> usize {
@@ -235,74 +262,84 @@ mod tests {
         }
     }
 
-    /// Subscriber that panics on every event.
-    struct PanicSub;
+    struct PanicSub {
+        name: String,
+    }
+
+    impl PanicSub {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                name: "panicking".to_string(),
+            })
+        }
+        fn named(name: &str) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.to_string(),
+            })
+        }
+    }
 
     impl Subscribe for PanicSub {
         fn on_event(&self, _event: &Event) {
             panic!("boom");
         }
-        fn name(&self) -> &'static str {
-            "panicking"
+        fn name(&self) -> &str {
+            &self.name
         }
         fn queue_capacity(&self) -> usize {
             16
         }
     }
 
-    #[tokio::test]
-    async fn overflow_publishes_subscriber_overflow() {
-        let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
+    struct RecordingSub {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
 
-        let (count, sub) = CountingSub::new(1);
-        let set = SubscriberSet::new(vec![sub], bus.clone());
-
-        let ev1 = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-        let ev2 = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-        let ev3 = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-
-        set.emit_arc(ev1);
-        set.emit_arc(ev2);
-        set.emit_arc(ev3);
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        set.close().await;
-
-        let mut saw_overflow = false;
-        while let Ok(ev) = bus_rx.try_recv() {
-            if matches!(ev.kind, EventKind::SubscriberOverflow) {
-                saw_overflow = true;
+    impl Subscribe for RecordingSub {
+        fn on_event(&self, e: &Event) {
+            if let Some(t) = e.task.as_deref() {
+                self.seen.lock().unwrap().push(t.to_string());
             }
         }
-
-        assert!(
-            saw_overflow,
-            "expected SubscriberOverflow on bus (count={})",
-            count.load(Ordering::Relaxed)
-        );
+        fn name(&self) -> &str {
+            "recorder"
+        }
+        fn queue_capacity(&self) -> usize {
+            64
+        }
     }
 
     #[tokio::test]
-    async fn overflow_of_internal_event_does_not_publish_further_overflow() {
-        let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
+    async fn overflow_reported_for_ordinary_but_not_diagnostic_events() {
+        {
+            let bus = Bus::new(64);
+            let mut rx = bus.subscribe();
+            let (_c, sub) = CountingSub::new(1);
+            let set = SubscriberSet::new(vec![sub], bus.clone());
 
-        let (_count, sub) = CountingSub::new(1);
-        let set = SubscriberSet::new(vec![sub], bus.clone());
-
-        let internal_ev = Arc::new(Event::new(EventKind::SubscriberOverflow).with_task("test"));
-        for _ in 0..5 {
-            set.emit_arc(Arc::clone(&internal_ev));
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        set.close().await;
-
-        while let Ok(ev) = bus_rx.try_recv() {
+            for _ in 0..3 {
+                set.emit_arc(ev("t"));
+            }
+            set.close().await;
             assert!(
-                !matches!(ev.kind, EventKind::SubscriberOverflow),
-                "internal event overflow must not publish further SubscriberOverflow"
+                count(&mut rx, EventKind::SubscriberOverflow) > 0,
+                "a dropped ordinary event must be reported"
+            );
+        }
+        {
+            let bus = Bus::new(64);
+            let mut rx = bus.subscribe();
+            let (_c, sub) = CountingSub::new(1);
+            let set = SubscriberSet::new(vec![sub], bus.clone());
+
+            for _ in 0..5 {
+                set.emit_arc(kind_ev(EventKind::SubscriberOverflow));
+            }
+            set.close().await;
+            assert_eq!(
+                count(&mut rx, EventKind::SubscriberOverflow),
+                0,
+                "dropping a diagnostic event must not publish further overflow"
             );
         }
     }
@@ -310,27 +347,74 @@ mod tests {
     #[tokio::test]
     async fn panic_in_subscriber_publishes_subscriber_panicked_and_continues() {
         let bus = Bus::new(64);
-        let mut bus_rx = bus.subscribe();
-        let set = SubscriberSet::new(vec![Arc::new(PanicSub)], bus.clone());
+        let mut rx = bus.subscribe();
+        let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
 
         for _ in 0..3 {
-            let ev = Arc::new(Event::new(EventKind::TaskStarting).with_task("t"));
-            set.emit_arc(ev);
+            set.emit_arc(ev("t"));
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         set.close().await;
 
-        let mut panic_count = 0u64;
-        while let Ok(ev) = bus_rx.try_recv() {
-            if matches!(ev.kind, EventKind::SubscriberPanicked) {
-                panic_count += 1;
-            }
-        }
-
         assert!(
-            panic_count >= 3,
-            "expected at least 3 SubscriberPanicked events, got {panic_count}"
+            count(&mut rx, EventKind::SubscriberPanicked) >= 3,
+            "each ordinary-event panic must be reported, and the worker must continue"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_on_internal_diagnostic_does_not_republish() {
+        for diagnostic in [EventKind::SubscriberPanicked, EventKind::SubscriberOverflow] {
+            let bus = Bus::new(64);
+            let mut rx = bus.subscribe();
+            let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
+
+            set.emit_arc(kind_ev(diagnostic));
+            set.close().await;
+
+            assert_eq!(
+                count(&mut rx, EventKind::SubscriberPanicked),
+                0,
+                "panicking on a {diagnostic:?} event must not republish — that is the feedback loop"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_subscriber_name_surfaces_in_diagnostics() {
+        let bus = Bus::new(64);
+        let mut rx = bus.subscribe();
+        let set = SubscriberSet::new(vec![PanicSub::named("slack-#alerts")], bus.clone());
+
+        set.emit_arc(ev("t"));
+        set.close().await;
+
+        let panicked =
+            first(&mut rx, EventKind::SubscriberPanicked).expect("the panic must be reported");
+        assert_eq!(
+            panicked.task.as_deref(),
+            Some("slack-#alerts"),
+            "a subscriber's dynamic name must surface in the diagnostic event's `task`"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_subscriber_does_not_affect_others_and_order_is_fifo() {
+        let bus = Bus::new(64);
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = Arc::new(RecordingSub {
+            seen: Arc::clone(&seen),
+        });
+        let set = SubscriberSet::new(vec![PanicSub::new(), recorder], bus);
+
+        for i in 0..5 {
+            set.emit_arc(ev(&format!("e{i}")));
+        }
+        set.close().await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["e0", "e1", "e2", "e3", "e4"],
+            "the healthy subscriber must see every event in FIFO order, unaffected by the panicking one"
         );
     }
 
@@ -342,8 +426,7 @@ mod tests {
 
         let n = 10u64;
         for _ in 0..n {
-            let ev = Arc::new(Event::new(EventKind::TaskStopped).with_task("t"));
-            set.emit_arc(ev);
+            set.emit_arc(Arc::new(Event::new(EventKind::TaskStopped).with_task("t")));
         }
         set.close().await;
 

@@ -1,8 +1,4 @@
-//! # Error types used by the taskvisor runtime and tasks.
-//!
-//! This module defines two main error enums:
-//! - [`RuntimeError`] errors raised by the orchestration runtime itself.
-//! - [`TaskError`] errors raised by individual task executions.
+//! Error types for runtime orchestration and task execution.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,17 +7,18 @@ use thiserror::Error;
 
 use crate::identity::TaskId;
 
-/// Boxed, type-erased source error carried by [`TaskError`] failure variants.
-///
-/// Failures cross task/thread boundaries and chain into `anyhow`/`eyre` via [`std::error::Error::source`].
+/// Boxed source error carried by [`TaskError::Fail`] and [`TaskError::Fatal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Shared, type-erased source error carried on the completion plane ([`TaskOutcome`](crate::TaskOutcome)).
+/// Shared source error carried on the completion plane.
 pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
-/// # Errors produced by the taskvisor runtime.
+/// Errors produced by the supervisor runtime.
 ///
-/// These represent failures in the orchestration system itself.
+/// These are orchestration errors: add, remove, shutdown, and run failures.
+/// They are separate from [`TaskError`], which is returned by task attempts.
+///
+/// Match with a wildcard arm because this enum is non-exhaustive.
 ///
 /// # Also
 ///
@@ -30,50 +27,68 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RuntimeError {
-    /// Shutdown grace period was exceeded; some tasks remained stuck and had to be force-terminated.
+    /// Shutdown grace period was exceeded.
+    ///
+    /// Some tasks did not stop in time and had to be force-terminated.
     #[error("shutdown timeout {grace:?} exceeded; stuck: {stuck:?}; forcing termination")]
     GraceExceeded {
-        /// The configured grace duration.
+        /// Configured shutdown grace duration.
         grace: Duration,
-        /// List of task names that did not shut down in time.
+        /// Task names that did not stop in time.
         stuck: Vec<Arc<str>>,
     },
-    /// Attempted to add a task with a name that already exists in the registry.
+
+    /// A task with the same name is already registered.
     #[error("task '{name}' already exists in registry")]
     TaskAlreadyExists {
-        /// The duplicate task name.
+        /// Duplicate task name.
         name: Arc<str>,
     },
-    /// A cancelled task did not confirm termination within the wait window.
+
+    /// Timed out while waiting for removal confirmation.
     #[error("timeout waiting for task {id} removal after {timeout:?}")]
     TaskRemoveTimeout {
-        /// The runtime identity that did not stop in time.
+        /// Task id that did not report removal in time.
         id: TaskId,
-        /// How long we waited before giving up.
+        /// Wait duration before timing out.
         timeout: Duration,
     },
-    /// Timeout waiting for task registration confirmation.
+
+    /// Timed out while waiting for registration confirmation.
     #[error("timeout waiting for task '{name}' registration after {timeout:?}")]
     TaskAddTimeout {
-        /// The task name that was not registered in time.
+        /// Task name that was not confirmed in time.
         name: Arc<str>,
-        /// How long we waited.
+        /// Wait duration before timing out.
         timeout: Duration,
     },
-    /// OS signal-listener registration failed; signal-based shutdown is unavailable.
+
+    /// OS signal listener setup failed.
+    ///
+    /// Signal-based shutdown is unavailable.
+    /// The original [`std::io::Error`] is preserved as the source.
     #[error("failed to install shutdown signal handlers: {source}")]
     SignalSetupFailed {
-        /// The underlying I/O error from signal registration (preserves [`ErrorKind`](std::io::ErrorKind)).
+        /// I/O error returned by signal registration.
         #[source]
         source: std::io::Error,
     },
-    /// The supervisor runtime is shutting down; the command channel is closed.
+
+    /// The runtime is shutting down and no longer accepts commands.
     #[error("supervisor is shutting down")]
     ShuttingDown,
+
+    /// [`Supervisor::run`](crate::Supervisor::run) was called more than once.
+    ///
+    /// A supervisor run is single-shot.
+    #[error("supervisor run() was already started")]
+    AlreadyRunning,
 }
 
 impl RuntimeError {
-    /// Returns a short stable label (snake_case) for use in logs/metrics.
+    /// Returns a stable machine-readable label for logs and metrics.
+    ///
+    /// This label is not the same as `Display`.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
@@ -83,61 +98,81 @@ impl RuntimeError {
             RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
+            RuntimeError::AlreadyRunning => "runtime_already_running",
         }
     }
 }
 
-/// # Errors produced by task execution.
+/// Errors returned by a task attempt.
 ///
-/// These represent failures of individual async tasks managed by the runtime.
-/// Some errors are retryable (`Timeout`, `Fail`), others are considered fatal.
+/// A task returns `Result<(), TaskError>` from [`Task::spawn`](crate::Task::spawn).
+///
+/// Restart behavior:
+/// - [`Canceled`](Self::Canceled) is cooperative shutdown and is not retried,
+/// - [`Fatal`](Self::Fatal) is not retryable,
+/// - [`Timeout`](Self::Timeout) is retryable,
+/// - [`Fail`](Self::Fail) is retryable.
+///
+/// Match with a wildcard arm because this enum is non-exhaustive.
 ///
 /// # Also
 ///
-/// - [`Task`](crate::Task) - trait whose [`spawn`](crate::Task::spawn) returns `Result<(), TaskError>`
-/// - [`RestartPolicy`](crate::RestartPolicy) - determines restart behavior based on error variant
+/// - [`Task`](crate::Task) - task trait
+/// - [`RestartPolicy`](crate::RestartPolicy) - decides whether retryable errors restart
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum TaskError {
-    /// Task execution exceeded its timeout duration.
+    /// The attempt exceeded its configured timeout.
     #[error("timed out after {timeout:?}")]
-    Timeout { timeout: Duration },
+    Timeout {
+        /// Timeout duration that was exceeded.
+        timeout: Duration,
+    },
 
-    /// Non-recoverable fatal error (should not be retried).
+    /// Permanent task failure.
+    ///
+    /// This stops the actor and is not retried.
     #[error("fatal error (no retry): {reason}")]
     #[non_exhaustive]
     Fatal {
-        /// Human-readable failure reason (rendered by `Display`).
+        /// Human-readable failure reason.
         reason: String,
-        /// Numeric exit code when the error came from a process-like runtime;
-        /// `None` for logical errors with no process behind them.
+        /// Process-style exit code, when available.
+        ///
+        /// `None` means this was a logical error with no process exit code.
         exit_code: Option<i32>,
-        /// Underlying error, preserved for [`source`](std::error::Error::source) chains.
+        /// Underlying error preserved for source chains.
         #[source]
         source: Option<BoxError>,
     },
 
-    /// Task execution failed but may succeed if retried.
+    /// Retryable task failure.
+    ///
+    /// The actor may restart after this error, depending on restart policy.
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
-        /// Human-readable failure reason (rendered by `Display`).
+        /// Human-readable failure reason.
         reason: String,
-        /// Numeric exit code when the error came from a process-like runtime;
-        /// `None` for logical errors with no process behind them.
+        /// Process-style exit code, when available.
+        ///
+        /// `None` means this was a logical error with no process exit code.
         exit_code: Option<i32>,
-        /// Underlying error, preserved for [`source`](std::error::Error::source) chains.
+        /// Underlying error preserved for source chains.
         #[source]
         source: Option<BoxError>,
     },
 
-    /// Task was canceled due to shut down or parent cancellation.
+    /// Cooperative cancellation.
+    ///
+    /// Tasks should return this when they stop because [`TaskContext`](crate::TaskContext)
+    /// was cancelled.
     #[error("context canceled")]
     Canceled,
 }
 
 impl TaskError {
-    /// A retryable failure with a human-readable reason and no underlying error.
+    /// Creates a retryable failure with no source error.
     pub fn fail(reason: impl Into<String>) -> Self {
         TaskError::Fail {
             reason: reason.into(),
@@ -146,7 +181,7 @@ impl TaskError {
         }
     }
 
-    /// A permanent (non-retryable) failure with a human-readable reason and no underlying error.
+    /// Creates a permanent failure with no source error.
     pub fn fatal(reason: impl Into<String>) -> Self {
         TaskError::Fatal {
             reason: reason.into(),
@@ -155,7 +190,10 @@ impl TaskError {
         }
     }
 
-    /// A retryable failure wrapping an underlying error.
+    /// Creates a retryable failure from a source error.
+    ///
+    /// The display reason is copied from `source.to_string()`.
+    /// The original error remains available through [`std::error::Error::source`].
     pub fn fail_from<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -167,7 +205,10 @@ impl TaskError {
         }
     }
 
-    /// A permanent failure wrapping an underlying error (see [`fail_from`](Self::fail_from)).
+    /// Creates a permanent failure from a source error.
+    ///
+    /// The display reason is copied from `source.to_string()`.
+    /// The original error remains available through [`std::error::Error::source`].
     pub fn fatal_from<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -179,7 +220,9 @@ impl TaskError {
         }
     }
 
-    /// Builder: attach a process-style exit code to a [`Fail`](Self::Fail)/[`Fatal`](Self::Fatal) error.
+    /// Attaches a process-style exit code to `Fail` or `Fatal`.
+    ///
+    /// No-op for `Timeout` and `Canceled`.
     #[must_use]
     pub fn with_exit_code(mut self, code: impl Into<Option<i32>>) -> Self {
         let code = code.into();
@@ -189,7 +232,9 @@ impl TaskError {
         self
     }
 
-    /// Builder: attach an underlying source error to a [`Fail`](Self::Fail)/[`Fatal`](Self::Fatal) error.
+    /// Attaches a source error to `Fail` or `Fatal`.
+    ///
+    /// No-op for `Timeout` and `Canceled`.
     #[must_use]
     pub fn with_source(mut self, source: impl Into<BoxError>) -> Self {
         if let TaskError::Fail { source: s, .. } | TaskError::Fatal { source: s, .. } = &mut self {
@@ -198,7 +243,7 @@ impl TaskError {
         self
     }
 
-    /// Consumes the error and returns its underlying source, if any.
+    /// Consumes the error and returns its boxed source, if any.
     #[must_use]
     pub fn into_source(self) -> Option<BoxError> {
         match self {
@@ -207,7 +252,9 @@ impl TaskError {
         }
     }
 
-    /// Returns a short stable label.
+    /// Returns a stable machine-readable label for logs and metrics.
+    ///
+    /// This label is not the same as `Display`.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
@@ -218,20 +265,19 @@ impl TaskError {
         }
     }
 
-    /// Indicates whether the error type is safe to retry.
+    /// Returns `true` for errors that may be retried by restart policy.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, TaskError::Timeout { .. } | TaskError::Fail { .. })
     }
 
-    /// Indicates whether the error is fatal.
+    /// Returns `true` for [`TaskError::Fatal`].
     #[must_use]
     pub fn is_fatal(&self) -> bool {
         matches!(self, TaskError::Fatal { .. })
     }
 
-    /// Numeric exit code when the error originated from a process-like runtime.
-    /// `None` for `Timeout`, `Canceled`, and for logical `Fail`/`Fatal` errors that have no process behind them.
+    /// Returns the process-style exit code, if one was attached.
     #[must_use]
     pub fn exit_code(&self) -> Option<i32> {
         match self {
@@ -269,7 +315,6 @@ mod tests {
 
     #[test]
     fn exit_code_is_none_for_timeout_and_canceled() {
-        use std::time::Duration;
         assert_eq!(
             TaskError::Timeout {
                 timeout: Duration::from_secs(1),
@@ -323,6 +368,7 @@ mod tests {
     #[test]
     fn with_exit_code_accepts_bare_and_option() {
         assert_eq!(TaskError::fail("x").with_exit_code(7).exit_code(), Some(7));
+
         let dynamic: Option<i32> = None;
         assert_eq!(
             TaskError::fail("y").with_exit_code(dynamic).exit_code(),
@@ -337,6 +383,7 @@ mod tests {
 
         assert!(e.is_fatal());
         assert!(!e.is_retryable());
+
         let src = std::error::Error::source(&e).expect("source present");
         assert_eq!(
             src.downcast_ref::<std::io::Error>().unwrap().kind(),
@@ -350,6 +397,7 @@ mod tests {
         let e = RuntimeError::SignalSetupFailed { source: io };
 
         assert!(e.to_string().contains("in use"));
+
         let src = std::error::Error::source(&e).expect("source present");
         assert_eq!(
             src.downcast_ref::<std::io::Error>().unwrap().kind(),

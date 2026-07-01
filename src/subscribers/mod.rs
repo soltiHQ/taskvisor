@@ -1,22 +1,28 @@
-//! # Subscriber infrastructure.
+//! # Subscriber.
 //!
-//! [`Subscribe`] is the trait you implement to consume runtime events.
-//! The supervisor delivers events to each subscriber via a dedicated bounded queue and worker task.
+//! Subscribers observe runtime events without blocking the supervisor.
 //!
-//! See [`Subscribe`] for the full contract.
+//! [`Subscribe`] is the trait for custom event handlers.
+//! Each subscriber gets its own bounded queue and one worker task.
+//! A slow subscriber can overflow its own queue, but it does not block other subscribers or task execution.
 //!
-//! ## Overview
+//! Delivery is best-effort: events may be dropped if the bus or a subscriber queue falls behind.
+//! Drops and subscriber panics are reported as diagnostic events when possible.
+//!
+//! See [`Subscribe`] for the public contract.
+//!
+//! ## Flow
 //!
 //! ```text
-//! Bus (broadcast) ──► Supervisor::subscriber_listener
+//! Bus (broadcast) ──► internal subscriber listener
 //!                         ├─► AliveTracker::update()
 //!                         └─► SubscriberSet::emit_arc()
-//!                                   ├─► [queue for S1] ──► worker ──► S1.on_event()
-//!                                   ├─► [queue for S2] ──► worker ──► S2.on_event()
+//!                                   ├─► [queue S1] ──► worker ──► S1.on_event()
+//!                                   ├─► [queue S2] ──► worker ──► S2.on_event()
 //!                                   └─► ...
 //! ```
 //!
-//! See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for the event structure.
+//! See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for event data.
 
 mod subscriber;
 mod subscriber_set;

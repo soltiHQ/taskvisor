@@ -1,111 +1,71 @@
 //! # taskvisor
 //!
-//! **Taskvisor** is a lightweight task orchestration library for Rust.
+//! Taskvisor is a small async task supervisor for Rust.
 //!
-//! It provides primitives to define, supervise, and restart async tasks with configurable policies.
-//! The crate is designed as a building block for higher-level orchestrators and agents.
+//! It helps you run named async tasks with:
 //!
-//! ## Architecture
-//! ### Overview
+//! - restart policies,
+//! - retry backoff,
+//! - per-attempt timeout,
+//! - cooperative cancellation,
+//! - lifecycle events,
+//! - optional final outcomes through `*_and_watch` APIs.
 //!
-//! ```text
-//!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-//!     │   TaskSpec   │   │   TaskSpec   │   │   TaskSpec   │
-//!     │(user task #1)│   │(user task #2)│   │(user task #3)│
-//!     └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
-//!            ▼                  ▼                  ▼
-//! ┌───────────────────────────────────────────────────────────────────┐
-//! │  Supervisor (runtime orchestrator)                                │
-//! │  - Bus (broadcast events)                                         │
-//! │  - AliveTracker (tracks task state with sequence numbers)         │
-//! │  - SubscriberSet (fans out to user subscribers)                   │
-//! │  - Registry (manages active tasks by name)                        │
-//! └──────┬──────────────────┬──────────────────┬───────────────┬──────┘
-//!        ▼                  ▼                  ▼               │
-//!     ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   │
-//!     │  TaskActor   │   │  TaskActor   │   │  TaskActor   │   │
-//!     │ (retry loop) │   │ (retry loop) │   │ (retry loop) │   │
-//!     └┬─────────────┘   └┬─────────────┘   └┬─────────────┘   │
-//!      │                  │                  │                 │
-//!      │ Publishes        │ Publishes        │ Publishes       │
-//!      │ Events:          │ Events:          │ Events:         │
-//!      │ - TaskStarting   │ - TaskStarting   │ - TaskStarting  │
-//!      │ - TaskFailed     │ - TaskStopped    │ - TimeoutHit    │
-//!      │ - BackoffSched.  │ - ActorExhausted │ - ...           │
-//!      │                  │                  │                 │
-//!      ▼                  ▼                  ▼                 ▼
-//! ┌───────────────────────────────────────────────────────────────────┐
-//! │                        Bus (broadcast channel)                    │
-//! │              (capacity: SupervisorConfig::bus_capacity)           │
-//! └─────────────────────────────────┬─────────────────────────────────┘
-//!                                   ▼
-//!                       ┌────────────────────────┐
-//!                       │  subscriber_listener   │
-//!                       │   (in Supervisor)      │
-//!                       └───┬────────────────┬───┘
-//!                           ▼                ▼
-//!                    AliveTracker     SubscriberSet
-//!                  (sequence-based)   (per-sub queues)
-//!                                  ┌─────────┼─────────┐
-//!                                  ▼         ▼         ▼
-//!                                  worker1  worker2  workerN
-//!                                  ▼         ▼         ▼
-//!                             sub1.on   sub2.on   subN.on
-//!                              _event()  _event()  _event()
-//! ```
+//! The crate is meant to be a building block for services, agents, workers, and higher-level orchestration SDKs.
 //!
-//! ### Lifecycle
+//! ## Core Model
 //!
 //! ```text
-//! TaskSpec ──► Supervisor ──► Registry ──► TaskActor::run()
-//!
-//! loop {
-//!   ├─► attempt += 1
-//!   ├─► acquire semaphore (optional, cancellable)
-//!   ├─► publish TaskStarting{ task, attempt }
-//!   ├─► run_once(task, timeout, attempt)
-//!   │       │
-//!   │       ├─ Ok  ──► publish TaskStopped
-//!   │       │          ├─ RestartPolicy::Never     ─► ActorExhausted, exit
-//!   │       │          ├─ RestartPolicy::OnFailure ─► ActorExhausted, exit
-//!   │       │          └─ RestartPolicy::Always    ─► reset delay, continue
-//!   │       │
-//!   │       └─ Err ──► publish TaskFailed{ task, error, attempt }
-//!   │                  ├─ RestartPolicy::Never     ─► ActorExhausted, exit
-//!   │                  └─ RestartPolicy::OnFailure/Always:
-//!   │                       ├─ compute delay = backoff.next(backoff_attempt)
-//!   │                       ├─ publish BackoffScheduled{ delay, attempt }
-//!   │                       ├─ sleep(delay) (cancellable)
-//!   │                       └─ continue
-//!   │
-//!   └─ exit conditions:
-//!        - runtime_token cancelled (OS signal or explicit remove)
-//!        - RestartPolicy forbids continuation ─► ActorExhausted
-//!        - Fatal error ─► ActorDead
-//!        - semaphore closed
-//! }
-//!
-//! On exit: actor cleanup removes from Registry (if PolicyExhausted/Fatal)
+//! TaskFn / impl Task
+//!        |
+//!        v
+//!     TaskSpec
+//!        |
+//!        v
+//!   Supervisor ---- publishes ----> Event bus ----> Subscribe
+//!        |
+//!        v
+//!    TaskActor
+//!   (attempt loop)
 //! ```
 //!
-//! ## Features
+//! A [`Task`] is the user unit of work.
+//! A [`TaskSpec`] configures how that task runs.
+//! A [`Supervisor`] owns the runtime and manages task lifecycle.
+//! A [`Subscribe`] implementation can observe lifecycle events.
 //!
-//! | Area              | Description                                                            | Key types / traits                     |
-//! |-------------------|------------------------------------------------------------------------|----------------------------------------|
-//! | **Subscriber API**| Hook into task lifecycle events (logging, metrics, custom subscribers).| [`Subscribe`]                          |
-//! | **Policies**      | Configure restart/backoff strategies for tasks.                        | [`RestartPolicy`], [`BackoffPolicy`]   |
-//! | **Supervision**   | Manage groups of tasks and their lifecycle.                            | [`Supervisor`], [`SupervisorHandle`]   |
-//! | **Completion**    | Opt in (via `*_and_watch`) to await a task's final result.             | [`TaskWaiter`], [`TaskOutcome`]        |
-//! | **Errors**        | Typed errors for orchestration and task execution.                     | [`TaskError`], [`RuntimeError`]        |
-//! | **Tasks**         | Define tasks as functions or specs, easy to compose and run.           | [`TaskRef`], [`TaskFn`], [`TaskSpec`]  |
-//! | **Configuration** | Centralize runtime settings.                                           | [`SupervisorConfig`]                   |
+//! ## Task Lifecycle
 //!
-//! ## Optional features
+//! ```text
+//! add task
+//!   -> TaskStarting
+//!   -> task attempt runs
+//!   -> TaskStopped / TaskFailed / TimeoutHit / TaskCanceled
+//!   -> restart, backoff, or finish
+//!   -> TaskRemoved
+//! ```
 //!
-//! - `logging`: exports a simple built-in `LogWriter` _(demo/reference only)_.
-//! - `controller`:  exposes controller runtime and admission types.
+//! Events are best-effort observability.
+//! If you need a guaranteed final result for one task, use [`SupervisorHandle::add_and_watch`] or, with the `controller` feature, `submit_and_watch`.
 //!
-//! ## Example
+//! ## Main Types
+//!
+//! | Area     | Types                                                      |
+//! |----------|------------------------------------------------------------|
+//! | Tasks    | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]        |
+//! | Runtime  | [`Supervisor`], [`SupervisorHandle`], [`SupervisorConfig`] |
+//! | Outcomes | [`TaskWaiter`], [`TaskOutcome`]                            |
+//! | Policies | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]     |
+//! | Events   | [`Event`], [`EventKind`], [`Subscribe`]                    |
+//! | Errors   | [`TaskError`], [`RuntimeError`]                            |
+//!
+//! ## Optional Features
+//!
+//! - `controller`: slot-based admission control with [`ControllerSpec`], [`AdmissionPolicy`], and [`ControllerConfig`].
+//! - `tokio-util-interop`: exposes raw `tokio_util::sync::CancellationToken` interop through [`TaskContext`] and the prelude.
+//! - `logging`: built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
+//!
+//! ## Quick Start
 //!
 //! ```rust
 //! use taskvisor::prelude::*;
@@ -114,24 +74,25 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
-//!     // Define a simple task that runs once and exits
 //!     let hello: TaskRef = TaskFn::arc("hello", |ctx: TaskContext| async move {
-//!         if ctx.is_cancelled() { return Ok(()); }
+//!         if ctx.is_cancelled() {
+//!             return Ok(());
+//!         }
+//!
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     // One-shot task (runs once, never restarts)
 //!     let spec = TaskSpec::once(hello);
-//!
 //!     sup.run(vec![spec]).await?;
+//!
 //!     Ok(())
 //! }
 //! ```
 
 #![forbid(unsafe_code)]
 
-/// Compiles the runnable Rust code blocks in `README.md` as doctests
+/// Compiles runnable Rust code blocks in `README.md` as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;

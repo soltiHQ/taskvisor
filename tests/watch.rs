@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use common::*;
@@ -26,7 +27,7 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
 
     let spec = TaskSpec::restartable(make_fail("drifter", Some(9)))
         .with_backoff(fast_backoff())
-        .with_max_retries(2);
+        .with_max_retries(NonZeroU32::new(2).unwrap());
     let (id, waiter) = handle
         .add_and_watch(spec, ADD_TIMEOUT)
         .await
@@ -93,7 +94,7 @@ async fn failed_outcome_carries_reason_and_exit_code() {
 
     let spec = TaskSpec::restartable(make_fail("flaky", Some(7)))
         .with_backoff(fast_backoff())
-        .with_max_retries(2);
+        .with_max_retries(NonZeroU32::new(2).unwrap());
     let (_id, waiter) = handle
         .add_and_watch(spec, ADD_TIMEOUT)
         .await
@@ -376,7 +377,7 @@ async fn outcome_is_delivered_even_under_bus_lag() {
 
     let spec = TaskSpec::restartable(make_fail("noisy", None))
         .with_backoff(fast_backoff())
-        .with_max_retries(5);
+        .with_max_retries(NonZeroU32::new(5).unwrap());
     let (_id, waiter) = handle
         .add_and_watch(spec, ADD_TIMEOUT)
         .await

@@ -91,7 +91,7 @@ impl Subscribe for Metrics {
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "metrics"
     }
 

@@ -39,7 +39,7 @@ taskvisor gives you a **supervised** handle instead: it restarts the task on fai
 |     | Feature                   | What you get                                                                |
 |:---:|---------------------------|-----------------------------------------------------------------------------|
 | 🔁  | **Restart policies**      | `Never`, `OnFailure`, or `Always { interval }`: chosen per task             |
-|  ⏳  | **Backoff with jitter**   | Exponential, constant, or decorrelated; spreads retries out in time         |
+|  ⏳  | **Backoff with jitter**   | Exponential, constant, or randomized-band; spreads retries out in time      |
 | 📡  | **Structured events**     | Every start, stop, failure, timeout, and backoff on a broadcast bus         |
 | 🔌  | **Pluggable subscribers** | Implement one method (`on_event`) for metrics, alerts, or logging           |
 | 🎯  | **Guaranteed outcomes**   | `await` a task's final `TaskOutcome`, even if events are dropped under load |
@@ -227,7 +227,7 @@ let spec = TaskSpec::restartable(task);
 
 // Full control
 let spec = TaskSpec::new(task, RestartPolicy::Always { interval: None }, backoff, Some(timeout))
-    .with_max_retries(5);
+    .with_max_retries(std::num::NonZeroU32::new(5).unwrap()); // None (omit) = unlimited
 ```
 
 **RestartPolicy** - Controls when a task restarts after it exits:
@@ -239,7 +239,8 @@ let spec = TaskSpec::new(task, RestartPolicy::Always { interval: None }, backoff
 | `Always { interval }`   | Always restarts.                                |
 
 **BackoffPolicy** - Controls retry delay after failure. 
-Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied:
+Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is applied.
+A non-zero delay is floored to at least `1ms` (capped at `max`) to avoid a restart hot-spin (`first = 0` opts out):
 
 | Field    | Default  | Meaning                                      |
 |----------|----------|----------------------------------------------|
@@ -255,7 +256,7 @@ Delay for attempt `n` = `first * factor^n`, capped at `max`, then jitter is appl
 | `None`                  | exact delay                      | Single task, predictable timing        |
 | `Full`                  | `[0, delay]`                     | Maximum spread needed                  |
 | `Equal` *(recommended)* | `[delay/2, delay]`               | Balanced; keeps about 75% of the delay |
-| `Decorrelated`          | `[base, base*3]` capped at `max` | Self-adjusting; widens with each retry |
+| `RandomizedBand`        | `[first, min(base*3, max)]`      | Widest spread; can exceed the base     |
 
 **Events & Subscribe** - Every lifecycle change is published to a broadcast bus. 
 Implement `Subscribe` to observe them. 
@@ -268,7 +269,7 @@ Return these from your task to control what happens next:
 | Return                           | Retryable | What happens                                                                |
 |----------------------------------|-----------|-----------------------------------------------------------------------------|
 | `Ok(())`                         | -         | Task completed. `RestartPolicy` decides next step.                          |
-| `panic!` in the task body        | Yes       | Caught and converted to `TaskError::Fail`; backoff, then retry per policy.  |
+| `panic!` in the task body        | Yes\*     | Caught and converted to `TaskError::Fail`; backoff, then retry per policy.  |
 | `Err(TaskError::fail(reason))`   | Yes       | Retryable failure. Backoff, then retry. Wrap a cause with `fail_from(err)`. |
 | `Err(TaskError::Timeout { .. })` | Yes       | Set automatically when per-task timeout is exceeded.                        |
 | `Err(TaskError::fatal(reason))`  | No        | Permanent failure. Actor stops, publishes `ActorDead`. See `fatal_from`.    |
@@ -317,7 +318,7 @@ let backoff = BackoffPolicy::new(
 // Task gets 5s per attempt, max 3 retries.
 // If exceeded: TimeoutHit event + TaskError::Timeout + backoff + retry.
 let spec = TaskSpec::new(task, RestartPolicy::OnFailure, backoff, Some(Duration::from_secs(5)))
-    .with_max_retries(3);
+    .with_max_retries(std::num::NonZeroU32::new(3).unwrap());
 ```
 
 ### Custom subscriber (metrics)
@@ -404,14 +405,14 @@ Each event carries: `kind`, `id` (the task's `TaskId`), `task` (name), `attempt`
 ## Configuration
 
 ```rust,no_run
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 use taskvisor::{SupervisorConfig, RestartPolicy, BackoffPolicy};
 
 let mut cfg = SupervisorConfig::default();
 cfg.grace = Duration::from_secs(30);              // shutdown grace period
 cfg.timeout = Some(Duration::from_secs(5));       // default per-task timeout (None = no timeout)
-cfg.max_retries = 10;                             // default max retries (0 = unlimited)
+cfg.max_retries = NonZeroU32::new(10);            // default max retries (None = unlimited)
 cfg.max_concurrent = NonZeroUsize::new(4);        // task concurrency limit (None = unlimited)
 cfg.bus_capacity = 2048;                          // event bus ring buffer size
 cfg.restart = RestartPolicy::OnFailure;
@@ -422,7 +423,7 @@ cfg.backoff = BackoffPolicy::default();
 |------------------|--------------------------|--------------------------------------------------------|
 | `grace`          | `60s`                    | How long to wait for tasks to stop on shutdown         |
 | `timeout`        | `None`                   | Default per-task attempt timeout (`None` = no timeout) |
-| `max_retries`    | `0` (unlimited)          | Default max failure-driven retries                     |
+| `max_retries`    | `None` (unlimited)       | Default max failure-driven retries (`Some(n)` = limit) |
 | `max_concurrent` | `None` (unlimited)       | Global semaphore for running tasks (`Some(n)` permits) |
 | `bus_capacity`   | `1024`                   | Broadcast channel size. Slow subscribers see `Lagged`  |
 | `restart`        | `OnFailure`              | Default restart policy for tasks                       |

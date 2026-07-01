@@ -390,9 +390,9 @@ async fn controller_many_distinct_slots_all_settle() {
         for s in 0..S {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                let spec = TaskSpec::restartable(make_coop(&format!("svc-{s}")))
-                    .with_slot(format!("slot-{s}"));
-                h.submit(ControllerSpec::queue(spec)).await
+                let spec = TaskSpec::restartable(make_coop(&format!("svc-{s}")));
+                h.submit(ControllerSpec::queue(spec).with_slot(format!("slot-{s}")))
+                    .await
             }));
         }
         for j in joins {
@@ -431,8 +431,8 @@ async fn controller_replace_storm_single_slot_one_alive() {
         for i in 0..K {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                let spec = TaskSpec::restartable(make_coop(&format!("run-{i}"))).with_slot("s");
-                h.submit(ControllerSpec::replace(spec)).await
+                let spec = TaskSpec::restartable(make_coop(&format!("run-{i}")));
+                h.submit(ControllerSpec::replace(spec).with_slot("s")).await
             }));
         }
         for j in joins {
@@ -484,8 +484,9 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
         for i in 0..K {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                let spec = TaskSpec::restartable(make_coop(&format!("d-{i}"))).with_slot("s");
-                h.submit(ControllerSpec::drop_if_running(spec)).await
+                let spec = TaskSpec::restartable(make_coop(&format!("d-{i}")));
+                h.submit(ControllerSpec::drop_if_running(spec).with_slot("s"))
+                    .await
             }));
         }
         for j in joins {

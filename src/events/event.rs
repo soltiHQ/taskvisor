@@ -1,16 +1,39 @@
-//! # Runtime events emitted by the supervisor and task actors.
+//! # Runtime event model.
 //!
-//! The [`EventKind`] enum classifies event types across three categories:
-//! - **Management events**: runtime task control (add/remove requests and confirmations)
-//! - **Lifecycle events**: task execution flow (starting, stopped, failed, timeout)
-//! - **Terminal events**: actor final states (exhausted policy, dead)
+//! This module defines the event records emitted by taskvisor.
 //!
-//! The [`Event`] struct carries additional metadata such as timestamps, task name, reasons, and backoff delays.
+//! Events are used for observability: logs, metrics, dashboards, tests, and subscriber integrations.
+//! Delivery is best-effort; consumers can lag and miss events. Do not use the event bus as durable storage.
 //!
-//! ## Ordering guarantees
+//! | Type              | Role                                       |
+//! |-------------------|--------------------------------------------|
+//! | [`EventKind`]     | Event classification                       |
+//! | [`Event`]         | Event payload and metadata                 |
+//! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
 //!
-//! Each event has a globally unique sequence number (`seq`) that increases monotonically.
-//! Use `seq` to restore the exact order when events are delivered out of order.
+//! ## Sequence Numbers
+//!
+//! Each event has a unique, increasing `seq` assigned when the event is created.
+//! `seq` is useful for sorting and de-duplication after a lag gap. `seq` is not a causal clock.
+//! With concurrent publishers, it reflects event construction order, not a guaranteed runtime order.
+//!
+//! ## Field Model
+//!
+//! [`Event`] is a flat record with optional fields. Which fields are set depends on [`EventKind`].
+//!
+//! Common fields:
+//! - `seq`: unique event sequence.
+//! - `at`: wall-clock timestamp.
+//! - `kind`: event type.
+//!
+//! Correlation fields:
+//! - `id`: runtime task identity, when the event belongs to a task run.
+//! - `attempt`: task attempt number, starting from 1.
+//! - `task`: a task name or subscriber name.
+//!
+//! Timing fields are stored in milliseconds and saturate at `u32::MAX`.
+//!
+//! `reason` is a diagnostic text unless a variant documents a small stable set of values.
 //!
 //! ## Example
 //!
@@ -22,11 +45,12 @@
 //!     .with_task("demo-task")
 //!     .with_reason("boom")
 //!     .with_attempt(3)
-//!     .with_timeout(Duration::from_secs(5));
+//!     .with_duration(Duration::from_millis(42));
 //!
 //! assert_eq!(ev.kind, EventKind::TaskFailed);
 //! assert_eq!(ev.task.as_deref(), Some("demo-task"));
 //! assert_eq!(ev.reason.as_deref(), Some("boom"));
+//! assert_eq!(ev.duration_ms, Some(42));
 //! ```
 
 use std::sync::Arc;
@@ -35,10 +59,13 @@ use std::time::{Duration, SystemTime};
 
 use crate::identity::TaskId;
 
-/// Global sequence counter for event ordering.
+/// Global counter minting unique, monotonic `seq` values at event construction.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Classification of runtime events.
+///
+/// Every event has `seq`, `at`, and `kind`.
+/// Variant docs list only the additional fields normally set by the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventKind {
@@ -54,8 +81,8 @@ pub enum EventKind {
     /// Subscriber dropped an event (queue full or worker closed).
     ///
     /// Sets:
-    /// - `task`: subscriber name
-    /// - `reason`: reason string (e.g., "full", "closed")
+    /// - `task`: subscriber name (or the internal consumer that lagged)
+    /// - `reason`: bare cause — `"full"`, `"closed"`, or `"lagged(n)"`
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     SubscriberOverflow,
@@ -93,41 +120,45 @@ pub enum EventKind {
     /// Task attempt finished successfully.
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: attempt number
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `duration_ms`: attempt duration
     TaskStopped,
 
-    /// Task attempt exited via graceful cancellation (`TaskError::Canceled` returned while its token was cancelled).
+    /// Task attempt returned [`TaskError::Canceled`](crate::TaskError::Canceled).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: attempt number
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `duration_ms`: attempt duration
     TaskCanceled,
 
-    /// Task failed with a (non-fatal) error for this attempt.
+    /// Task attempt returned an error.
+    ///
+    /// This includes retryable failures, timeouts, and fatal errors.
+    /// The actor later decides whether to retry, exhaust, or die.
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: attempt number
-    /// - `reason`: failure message
-    /// - `exit_code`: numeric exit code when the error came from a
-    ///   process-like runtime; `None` for logical errors
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `duration_ms`: attempt duration
+    /// - `reason`: error message
+    /// - `exit_code`: process-like exit code, when available
     TaskFailed,
 
     /// Task exceeded its configured timeout for this attempt.
     ///
+    /// A timeout is followed by a `TaskFailed` event carrying `TaskError::Timeout`.
+    ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: attempt number
-    /// - `timeout_ms`: configured attempt timeout (ms)
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `timeout_ms`: configured timeout
+    /// - `duration_ms`: elapsed attempt duration
     TimeoutHit,
 
     /// Next attempt scheduled (after success or failure).
@@ -224,7 +255,9 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `id`: the rejected submission's [`TaskId`]
+    /// - `id`: the rejected submission's [`TaskId`], when the rejection concerns a specific
+    ///   submission. Absent for slot- or loop-level diagnostics that have no submission behind
+    ///   them (e.g. a failed recovery cleanup or the controller loop exiting).
     /// - `reason`: rejection reason ("queue_full", "add_failed: ...", "superseded_by_replace", "controller_shutting_down", etc)
     ControllerRejected,
 
@@ -234,15 +267,16 @@ pub enum EventKind {
     /// Sets:
     /// - `task`: slot name
     /// - `id`: the submission's [`TaskId`]
-    /// - `reason`: "admission={admission} status={status} depth={N}"
+    /// - `reason`: a human-readable admission summary, e.g. `admission=Queue status=admitting` or
+    ///   `started_from_queue depth=N` (exact text is diagnostic, not a stable contract)
     ControllerSubmitted,
 
     #[cfg(feature = "controller")]
-    /// Slot transitioned state (Running → Terminating, etc).
+    /// Slot transitioned state (e.g. Admitting → Running, Running → Terminating).
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: "running→terminating" (Replace), "terminating→idle", etc
+    /// - `reason`: the transition, e.g. `admitting→running`, `running→terminating (replace)`, `admitting→running (lag recovery)`
     ControllerSlotTransition,
 }
 
@@ -251,14 +285,16 @@ pub enum EventKind {
 /// A closed set (success vs failure); intentionally **not** `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackoffSource {
+    /// Delay after a successful attempt under `RestartPolicy::Always`.
     Success,
+    /// Delay after a retryable failure.
     Failure,
 }
 
 /// Runtime event with optional metadata.
 ///
-/// - `seq`: monotonic global sequence for ordering
 /// - `at`: wall-clock timestamp (for logs)
+/// - `seq`: globally unique, monotonic sequence (construction order; see the module-level "Sequence numbers" note)
 /// - other optional fields are set depending on the [`EventKind`]
 ///
 /// Fields are public for reading;
@@ -409,33 +445,22 @@ impl Event {
     /// Creates a subscriber overflow event.
     #[inline]
     #[must_use]
-    pub fn subscriber_overflow(subscriber: &'static str, reason: &'static str) -> Self {
+    pub fn subscriber_overflow(
+        subscriber: impl Into<Arc<str>>,
+        reason: impl Into<Arc<str>>,
+    ) -> Self {
         Event::new(EventKind::SubscriberOverflow)
             .with_task(subscriber)
-            .with_reason(format!("subscriber={subscriber} reason={reason}"))
+            .with_reason(reason)
     }
 
     /// Creates a subscriber panic event.
     #[inline]
     #[must_use]
-    pub fn subscriber_panicked(subscriber: &'static str, info: String) -> Self {
+    pub fn subscriber_panicked(subscriber: impl Into<Arc<str>>, info: impl Into<Arc<str>>) -> Self {
         Event::new(EventKind::SubscriberPanicked)
             .with_task(subscriber)
             .with_reason(info)
-    }
-
-    /// Returns `true` if this is a [`EventKind::SubscriberOverflow`] event.
-    #[inline]
-    #[must_use]
-    pub fn is_subscriber_overflow(&self) -> bool {
-        matches!(self.kind, EventKind::SubscriberOverflow)
-    }
-
-    /// Returns `true` if this is a [`EventKind::SubscriberPanicked`] event.
-    #[inline]
-    #[must_use]
-    pub fn is_subscriber_panic(&self) -> bool {
-        matches!(self.kind, EventKind::SubscriberPanicked)
     }
 
     /// Returns `true` for internal diagnostic events.
@@ -475,6 +500,9 @@ impl std::fmt::Debug for Event {
         if let Some(duration_ms) = self.duration_ms {
             d.field("duration_ms", &duration_ms);
         }
+        if let Some(exit_code) = self.exit_code {
+            d.field("exit_code", &exit_code);
+        }
         if let Some(ref src) = self.backoff_source {
             d.field("backoff_source", src);
         }
@@ -494,66 +522,120 @@ mod tests {
     }
 
     #[test]
-    fn with_timeout_clamps_large_duration() {
-        let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
-        let ev = Event::new(EventKind::TimeoutHit).with_timeout(huge);
-        assert_eq!(ev.timeout_ms, Some(u32::MAX));
+    fn new_event_leaves_all_optionals_empty() {
+        let ev = Event::new(EventKind::TaskStarting);
+        assert_eq!(ev.timeout_ms, None);
+        assert_eq!(ev.delay_ms, None);
+        assert_eq!(ev.duration_ms, None);
+        assert_eq!(ev.attempt, None);
+        assert_eq!(ev.exit_code, None);
+        assert_eq!(ev.reason, None);
+        assert_eq!(ev.task, None);
+        assert_eq!(ev.id, None);
+        assert_eq!(ev.backoff_source, None);
     }
 
     #[test]
-    fn with_delay_clamps_large_duration() {
+    fn ms_builders_set_then_clamp_to_u32_max() {
+        let normal = Duration::from_millis(42);
         let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
-        let ev = Event::new(EventKind::BackoffScheduled).with_delay(huge);
-        assert_eq!(ev.delay_ms, Some(u32::MAX));
-    }
 
-    #[test]
-    fn with_duration_sets_and_clamps() {
-        let ev = Event::new(EventKind::TaskStopped).with_duration(Duration::from_millis(42));
-        assert_eq!(ev.duration_ms, Some(42));
+        assert_eq!(
+            Event::new(EventKind::TimeoutHit)
+                .with_timeout(normal)
+                .timeout_ms,
+            Some(42)
+        );
+        assert_eq!(
+            Event::new(EventKind::TimeoutHit)
+                .with_timeout(huge)
+                .timeout_ms,
+            Some(u32::MAX)
+        );
 
-        let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
-        let clamped = Event::new(EventKind::TaskStopped).with_duration(huge);
-        assert_eq!(clamped.duration_ms, Some(u32::MAX));
-    }
+        assert_eq!(
+            Event::new(EventKind::BackoffScheduled)
+                .with_delay(normal)
+                .delay_ms,
+            Some(42)
+        );
+        assert_eq!(
+            Event::new(EventKind::BackoffScheduled)
+                .with_delay(huge)
+                .delay_ms,
+            Some(u32::MAX)
+        );
 
-    #[test]
-    fn new_event_has_no_duration() {
-        assert_eq!(Event::new(EventKind::TaskStopped).duration_ms, None);
+        assert_eq!(
+            Event::new(EventKind::TaskStopped)
+                .with_duration(normal)
+                .duration_ms,
+            Some(42)
+        );
+        assert_eq!(
+            Event::new(EventKind::TaskStopped)
+                .with_duration(huge)
+                .duration_ms,
+            Some(u32::MAX)
+        );
     }
 
     #[test]
     fn is_internal_diagnostic_covers_both_variants() {
-        let overflow = Event::new(EventKind::SubscriberOverflow);
-        let panic = Event::new(EventKind::SubscriberPanicked);
-        let normal = Event::new(EventKind::TaskStarting);
-
-        assert!(overflow.is_internal_diagnostic());
-        assert!(panic.is_internal_diagnostic());
-        assert!(!normal.is_internal_diagnostic());
+        assert!(Event::new(EventKind::SubscriberOverflow).is_internal_diagnostic());
+        assert!(Event::new(EventKind::SubscriberPanicked).is_internal_diagnostic());
+        assert!(!Event::new(EventKind::TaskStarting).is_internal_diagnostic());
     }
 
     #[test]
-    fn subscriber_overflow_factory_sets_fields() {
-        let ev = Event::subscriber_overflow("my-sub", "full");
-        assert_eq!(ev.kind, EventKind::SubscriberOverflow);
-        assert_eq!(ev.task.as_deref(), Some("my-sub"));
-        assert!(ev.reason.as_deref().unwrap().contains("subscriber=my-sub"));
-        assert!(ev.reason.as_deref().unwrap().contains("reason=full"));
+    fn subscriber_factories_set_kind_task_and_reason() {
+        let overflow = Event::subscriber_overflow("my-sub", "full");
+        assert_eq!(overflow.kind, EventKind::SubscriberOverflow);
+        assert_eq!(
+            overflow.task.as_deref(),
+            Some("my-sub"),
+            "subscriber name lives in `task`"
+        );
+        assert_eq!(
+            overflow.reason.as_deref(),
+            Some("full"),
+            "`reason` is the bare cause, not a re-encoding of the subscriber name"
+        );
+
+        let panicked = Event::subscriber_panicked("my-sub", "boom");
+        assert_eq!(panicked.kind, EventKind::SubscriberPanicked);
+        assert_eq!(panicked.task.as_deref(), Some("my-sub"));
+        assert_eq!(panicked.reason.as_deref(), Some("boom"));
     }
 
     #[test]
-    fn new_event_has_no_exit_code() {
-        let ev = Event::new(EventKind::TaskFailed);
-        assert_eq!(ev.exit_code, None);
+    fn with_exit_code_keeps_sign() {
+        assert_eq!(
+            Event::new(EventKind::TaskFailed)
+                .with_exit_code(42)
+                .exit_code,
+            Some(42)
+        );
+        assert_eq!(
+            Event::new(EventKind::ActorDead)
+                .with_exit_code(-1)
+                .exit_code,
+            Some(-1)
+        );
     }
 
     #[test]
-    fn with_exit_code_populates_field() {
-        let ev = Event::new(EventKind::TaskFailed).with_exit_code(42);
-        assert_eq!(ev.exit_code, Some(42));
+    fn debug_renders_exit_code_only_when_set() {
+        let ev = Event::new(EventKind::ActorExhausted).with_exit_code(137);
+        assert!(
+            format!("{ev:?}").contains("exit_code: 137"),
+            "Debug must surface exit_code when present"
+        );
 
-        let neg = Event::new(EventKind::ActorDead).with_exit_code(-1);
-        assert_eq!(neg.exit_code, Some(-1));
+        let none = Event::new(EventKind::TaskStopped);
+        assert!(
+            !format!("{none:?}").contains("exit_code"),
+            "Debug must omit exit_code when absent"
+        );
     }
 }

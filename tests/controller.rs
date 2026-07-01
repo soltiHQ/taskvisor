@@ -40,9 +40,9 @@ async fn submit_and_watch_resolves_completed_for_admitted_task() {
 
     with_timeout(10, async {
         let (id, waiter) = handle
-            .submit_and_watch(ControllerSpec::queue(
-                TaskSpec::once(make_ok_once("watched-ok")).with_slot("s"),
-            ))
+            .submit_and_watch(
+                ControllerSpec::queue(TaskSpec::once(make_ok_once("watched-ok"))).with_slot("s"),
+            )
             .await
             .expect("submit_and_watch ok");
         assert_eq!(waiter.id(), id);
@@ -64,9 +64,10 @@ async fn submit_and_watch_resolves_rejected_on_drop_if_running() {
 
     with_timeout(10, async {
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("occupant-w")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-w")))
+                    .with_slot("s"),
+            )
             .await
             .expect("first submit ok");
         assert!(
@@ -77,9 +78,10 @@ async fn submit_and_watch_resolves_rejected_on_drop_if_running() {
         );
 
         let (_id, waiter) = handle
-            .submit_and_watch(ControllerSpec::drop_if_running(
-                TaskSpec::restartable(make_coop("dropped-w")).with_slot("s"),
-            ))
+            .submit_and_watch(
+                ControllerSpec::drop_if_running(TaskSpec::restartable(make_coop("dropped-w")))
+                    .with_slot("s"),
+            )
             .await
             .expect("submit_and_watch accepted into channel");
 
@@ -104,9 +106,10 @@ async fn submit_and_watch_resolves_rejected_when_removed_from_queue() {
 
     with_timeout(10, async {
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("occupant-rm")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-rm")))
+                    .with_slot("s"),
+            )
             .await
             .expect("first submit ok");
         assert!(
@@ -117,9 +120,10 @@ async fn submit_and_watch_resolves_rejected_when_removed_from_queue() {
         );
 
         let (victim_id, waiter) = handle
-            .submit_and_watch(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("queued-victim-w")).with_slot("s"),
-            ))
+            .submit_and_watch(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued-victim-w")))
+                    .with_slot("s"),
+            )
             .await
             .expect("queued submit_and_watch ok");
         assert!(
@@ -151,9 +155,9 @@ async fn submit_returns_task_id_carried_by_events() {
 
     with_timeout(10, async {
         let id = handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("id-task")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("id-task"))).with_slot("s"),
+            )
             .await
             .expect("submit ok");
 
@@ -186,9 +190,10 @@ async fn rejected_submission_event_carries_its_id() {
 
     with_timeout(10, async {
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("occupant-rej")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-rej")))
+                    .with_slot("s"),
+            )
             .await
             .expect("first submit ok");
         assert!(
@@ -199,9 +204,10 @@ async fn rejected_submission_event_carries_its_id() {
         );
 
         let rejected_id = handle
-            .submit(ControllerSpec::drop_if_running(
-                TaskSpec::restartable(make_coop("dropped")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::drop_if_running(TaskSpec::restartable(make_coop("dropped")))
+                    .with_slot("s"),
+            )
             .await
             .expect("submit accepted into channel");
 
@@ -227,9 +233,10 @@ async fn remove_of_queued_submission_purges_it_before_start() {
 
     with_timeout(10, async {
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("occupant-q")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-q")))
+                    .with_slot("s"),
+            )
             .await
             .expect("first submit ok");
         assert!(
@@ -240,9 +247,10 @@ async fn remove_of_queued_submission_purges_it_before_start() {
         );
 
         let victim_id = handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("queued-victim")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued-victim")))
+                    .with_slot("s"),
+            )
             .await
             .expect("second submit ok");
 
@@ -297,9 +305,9 @@ async fn shutdown_does_not_start_queued_tasks() {
 
     with_timeout(10, async {
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("occupant")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant"))).with_slot("s"),
+            )
             .await
             .expect("first submit ok");
         assert!(
@@ -311,9 +319,9 @@ async fn shutdown_does_not_start_queued_tasks() {
         );
 
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("queued")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued"))).with_slot("s"),
+            )
             .await
             .expect("second submit ok");
 
@@ -371,8 +379,11 @@ async fn submit_without_controller_via_plain_builder_returns_not_configured() {
 async fn idle_submit_admits_emits_submitted_then_running_transition() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let spec = TaskSpec::restartable(make_coop("runner-7")).with_slot("web");
-        let id = handle.submit(ControllerSpec::queue(spec)).await.unwrap();
+        let spec = TaskSpec::restartable(make_coop("runner-7"));
+        let id = handle
+            .submit(ControllerSpec::queue(spec).with_slot("web"))
+            .await
+            .unwrap();
 
         assert!(
             poll_until(Duration::from_secs(3), || async {
@@ -419,8 +430,11 @@ async fn queue_three_drains_in_fifo_order() {
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     with_timeout(10, async {
         for name in ["t1", "t2", "t3"] {
-            let spec = TaskSpec::once(logging_once(name, log.clone())).with_slot("q");
-            handle.submit(ControllerSpec::queue(spec)).await.unwrap();
+            let spec = TaskSpec::once(logging_once(name, log.clone()));
+            handle
+                .submit(ControllerSpec::queue(spec).with_slot("q"))
+                .await
+                .unwrap();
         }
         assert!(
             poll_until(Duration::from_secs(5), || async {
@@ -438,8 +452,11 @@ async fn queue_three_drains_in_fifo_order() {
 async fn replace_supersedes_running_latest_wins() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let run1 = TaskSpec::restartable(make_coop("run-1")).with_slot("s");
-        handle.submit(ControllerSpec::replace(run1)).await.unwrap();
+        let run1 = TaskSpec::restartable(make_coop("run-1"));
+        handle
+            .submit(ControllerSpec::replace(run1).with_slot("s"))
+            .await
+            .unwrap();
         assert!(
             poll_until(Duration::from_secs(3), || async {
                 handle.is_alive("run-1").await
@@ -447,8 +464,11 @@ async fn replace_supersedes_running_latest_wins() {
             .await
         );
 
-        let run2 = TaskSpec::restartable(make_coop("run-2")).with_slot("s");
-        handle.submit(ControllerSpec::replace(run2)).await.unwrap();
+        let run2 = TaskSpec::restartable(make_coop("run-2"));
+        handle
+            .submit(ControllerSpec::replace(run2).with_slot("s"))
+            .await
+            .unwrap();
 
         assert!(
             poll_until(Duration::from_secs(4), || async {
@@ -472,9 +492,9 @@ async fn replace_supersedes_running_latest_wins() {
 async fn drop_if_running_rejects_while_busy_silently() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let first = TaskSpec::restartable(make_coop("first")).with_slot("s");
+        let first = TaskSpec::restartable(make_coop("first"));
         handle
-            .submit(ControllerSpec::drop_if_running(first))
+            .submit(ControllerSpec::drop_if_running(first).with_slot("s"))
             .await
             .unwrap();
         assert!(
@@ -484,9 +504,9 @@ async fn drop_if_running_rejects_while_busy_silently() {
             .await
         );
 
-        let second = TaskSpec::restartable(make_coop("second")).with_slot("s");
+        let second = TaskSpec::restartable(make_coop("second"));
         handle
-            .submit(ControllerSpec::drop_if_running(second))
+            .submit(ControllerSpec::drop_if_running(second).with_slot("s"))
             .await
             .unwrap();
 
@@ -515,9 +535,9 @@ async fn drop_if_running_rejects_while_busy_silently() {
 async fn drop_if_running_admits_when_slot_idle() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let solo = TaskSpec::restartable(make_coop("solo")).with_slot("s");
+        let solo = TaskSpec::restartable(make_coop("solo"));
         handle
-            .submit(ControllerSpec::drop_if_running(solo))
+            .submit(ControllerSpec::drop_if_running(solo).with_slot("s"))
             .await
             .unwrap();
         assert!(
@@ -543,10 +563,16 @@ async fn drop_if_running_admits_when_slot_idle() {
 async fn same_name_distinct_slots_both_admitted() {
     let (handle, _c) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let w1 = TaskSpec::restartable(make_coop("w1")).with_slot("s1");
-        let w2 = TaskSpec::restartable(make_coop("w2")).with_slot("s2");
-        handle.submit(ControllerSpec::queue(w1)).await.unwrap();
-        handle.submit(ControllerSpec::queue(w2)).await.unwrap();
+        let w1 = TaskSpec::restartable(make_coop("w1"));
+        let w2 = TaskSpec::restartable(make_coop("w2"));
+        handle
+            .submit(ControllerSpec::queue(w1).with_slot("s1"))
+            .await
+            .unwrap();
+        handle
+            .submit(ControllerSpec::queue(w2).with_slot("s2"))
+            .await
+            .unwrap();
 
         assert!(
             poll_until(Duration::from_secs(4), || async {
@@ -564,9 +590,9 @@ async fn same_name_distinct_slots_both_admitted() {
 async fn submit_and_watch_duplicate_name_distinct_slots_resolves_rejected() {
     let (handle, _c) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let first = TaskSpec::restartable(make_coop("dup")).with_slot("s1");
+        let first = TaskSpec::restartable(make_coop("dup"));
         handle
-            .submit(ControllerSpec::queue(first))
+            .submit(ControllerSpec::queue(first).with_slot("s1"))
             .await
             .expect("first submit accepted");
 
@@ -579,9 +605,9 @@ async fn submit_and_watch_duplicate_name_distinct_slots_resolves_rejected() {
         );
 
         let (_id, waiter) = handle
-            .submit_and_watch(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("dup")).with_slot("s2"),
-            ))
+            .submit_and_watch(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("dup"))).with_slot("s2"),
+            )
             .await
             .expect("second submit_and_watch accepted into channel");
 
@@ -600,8 +626,11 @@ async fn submit_and_watch_duplicate_name_distinct_slots_resolves_rejected() {
 async fn replace_into_idle_slot_behaves_as_plain_admit() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let x = TaskSpec::restartable(make_coop("x")).with_slot("s");
-        handle.submit(ControllerSpec::replace(x)).await.unwrap();
+        let x = TaskSpec::restartable(make_coop("x"));
+        handle
+            .submit(ControllerSpec::replace(x).with_slot("s"))
+            .await
+            .unwrap();
         assert!(
             poll_until(Duration::from_secs(3), || async {
                 handle.is_alive("x").await
@@ -631,8 +660,11 @@ async fn replace_into_idle_slot_behaves_as_plain_admit() {
 async fn slot_freed_and_reusable_after_task_completes() {
     let (handle, _collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let first = TaskSpec::once(make_ok_once("first")).with_slot("s");
-        handle.submit(ControllerSpec::queue(first)).await.unwrap();
+        let first = TaskSpec::once(make_ok_once("first"));
+        handle
+            .submit(ControllerSpec::queue(first).with_slot("s"))
+            .await
+            .unwrap();
         assert!(
             poll_until(Duration::from_secs(3), || async {
                 !handle.is_alive("first").await
@@ -642,8 +674,10 @@ async fn slot_freed_and_reusable_after_task_completes() {
         assert!(
             poll_until(Duration::from_secs(3), || async {
                 if !handle.is_alive("second").await {
-                    let second = TaskSpec::restartable(make_coop("second")).with_slot("s");
-                    let _ = handle.submit(ControllerSpec::drop_if_running(second)).await;
+                    let second = TaskSpec::restartable(make_coop("second"));
+                    let _ = handle
+                        .submit(ControllerSpec::drop_if_running(second).with_slot("s"))
+                        .await;
                 }
                 handle.is_alive("second").await
             })
@@ -662,8 +696,11 @@ async fn queue_full_rejects_with_controller_rejected_event() {
         max_slot_queue: 1,
     });
     with_timeout(10, async {
-        let running = TaskSpec::restartable(make_coop("r")).with_slot("s");
-        handle.submit(ControllerSpec::queue(running)).await.unwrap();
+        let running = TaskSpec::restartable(make_coop("r"));
+        handle
+            .submit(ControllerSpec::queue(running).with_slot("s"))
+            .await
+            .unwrap();
         assert!(
             poll_until(Duration::from_secs(3), || async {
                 handle.is_alive("r").await
@@ -671,10 +708,16 @@ async fn queue_full_rejects_with_controller_rejected_event() {
             .await
         );
 
-        let p1 = TaskSpec::restartable(make_coop("p1")).with_slot("s");
-        let p2 = TaskSpec::restartable(make_coop("p2")).with_slot("s");
-        handle.submit(ControllerSpec::queue(p1)).await.unwrap();
-        handle.submit(ControllerSpec::queue(p2)).await.unwrap();
+        let p1 = TaskSpec::restartable(make_coop("p1"));
+        let p2 = TaskSpec::restartable(make_coop("p2"));
+        handle
+            .submit(ControllerSpec::queue(p1).with_slot("s"))
+            .await
+            .unwrap();
+        handle
+            .submit(ControllerSpec::queue(p2).with_slot("s"))
+            .await
+            .unwrap();
         assert!(
             poll_until(Duration::from_secs(3), || async {
                 collector.by_label("s").iter().any(|e| {
@@ -700,9 +743,11 @@ async fn try_submit_full_when_queue_capacity_saturated() {
     with_timeout(10, async {
         let mut saw_full = false;
         for i in 0..256u32 {
-            let spec = TaskSpec::once(make_ok_once("q")).with_slot("q");
+            let spec = TaskSpec::once(make_ok_once("q"));
             let _ = i;
-            if let Err(ControllerError::Full) = handle.try_submit(ControllerSpec::queue(spec)) {
+            if let Err(ControllerError::Full) =
+                handle.try_submit(ControllerSpec::queue(spec).with_slot("q"))
+            {
                 saw_full = true;
                 break;
             }
@@ -725,15 +770,17 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
 
     with_timeout(10, async {
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("occupant-snap")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-snap")))
+                    .with_slot("s"),
+            )
             .await
             .expect("submit occupant ok");
         handle
-            .submit(ControllerSpec::queue(
-                TaskSpec::restartable(make_coop("queued-snap")).with_slot("s"),
-            ))
+            .submit(
+                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued-snap")))
+                    .with_slot("s"),
+            )
             .await
             .expect("submit queued ok");
 

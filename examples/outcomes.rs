@@ -55,6 +55,7 @@
 //! | [`dynamic.rs`](dynamic.rs)   | Add / remove / cancel tasks at runtime          |
 //! | [`pipeline.rs`](pipeline.rs) | Slot-based admission control (`controller`)     |
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -101,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .expect("valid backoff"),
         )
-        .with_max_retries(2);
+        .with_max_retries(NonZeroU32::new(2).unwrap());
     match handle
         .add_and_watch(spec, ADD_TIMEOUT)
         .await?
