@@ -3,20 +3,22 @@
 //! A minimal subscriber that prints incoming [`Event`]s to stdout.
 //! Useful for development, debugging, and demos.
 //!
+//! Each line starts with the event's stable label from [`EventKind::as_label`].
+//!
 //! ## Example output
 //! ```text
-//! [001] [starting] task=worker attempt=1
-//! [002] [failed] task=worker reason="connection refused" attempt=1
-//! [003] [backoff] task=worker source=failure delay=2s after_attempt=1 reason="connection refused"
-//! [004] [timeout] task=worker timeout=5s
-//! [005] [stopped] task=worker
-//! [006] [actor-exhausted] task=worker reason=policy
-//! [007] [task-add-requested] task=new-worker
-//! [008] [task-added] task=new-worker
-//! [009] [task-remove-requested] task=old-worker
-//! [010] [task-removed] task=old-worker
-//! [011] [shutdown-requested]
-//! [012] [all-stopped-within-grace]
+//! [001] [task_starting] task=worker attempt=1
+//! [002] [task_failed] task=worker reason="connection refused" attempt=1
+//! [003] [backoff_scheduled] task=worker source=failure delay=2s after_attempt=1 reason="connection refused"
+//! [004] [timeout_hit] task=worker timeout=5s
+//! [005] [task_stopped] task=worker
+//! [006] [actor_exhausted] task=worker reason=policy
+//! [007] [task_add_requested] task=new-worker
+//! [008] [task_added] task=new-worker
+//! [009] [task_remove_requested] task=old-worker
+//! [010] [task_removed] task=old-worker
+//! [011] [shutdown_requested]
+//! [012] [all_stopped_within_grace]
 //! ```
 //!
 //! ## Example
@@ -55,7 +57,7 @@ impl Subscribe for LogWriter {
 
 impl LogWriter {
     fn print_event(&self, e: &Event) {
-        let seq = format!("[{:03}]", e.seq % 1000);
+        let head = format!("[{:03}] [{}]", e.seq % 1000, e.kind.as_label());
 
         fn fmt_ms(ms: Option<u32>) -> String {
             match ms {
@@ -70,45 +72,48 @@ impl LogWriter {
         }
 
         match e.kind {
-            // Shutdown
-            EventKind::ShutdownRequested => {
-                println!("{} [shutdown-requested]", seq);
-            }
-            EventKind::AllStoppedWithinGrace => {
-                println!("{} [all-stopped-within-grace]", seq);
-            }
-            EventKind::GraceExceeded => {
-                println!("{} [grace-exceeded]", seq);
+            // Shutdown: no payload.
+            EventKind::ShutdownRequested
+            | EventKind::AllStoppedWithinGrace
+            | EventKind::GraceExceeded => {
+                println!("{head}");
             }
 
-            // Task lifecycle
+            // Task lifecycle and management: task name only.
+            EventKind::TaskStopped
+            | EventKind::TaskCanceled
+            | EventKind::TaskAddRequested
+            | EventKind::TaskAdded
+            | EventKind::TaskRemoveRequested
+            | EventKind::TaskRemoved => {
+                println!("{head} task={}", or(e.task.as_deref(), "none"));
+            }
+
             EventKind::TaskStarting => {
                 println!(
-                    "{} [starting] task={} attempt={}",
-                    seq,
+                    "{head} task={} attempt={}",
                     or(e.task.as_deref(), "none"),
                     e.attempt.unwrap_or(0)
                 );
             }
-            EventKind::TaskStopped => {
-                println!("{} [stopped] task={}", seq, or(e.task.as_deref(), "none"));
-            }
-            EventKind::TaskCanceled => {
-                println!("{} [canceled] task={}", seq, or(e.task.as_deref(), "none"));
-            }
             EventKind::TaskFailed => {
                 println!(
-                    "{} [failed] task={} reason=\"{}\" attempt={}",
-                    seq,
+                    "{head} task={} reason=\"{}\" attempt={}",
                     or(e.task.as_deref(), "none"),
                     or(e.reason.as_deref(), "unknown"),
                     e.attempt.unwrap_or(0)
                 );
             }
+            EventKind::TaskAddFailed => {
+                println!(
+                    "{head} task={} reason=\"{}\"",
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
+                );
+            }
             EventKind::TimeoutHit => {
                 println!(
-                    "{} [timeout] task={} timeout={}",
-                    seq,
+                    "{head} task={} timeout={}",
                     or(e.task.as_deref(), "none"),
                     fmt_ms(e.timeout_ms)
                 );
@@ -120,8 +125,7 @@ impl LogWriter {
                     None => "unknown",
                 };
                 println!(
-                    "{} [backoff] task={} source={} delay={} after_attempt={} reason=\"{}\"",
-                    seq,
+                    "{head} task={} source={} delay={} after_attempt={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
                     src,
                     fmt_ms(e.delay_ms),
@@ -130,107 +134,46 @@ impl LogWriter {
                 );
             }
 
-            // Subscribers
-            EventKind::SubscriberOverflow => {
+            // Subscribers: the `task` field carries the subscriber name.
+            EventKind::SubscriberOverflow | EventKind::SubscriberPanicked => {
                 println!(
-                    "{} [subscriber-overflow] subscriber={} reason=\"{}\"",
-                    seq,
-                    or(e.task.as_deref(), "none"),
-                    or(e.reason.as_deref(), "unknown")
-                );
-            }
-            EventKind::SubscriberPanicked => {
-                println!(
-                    "{} [subscriber-panicked] subscriber={} info=\"{}\"",
-                    seq,
+                    "{head} subscriber={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
                     or(e.reason.as_deref(), "unknown")
                 );
             }
 
-            // Management
-            EventKind::TaskAddRequested => {
-                println!(
-                    "{} [task-add-requested] task={}",
-                    seq,
-                    or(e.task.as_deref(), "none")
-                );
-            }
-            EventKind::TaskAdded => {
-                println!(
-                    "{} [task-added] task={}",
-                    seq,
-                    or(e.task.as_deref(), "none")
-                );
-            }
-            EventKind::TaskAddFailed => {
-                println!(
-                    "{} [task-add-failed] task={} reason=\"{}\"",
-                    seq,
-                    or(e.task.as_deref(), "none"),
-                    or(e.reason.as_deref(), "unknown")
-                );
-            }
-            EventKind::TaskRemoveRequested => {
-                println!(
-                    "{} [task-remove-requested] task={}",
-                    seq,
-                    or(e.task.as_deref(), "none")
-                );
-            }
-            EventKind::TaskRemoved => {
-                println!(
-                    "{} [task-removed] task={}",
-                    seq,
-                    or(e.task.as_deref(), "none")
-                );
-            }
-
-            // Terminals
+            // Terminals.
             EventKind::ActorExhausted => {
                 println!(
-                    "{} [actor-exhausted] task={} reason=\"{}\"",
-                    seq,
+                    "{head} task={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
                     or(e.reason.as_deref(), "policy")
                 );
             }
             EventKind::ActorDead => {
                 println!(
-                    "{} [actor-dead] task={} reason=\"{}\"",
-                    seq,
+                    "{head} task={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
                     or(e.reason.as_deref(), "fatal")
                 );
             }
 
+            // Controller: the `task` field carries the slot name.
             #[cfg(feature = "controller")]
-            EventKind::ControllerRejected => {
+            EventKind::ControllerRejected | EventKind::ControllerSlotTransition => {
                 println!(
-                    "{} [controller-rejected] slot={} reason=\"{}\"",
-                    seq,
+                    "{head} slot={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
                     or(e.reason.as_deref(), "unknown")
                 );
             }
-
             #[cfg(feature = "controller")]
             EventKind::ControllerSubmitted => {
                 println!(
-                    "{} [controller-submitted] slot={} {}",
-                    seq,
+                    "{head} slot={} {}",
                     or(e.task.as_deref(), "none"),
                     or(e.reason.as_deref(), "")
-                );
-            }
-
-            #[cfg(feature = "controller")]
-            EventKind::ControllerSlotTransition => {
-                println!(
-                    "{} [controller-transition] slot={} transition=\"{}\"",
-                    seq,
-                    or(e.task.as_deref(), "none"),
-                    or(e.reason.as_deref(), "unknown")
                 );
             }
         }

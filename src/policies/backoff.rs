@@ -6,9 +6,9 @@
 //! |------------------------------------|-------------------------------------------|
 //! | [`first`](BackoffPolicy::first)    | Delay before the first retry              |
 //! | [`factor`](BackoffPolicy::factor)  | Growth multiplier (`1.0` = constant)      |
-//! | [`max`](BackoffPolicy::max)        | Maximum delay cap                         |
 //! | [`jitter`](BackoffPolicy::jitter)  | Random spread applied to the base delay   |
 //! | [`floor`](BackoffPolicy::floor)    | User minimum delay after jitter           |
+//! | [`max`](BackoffPolicy::max)        | Maximum delay cap                         |
 //!
 //! ## Formula
 //!

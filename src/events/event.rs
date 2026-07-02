@@ -280,6 +280,49 @@ pub enum EventKind {
     ControllerSlotTransition,
 }
 
+impl EventKind {
+    /// Returns a stable machine-readable label for logs and metrics.
+    ///
+    /// The label is the snake_case form of the variant name.
+    /// Use it as an event name in tracing or as a metrics label value.
+    ///
+    /// ```rust
+    /// use taskvisor::EventKind;
+    ///
+    /// assert_eq!(EventKind::TaskStarting.as_label(), "task_starting");
+    /// assert_eq!(EventKind::BackoffScheduled.as_label(), "backoff_scheduled");
+    /// ```
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            EventKind::SubscriberPanicked => "subscriber_panicked",
+            EventKind::SubscriberOverflow => "subscriber_overflow",
+            EventKind::ShutdownRequested => "shutdown_requested",
+            EventKind::AllStoppedWithinGrace => "all_stopped_within_grace",
+            EventKind::GraceExceeded => "grace_exceeded",
+            EventKind::TaskStarting => "task_starting",
+            EventKind::TaskStopped => "task_stopped",
+            EventKind::TaskCanceled => "task_canceled",
+            EventKind::TaskFailed => "task_failed",
+            EventKind::TimeoutHit => "timeout_hit",
+            EventKind::BackoffScheduled => "backoff_scheduled",
+            EventKind::TaskAddRequested => "task_add_requested",
+            EventKind::TaskAdded => "task_added",
+            EventKind::TaskAddFailed => "task_add_failed",
+            EventKind::TaskRemoveRequested => "task_remove_requested",
+            EventKind::TaskRemoved => "task_removed",
+            EventKind::ActorExhausted => "actor_exhausted",
+            EventKind::ActorDead => "actor_dead",
+            #[cfg(feature = "controller")]
+            EventKind::ControllerRejected => "controller_rejected",
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSubmitted => "controller_submitted",
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSlotTransition => "controller_slot_transition",
+        }
+    }
+}
+
 /// Reason for scheduling the next run/backoff.
 ///
 /// A closed set (success vs failure); intentionally **not** `#[non_exhaustive]`.

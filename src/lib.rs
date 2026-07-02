@@ -61,8 +61,8 @@
 //!
 //! ## Optional Features
 //!
-//! - `controller`: slot-based admission control with [`ControllerSpec`], [`AdmissionPolicy`], and [`ControllerConfig`].
 //! - `tokio-util-interop`: exposes raw `tokio_util::sync::CancellationToken` interop through [`TaskContext`] and the prelude.
+//! - `controller`: slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
 //! - `logging`: built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
 //!
 //! ## Quick Start
@@ -117,7 +117,7 @@ mod events;
 pub use events::{BackoffSource, Event, EventKind};
 
 mod error;
-pub use error::{BoxError, RuntimeError, SharedError, TaskError};
+pub use error::{BoxError, Error, RuntimeError, SharedError, TaskError};
 
 mod subscribers;
 pub use subscribers::Subscribe;
