@@ -23,10 +23,10 @@ exclude = [
 
 [features]
 default = []
+controller = ["dashmap"]
 logging = []
 tracing = ["dep:tracing"]
 tokio-util-interop = []
-controller = ["dashmap"]
 
 [package.metadata.docs.rs]
 features = ["logging", "tracing", "controller", "tokio-util-interop"]
