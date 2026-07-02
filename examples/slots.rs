@@ -1,11 +1,12 @@
-//! # Pipeline
+//! # Slots: Admission Policies
 //!
 //! Uses the optional `controller` feature to demonstrate slot-based admission control.
 //! This is useful when you need to limit concurrency per logical operation - e.g., "only one deploy at a time" or "queue report generation".
 //!
 //! ## What is the controller?
 //!
-//! The controller is a thin layer over the supervisor that groups tasks into **slots** (keyed by `TaskSpec::slot()`, which defaults to the task name).
+//! The controller is a thin layer over the supervisor that groups tasks into **slots**.
+//! The slot key is `ControllerSpec::slot_name()`: it defaults to the task name, override it with `ControllerSpec::with_slot(...)`.
 //! Each slot enforces an admission policy:
 //!
 //! | Policy          | Behavior                                             | Use case           |
@@ -14,7 +15,6 @@
 //! | `Replace`       | Cancels running task, starts new one                 | Search-as-you-type |
 //! | `DropIfRunning` | Silently ignores if slot is busy                     | Debounced actions  |
 //!
-//! The slot key is `ControllerSpec::slot_name()` (defaults to the task name; override with `ControllerSpec::with_slot(...)`).
 //! **Tasks with different slot keys go to different slots and never interfere.**
 //!
 //! ## What this shows
@@ -44,12 +44,18 @@
 //! ## Run
 //!
 //! ```bash
-//! cargo run --example pipeline --features controller
+//! cargo run --example slots --features controller
 //! ```
+//!
+//! ## Next
+//!
+//! | Example                        | What it adds                                        |
+//! |--------------------------------|-----------------------------------------------------|
+//! | [`admission.rs`](admission.rs) | Await the admission outcome with `submit_and_watch` |
 
 #[cfg(not(feature = "controller"))]
 compile_error!(
-    "This example requires the `controller` feature: cargo run --example pipeline --features controller"
+    "This example requires the `controller` feature: cargo run --example slots --features controller"
 );
 
 use std::time::Duration;
@@ -57,18 +63,18 @@ use std::time::Duration;
 use taskvisor::prelude::*;
 
 fn job(name: &'static str, duration: Duration) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
         println!("  [{name}] started");
         let start = tokio::time::Instant::now();
 
-        tokio::select! {
-            _ = tokio::time::sleep(duration) => {
+        match ctx.run_until_cancelled(tokio::time::sleep(duration)).await {
+            Ok(()) => {
                 println!("  [{name}] completed in {:?}", start.elapsed());
                 Ok(())
             }
-            _ = ctx.cancelled() => {
+            Err(canceled) => {
                 println!("  [{name}] cancelled after {:?}", start.elapsed());
-                Err(TaskError::Canceled)
+                Err(canceled)
             }
         }
     });

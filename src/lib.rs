@@ -91,20 +91,23 @@
 //!
 //! ## Examples
 //!
-//! The repository ships nine runnable, tutorial-style examples
+//! The repository ships twelve runnable, tutorial-style examples
 //! ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
 //!
 //! | Example | What it shows |
-//! |-----------------------------------------------------------------------------------|----------------------------------------------------|
-//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)         | Minimal wiring: one task, one run                  |
-//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)       | Long-running worker with graceful Ctrl+C shutdown  |
-//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)   | Fixed-interval repeated job                        |
-//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)   | Three tasks with different restart policies        |
-//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)     | Custom `Subscribe` implementation                  |
-//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)     | Add, cancel, and remove tasks at runtime           |
-//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)   | Await a task's final result                        |
-//! | [pipeline](https://github.com/soltiHQ/taskvisor/blob/main/examples/pipeline.rs)   | Slot admission policies (`controller` feature)     |
-//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs) | Await the admission outcome (`controller` feature) |
+//! |---------------------------------------------------------------------------------------------|----------------------------------------------------|
+//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                   | Minimal wiring: one task, one run                  |
+//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)                 | Long-running worker with graceful Ctrl+C shutdown  |
+//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)             | Fixed-interval repeated job                        |
+//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)             | Three tasks with different restart policies        |
+//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | Broker consumer with reconnect + backoff           |
+//! | [subscriber](https://github.com/soltiHQ/taskvisor/blob/main/examples/subscriber.rs)         | Custom `Subscribe` implementation                  |
+//! | [tracing](https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs)               | Events in your log pipeline (`tracing` feature)    |
+//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)               | Prometheus counters from lifecycle events          |
+//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)               | Add, cancel, and remove tasks at runtime           |
+//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)             | Await a task's final result                        |
+//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                   | Slot admission policies (`controller` feature)     |
+//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)           | Await the admission outcome (`controller` feature) |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

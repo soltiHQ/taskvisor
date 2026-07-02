@@ -35,7 +35,7 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let task: TaskRef = TaskFn::arc("hello", |_ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc("hello", |_ctx| async move {
         println!("Hello from taskvisor!");
         Ok(())
     });

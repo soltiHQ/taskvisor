@@ -183,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Restart, backoff, and an event for every step, without writing a retry loop.
 
-See [`examples/metrics.rs`](examples/metrics.rs) for a fuller version (`cargo run --example metrics`).
+See [`examples/subscriber.rs`](examples/subscriber.rs) for a fuller version (`cargo run --example subscriber`).
 
 
 ## Two modes
@@ -490,34 +490,41 @@ cargo run --example basic
 cargo run --example worker
 cargo run --example periodic
 cargo run --example multiple
+cargo run --example queue_consumer
+cargo run --example subscriber
 cargo run --example metrics
 cargo run --example dynamic
 cargo run --example outcomes
-cargo run --example pipeline --features controller
+cargo run --example tracing --features tracing
+cargo run --example slots --features controller
 cargo run --example admission --features controller
 ```
 
-| Example                                   | What it shows                                                  |
-|-------------------------------------------|----------------------------------------------------------------|
-| [basic.rs](examples/basic.rs)             | Minimal hello-world, one task runs once                        |
-| [worker.rs](examples/worker.rs)           | Long-running worker with graceful Ctrl+C shutdown              |
-| [periodic.rs](examples/periodic.rs)       | Cron-like periodic task via `RestartPolicy::Always`            |
-| [multiple.rs](examples/multiple.rs)       | Three tasks with different policies and backoff                |
-| [metrics.rs](examples/metrics.rs)         | Custom `Subscribe` implementation for metrics                  |
-| [dynamic.rs](examples/dynamic.rs)         | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime   |
-| [outcomes.rs](examples/outcomes.rs)       | `add_and_watch`: await a task's final `TaskOutcome`            |
-| [pipeline.rs](examples/pipeline.rs)       | Controller admission policies: Queue, Replace, DropIfRunning   |
-| [admission.rs](examples/admission.rs)     | `submit_and_watch`: await admission outcome (incl. `Rejected`) |
+| Example                                       | What it shows                                                  |
+|-----------------------------------------------|----------------------------------------------------------------|
+| [basic.rs](examples/basic.rs)                 | Minimal hello-world, one task runs once                        |
+| [worker.rs](examples/worker.rs)               | Long-running worker with graceful Ctrl+C shutdown              |
+| [periodic.rs](examples/periodic.rs)           | Periodic task via `TaskSpec::periodic`                         |
+| [multiple.rs](examples/multiple.rs)           | Three tasks with different policies and backoff                |
+| [queue_consumer.rs](examples/queue_consumer.rs) | Broker consumer with reconnect + restart-on-failure          |
+| [subscriber.rs](examples/subscriber.rs)       | Custom `Subscribe` implementation                              |
+| [tracing.rs](examples/tracing.rs)             | Supervisor events in your `tracing` log pipeline               |
+| [metrics.rs](examples/metrics.rs)             | Prometheus counters from lifecycle events                      |
+| [dynamic.rs](examples/dynamic.rs)             | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime   |
+| [outcomes.rs](examples/outcomes.rs)           | `add_and_watch`: await a task's final `TaskOutcome`            |
+| [slots.rs](examples/slots.rs)                 | Controller admission policies: Queue, Replace, DropIfRunning   |
+| [admission.rs](examples/admission.rs)         | `submit_and_watch`: await admission outcome (incl. `Rejected`) |
 
 ## Optional features
 
 | Feature      | What it enables                                                                       |
 |--------------|---------------------------------------------------------------------------------------|
 | `controller` | Slot-based admission control: `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
+| `tracing`    | Built-in `TracingBridge` subscriber - events flow into your `tracing` log pipeline    |
 | `logging`    | Built-in `LogWriter` subscriber - event output to stdout (demo/reference)             |
 
 ```toml
-taskvisor = { version = "0.3", features = ["controller", "logging"] }
+taskvisor = { version = "0.3", features = ["controller", "tracing"] }
 ```
 
 ## Contributing

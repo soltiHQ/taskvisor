@@ -50,10 +50,10 @@
 //!
 //! ## Next
 //!
-//! | Example                      | What it adds                                    |
-//! |------------------------------|-------------------------------------------------|
-//! | [`dynamic.rs`](dynamic.rs)   | Add / remove / cancel tasks at runtime          |
-//! | [`pipeline.rs`](pipeline.rs) | Slot-based admission control (`controller`)     |
+//! | Example                    | What it adds                                |
+//! |----------------------------|---------------------------------------------|
+//! | [`dynamic.rs`](dynamic.rs) | Add / remove / cancel tasks at runtime      |
+//! | [`slots.rs`](slots.rs)     | Slot-based admission control (`controller`) |
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1) A one-shot job that succeeds -> Completed.
     println!("=== Completed ===");
-    let job: TaskRef = TaskFn::arc("import", |_ctx: TaskContext| async {
+    let job: TaskRef = TaskFn::arc("import", |_ctx| async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     });
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    Note the outcome's reason/exit_code are identical to the ActorExhausted event.
     println!("=== Failed (retries exhausted) ===");
     let attempts = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("sync", move |_ctx: TaskContext| {
+    let flaky: TaskRef = TaskFn::arc("sync", move |_ctx| {
         let attempts = Arc::clone(&attempts);
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
@@ -93,15 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let spec = TaskSpec::restartable(flaky)
-        .with_backoff(
-            BackoffPolicy::new(
-                Duration::from_millis(20),
-                Duration::from_secs(30),
-                1.0,
-                JitterPolicy::None,
-            )
-            .expect("valid backoff"),
-        )
+        .with_backoff(BackoffPolicy::constant(Duration::from_millis(20)))
         .with_max_retries(NonZeroU32::new(2).unwrap());
     match handle
         .add_and_watch(spec, ADD_TIMEOUT)
@@ -120,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3) A long-running worker we cancel -> Canceled.
     println!("=== Canceled ===");
-    let worker: TaskRef = TaskFn::arc("worker", |ctx: TaskContext| async move {
+    let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
         ctx.cancelled().await;
         Ok(())
     });

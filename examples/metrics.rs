@@ -1,29 +1,27 @@
-//! # Metrics (Custom Event Subscriber)
+//! # Metrics: Prometheus Counters from Lifecycle Events
 //!
-//! Implements the `Subscribe` trait to collect task lifecycle counters.
-//
+//! A real metrics integration: every supervisor event increments a Prometheus
+//! counter, keyed by the event's stable label.
+//!
+//! ## The pattern
+//!
+//! - One `IntCounterVec` with labels `event` and `task`.
+//! - `EventKind::as_label()` gives a stable, machine-readable label value
+//!   (`task_failed`, `backoff_scheduled`, ...). No hand-written match.
+//! - In a real service, serve the encoded text at `GET /metrics`.
+//!   This example prints it at exit instead.
+//!
+//! ## Label cardinality
+//!
+//! The `task` label uses the task name.
+//! Keep task names a bounded set (no per-request ids in names) to avoid
+//! high-cardinality metrics.
+//!
 //! ## What this shows
 //!
-//! - **`Subscribe` trait** - extension point for observability.
-//! - **`queue_capacity()`** - per-subscriber buffer size (overflow → event dropped).
-//! - **`on_event(&self, event: &Event)`** - your handler, called synchronously.
-//! - **`name()`** - identifier for logs and overflow/panic events.
-//!
-//! ## How subscribers are wired
-//!
-//! ```text
-//! Supervisor::new(config, vec![metrics])
-//!                               ▼
-//!                        SubscriberSet
-//!                         ├── [mpsc queue] → worker → metrics.on_event()
-//!                         └── [mpsc queue] → worker → other_sub.on_event()
-//! ```
-//!
-//! ## Runtime flavor
-//!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
+//! - `Subscribe` + `prometheus::IntCounterVec` - the whole bridge is ~15 lines.
+//! - `EventKind::as_label()` as the metric label value.
+//! - `TextEncoder` - rendering the standard exposition format.
 //!
 //! ## Run
 //!
@@ -33,66 +31,33 @@
 //!
 //! ## Next
 //!
-//! | Example                      | What it adds                                          |
-//! |------------------------------|-------------------------------------------------------|
-//! | [`dynamic.rs`](dynamic.rs)   | `serve()` → `SupervisorHandle` for runtime management |
-//! | [`pipeline.rs`](pipeline.rs) | Admission control with the `controller` feature       |
+//! | Example                          | What it adds                                 |
+//! |----------------------------------|----------------------------------------------|
+//! | [`tracing.rs`](tracing.rs)       | The same event stream in your logs           |
+//! | [`subscriber.rs`](subscriber.rs) | The `Subscribe` trait itself, step by step   |
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 use taskvisor::prelude::*;
 
-/// A simple metrics subscriber that counts lifecycle events.
-struct Metrics {
-    starts: AtomicU64,
-    stops: AtomicU64,
-    failures: AtomicU64,
-    retries: AtomicU64,
+/// Bridges supervisor events into a Prometheus counter family.
+struct PromSubscriber {
+    events: IntCounterVec,
 }
 
-impl Metrics {
-    fn new() -> Self {
-        Self {
-            starts: AtomicU64::new(0),
-            stops: AtomicU64::new(0),
-            failures: AtomicU64::new(0),
-            retries: AtomicU64::new(0),
-        }
-    }
-
-    fn report(&self) {
-        println!();
-        println!("--- Metrics ---");
-        println!("  starts:   {}", self.starts.load(Ordering::Relaxed));
-        println!("  stops:    {}", self.stops.load(Ordering::Relaxed));
-        println!("  failures: {}", self.failures.load(Ordering::Relaxed));
-        println!("  retries:  {}", self.retries.load(Ordering::Relaxed));
-    }
-}
-
-impl Subscribe for Metrics {
-    fn on_event(&self, ev: &Event) {
-        match ev.kind {
-            EventKind::TaskStarting => {
-                self.starts.fetch_add(1, Ordering::Relaxed);
-            }
-            EventKind::TaskStopped => {
-                self.stops.fetch_add(1, Ordering::Relaxed);
-            }
-            EventKind::TaskFailed => {
-                self.failures.fetch_add(1, Ordering::Relaxed);
-            }
-            EventKind::BackoffScheduled => {
-                self.retries.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
-        }
+impl Subscribe for PromSubscriber {
+    fn on_event(&self, e: &Event) {
+        let task = e.task.as_deref().unwrap_or("none");
+        self.events
+            .with_label_values(&[e.kind.as_label(), task])
+            .inc();
     }
 
     fn name(&self) -> &str {
-        "metrics"
+        "prometheus"
     }
 
     fn queue_capacity(&self) -> usize {
@@ -102,33 +67,39 @@ impl Subscribe for Metrics {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let metrics = Arc::new(Metrics::new());
+    let registry = Registry::new();
+    let events = IntCounterVec::new(
+        Opts::new("taskvisor_events_total", "Supervisor lifecycle events"),
+        &["event", "task"],
+    )?;
+    registry.register(Box::new(events.clone()))?;
 
-    // A "flaky" task that fails 3 times then succeeds.
-    let counter = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx: TaskContext| {
-        let counter = Arc::clone(&counter);
+    // A flaky task: fails twice, then succeeds.
+    let attempts = Arc::new(AtomicU32::new(0));
+    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx| {
+        let attempts = Arc::clone(&attempts);
         async move {
-            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
             tokio::time::sleep(Duration::from_millis(50)).await;
-
-            if n <= 3 {
-                println!("[flaky-job] attempt #{n}: fail");
-                Err(TaskError::fail(format!("attempt #{n}")))
-            } else {
-                println!("[flaky-job] attempt #{n}: success!");
-                Ok(())
+            if n <= 2 {
+                return Err(TaskError::fail(format!("boom #{n}")));
             }
+            Ok(())
         }
     });
 
-    // first=100ms, factor=1.0 are the defaults already.
-    let spec = TaskSpec::restartable(flaky).with_backoff(BackoffPolicy::default());
+    let spec = TaskSpec::restartable(flaky)
+        .with_backoff(BackoffPolicy::constant(Duration::from_millis(100)));
 
-    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as _];
+    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(PromSubscriber {
+        events: events.clone(),
+    })];
     let sup = Supervisor::new(SupervisorConfig::default(), subs);
     sup.run(vec![spec]).await?;
 
-    metrics.report();
+    // In a real service: serve this string at GET /metrics.
+    let mut buf = Vec::new();
+    TextEncoder::new().encode(&registry.gather(), &mut buf)?;
+    println!("\n--- /metrics ---\n{}", String::from_utf8(buf)?);
     Ok(())
 }

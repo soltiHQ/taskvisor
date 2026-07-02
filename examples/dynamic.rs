@@ -63,27 +63,30 @@
 //!
 //! ## Next
 //!
-//! | Example                      | What it adds                                    |
-//! |------------------------------|-------------------------------------------------|
+//! | Example                      | What it adds                                     |
+//! |------------------------------|--------------------------------------------------|
 //! | [`outcomes.rs`](outcomes.rs) | Await a task's final result with `add_and_watch` |
-//! | [`pipeline.rs`](pipeline.rs) | Admission control with the `controller` feature |
+//! | [`slots.rs`](slots.rs)       | Admission control with the `controller` feature  |
 
 use std::time::Duration;
 
 use taskvisor::prelude::*;
 
 fn make_worker(name: &'static str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
         let mut tick = 0u32;
         loop {
-            tokio::select! {
-                _ = ctx.cancelled() => {
-                    println!("  [{name}] stopped at tick #{tick}");
-                    return Ok(());
-                }
-                _ = tokio::time::sleep(Duration::from_millis(300)) => {
+            match ctx
+                .run_until_cancelled(tokio::time::sleep(Duration::from_millis(300)))
+                .await
+            {
+                Ok(()) => {
                     tick += 1;
                     println!("  [{name}] tick #{tick}");
+                }
+                Err(canceled) => {
+                    println!("  [{name}] stopped at tick #{tick}");
+                    return Err(canceled);
                 }
             }
         }

@@ -45,10 +45,10 @@
 //!
 //! ## Next
 //!
-//! | Example                      | What it adds                                   |
-//! |------------------------------|------------------------------------------------|
-//! | [`pipeline.rs`](pipeline.rs) | All three admission policies, side by side     |
-//! | [`outcomes.rs`](outcomes.rs) | The direct-path waiter (`add_and_watch`)       |
+//! | Example                      | What it adds                               |
+//! |------------------------------|--------------------------------------------|
+//! | [`slots.rs`](slots.rs)       | All three admission policies, side by side |
+//! | [`outcomes.rs`](outcomes.rs) | The direct-path waiter (`add_and_watch`)   |
 
 #[cfg(not(feature = "controller"))]
 compile_error!(
@@ -62,13 +62,10 @@ use taskvisor::prelude::*;
 
 /// A job that runs for `dur`, observing cancellation.
 fn job(name: &'static str, dur: Duration) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx: TaskContext| async move {
-        tokio::select! {
-            _ = tokio::time::sleep(dur) => Ok(()),
-            _ = ctx.cancelled() => Err(TaskError::Canceled),
-        }
+    let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
+        ctx.run_until_cancelled(tokio::time::sleep(dur)).await?;
+        Ok(())
     });
-    // Same slot "deploy" for every submission; they contend for one slot.
     TaskSpec::once(task)
 }
 
@@ -82,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Slot 'deploy' admits at most one task at a time.\n");
 
     // 1) The slot is idle: this submission is admitted and starts running.
+    //    Every submission below uses .with_slot("deploy"): they contend for one slot.
     println!("1) submit deploy-v1 (Queue) to the idle slot");
     let (_id, v1) = handle
         .submit_and_watch(
