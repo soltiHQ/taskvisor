@@ -63,6 +63,7 @@
 //!
 //! - `tokio-util-interop`: exposes raw `tokio_util::sync::CancellationToken` interop through [`TaskContext`] and the prelude.
 //! - `controller`: slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
+//! - `tracing`: built-in `TracingBridge` subscriber that forwards runtime events to the `tracing` ecosystem.
 //! - `logging`: built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
 //!
 //! ## Quick Start
@@ -132,3 +133,6 @@ pub use controller::{
 
 #[cfg(feature = "logging")]
 pub use subscribers::LogWriter;
+
+#[cfg(feature = "tracing")]
+pub use subscribers::TracingBridge;

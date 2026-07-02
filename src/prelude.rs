@@ -48,6 +48,12 @@ pub use crate::controller::{
 #[cfg(feature = "logging")]
 pub use crate::subscribers::LogWriter;
 
+/// Built-in tracing bridge subscriber.
+///
+/// Requires the `tracing` feature.
+#[cfg(feature = "tracing")]
+pub use crate::subscribers::TracingBridge;
+
 /// Raw cancellation-token interop.
 ///
 /// Requires the `tokio-util-interop` feature.
