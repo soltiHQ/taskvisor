@@ -1,6 +1,10 @@
 //! Task execution context handed to [`Task::spawn`](crate::Task::spawn).
 
+use std::future::Future;
+
 use tokio_util::sync::CancellationToken;
+
+use crate::error::TaskError;
 
 /// Context passed to a [`Task`](crate::Task) for one attempt.
 ///
@@ -9,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 /// ## Cancellation
 ///
 /// The context is cancelled by the supervisor during shutdown or when the task is removed at runtime.
-/// - Long-running tasks should await [`cancelled`](Self::cancelled) or check [`is_cancelled`](Self::is_cancelled).
 /// - Short-lived, one-shot tasks that finish quickly may ignore it.
+/// - Long-running tasks should wrap their awaits in [`run_until_cancelled`](Self::run_until_cancelled),
+///   or await [`cancelled`](Self::cancelled) / check [`is_cancelled`](Self::is_cancelled) manually.
 #[derive(Clone, Debug)]
 pub struct TaskContext {
     cancel: CancellationToken,
@@ -24,6 +29,7 @@ impl TaskContext {
 
     /// Waits until the context is cancelled.
     ///
+    /// Resolves immediately if the context is already cancelled.
     /// Safe to call repeatedly and to use as a branch in `tokio::select!`.
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await;
@@ -35,10 +41,45 @@ impl TaskContext {
         self.cancel.is_cancelled()
     }
 
+    /// Runs a future until it completes or this context is cancelled.
+    ///
+    /// Returns `Ok(output)` when `fut` completes first.
+    /// Returns [`Err(TaskError::Canceled)`](TaskError::Canceled) when the context is cancelled first.
+    ///
+    /// Cancellation wins ties: if the context is already cancelled, `fut` is not polled at all.
+    /// On cancellation `fut` is dropped together with any work it owns.
+    ///
+    /// Use it instead of the manual `tokio::select!` + `Err(TaskError::Canceled)` pattern:
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    /// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef};
+    ///
+    /// # async fn poll_once() -> Result<(), TaskError> { Ok(()) }
+    /// let poller: TaskRef = TaskFn::arc("poller", |ctx: TaskContext| async move {
+    ///     loop {
+    ///         // `?` propagates poll_once() errors.
+    ///         // On shutdown this returns TaskError::Canceled (clean stop, not a failure).
+    ///         ctx.run_until_cancelled(poll_once()).await??;
+    ///         ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
+    ///             .await?;
+    ///     }
+    /// });
+    /// ```
+    pub async fn run_until_cancelled<F: Future>(&self, fut: F) -> Result<F::Output, TaskError> {
+        tokio::select! {
+            biased;
+            _ = self.cancelled() => Err(TaskError::Canceled),
+            output = fut => Ok(output),
+        }
+    }
+
     /// Creates a child context.
     ///
+    /// Use it to give a piece of sub-work its own cancellation scope.
+    ///
     /// The child is cancelled when this context is cancelled.
-    /// If the child is cancelled through interop APIs, this context is not cancelled.
+    /// Cancelling the child (through interop APIs) does not cancel this context.
     #[must_use]
     pub fn child(&self) -> TaskContext {
         TaskContext {
@@ -62,8 +103,72 @@ impl TaskContext {
 #[cfg(test)]
 mod tests {
     use super::TaskContext;
+    use crate::error::TaskError;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn run_until_cancelled_returns_output_when_future_completes_first() {
+        let ctx = TaskContext::from_token(CancellationToken::new());
+
+        let result = ctx.run_until_cancelled(async { 7 }).await;
+
+        assert_eq!(
+            result.expect("future completed without cancellation, must yield Ok"),
+            7,
+            "the future's output must pass through unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_until_cancelled_returns_canceled_when_cancelled_mid_flight() {
+        let token = CancellationToken::new();
+        let ctx = TaskContext::from_token(token.clone());
+
+        let running =
+            tokio::spawn(
+                async move { ctx.run_until_cancelled(std::future::pending::<()>()).await },
+            );
+        token.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("run_until_cancelled must resolve promptly after cancellation")
+            .expect("the spawned task must not panic");
+        assert!(
+            matches!(result, Err(TaskError::Canceled)),
+            "cancellation mid-flight must yield Err(TaskError::Canceled), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_until_cancelled_does_not_poll_future_when_already_cancelled() {
+        let token = CancellationToken::new();
+        let ctx = TaskContext::from_token(token.clone());
+        token.cancel();
+
+        let polled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&polled);
+        let result = ctx
+            .run_until_cancelled(async move {
+                flag.store(true, Ordering::SeqCst);
+                7
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(TaskError::Canceled)),
+            "an already-cancelled context must yield Err(TaskError::Canceled), got {result:?}"
+        );
+        assert!(
+            !polled.load(Ordering::SeqCst),
+            "the future must not be polled when the context is already cancelled (cancellation wins ties)"
+        );
+    }
 
     #[test]
     fn is_cancelled_reflects_underlying_token() {
