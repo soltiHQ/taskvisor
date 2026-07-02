@@ -45,7 +45,7 @@
 //!   ShutdownRequested ──► AllStoppedWithinGrace | GraceExceeded
 //! ```
 //!
-//! [`TaskRemoved`] is a registry cleanup confirmation.
+//! [`TaskRemoved`](EventKind::TaskRemoved) is a registry cleanup confirmation.
 //! It is emitted after the task actor has been joined or cleaned up.
 //!
 //! ## Subscribers

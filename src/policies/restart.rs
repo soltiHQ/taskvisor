@@ -50,6 +50,9 @@ pub enum RestartPolicy {
     /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
     /// Fatal errors and cooperative cancellation stop the task.
     Always {
+        /// Wait time between a successful completion and the next run.
+        ///
+        /// `None` means restart with no configured delay.
         interval: Option<std::time::Duration>,
     },
 }

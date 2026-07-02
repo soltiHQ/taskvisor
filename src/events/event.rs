@@ -111,6 +111,7 @@ pub enum EventKind {
     /// Task is starting an attempt.
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: attempt number (1-based, per actor)
     /// - `at`: wall-clock timestamp
@@ -164,6 +165,7 @@ pub enum EventKind {
     /// Next attempt scheduled (after success or failure).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: previous attempt number
     /// - `delay_ms`: delay before the next attempt (ms)
@@ -179,6 +181,7 @@ pub enum EventKind {
     /// the `Add` command to Registry via mpsc.
     ///
     /// Sets:
+    /// - `id`: task run identity (pre-allocated for this add request)
     /// - `task`: logical task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -187,6 +190,7 @@ pub enum EventKind {
     /// Task was successfully added (actor spawned and registered).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -198,6 +202,7 @@ pub enum EventKind {
     /// no new actor is spawned.
     ///
     /// Sets:
+    /// - `id`: task run identity of the rejected add request
     /// - `task`: task name
     /// - `reason`: e.g. "already_exists"
     /// - `at`: wall-clock timestamp
@@ -207,6 +212,7 @@ pub enum EventKind {
     /// Request to remove a task from the supervisor.
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -215,6 +221,7 @@ pub enum EventKind {
     /// Task was removed from the supervisor (after join/cleanup).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -228,6 +235,7 @@ pub enum EventKind {
     /// - retry budget exceeded on a retryable failure
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: optional message
@@ -242,6 +250,7 @@ pub enum EventKind {
     /// - Task returned `TaskError::Fatal`
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: fatal error message

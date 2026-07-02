@@ -57,7 +57,11 @@
 //! | Outcomes | [`TaskWaiter`], [`TaskOutcome`]                            |
 //! | Policies | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]     |
 //! | Events   | [`Event`], [`EventKind`], [`Subscribe`]                    |
-//! | Errors   | [`TaskError`], [`RuntimeError`]                            |
+//! | Errors   | [`Error`], [`TaskError`], [`RuntimeError`]                 |
+//!
+//! All main types are re-exported at the crate root.
+//! For the concept behind each area, read the module pages:
+//! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], [`identity`], and `controller` (feature-gated).
 //!
 //! ## Optional Features
 //!
@@ -75,23 +79,36 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
-//!     let hello: TaskRef = TaskFn::arc("hello", |ctx: TaskContext| async move {
-//!         if ctx.is_cancelled() {
-//!             return Ok(());
-//!         }
-//!
+//!     let hello: TaskRef = TaskFn::arc("hello", |_ctx| async move {
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     let spec = TaskSpec::once(hello);
-//!     sup.run(vec![spec]).await?;
-//!
+//!     sup.run(vec![TaskSpec::once(hello)]).await?;
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Examples
+//!
+//! The repository ships nine runnable, tutorial-style examples
+//! ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
+//!
+//! | Example | What it shows |
+//! |-----------------------------------------------------------------------------------|----------------------------------------------------|
+//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)         | Minimal wiring: one task, one run                  |
+//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)       | Long-running worker with graceful Ctrl+C shutdown  |
+//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)   | Fixed-interval repeated job                        |
+//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)   | Three tasks with different restart policies        |
+//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)     | Custom `Subscribe` implementation                  |
+//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)     | Add, cancel, and remove tasks at runtime           |
+//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)   | Await a task's final result                        |
+//! | [pipeline](https://github.com/soltiHQ/taskvisor/blob/main/examples/pipeline.rs)   | Slot admission policies (`controller` feature)     |
+//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs) | Await the admission outcome (`controller` feature) |
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Compiles runnable Rust code blocks in `README.md` as doctests.
 #[cfg(doctest)]
@@ -100,31 +117,31 @@ struct ReadmeDoctests;
 
 pub mod prelude;
 
-mod identity;
+pub mod identity;
 pub use identity::TaskId;
 
-mod core;
+pub mod core;
 pub use core::{
     Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskOutcome, TaskWaiter,
 };
 
-mod tasks;
+pub mod tasks;
 pub use tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
 
-mod policies;
+pub mod policies;
 pub use policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
-mod events;
-pub use events::{BackoffSource, Event, EventKind};
-
-mod error;
+pub mod error;
 pub use error::{BoxError, Error, RuntimeError, SharedError, TaskError};
 
-mod subscribers;
+pub mod events;
+pub use events::{BackoffSource, Event, EventKind};
+
+pub mod subscribers;
 pub use subscribers::Subscribe;
 
 #[cfg(feature = "controller")]
-mod controller;
+pub mod controller;
 #[cfg(feature = "controller")]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,

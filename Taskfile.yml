@@ -57,11 +57,13 @@ tasks:
       - task: rust:audit
 
   ci/docs:
-    desc: Run 'rustdoc' for the taskvisor crate.
+    desc: Run 'rustdoc' for the taskvisor crate. Fails on broken doc links in any feature config.
     cmds:
+      - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
       - task: rust:docs
         vars:
-          DOCS_ARGS: '--features "logging controller"'
+          DOCS_ARGS: '--all-features'
 
   ci/build:
     desc: Build a taskvisor example. Pass CRATE = example name.

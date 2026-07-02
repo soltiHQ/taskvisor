@@ -29,7 +29,8 @@ tracing = ["dep:tracing"]
 tokio-util-interop = []
 
 [package.metadata.docs.rs]
-features = ["logging", "tracing", "controller", "tokio-util-interop"]
+features     = ["logging", "tracing", "controller", "tokio-util-interop"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 tokio      = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }

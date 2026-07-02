@@ -145,7 +145,12 @@ impl Supervisor {
     /// It starts the runtime, submits the provided tasks, and waits until all tasks complete or a shutdown signal is received.
     ///
     /// `run` is single-shot for one supervisor instance.
-    /// A second call returns [`RuntimeError::AlreadyRunning`].
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
+    /// - [`RuntimeError::SignalSetupFailed`] when OS signal handlers cannot be installed.
+    /// - [`RuntimeError::AlreadyRunning`] when `run` is called a second time.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         #[cfg(feature = "controller")]
         self.start_controller();

@@ -56,7 +56,7 @@ impl TaskContext {
     /// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef};
     ///
     /// # async fn poll_once() -> Result<(), TaskError> { Ok(()) }
-    /// let poller: TaskRef = TaskFn::arc("poller", |ctx: TaskContext| async move {
+    /// let poller: TaskRef = TaskFn::arc("poller", |ctx| async move {
     ///     loop {
     ///         // `?` propagates poll_once() errors.
     ///         // On shutdown this returns TaskError::Canceled (clean stop, not a failure).

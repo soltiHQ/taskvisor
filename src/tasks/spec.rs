@@ -33,8 +33,8 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// use std::num::NonZeroU32;
 /// use std::time::Duration;
 ///
-/// let task: TaskRef = TaskFn::arc("demo", |_ctx: TaskContext| async move {
-///     Ok::<(), TaskError>(())
+/// let task: TaskRef = TaskFn::arc("demo", |_ctx| async move {
+///     Ok(())
 /// });
 ///
 /// // One-shot (most common):
@@ -150,9 +150,9 @@ impl TaskSpec {
     /// use std::time::Duration;
     /// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
     ///
-    /// let tick: TaskRef = TaskFn::arc("tick", |_ctx: TaskContext| async move {
+    /// let tick: TaskRef = TaskFn::arc("tick", |_ctx| async move {
     ///     println!("tick");
-    ///     Ok::<(), TaskError>(())
+    ///     Ok(())
     /// });
     ///
     /// // Runs every 30 seconds until shutdown.
