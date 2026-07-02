@@ -4,14 +4,14 @@ version      = "0.3.0"
 edition      = "2024"
 rust-version = "1.90.0"
 
-description   = "Event-driven task orchestration with restart, backoff, and user-defined subscribers"
+description   = "Task supervisor for Tokio: restarts background tasks on failure with exponential backoff and jitter, graceful shutdown, and lifecycle events"
 repository    = "https://github.com/soltiHQ/taskvisor"
 documentation = "https://docs.rs/taskvisor"
 license       = "Apache-2.0"
 readme        = "README.md"
 
-keywords   = ["async", "tasks", "supervisor", "backoff", "orchestration"]
-categories = ["asynchronous", "concurrency", "rust-patterns"]
+keywords   = ["supervisor", "tokio", "background-tasks", "restart", "backoff"]
+categories = ["asynchronous", "concurrency"]
 
 exclude = [
     ".env",
