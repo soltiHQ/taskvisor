@@ -425,14 +425,43 @@ Taskvisor is the supervision core of *Solti*, a larger task-orchestration toolki
 
 Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/issues) or send a pull request.
 
+
+
+
+
+
+
+<br>
+
+---
+
+<p align="center">
+  <i>Part of <a href="https://github.com/soltiHQ">soltiHQ</a>: open-source tooling for supervised background tasks.</i>
+</p>
+
+<p align="center">
+  <a href="https://github.com/soltiHQ">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg">
+      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-light.svg" alt="soltiHQ" height="34">
+    </picture>
+  </a>
+</p>
+
+
+<br>
+
 ---
 
 <p>
-<a href="https://github.com/soltiHQ">
-<picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg">
-<img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-light.svg" alt="soltiHQ" height="30" align="middle">
-</picture>
-</a>
-&nbsp;&nbsp;<i>Part of <a href="https://github.com/soltiHQ">soltiHQ</a>: open-source tooling for supervised background tasks.</i>
+  <i>Part of <a href="https://github.com/soltiHQ">soltiHQ</a>: open-source tooling for supervised background tasks.</i>
+</p>
+
+<p>
+  <a href="https://github.com/soltiHQ">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg">
+      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-light.svg" alt="soltiHQ" height="34">
+    </picture>
+  </a>
 </p>
