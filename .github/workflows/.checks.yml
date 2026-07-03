@@ -4,7 +4,7 @@ on: { workflow_call: {} }
 
 jobs:
   fmt:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Run fmt
@@ -12,7 +12,7 @@ jobs:
         with: { command: ci/fmt }
 
   check:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Run check
@@ -20,7 +20,7 @@ jobs:
         with: { command: ci/check }
 
   unittest:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/cargo-cache
@@ -30,7 +30,7 @@ jobs:
         with: { command: ci/test-unit }
 
   integration:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/cargo-cache
@@ -40,7 +40,7 @@ jobs:
         with: { command: ci/test-integration }
 
   clippy-features:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
@@ -58,7 +58,7 @@ jobs:
 
   clippy:
     needs: clippy-features
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

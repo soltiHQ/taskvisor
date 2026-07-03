@@ -14,7 +14,7 @@ Apply **one** of these labels before merge
 | `bug`     | Bug fixes            |
 | `docs`    | Documentation        |
 | `deps`    | Dependencies         |
-| `ci`      | CI/CD                |
+| `tooling` | Tooling              |
 | `other`   | Other                |
 | `skip`    | *omitted from notes* |
 

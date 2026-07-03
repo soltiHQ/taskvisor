@@ -21,7 +21,7 @@ env:
 jobs:
   verify:
     name: Verify tag and version
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -70,7 +70,7 @@ jobs:
   publish:
     name: Publish crate
     needs: verify
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +83,7 @@ jobs:
   gh-release:
     name: GitHub release
     needs: publish
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

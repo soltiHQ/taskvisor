@@ -4,7 +4,7 @@ on: { workflow_call: {} }
 
 jobs:
   required:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     steps:

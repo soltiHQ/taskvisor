@@ -4,7 +4,7 @@ on: { workflow_call: {} }
 
 jobs:
   list:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
@@ -18,7 +18,7 @@ jobs:
 
   build:
     needs: list
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

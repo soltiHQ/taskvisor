@@ -2,7 +2,7 @@ name: Pr
 
 on:
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [opened, synchronize, reopened]
 
 concurrency:
   group: pr-${{ github.ref }}
@@ -10,39 +10,44 @@ concurrency:
 
 permissions: {
   contents: read,
-  actions: write,
-  pull-requests: read
+  actions: write
 }
 
 jobs:
   audit:
     name: Audit
-    if: ${{ toJSON(github.event.pull_request.labels) != '[]' }}
     uses: ./.github/workflows/.audit.yml
-
-  label-check:
-    name: Label check
-    uses: ./.github/workflows/.label-check.yml
 
   docs:
     name: Docs
-    needs: [audit, label-check]
+    needs: [audit]
     uses: ./.github/workflows/.docs.yml
 
   build:
     name: Build examples
-    needs: [audit, label-check]
+    needs: [audit]
     uses: ./.github/workflows/.build.yml
 
   preflight:
     name: Preflight
-    needs: [audit, label-check]
+    needs: [audit]
     uses: ./.github/workflows/.preflight.yml
 
   pr-check:
     name: Pr Check
-    needs: [audit, label-check, docs, build, preflight]
-    runs-on: ${{ vars.RUNS_ON }}
+    if: always()
+    needs: [audit, docs, build, preflight]
+    runs-on: ubuntu-24.04
     steps:
-      - name: All checks passed
-        run: echo "All Pr checks completed successfully!"
+      - name: Verify results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | jq .
+          bad=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success") | .key')
+          if [ -n "$bad" ]; then
+            echo "::error::Jobs not successful: $bad"
+            exit 1
+          fi
+          echo "All Pr checks completed successfully!"

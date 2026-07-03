@@ -4,7 +4,7 @@ on: { workflow_call: {} }
 
 jobs:
   publish-dry-run:
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Run publish dry-run

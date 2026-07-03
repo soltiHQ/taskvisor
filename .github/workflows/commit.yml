@@ -28,8 +28,17 @@ jobs:
 
   commit-check:
     name: Commit Check
+    if: always()
     needs: checks
-    runs-on: ${{ vars.RUNS_ON }}
+    runs-on: ubuntu-24.04
     steps:
-      - name: All checks passed
-        run: echo "All Commit checks completed successfully!"
+      - name: Verify results
+        env:
+          RESULT: ${{ needs.checks.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" != "success" ]; then
+            echo "::error::checks result: $RESULT"
+            exit 1
+          fi
+          echo "All Commit checks completed successfully!"
