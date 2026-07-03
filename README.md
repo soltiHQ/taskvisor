@@ -442,3 +442,14 @@ Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/
     </picture>
   </a>
 </p>
+
+---
+
+<p>
+  <a href="https://github.com/soltiHQ">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/word/solti-word-dark.svg">
+      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-light.svg" alt="soltiHQ" height="128">
+    </picture>
+  </a>
+</p>
