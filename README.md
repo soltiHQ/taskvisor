@@ -11,7 +11,7 @@ You write the task as a plain async fn. Taskvisor keeps it alive: it restarts ta
 
 ## The loop you stop writing
 
-Every long-running service grows this code:
+Every long-running service grows this code: 
 
 ```rust,ignore
 // The hand-rolled way: tokio::spawn + retry loop.
