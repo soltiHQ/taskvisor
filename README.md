@@ -438,7 +438,7 @@ Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/
   <a href="https://github.com/soltiHQ">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg">
-      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-light.svg" alt="soltiHQ" height="34">
+      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-light.svg" alt="soltiHQ" height="128">
     </picture>
   </a>
 </p>
