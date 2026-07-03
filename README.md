@@ -430,7 +430,7 @@ Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/
 
 ##
 
-<p>
+<p align="center">
   <a href="https://github.com/soltiHQ">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/word/solti-word-light.svg">
