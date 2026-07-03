@@ -428,7 +428,7 @@ Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/
 
 <br>
 
----
+##
 
 <p>
   <a href="https://github.com/soltiHQ">
