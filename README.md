@@ -425,6 +425,9 @@ Taskvisor is the supervision core of *Solti*, a larger task-orchestration toolki
 
 Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/issues) or send a pull request.
 
+
+<br>
+
 ---
 
 <p>
