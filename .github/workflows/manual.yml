@@ -1,11 +1,9 @@
-name: Pr
+name: Manual
 
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+on: workflow_dispatch
 
 concurrency:
-  group: pr-${{ github.ref }}
+  group: manual-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {

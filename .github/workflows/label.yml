@@ -16,4 +16,4 @@ permissions: {
 jobs:
   label-check:
     name: Label check
-    uses: ./.github/workflows/.label-check.yml
+    uses: soltiHQ/actions/.github/workflows/label-check.yml@v1
