@@ -278,7 +278,7 @@ The outcome is reported either way.
 
 ### Run CPU-heavy work without blocking Tokio
 
-Offload the computation to rayon and await the result through a oneshot channel — inside a supervised task.
+Offload the computation to rayon and await the result through a oneshot channel. All of this runs inside a supervised task.
 Tokio threads stay unblocked. Taskvisor adds restart with backoff:
 
 ```rust,ignore
