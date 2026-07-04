@@ -184,20 +184,23 @@ handle.shutdown().await?;
 
 ## How it works
 
-```text
-your async fn ──► TaskSpec (restart + backoff + timeout) ──► Supervisor
-                                                                │  runs attempts,
-                                                                │  applies policies
-                                                                ▼
-                                                        typed Event bus
-                                                                │
-                                        ┌───────────────────────┼──────────────────┐
-                                        ▼                       ▼                  ▼
-                                  your Subscribe          TracingBridge      guaranteed outcome
-                                  (metrics, alerts)       (log pipeline)     (add_and_watch)
+```mermaid
+flowchart LR
+    fn["your async fn"] --> spec["TaskSpec<br/>restart · backoff · timeout"]
+    spec --> sup["Supervisor<br/>run → fail → wait → retry"]
+    sig["Ctrl+C / SIGTERM"] -.-> sup
+
+    sup -. "every lifecycle step,<br/>best-effort" .-> bus["event bus"]
+    bus -.-> sub["your Subscribe<br/>metrics, alerts"]
+    bus -.-> tb["TracingBridge<br/>logs"]
+
+    sup == "guaranteed,<br/>one per task" ==> out["final outcome<br/>done / failed / canceled"]
 ```
 
-<!-- TODO: replace the ASCII above with the designed scheme from soltiHQ/.github/assets when ready -->
+Two channels report what happened, and they are different paths:
+the event bus is best-effort (dashed), the final outcome is a guaranteed delivery per task (bold) — it does not go through the bus.
+
+<!-- TODO: replace with the designed scheme from soltiHQ/.github/assets when ready -->
 
 
 Each subscriber gets its own bounded queue. A slow subscriber never blocks others or the supervisor.
