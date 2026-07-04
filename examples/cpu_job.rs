@@ -17,8 +17,8 @@
 //! ## What this shows
 //!
 //! - Offloading CPU-bound work from a supervised task without blocking Tokio.
+//! - Awaiting the job's final result after the supervisor retries it.
 //! - Mapping a computation error into a retryable task failure.
-//! - Awaiting the job's final result: done or failed.
 //!
 //! ## One honest limit
 //!

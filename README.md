@@ -44,7 +44,7 @@ taskvisor = "0.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
-A worker that polls every 5 seconds, restarts on failure, and stops cleanly on Ctrl+C:
+A worker that polls every 5 seconds and stops cleanly on Ctrl+C. If it returns an error, taskvisor restarts it:
 
 ```rust,no_run
 use std::time::Duration;
@@ -135,7 +135,7 @@ In the output, `actor` means taskvisor's internal per-task runner, not an actor-
 
 ## Why taskvisor?
 
-Most supervision crates stop at restart + backoff. Taskvisor also gives you:
+Restart and backoff are the baseline. Taskvisor also gives you:
 
 - **A final answer per task.** Await one result: done, failed, or canceled. Delivered even when events are dropped under load.
 - **Typed lifecycle events.** Every start, failure, and retry goes to an event bus. A `tracing` bridge is built in.
@@ -185,18 +185,7 @@ handle.shutdown().await?;
 
 ## How it works
 
-```mermaid
-flowchart TD
-    fn["your async fn"] --> spec["TaskSpec<br/>restart · backoff · timeout"]
-    spec --> sup["Supervisor<br/>run → fail → wait → retry"]
-    sig["Ctrl+C / SIGTERM"] -.-> sup
-
-    sup -. "every lifecycle step, best-effort" .-> bus["event bus"]
-    bus -.-> sub["your Subscribe<br/>metrics, alerts"]
-    bus -.-> tb["TracingBridge<br/>logs"]
-
-    sup == "guaranteed, one per task" ==> out["final outcome<br/>done / failed / canceled"]
-```
+<img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="How taskvisor works: TaskSpec wraps your async fn, the Supervisor runs and restarts it, lifecycle events go to the event bus, the final outcome is delivered once per task" width="640">
 
 Two separate channels report what happened. The event bus is best-effort (dashed lines).
 The final outcome is delivered once per task (bold line). It does not go through the bus.
@@ -309,11 +298,14 @@ Full program: [`examples/cpu_job.rs`](examples/cpu_job.rs).
 
 ### Send supervisor events to `tracing`
 
+Your application must initialize `tracing` first (for example with `tracing-subscriber`).
+Then add `TracingBridge` as a subscriber:
+
 ```rust,ignore
 // features = ["tracing"]
 let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
 let sup = Supervisor::new(SupervisorConfig::default(), subs);
-// Failures arrive as ERROR, retries as DEBUG — in your existing log pipeline.
+// Failures arrive as ERROR, retries as DEBUG in your existing log pipeline.
 // Filter with RUST_LOG=taskvisor=warn.
 ```
 
@@ -365,7 +357,7 @@ See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examp
 ## Production notes
 
 - **No unsafe.** The crate is `#![forbid(unsafe_code)]`.
-- **Tested.** Unit and integration suites cover concurrency, shutdown, timeouts, and task identity. CI runs fmt, clippy per feature combination, all tests, and per-example builds on every PR.
+- **Tested.** Unit and integration suites cover concurrency, shutdown, timeouts, and task identity. CI covers formatting, linting, tests, docs, and example builds.
 - **Small footprint.** Depends on `tokio`, `tokio-util`, `thiserror`, `fastrand`. Optional: `dashmap` (controller), `tracing`.
 
 ## Examples
