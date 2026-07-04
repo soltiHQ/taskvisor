@@ -247,7 +247,7 @@ impl Controller {
             .write()
             .await
             .take()
-            .ok_or(ControllerError::AlreadyRunning)?;
+            .ok_or(ControllerError::AlreadyStarted)?;
 
         let mut bus_rx = self.bus.subscribe();
         loop {

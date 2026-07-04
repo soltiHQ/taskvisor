@@ -17,35 +17,40 @@ use crate::{
 ///
 /// ## Simple Task
 ///
-/// ```rust
-/// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef};
+/// No type annotations are needed: the constructor bounds drive inference.
 ///
-/// let worker: TaskRef = TaskFn::arc("worker", |_ctx: TaskContext| async move {
-///     Ok::<(), TaskError>(())
+/// ```rust
+/// use taskvisor::{TaskError, TaskFn};
+///
+/// let worker = TaskFn::arc("worker", |ctx| async move {
+///     if ctx.is_cancelled() {
+///         return Err(TaskError::Canceled);
+///     }
+///     Ok(())
 /// });
 /// ```
 ///
 /// ## Task With Shared State
 ///
+/// The closure runs on every attempt.
+/// Clone the state once into the closure, then once into each future:
+///
 /// ```rust
 /// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 /// use std::time::Duration;
 ///
-/// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef};
+/// use taskvisor::TaskFn;
 ///
 /// let counter = Arc::new(AtomicU64::new(0));
-/// let task: TaskRef = TaskFn::arc("counter", {
+/// let task = TaskFn::arc("counter", {
 ///     let counter = counter.clone();
-///     move |ctx: TaskContext| {
+///     move |ctx| {
 ///         let counter = counter.clone();
 ///         async move {
 ///             loop {
-///                 tokio::select! {
-///                     _ = ctx.cancelled() => return Err(TaskError::Canceled),
-///                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
-///                         counter.fetch_add(1, Ordering::Relaxed);
-///                     }
-///                 }
+///                 ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(1)))
+///                     .await?;
+///                 counter.fetch_add(1, Ordering::Relaxed);
 ///             }
 ///         }
 ///     }
@@ -69,8 +74,15 @@ impl<F> std::fmt::Debug for TaskFn<F> {
     }
 }
 
-impl<F> TaskFn<F> {
+impl<F, Fut> TaskFn<F>
+where
+    F: Fn(TaskContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
+{
     /// Creates a task from a name and closure.
+    ///
+    /// The bounds let the compiler infer the closure types.
+    /// You do not need to annotate the `ctx` parameter or the error type.
     pub fn new(name: impl Into<Arc<str>>, f: F) -> Self {
         Self {
             name: name.into(),
@@ -80,7 +92,7 @@ impl<F> TaskFn<F> {
 
     /// Creates a shared task handle.
     ///
-    /// The return value can be assigned to [`TaskRef`](crate::TaskRef): `let task: TaskRef = TaskFn::arc("name", f);`.
+    /// The result coerces to [`TaskRef`](crate::TaskRef) where one is expected.
     pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {
         Arc::new(Self::new(name, f))
     }
@@ -109,6 +121,17 @@ mod tests {
 
     fn ctx() -> TaskContext {
         TaskContext::from_token(CancellationToken::new())
+    }
+
+    #[test]
+    fn constructors_infer_closure_types_without_annotations() {
+        let t = TaskFn::arc("infer", |ctx| async move {
+            if ctx.is_cancelled() {
+                return Err(TaskError::Canceled);
+            }
+            Ok(())
+        });
+        assert_eq!(t.name(), "infer");
     }
 
     #[test]

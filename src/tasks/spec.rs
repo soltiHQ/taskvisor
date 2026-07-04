@@ -14,14 +14,15 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// Describes how a [`Task`](crate::Task) should run.
 ///
 /// A `TaskSpec` combines:
+/// - optional timeout,
 /// - the task itself,
 /// - restart policy,
 /// - backoff policy,
-/// - optional timeout,
 /// - retry limit.
 ///
 /// Use:
 /// - [`restartable`](Self::restartable) for tasks that restart after failure.
+/// - [`periodic`](Self::periodic) for tasks that repeat on a fixed interval.
 /// - [`new`](Self::new) when you want to set all main options directly.
 /// - [`once`](Self::once) for tasks that run once and do not restart.
 ///
@@ -32,8 +33,8 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// use std::num::NonZeroU32;
 /// use std::time::Duration;
 ///
-/// let task: TaskRef = TaskFn::arc("demo", |_ctx: TaskContext| async move {
-///     Ok::<(), TaskError>(())
+/// let task: TaskRef = TaskFn::arc("demo", |_ctx| async move {
+///     Ok(())
 /// });
 ///
 /// // One-shot (most common):
@@ -78,7 +79,14 @@ impl std::fmt::Debug for TaskSpec {
 }
 
 impl TaskSpec {
-    /// Creates a spec with custom restart, backoff, and timeout settings.
+    /// Creates a spec with explicit restart, backoff, and timeout settings.
+    ///
+    /// Prefer the named constructors for common cases:
+    /// [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
+    ///
+    /// A `Some(Duration::ZERO)` timeout is stored as `None` (no timeout).
+    /// The retry limit starts unlimited.
+    /// Change it with [`with_max_retries`](Self::with_max_retries).
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
@@ -96,6 +104,12 @@ impl TaskSpec {
     }
 
     /// One-shot: run once, never restart.
+    ///
+    /// The task runs a single attempt.
+    /// It does not restart, even after a failure.
+    ///
+    /// There is no timeout by default.
+    /// Add one with [`with_timeout`](Self::with_timeout).
     pub fn once(task: TaskRef) -> Self {
         Self {
             backoff: BackoffPolicy::default(),
@@ -106,10 +120,49 @@ impl TaskSpec {
         }
     }
 
-    /// Restartable: restart on failure with default backoff.
+    /// Restartable: restart on failure, stop on success.
+    ///
+    /// On failure the task restarts after the default [`BackoffPolicy`] delay.
+    /// Retries are unlimited by default.
+    /// Limit them with [`with_max_retries`](Self::with_max_retries).
     pub fn restartable(task: TaskRef) -> Self {
         Self {
             restart: RestartPolicy::OnFailure,
+            backoff: BackoffPolicy::default(),
+            timeout: None,
+
+            task,
+
+            max_retries: None,
+        }
+    }
+
+    /// Periodic: run, wait `every`, run again. Forever.
+    ///
+    /// The task restarts after both success and failure.
+    /// On failure the default [`BackoffPolicy`] delay applies first.
+    /// A zero `every` means restart immediately.
+    ///
+    /// The interval starts after the task completes.
+    /// This is not a wall-clock schedule (no "daily at 03:00").
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
+    ///
+    /// let tick: TaskRef = TaskFn::arc("tick", |_ctx| async move {
+    ///     println!("tick");
+    ///     Ok(())
+    /// });
+    ///
+    /// // Runs every 30 seconds until shutdown.
+    /// let spec = TaskSpec::periodic(tick, Duration::from_secs(30));
+    /// ```
+    pub fn periodic(task: TaskRef, every: Duration) -> Self {
+        Self {
+            restart: RestartPolicy::Always {
+                interval: Some(every).filter(|d| !d.is_zero()),
+            },
             backoff: BackoffPolicy::default(),
             timeout: None,
 
@@ -159,13 +212,17 @@ impl TaskSpec {
         self
     }
 
-    /// Builder: set backoff policy.
+    /// Builder: sets the backoff policy.
+    ///
+    /// Backoff controls the delay before a failed attempt restarts.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
         self.backoff = backoff;
         self
     }
 
-    /// Builder: set restart policy.
+    /// Builder: sets the restart policy.
+    ///
+    /// Restart controls whether the task runs again after it exits.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = restart;
         self
@@ -187,6 +244,35 @@ mod tests {
 
     fn task(name: &str) -> TaskRef {
         TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) })
+    }
+
+    #[test]
+    fn periodic_sets_always_restart_with_interval() {
+        let every = Duration::from_secs(30);
+        let spec = TaskSpec::periodic(task("tick"), every);
+
+        assert!(
+            matches!(spec.restart(), RestartPolicy::Always { interval: Some(d) } if d == every),
+            "periodic must set RestartPolicy::Always with the given interval, got {:?}",
+            spec.restart()
+        );
+        assert_eq!(spec.timeout(), None, "periodic must not set a timeout");
+        assert_eq!(
+            spec.max_retries(),
+            None,
+            "periodic must not limit retries by default"
+        );
+    }
+
+    #[test]
+    fn periodic_zero_interval_normalizes_to_immediate_restart() {
+        let spec = TaskSpec::periodic(task("tick"), Duration::ZERO);
+
+        assert!(
+            matches!(spec.restart(), RestartPolicy::Always { interval: None }),
+            "a zero interval must normalize to None (immediate restart), got {:?}",
+            spec.restart()
+        );
     }
 
     #[test]

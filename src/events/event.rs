@@ -62,6 +62,10 @@ use crate::identity::TaskId;
 /// Global counter minting unique, monotonic `seq` values at event construction.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Reason prefix set by the actor when a task permanently stops after exhausting its retry budget.
+/// `TracingBridge` raises such events to WARN.
+pub(crate) const REASON_MAX_RETRIES_EXCEEDED: &str = "max_retries_exceeded";
+
 /// Classification of runtime events.
 ///
 /// Every event has `seq`, `at`, and `kind`.
@@ -111,6 +115,7 @@ pub enum EventKind {
     /// Task is starting an attempt.
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: attempt number (1-based, per actor)
     /// - `at`: wall-clock timestamp
@@ -164,6 +169,7 @@ pub enum EventKind {
     /// Next attempt scheduled (after success or failure).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: previous attempt number
     /// - `delay_ms`: delay before the next attempt (ms)
@@ -179,6 +185,7 @@ pub enum EventKind {
     /// the `Add` command to Registry via mpsc.
     ///
     /// Sets:
+    /// - `id`: task run identity (pre-allocated for this add request)
     /// - `task`: logical task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -187,6 +194,7 @@ pub enum EventKind {
     /// Task was successfully added (actor spawned and registered).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -198,6 +206,7 @@ pub enum EventKind {
     /// no new actor is spawned.
     ///
     /// Sets:
+    /// - `id`: task run identity of the rejected add request
     /// - `task`: task name
     /// - `reason`: e.g. "already_exists"
     /// - `at`: wall-clock timestamp
@@ -207,6 +216,7 @@ pub enum EventKind {
     /// Request to remove a task from the supervisor.
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -215,6 +225,7 @@ pub enum EventKind {
     /// Task was removed from the supervisor (after join/cleanup).
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
@@ -228,6 +239,7 @@ pub enum EventKind {
     /// - retry budget exceeded on a retryable failure
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: optional message
@@ -242,6 +254,7 @@ pub enum EventKind {
     /// - Task returned `TaskError::Fatal`
     ///
     /// Sets:
+    /// - `id`: task run identity
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: fatal error message
@@ -278,6 +291,49 @@ pub enum EventKind {
     /// - `task`: slot name
     /// - `reason`: the transition, e.g. `admitting→running`, `running→terminating (replace)`, `admitting→running (lag recovery)`
     ControllerSlotTransition,
+}
+
+impl EventKind {
+    /// Returns a stable machine-readable label for logs and metrics.
+    ///
+    /// The label is the snake_case form of the variant name.
+    /// Use it as an event name in tracing or as a metrics label value.
+    ///
+    /// ```rust
+    /// use taskvisor::EventKind;
+    ///
+    /// assert_eq!(EventKind::TaskStarting.as_label(), "task_starting");
+    /// assert_eq!(EventKind::BackoffScheduled.as_label(), "backoff_scheduled");
+    /// ```
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            EventKind::SubscriberPanicked => "subscriber_panicked",
+            EventKind::SubscriberOverflow => "subscriber_overflow",
+            EventKind::ShutdownRequested => "shutdown_requested",
+            EventKind::AllStoppedWithinGrace => "all_stopped_within_grace",
+            EventKind::GraceExceeded => "grace_exceeded",
+            EventKind::TaskStarting => "task_starting",
+            EventKind::TaskStopped => "task_stopped",
+            EventKind::TaskCanceled => "task_canceled",
+            EventKind::TaskFailed => "task_failed",
+            EventKind::TimeoutHit => "timeout_hit",
+            EventKind::BackoffScheduled => "backoff_scheduled",
+            EventKind::TaskAddRequested => "task_add_requested",
+            EventKind::TaskAdded => "task_added",
+            EventKind::TaskAddFailed => "task_add_failed",
+            EventKind::TaskRemoveRequested => "task_remove_requested",
+            EventKind::TaskRemoved => "task_removed",
+            EventKind::ActorExhausted => "actor_exhausted",
+            EventKind::ActorDead => "actor_dead",
+            #[cfg(feature = "controller")]
+            EventKind::ControllerRejected => "controller_rejected",
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSubmitted => "controller_submitted",
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSlotTransition => "controller_slot_transition",
+        }
+    }
 }
 
 /// Reason for scheduling the next run/backoff.

@@ -287,6 +287,53 @@ impl TaskError {
     }
 }
 
+/// Umbrella error for mixed supervisor and controller call chains.
+///
+/// [`RuntimeError`] and `ControllerError` (feature `controller`) convert into this type with `?`.
+/// Match on the variant to get the original error back.
+///
+/// Use it when one function mixes `add*` and `submit*` calls:
+///
+/// ```rust
+/// use taskvisor::{Error, RuntimeError};
+///
+/// fn stop() -> Result<(), Error> {
+///     Err(RuntimeError::ShuttingDown)? // `?` converts automatically
+/// }
+///
+/// assert!(matches!(stop(), Err(Error::Runtime(_))));
+/// ```
+///
+/// Match with a wildcard arm because this enum is non-exhaustive.
+#[non_exhaustive]
+#[derive(Error, Debug)]
+pub enum Error {
+    /// Core runtime error from `run`, `add*`, waiters, and management methods.
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+
+    /// Controller submission error from `submit*` methods.
+    ///
+    /// Requires the `controller` feature.
+    #[cfg(feature = "controller")]
+    #[error(transparent)]
+    Controller(#[from] crate::controller::ControllerError),
+}
+
+impl Error {
+    /// Returns a stable machine-readable label for logs and metrics.
+    ///
+    /// The label comes from the wrapped error.
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Error::Runtime(e) => e.as_label(),
+            #[cfg(feature = "controller")]
+            Error::Controller(e) => e.as_label(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -30,8 +30,8 @@
 //! ```rust
 //! use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
 //!
-//! let task: TaskRef = TaskFn::arc("worker", |_ctx: TaskContext| async move {
-//!     Ok::<(), TaskError>(())
+//! let task: TaskRef = TaskFn::arc("worker", |_ctx| async move {
+//!     Ok(())
 //! });
 //!
 //! let once = TaskSpec::once(task.clone());

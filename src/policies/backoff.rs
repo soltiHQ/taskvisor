@@ -6,9 +6,9 @@
 //! |------------------------------------|-------------------------------------------|
 //! | [`first`](BackoffPolicy::first)    | Delay before the first retry              |
 //! | [`factor`](BackoffPolicy::factor)  | Growth multiplier (`1.0` = constant)      |
-//! | [`max`](BackoffPolicy::max)        | Maximum delay cap                         |
 //! | [`jitter`](BackoffPolicy::jitter)  | Random spread applied to the base delay   |
 //! | [`floor`](BackoffPolicy::floor)    | User minimum delay after jitter           |
+//! | [`max`](BackoffPolicy::max)        | Maximum delay cap                         |
 //!
 //! ## Formula
 //!
@@ -27,17 +27,12 @@
 //! ## Example
 //! ```rust
 //! use std::time::Duration;
-//! use taskvisor::{BackoffPolicy, JitterPolicy};
+//! use taskvisor::BackoffPolicy;
 //!
-//! let backoff = BackoffPolicy::new(
-//!     Duration::from_millis(100),
-//!     Duration::from_secs(10),
-//!     2.0,
-//!     JitterPolicy::None,
-//! )
-//! .unwrap();
+//! let backoff = BackoffPolicy::exponential(Duration::from_millis(100))
+//!     .with_max(Duration::from_secs(10));
 //!
-//! // Attempt 0 - uses 'first' (100ms), clamped to max
+//! // Attempt 0 - uses 'first' (100ms)
 //! assert_eq!(backoff.next(0), Duration::from_millis(100));
 //!
 //! // Attempt 1 - first × factor^1 = 200ms
@@ -46,6 +41,9 @@
 //! // Attempt 10 - 100ms × 2^10 = 102_400ms → capped at max=10s
 //! assert_eq!(backoff.next(10), Duration::from_secs(10));
 //! ```
+//!
+//! Named constructors: [`constant`](BackoffPolicy::constant) and [`exponential`](BackoffPolicy::exponential).
+//! For a custom growth factor use [`new`](BackoffPolicy::new).
 
 use std::time::Duration;
 
@@ -88,6 +86,9 @@ pub struct BackoffPolicy {
     factor: f64,
 }
 
+/// Default delay cap shared by [`Default`] and the named constructors.
+const DEFAULT_MAX: Duration = Duration::from_secs(30);
+
 impl Default for BackoffPolicy {
     /// Returns a strategy with:
     /// - `factor = 1.0` (constant delay);
@@ -97,7 +98,7 @@ impl Default for BackoffPolicy {
     fn default() -> Self {
         Self {
             first: Duration::from_millis(100),
-            max: Duration::from_secs(30),
+            max: DEFAULT_MAX,
             jitter: JitterPolicy::None,
             factor: 1.0,
             floor: Duration::ZERO,
@@ -133,6 +134,85 @@ impl BackoffPolicy {
             jitter,
             floor: Duration::ZERO,
         })
+    }
+
+    /// Constant backoff: the same `delay` before every retry.
+    ///
+    /// No jitter by default.
+    /// Add it with [`with_jitter`](Self::with_jitter).
+    /// The cap starts at 30 seconds, or at `delay` if that is larger.
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use taskvisor::BackoffPolicy;
+    ///
+    /// let backoff = BackoffPolicy::constant(Duration::from_millis(500));
+    /// assert_eq!(backoff.next(0), Duration::from_millis(500));
+    /// assert_eq!(backoff.next(9), Duration::from_millis(500));
+    /// ```
+    #[must_use]
+    pub fn constant(delay: Duration) -> Self {
+        Self {
+            first: delay,
+            max: delay.max(DEFAULT_MAX),
+            factor: 1.0,
+            jitter: JitterPolicy::None,
+            floor: Duration::ZERO,
+        }
+    }
+
+    /// Exponential backoff: the delay doubles after every retry.
+    ///
+    /// Starts at `first` with `factor = 2.0`.
+    /// The cap starts at 30 seconds, or at `first` if that is larger.
+    /// Change the cap with [`with_max`](Self::with_max).
+    /// No jitter by default.
+    /// Add it with [`with_jitter`](Self::with_jitter).
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use taskvisor::{BackoffPolicy, JitterPolicy};
+    ///
+    /// let backoff = BackoffPolicy::exponential(Duration::from_millis(100))
+    ///     .with_max(Duration::from_secs(10))
+    ///     .with_jitter(JitterPolicy::Equal);
+    ///
+    /// // Base delays: 100ms, 200ms, 400ms, ... capped at 10s.
+    /// // Equal jitter keeps each delay within [base/2, base].
+    /// assert!(backoff.next(0) <= Duration::from_millis(100));
+    /// ```
+    #[must_use]
+    pub fn exponential(first: Duration) -> Self {
+        Self {
+            first,
+            max: first.max(DEFAULT_MAX),
+            factor: 2.0,
+            jitter: JitterPolicy::None,
+            floor: Duration::ZERO,
+        }
+    }
+
+    /// Builder: sets the maximum delay cap.
+    ///
+    /// If `max` is below the current `first`, `first` is lowered to `max`.
+    /// A previously set floor is re-clamped to the new cap.
+    /// The policy stays valid without a `Result`.
+    #[must_use]
+    pub fn with_max(mut self, max: Duration) -> Self {
+        self.max = max;
+        self.first = self.first.min(max);
+        self.floor = self.floor.min(max);
+        self
+    }
+
+    /// Builder: sets the jitter policy.
+    ///
+    /// Jitter spreads retry delays in time.
+    /// It helps when many tasks fail at the same moment.
+    #[must_use]
+    pub fn with_jitter(mut self, jitter: JitterPolicy) -> Self {
+        self.jitter = jitter;
+        self
     }
 
     /// Sets a minimum delay floor, applied to every computed delay (after jitter).
@@ -350,6 +430,127 @@ mod tests {
             hi >= Duration::from_secs(5),
             "upper bound {hi:?}; band too narrow"
         );
+    }
+
+    #[test]
+    fn constant_preset_yields_flat_delays() {
+        let p = BackoffPolicy::constant(Duration::from_millis(500));
+
+        assert_eq!(p.factor(), 1.0, "constant preset must use factor 1.0");
+        assert!(
+            matches!(p.jitter(), JitterPolicy::None),
+            "constant preset must have no jitter by default"
+        );
+        for attempt in 0..10 {
+            assert_eq!(
+                p.next(attempt),
+                Duration::from_millis(500),
+                "attempt {attempt}: constant delay must not change"
+            );
+        }
+    }
+
+    #[test]
+    fn constant_preset_allows_delay_above_default_cap() {
+        let p = BackoffPolicy::constant(Duration::from_secs(60));
+
+        assert!(
+            p.first() <= p.max(),
+            "invariant first <= max must hold for any delay"
+        );
+        assert_eq!(
+            p.next(0),
+            Duration::from_secs(60),
+            "a delay above the default cap must be preserved, not clamped"
+        );
+    }
+
+    #[test]
+    fn exponential_preset_doubles_and_caps_at_default_max() {
+        let p = BackoffPolicy::exponential(Duration::from_millis(100));
+
+        assert_eq!(p.factor(), 2.0, "exponential preset must use factor 2.0");
+        assert_eq!(p.next(0), Duration::from_millis(100));
+        assert_eq!(p.next(1), Duration::from_millis(200));
+        assert_eq!(p.next(2), Duration::from_millis(400));
+        assert_eq!(
+            p.next(20),
+            Duration::from_secs(30),
+            "growth must cap at the default 30s max"
+        );
+    }
+
+    #[test]
+    fn exponential_preset_with_large_first_keeps_invariant() {
+        let p = BackoffPolicy::exponential(Duration::from_secs(60));
+
+        assert!(
+            p.first() <= p.max(),
+            "invariant first <= max must hold when first exceeds the default cap"
+        );
+        assert_eq!(p.next(0), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn with_max_sets_the_cap() {
+        let p =
+            BackoffPolicy::exponential(Duration::from_millis(100)).with_max(Duration::from_secs(1));
+
+        assert_eq!(
+            p.next(10),
+            Duration::from_secs(1),
+            "with_max must cap the grown delay"
+        );
+    }
+
+    #[test]
+    fn with_max_below_first_clamps_first_down() {
+        let p = BackoffPolicy::constant(Duration::from_secs(10)).with_max(Duration::from_secs(5));
+
+        assert_eq!(
+            p.first(),
+            Duration::from_secs(5),
+            "with_max below first must lower first to max (invariant by construction)"
+        );
+        assert_eq!(p.next(0), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn with_max_reclamps_existing_floor() {
+        let p = BackoffPolicy::constant(Duration::from_millis(100))
+            .with_floor(Duration::from_secs(5))
+            .with_max(Duration::from_secs(1));
+
+        assert!(
+            p.floor() <= p.max(),
+            "with_max must re-clamp a previously set floor"
+        );
+        for attempt in 0..10 {
+            assert!(
+                p.next(attempt) <= Duration::from_secs(1),
+                "attempt {attempt}: delay must never exceed the new max"
+            );
+        }
+    }
+
+    #[test]
+    fn with_jitter_sets_policy_and_keeps_bounds() {
+        let p =
+            BackoffPolicy::exponential(Duration::from_millis(100)).with_jitter(JitterPolicy::Equal);
+
+        assert!(
+            matches!(p.jitter(), JitterPolicy::Equal),
+            "with_jitter must store the given policy"
+        );
+        for attempt in 0..10 {
+            let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
+            let delay = p.next(attempt);
+            assert!(
+                delay >= Duration::from_millis((base_ms / 2.0) as u64)
+                    && delay <= Duration::from_millis(base_ms as u64),
+                "attempt {attempt}: Equal jitter must stay within [base/2, base]"
+            );
+        }
     }
 
     #[test]

@@ -24,11 +24,11 @@ pub use crate::policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPoli
 /// Runtime event types.
 pub use crate::events::{BackoffSource, Event, EventKind};
 
+/// Runtime and task error types.
+pub use crate::error::{Error, RuntimeError, TaskError};
+
 /// Event subscriber trait.
 pub use crate::subscribers::Subscribe;
-
-/// Runtime and task error types.
-pub use crate::error::{RuntimeError, TaskError};
 
 /// Runtime task identity.
 pub use crate::identity::TaskId;
@@ -47,6 +47,12 @@ pub use crate::controller::{
 /// Requires the `logging` feature.
 #[cfg(feature = "logging")]
 pub use crate::subscribers::LogWriter;
+
+/// Built-in tracing bridge subscriber.
+///
+/// Requires the `tracing` feature.
+#[cfg(feature = "tracing")]
+pub use crate::subscribers::TracingBridge;
 
 /// Raw cancellation-token interop.
 ///

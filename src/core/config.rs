@@ -106,8 +106,8 @@ impl SupervisorConfig {
     /// ```rust
     /// # use std::time::Duration;
     /// # use taskvisor::{SupervisorConfig, TaskContext, TaskFn, TaskRef, TaskError};
-    /// let task: TaskRef = TaskFn::arc("worker", |_ctx: TaskContext| async {
-    ///     Ok::<(), TaskError>(())
+    /// let task: TaskRef = TaskFn::arc("worker", |_ctx| async {
+    ///     Ok(())
     /// });
     ///
     /// let spec = SupervisorConfig::default()

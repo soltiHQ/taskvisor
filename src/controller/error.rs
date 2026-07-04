@@ -28,8 +28,8 @@ pub enum ControllerError {
     /// The controller loop was started more than once.
     ///
     /// This is an internal lifecycle guard. Normal submission APIs do not return this variant.
-    #[error("controller already running")]
-    AlreadyRunning,
+    #[error("controller already started")]
+    AlreadyStarted,
 }
 
 impl ControllerError {
@@ -40,7 +40,7 @@ impl ControllerError {
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
-            ControllerError::AlreadyRunning => "controller_already_running",
+            ControllerError::AlreadyStarted => "controller_already_started",
             ControllerError::NotConfigured => "controller_not_configured",
             ControllerError::Closed => "controller_closed",
             ControllerError::Full => "controller_full",

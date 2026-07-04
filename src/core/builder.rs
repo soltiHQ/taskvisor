@@ -5,12 +5,22 @@
 //! ## Example
 //!
 //! ```rust
-//! use taskvisor::{SupervisorBuilder, SupervisorConfig};
+//! use std::time::Duration;
+//! use taskvisor::{BackoffPolicy, SupervisorBuilder, SupervisorConfig};
 //!
-//! let supervisor = SupervisorBuilder::new(SupervisorConfig::default()).build();
+//! let supervisor = SupervisorBuilder::new(SupervisorConfig::default())
+//!     .with_grace(Duration::from_secs(30))
+//!     .with_timeout(Duration::from_secs(5))
+//!     .with_max_retries(10)
+//!     .with_max_concurrent(4)
+//!     .with_backoff(BackoffPolicy::exponential(Duration::from_millis(100)))
+//!     .build();
 //! ```
 
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
+use std::time::Duration;
+
 use tokio::{sync, sync::mpsc};
 
 use super::{
@@ -19,6 +29,7 @@ use super::{
 use crate::{
     core::SupervisorConfig,
     events::Bus,
+    policies::{BackoffPolicy, RestartPolicy},
     subscribers::{Subscribe, SubscriberSet},
 };
 
@@ -44,6 +55,8 @@ pub struct SupervisorBuilder {
 
 impl SupervisorBuilder {
     /// Creates a new builder with the given runtime configuration.
+    ///
+    /// Start from [`SupervisorConfig::default`] and adjust single values with the `with_*` setters below.
     pub fn new(cfg: SupervisorConfig) -> Self {
         Self {
             cfg,
@@ -52,6 +65,81 @@ impl SupervisorBuilder {
             #[cfg(feature = "controller")]
             controller_config: None,
         }
+    }
+
+    /// Builder: sets the graceful-shutdown wait time.
+    ///
+    /// During shutdown the supervisor waits up to `grace` for tasks to stop.
+    /// `Duration::ZERO` means no graceful wait.
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.cfg.grace = grace;
+        self
+    }
+
+    /// Builder: sets the default timeout for one task attempt.
+    ///
+    /// A zero duration means no timeout.
+    /// Tasks created outside [`SupervisorConfig::task_spec`] keep their own timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.cfg.timeout = Some(timeout).filter(|d| !d.is_zero());
+        self
+    }
+
+    /// Builder: sets the default failure-retry limit.
+    ///
+    /// The default is unlimited retries.
+    /// Call this only when you want a limit.
+    ///
+    /// Use [`RestartPolicy::Never`] to stop a task after its first failure.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        assert!(
+            max_retries > 0,
+            "with_max_retries(0) is invalid: zero retries cannot be represented; \
+             use RestartPolicy::Never to stop after the first failure"
+        );
+        self.cfg.max_retries = NonZeroU32::new(max_retries);
+        self
+    }
+
+    /// Builder: sets the global limit for concurrently running task attempts.
+    ///
+    /// The default is unlimited concurrency.
+    /// Call this only when you want a limit.
+    ///
+    /// With zero permits no task could ever run.
+    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
+        assert!(
+            max_concurrent > 0,
+            "with_max_concurrent(0) is invalid: no task could ever run; \
+             omit the call for unlimited concurrency"
+        );
+        self.cfg.max_concurrent = NonZeroUsize::new(max_concurrent);
+        self
+    }
+
+    /// Builder: sets the event bus capacity.
+    ///
+    /// The effective capacity is at least `1`.
+    /// Slow subscribers that fall behind by more than this may skip older events.
+    pub fn with_bus_capacity(mut self, bus_capacity: usize) -> Self {
+        self.cfg.bus_capacity = bus_capacity;
+        self
+    }
+
+    /// Builder: sets the default restart policy for tasks created through [`SupervisorConfig::task_spec`].
+    ///
+    /// Restart controls whether a task runs again after it exits.
+    pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
+        self.cfg.restart = restart;
+        self
+    }
+
+    /// Builder: sets the default backoff policy for retryable failures.
+    ///
+    /// Backoff controls the delay before a failed attempt restarts.
+    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
+        self.cfg.backoff = backoff;
+        self
     }
 
     /// Sets event subscribers for runtime observability.
@@ -125,5 +213,66 @@ impl SupervisorBuilder {
             #[cfg(feature = "controller")]
             runtime_token,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policies::{BackoffPolicy, RestartPolicy};
+    use std::time::Duration;
+
+    #[test]
+    fn setters_override_config_fields() {
+        let backoff = BackoffPolicy::exponential(Duration::from_millis(200));
+        let b = SupervisorBuilder::new(SupervisorConfig::default())
+            .with_grace(Duration::from_secs(30))
+            .with_timeout(Duration::from_secs(5))
+            .with_max_retries(10)
+            .with_max_concurrent(4)
+            .with_bus_capacity(2048)
+            .with_restart(RestartPolicy::Never)
+            .with_backoff(backoff);
+
+        assert_eq!(b.cfg.grace, Duration::from_secs(30));
+        assert_eq!(b.cfg.timeout, Some(Duration::from_secs(5)));
+        assert_eq!(b.cfg.max_retries.map(|n| n.get()), Some(10));
+        assert_eq!(b.cfg.max_concurrent.map(|n| n.get()), Some(4));
+        assert_eq!(b.cfg.bus_capacity, 2048);
+        assert!(
+            matches!(b.cfg.restart, RestartPolicy::Never),
+            "with_restart must store the given policy"
+        );
+        assert_eq!(
+            b.cfg.backoff.factor(),
+            2.0,
+            "with_backoff must store the given policy"
+        );
+    }
+
+    #[test]
+    fn with_timeout_zero_means_no_timeout() {
+        let b = SupervisorBuilder::new(SupervisorConfig {
+            timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        })
+        .with_timeout(Duration::ZERO);
+
+        assert_eq!(
+            b.cfg.timeout, None,
+            "a zero timeout must normalize to None (no timeout)"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "with_max_retries(0)")]
+    fn with_max_retries_zero_panics() {
+        let _ = SupervisorBuilder::new(SupervisorConfig::default()).with_max_retries(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "with_max_concurrent(0)")]
+    fn with_max_concurrent_zero_panics() {
+        let _ = SupervisorBuilder::new(SupervisorConfig::default()).with_max_concurrent(0);
     }
 }

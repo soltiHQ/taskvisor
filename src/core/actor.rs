@@ -91,7 +91,7 @@ use crate::{
     TaskError,
     core::runner::run_once,
     error::SharedError,
-    events::{Bus, Event, EventKind},
+    events::{Bus, Event, EventKind, REASON_MAX_RETRIES_EXCEEDED},
     identity::TaskId,
     policies::{BackoffPolicy, RestartPolicy},
     tasks::Task,
@@ -378,7 +378,8 @@ impl TaskActor {
                             self.params.max_retries.filter(|_| retries_exhausted)
                         {
                             Arc::from(format!(
-                                "max_retries_exceeded({}/{}): {}",
+                                "{}({}/{}): {}",
+                                REASON_MAX_RETRIES_EXCEEDED,
                                 backoff_attempt,
                                 limit.get(),
                                 e

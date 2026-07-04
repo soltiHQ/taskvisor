@@ -44,8 +44,8 @@ use crate::TaskSpec;
 /// ```rust
 /// use taskvisor::{ControllerSpec, TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
 ///
-/// let task: TaskRef = TaskFn::arc("deploy-main-42", |_ctx: TaskContext| async {
-///     Ok::<(), TaskError>(())
+/// let task: TaskRef = TaskFn::arc("deploy-main-42", |_ctx| async {
+///     Ok(())
 /// });
 ///
 /// let spec = ControllerSpec::queue(TaskSpec::once(task)).with_slot("deploy-main");

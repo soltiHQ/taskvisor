@@ -1,6 +1,6 @@
 //! # taskvisor
 //!
-//! Taskvisor is a small async task supervisor for Rust.
+//! Taskvisor is a task supervisor for Tokio: it restarts background tasks on failure and reports every step through typed events.
 //!
 //! It helps you run named async tasks with:
 //!
@@ -57,12 +57,17 @@
 //! | Outcomes | [`TaskWaiter`], [`TaskOutcome`]                            |
 //! | Policies | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]     |
 //! | Events   | [`Event`], [`EventKind`], [`Subscribe`]                    |
-//! | Errors   | [`TaskError`], [`RuntimeError`]                            |
+//! | Errors   | [`Error`], [`TaskError`], [`RuntimeError`]                 |
+//!
+//! All main types are re-exported at the crate root.
+//! For the concept behind each area, read the module pages:
+//! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], [`identity`], and `controller` (feature-gated).
 //!
 //! ## Optional Features
 //!
-//! - `controller`: slot-based admission control with [`ControllerSpec`], [`AdmissionPolicy`], and [`ControllerConfig`].
 //! - `tokio-util-interop`: exposes raw `tokio_util::sync::CancellationToken` interop through [`TaskContext`] and the prelude.
+//! - `controller`: slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
+//! - `tracing`: built-in `TracingBridge` subscriber that forwards runtime events to the `tracing` ecosystem.
 //! - `logging`: built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
 //!
 //! ## Quick Start
@@ -74,23 +79,40 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
-//!     let hello: TaskRef = TaskFn::arc("hello", |ctx: TaskContext| async move {
-//!         if ctx.is_cancelled() {
-//!             return Ok(());
-//!         }
-//!
+//!     let hello: TaskRef = TaskFn::arc("hello", |_ctx| async move {
 //!         println!("Hello from task!");
 //!         Ok(())
 //!     });
 //!
-//!     let spec = TaskSpec::once(hello);
-//!     sup.run(vec![spec]).await?;
-//!
+//!     sup.run(vec![TaskSpec::once(hello)]).await?;
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Examples
+//!
+//! All examples run as-is, from simple to advanced
+//! ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
+//!
+//! | Example | What it shows |
+//! |---------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
+//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                   | Run one task and exit — the minimal wiring                        |
+//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)                 | A long-running worker that stops cleanly on Ctrl+C                |
+//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)             | Run a job every N seconds, forever                                |
+//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)             | Several tasks with different restart rules under one supervisor   |
+//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | A message consumer that reconnects after failures                 |
+//! | [cpu_job](https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs)               | Run CPU-heavy work on rayon, supervised, without blocking Tokio   |
+//! | [subscriber](https://github.com/soltiHQ/taskvisor/blob/main/examples/subscriber.rs)         | React to lifecycle events with your own handler                   |
+//! | [tracing](https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs)               | Send supervisor events into your logs (feature `tracing`)         |
+//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)               | Count lifecycle events as Prometheus metrics                      |
+//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)               | Add, cancel, and remove tasks while the app is running            |
+//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)             | Wait for a task's final result: done, failed, or canceled         |
+//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                   | Limit concurrency per slot: queue, replace, or drop the newcomer  |
+//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)           | Find out if your submission ran or was rejected                   |
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Compiles runnable Rust code blocks in `README.md` as doctests.
 #[cfg(doctest)]
@@ -99,31 +121,31 @@ struct ReadmeDoctests;
 
 pub mod prelude;
 
-mod identity;
+pub mod identity;
 pub use identity::TaskId;
 
-mod core;
+pub mod core;
 pub use core::{
     Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskOutcome, TaskWaiter,
 };
 
-mod tasks;
+pub mod tasks;
 pub use tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
 
-mod policies;
+pub mod policies;
 pub use policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
-mod events;
+pub mod error;
+pub use error::{BoxError, Error, RuntimeError, SharedError, TaskError};
+
+pub mod events;
 pub use events::{BackoffSource, Event, EventKind};
 
-mod error;
-pub use error::{BoxError, RuntimeError, SharedError, TaskError};
-
-mod subscribers;
+pub mod subscribers;
 pub use subscribers::Subscribe;
 
 #[cfg(feature = "controller")]
-mod controller;
+pub mod controller;
 #[cfg(feature = "controller")]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
@@ -132,3 +154,6 @@ pub use controller::{
 
 #[cfg(feature = "logging")]
 pub use subscribers::LogWriter;
+
+#[cfg(feature = "tracing")]
+pub use subscribers::TracingBridge;

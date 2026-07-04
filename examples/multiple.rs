@@ -6,16 +6,15 @@
 //!
 //! ## Tasks
 //!
-//! | Task        | Policy                                   | Behavior                              |
-//! |-------------|------------------------------------------|---------------------------------------|
-//! | `one-shot`  | `RestartPolicy::Never`                   | Runs once, exits.                     |
-//! | `resilient` | `OnFailure` + backoff + retry limit 3    | Fails twice, succeeds on 3rd attempt. |
-//! | `always-on` | `Always { interval: 500ms }`             | Runs forever in a loop.               |
+//! | Task        | Spec                                       | Behavior                              |
+//! |-------------|--------------------------------------------|---------------------------------------|
+//! | `one-shot`  | `TaskSpec::once`                           | Runs once, exits.                     |
+//! | `resilient` | `TaskSpec::restartable` + backoff + retries| Fails twice, succeeds on 3rd attempt. |
+//! | `always-on` | `TaskSpec::periodic(500ms)`                | Runs forever, 500ms between runs.     |
 //!
 //! ## What this shows
 //!
-//! - **`BackoffPolicy`** customization: exponential factor, initial delay, maximum delay.
-//!   `resilient` uses `factor: 2.0` → delays: 200ms, 400ms, 800ms, …
+//! - **`BackoffPolicy::exponential`** preset: delays 200ms, 400ms, 800ms, … capped at 5s.
 //! - **`max_retries(3)`**: the task gives up after 3 failure-driven retries.
 //!   Success-driven restarts (like `always-on`) don't count toward max_retries.
 //! - **`SupervisorConfig::grace`**: how long the supervisor waits for tasks to stop during shutdown.
@@ -43,10 +42,10 @@
 //!
 //! ## Next
 //!
-//! | Example                    | What it adds                                       |
-//! |----------------------------|----------------------------------------------------|
-//! | [`metrics.rs`](metrics.rs) | Observe lifecycle events with a subscriber         |
-//! | [`dynamic.rs`](dynamic.rs) | Add/remove tasks at runtime via `SupervisorHandle` |
+//! | Example                          | What it adds                                       |
+//! |----------------------------------|----------------------------------------------------|
+//! | [`subscriber.rs`](subscriber.rs) | Observe lifecycle events with a subscriber         |
+//! | [`dynamic.rs`](dynamic.rs)       | Add/remove tasks at runtime via `SupervisorHandle` |
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -58,7 +57,7 @@ use taskvisor::prelude::*;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One-shot: runs once and exits
-    let one_shot: TaskRef = TaskFn::arc("one-shot", |_ctx: TaskContext| async move {
+    let one_shot: TaskRef = TaskFn::arc("one-shot", |_ctx| async move {
         println!("[one-shot] doing work...");
         tokio::time::sleep(Duration::from_millis(200)).await;
         println!("[one-shot] done.");
@@ -67,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resilient: fails first 2 attempts, succeeds on 3rd
     let attempt = Arc::new(AtomicU32::new(0));
-    let resilient: TaskRef = TaskFn::arc("resilient", move |_ctx: TaskContext| {
+    let resilient: TaskRef = TaskFn::arc("resilient", move |_ctx| {
         let attempt = Arc::clone(&attempt);
         async move {
             let n = attempt.fetch_add(1, Ordering::Relaxed) + 1;
@@ -85,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Always-on: repeats every 500ms until Ctrl+C
     let cycle = Arc::new(AtomicU32::new(0));
-    let always_on: TaskRef = TaskFn::arc("always-on", move |_ctx: TaskContext| {
+    let always_on: TaskRef = TaskFn::arc("always-on", move |_ctx| {
         let cycle = Arc::clone(&cycle);
         async move {
             let n = cycle.fetch_add(1, Ordering::Relaxed) + 1;
@@ -97,18 +96,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let specs = vec![
         TaskSpec::once(one_shot),
-        TaskSpec::once(always_on).with_restart(RestartPolicy::Always {
-            interval: Some(Duration::from_millis(500)),
-        }),
+        TaskSpec::periodic(always_on, Duration::from_millis(500)),
         TaskSpec::restartable(resilient)
             .with_backoff(
-                BackoffPolicy::new(
-                    Duration::from_millis(200),
-                    Duration::from_secs(5),
-                    2.0,
-                    JitterPolicy::None,
-                )
-                .expect("valid backoff"),
+                BackoffPolicy::exponential(Duration::from_millis(200))
+                    .with_max(Duration::from_secs(5)),
             )
             .with_max_retries(NonZeroU32::new(3).unwrap()),
     ];

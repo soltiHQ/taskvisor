@@ -27,7 +27,7 @@
 mod subscriber;
 mod subscriber_set;
 
-#[cfg(feature = "logging")]
+#[cfg(any(feature = "logging", feature = "tracing"))]
 mod embedded;
 
 pub use subscriber::Subscribe;
@@ -35,3 +35,6 @@ pub(crate) use subscriber_set::SubscriberSet;
 
 #[cfg(feature = "logging")]
 pub use embedded::LogWriter;
+
+#[cfg(feature = "tracing")]
+pub use embedded::TracingBridge;

@@ -10,104 +10,15 @@ concurrency:
   cancel-in-progress: false
 
 permissions: {
-  contents: read,
+  contents: write,
   actions: write
 }
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-
 jobs:
-  verify:
-    name: Verify tag and version
-    runs-on: ${{ vars.RUNS_ON }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Ensure main is fetched
-        run: git fetch origin main --depth=1
-
-      - name: Verify tag commit is on main
-        shell: bash
-        env:
-          REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-
-          TAG_COMMIT=$(git rev-list -n 1 "$REF")
-          git rev-parse --verify origin/main >/dev/null
-
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
-            echo "::error::Tag commit is not an ancestor of origin/main"
-            exit 1
-          fi
-
-      - name: Verify Cargo.toml version matches tag
-        shell: bash
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          TAG_VERSION="${REF_NAME#v}"
-          FILE_VERSION=$(awk '
-            /^\[package\]/ { in_section=1; next }
-            /^\[/ { in_section=0 }
-            in_section && /^\s*version\s*=/ {
-              match($0, /"([^"]+)"/, m); print m[1]; exit
-            }
-          ' Cargo.toml)
-
-          if [ -z "$FILE_VERSION" ] || [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::package.version ($FILE_VERSION) must equal tag ($TAG_VERSION, from '$REF_NAME')"
-            exit 1
-          fi
-
-  publish:
-    name: Publish crate
-    needs: verify
-    runs-on: ${{ vars.RUNS_ON }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-
-  gh-release:
-    name: GitHub release
-    needs: publish
-    runs-on: ${{ vars.RUNS_ON }}
-    permissions:
-      contents: write
-    steps:
-      - name: Build crate/docs links
-        id: body
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "body<<EOF"
-            echo "### Crate"
-            echo "- https://crates.io/crates/taskvisor"
-            echo
-            echo "### Docs"
-            echo "- https://docs.rs/taskvisor"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: false
-          prerelease: false
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          body: ${{ steps.body.outputs.body }}
+  release:
+    name: release
+    uses: soltiHQ/actions/.github/workflows/rust-release.yml@v1
+    with:
+      crate: taskvisor
+    secrets:
+      crates-io-token: ${{ secrets.CRATES_IO_TOKEN }}

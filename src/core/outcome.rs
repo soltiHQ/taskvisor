@@ -210,8 +210,8 @@ impl TaskOutcome {
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 /// # let handle = sup.serve();
-/// let job: TaskRef = TaskFn::arc("job", |_ctx: TaskContext| async {
-///     Ok::<(), TaskError>(())
+/// let job: TaskRef = TaskFn::arc("job", |_ctx| async {
+///     Ok(())
 /// });
 ///
 /// let (id, waiter) = handle

@@ -5,31 +5,37 @@
 //!
 //! ## What this shows
 //!
-//! - **Cooperative cancellation** via `tokio::select!` + `ctx.cancelled()`.
+//! - **Cooperative cancellation** via `ctx.run_until_cancelled(...)`.
 //!   Every long-running task **MUST** observe cancellation via its `TaskContext`.
 //!   Without it, the task would keep running inside `sleep()` and ignore the shutdown signal until the grace period expires.
 //! - `TaskSpec::restartable(task)` uses `RestartPolicy::OnFailure` by default:
-//!   the worker restarts only if it returns `Err`, not on `Ok`.
+//!   the worker restarts only if it fails, not on clean exits.
 //!
-//! ## Why `ctx.cancelled()` matters
+//! ## Why observing cancellation matters
 //!
 //! Tokio **does not kill futures**: it cancels them cooperatively.
 //! When the supervisor shuts down, it cancels the task's `TaskContext`.
 //! If your task is awaiting `sleep(10s)`, it won't notice until the sleep finishes.
-//! `tokio::select!` with `ctx.cancelled()` lets the task react immediately.
+//! Wrapping the await lets the task react immediately.
 //!
-//! Two equivalent patterns:
+//! Three patterns, from most to least common:
 //! ```text
-//! // Pattern 1: select! (recommended for loops / long waits)
+//! // Pattern 1: run_until_cancelled (recommended)
+//! // Resolves to Err(TaskError::Canceled) on shutdown; `?` exits the loop cleanly.
+//! ctx.run_until_cancelled(do_work()).await?;
+//!
+//! // Pattern 2: select! (manual control over the cancel branch)
 //! tokio::select! {
-//!     _ = ctx.cancelled() => return Ok(()),
+//!     _ = ctx.cancelled() => return Err(TaskError::Canceled),
 //!     _ = do_work()       => { ... }
 //! }
 //!
-//! // Pattern 2: check (ok for short, non-blocking tasks)
-//! if ctx.is_cancelled() { return Ok(()); }
+//! // Pattern 3: check (ok for short, non-blocking tasks)
+//! if ctx.is_cancelled() { return Err(TaskError::Canceled); }
 //! do_quick_work().await;
 //! ```
+//!
+//! Returning `TaskError::Canceled` is a clean stop, not a failure.
 //!
 //! ## Runtime flavor
 //!
@@ -48,8 +54,8 @@
 //!
 //! | Example                      | What it adds                          |
 //! |------------------------------|---------------------------------------|
-//! | [`periodic.rs`](periodic.rs) | Task that repeats on a schedule       |
-//! | [`multiple`](multiple)       | Several tasks with different policies |
+//! | [`periodic.rs`](periodic.rs) | Task that repeats on a fixed interval |
+//! | [`multiple.rs`](multiple.rs) | Several tasks with different policies |
 //!
 
 use std::time::Duration;
@@ -58,17 +64,20 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let worker: TaskRef = TaskFn::arc("ticker", |ctx: TaskContext| async move {
+    let worker: TaskRef = TaskFn::arc("ticker", |ctx| async move {
         let mut tick = 0u64;
         loop {
-            tokio::select! {
-                _ = ctx.cancelled() => {
-                    println!("[ticker] shutting down after {tick} ticks");
-                    return Ok(());
-                }
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            match ctx
+                .run_until_cancelled(tokio::time::sleep(Duration::from_millis(500)))
+                .await
+            {
+                Ok(()) => {
                     tick += 1;
                     println!("[ticker] tick #{tick}");
+                }
+                Err(canceled) => {
+                    println!("[ticker] shutting down after {tick} ticks");
+                    return Err(canceled); // clean stop, not a failure
                 }
             }
         }
