@@ -10,7 +10,7 @@ documentation = "https://docs.rs/taskvisor"
 license       = "Apache-2.0"
 readme        = "README.md"
 
-keywords   = ["supervisor", "tokio", "background-tasks", "restart", "backoff"]
+keywords   = ["supervisor", "tokio", "retry", "restart", "backoff"]
 categories = ["asynchronous", "concurrency"]
 
 exclude = [
@@ -23,7 +23,7 @@ exclude = [
 
 [features]
 default = []
-controller = ["dashmap"]
+controller = ["dep:dashmap"]
 logging = []
 tracing = ["dep:tracing"]
 tokio-util-interop = []

@@ -62,6 +62,10 @@ use crate::identity::TaskId;
 /// Global counter minting unique, monotonic `seq` values at event construction.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Reason prefix set by the actor when a task permanently stops after exhausting its retry budget.
+/// `TracingBridge` raises such events to WARN.
+pub(crate) const REASON_MAX_RETRIES_EXCEEDED: &str = "max_retries_exceeded";
+
 /// Classification of runtime events.
 ///
 /// Every event has `seq`, `at`, and `kind`.

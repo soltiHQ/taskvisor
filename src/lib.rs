@@ -1,6 +1,6 @@
 //! # taskvisor
 //!
-//! Taskvisor is a small async task supervisor for Rust.
+//! Taskvisor is a task supervisor for Tokio: it restarts background tasks on failure and reports every step through typed events.
 //!
 //! It helps you run named async tasks with:
 //!

@@ -22,16 +22,17 @@
 
 use tracing::Level;
 
-use crate::events::{BackoffSource, Event, EventKind};
+use crate::events::{BackoffSource, Event, EventKind, REASON_MAX_RETRIES_EXCEEDED};
 use crate::subscribers::Subscribe;
 
 /// Subscriber that forwards runtime events to [`tracing`].
 ///
 /// Level mapping:
 /// - `ERROR`: task failed, actor dead, subscriber panicked.
-/// - `DEBUG`: chatty events (starting, backoff, add/remove requests,
 /// - `WARN`: timeout, grace exceeded, subscriber overflow, add failed, controller rejected.
-/// - `INFO`: lifecycle milestones (stopped, canceled, added, removed, shutdown, exhausted, submitted).
+///   Also `actor_exhausted` when the reason starts with `max_retries_exceeded`: the task permanently gave up.
+/// - `INFO`: lifecycle milestones (stopped, canceled, added, removed, shutdown, submitted, and `actor_exhausted` for every other reason).
+/// - `DEBUG`: chatty events (starting, backoff, add/remove requests, slot transitions).
 ///
 /// ## Also
 ///
@@ -40,9 +41,9 @@ use crate::subscribers::Subscribe;
 #[derive(Default)]
 pub struct TracingBridge;
 
-/// Maps an event kind to a tracing level.
-fn level_for(kind: EventKind) -> Level {
-    match kind {
+/// Maps an event to a tracing level.
+fn level_for(e: &Event) -> Level {
+    match e.kind {
         EventKind::TaskFailed | EventKind::ActorDead | EventKind::SubscriberPanicked => {
             Level::ERROR
         }
@@ -52,13 +53,21 @@ fn level_for(kind: EventKind) -> Level {
         | EventKind::SubscriberOverflow
         | EventKind::TaskAddFailed => Level::WARN,
 
+        // A task that gave up after its retry budget is a terminal failure signal.
+        EventKind::ActorExhausted => {
+            let gave_up = e
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with(REASON_MAX_RETRIES_EXCEEDED));
+            if gave_up { Level::WARN } else { Level::INFO }
+        }
+
         EventKind::TaskStopped
         | EventKind::TaskCanceled
         | EventKind::TaskAdded
         | EventKind::TaskRemoved
         | EventKind::ShutdownRequested
-        | EventKind::AllStoppedWithinGrace
-        | EventKind::ActorExhausted => Level::INFO,
+        | EventKind::AllStoppedWithinGrace => Level::INFO,
 
         EventKind::TaskStarting
         | EventKind::BackoffScheduled
@@ -100,7 +109,7 @@ impl Subscribe for TracingBridge {
             };
         }
 
-        match level_for(e.kind) {
+        match level_for(e) {
             Level::ERROR => emit!(Level::ERROR),
             Level::WARN => emit!(Level::WARN),
             Level::INFO => emit!(Level::INFO),
@@ -208,6 +217,39 @@ mod tests {
             let (level, _) = capture_one(&Event::new(kind));
             assert_eq!(level, expected, "wrong level for {kind:?}");
         }
+    }
+
+    #[test]
+    fn actor_exhausted_retry_limit_maps_to_warn() {
+        let e = Event::new(EventKind::ActorExhausted)
+            .with_task("worker")
+            .with_reason("max_retries_exceeded(3/3): boom");
+
+        let (level, _) = capture_one(&e);
+
+        assert_eq!(
+            level,
+            Level::WARN,
+            "a task that permanently gave up after max retries must be WARN"
+        );
+    }
+
+    #[test]
+    fn actor_exhausted_benign_reasons_stay_info() {
+        for reason in ["policy_exhausted_success", "task_returned_canceled"] {
+            let e = Event::new(EventKind::ActorExhausted)
+                .with_task("worker")
+                .with_reason(reason);
+            let (level, _) = capture_one(&e);
+            assert_eq!(level, Level::INFO, "wrong level for reason {reason:?}");
+        }
+        let no_reason = Event::new(EventKind::ActorExhausted).with_task("worker");
+        let (level, _) = capture_one(&no_reason);
+        assert_eq!(
+            level,
+            Level::INFO,
+            "ActorExhausted without reason stays INFO"
+        );
     }
 
     #[test]
