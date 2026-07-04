@@ -7,11 +7,11 @@
 
 > Task supervisor for Tokio with backoff, graceful shutdown, and lifecycle events.
 
-You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff and jitter, stops everything cleanly on shutdown, and reports every step through typed events.
+You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff, stops everything cleanly on shutdown, and reports every step through typed events.
 
 ## The loop you stop writing
 
-Every long-running service grows this code: 
+Every long-running service has this code somewhere:
 
 ```rust,ignore
 // The hand-rolled way: tokio::spawn + retry loop.
@@ -29,11 +29,11 @@ tokio::spawn(async move {
 // No backoff. No jitter. No graceful shutdown. No visibility.
 ```
 
-With taskvisor the same worker is one line of policy:
+With taskvisor, the same worker needs one line:
 
 ```rust,ignore
 sup.run(vec![TaskSpec::restartable(worker)]).await?;
-// Restart on failure, backoff with jitter, Ctrl+C handling: included.
+// Restart on failure, backoff, Ctrl+C handling: included.
 ```
 
 ## Quick start
@@ -72,7 +72,7 @@ No signal handling, no retry loop, no type annotations on the closure.
 
 ## See it recover from failure
 
-A task fails twice, then succeeds. Taskvisor retries it with backoff and publishes an event for every step. A small subscriber prints them, and you *see* the supervision happen:
+A task fails twice, then succeeds. Taskvisor retries it with backoff and publishes an event for every step. A small subscriber prints each event:
 
 ```rust,no_run
 use std::sync::Arc;
@@ -127,11 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   backoff_scheduled (task=flaky)
   task_starting (task=flaky)        # attempt 3
   task_stopped (task=flaky)         # success
-  actor_exhausted (task=flaky)      # OnFailure + success = done
+  actor_exhausted (task=flaky)      # task succeeded, no more restarts
   task_removed (task=flaky)
 ```
 
-Restart, backoff, and an event for every step, without writing a retry loop.
+In the output, `actor` means taskvisor's internal per-task runner, not an actor-model actor.
 
 ## Why taskvisor?
 
@@ -139,12 +139,12 @@ Most supervision crates stop at restart + backoff. Taskvisor also gives you:
 
 - **A final answer per task.** Await one result: done, failed, or canceled. Delivered even when events are dropped under load.
 - **Typed lifecycle events.** Every start, failure, and retry goes to an event bus. A `tracing` bridge is built in.
-- **Admission control.** Per-slot rules for competing submissions: queue, replace, or drop the newcomer. "One deploy at a time" is one line.
+- **Admission control.** Tasks can share a named slot. A rule decides what happens when the slot is busy: queue, replace, or drop the new task.
 - **Restart policies per task.** Never, on failure, always, or periodic.
 - **Backoff with jitter.** Exponential or constant, with a cap and a floor.
-- **Limits.** Per-attempt timeout, a retry budget, a global concurrency cap.
+- **Limits.** Per-attempt timeout, retry budget, global concurrency cap.
 
-Taskvisor is not a replacement for tokio or tower.
+Taskvisor is not a replacement for Tokio or Tower.
 It works one level higher: you write the task, taskvisor runs it and tells you what happened.
 
 It is also not an actor framework: no addressable actors, no mailboxes, no message passing.
@@ -152,7 +152,8 @@ Your existing `async fn` is the unit of supervision.
 
 ## When to use taskvisor
 
-Reach for it when you have **resident background tasks** that must stay up for the life of the process — queue consumers, pollers, sync loops, connection keepers, periodic jobs — and you want to restart tasks on failure, observe them through events, and manage them (add / remove / await) at runtime.
+Use it when you have **resident background tasks** that must stay up for the life of the process: queue consumers, pollers, sync loops, connection keepers, periodic jobs.
+Taskvisor restarts them on failure and reports every step as an event. You can add, remove, and await tasks at runtime.
 
 **Not the right tool if:**
 
@@ -168,7 +169,7 @@ Reach for it when you have **resident background tasks** that must stay up for t
 | Mode             | When to use            | Lifecycle                                        |
 |------------------|------------------------|--------------------------------------------------|
 | `sup.run(specs)` | Tasks known upfront    | Blocks until all done or Ctrl+C                  |
-| `sup.serve()`    | Tasks added at runtime | Returns `SupervisorHandle`, you control shutdown |
+| `sup.serve()`    | Tasks added at runtime | Returns a handle. You control shutdown           |
 
 ```rust,ignore
 // Dynamic mode
@@ -185,23 +186,20 @@ handle.shutdown().await?;
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     fn["your async fn"] --> spec["TaskSpec<br/>restart · backoff · timeout"]
     spec --> sup["Supervisor<br/>run → fail → wait → retry"]
     sig["Ctrl+C / SIGTERM"] -.-> sup
 
-    sup -. "every lifecycle step,<br/>best-effort" .-> bus["event bus"]
+    sup -. "every lifecycle step, best-effort" .-> bus["event bus"]
     bus -.-> sub["your Subscribe<br/>metrics, alerts"]
     bus -.-> tb["TracingBridge<br/>logs"]
 
-    sup == "guaranteed,<br/>one per task" ==> out["final outcome<br/>done / failed / canceled"]
+    sup == "guaranteed, one per task" ==> out["final outcome<br/>done / failed / canceled"]
 ```
 
-Two channels report what happened, and they are different paths:
-the event bus is best-effort (dashed), the final outcome is a guaranteed delivery per task (bold) — it does not go through the bus.
-
-<!-- TODO: replace with the designed scheme from soltiHQ/.github/assets when ready -->
-
+Two separate channels report what happened. The event bus is best-effort (dashed lines).
+The final outcome is delivered once per task (bold line). It does not go through the bus.
 
 Each subscriber gets its own bounded queue. A slow subscriber never blocks others or the supervisor.
 Module-level concepts are documented in depth on [docs.rs](https://docs.rs/taskvisor).
@@ -284,23 +282,15 @@ let sup = Supervisor::builder(SupervisorConfig::default())
 
 ### Graceful shutdown on Ctrl+C
 
-```rust,ignore
-// Static mode: run() installs SIGINT/SIGTERM handlers for you.
-sup.run(specs).await?;
-
-// Dynamic mode: you decide when to stop.
-let handle = sup.serve();
-// ...
-handle.shutdown().await?; // cancel all, wait up to `grace`, then force-abort
-```
-
+Static mode (`run`) installs OS shutdown signal handlers for you.
+In dynamic mode, you stop things yourself: `handle.shutdown()` cancels all tasks and waits up to `grace`.
 Tasks that ignore cancellation are force-aborted after the grace period.
 The outcome is reported either way.
 
 ### Run CPU-heavy work without blocking Tokio
 
 Offload the computation to rayon and await the result through a oneshot channel — inside a supervised task.
-Tokio stays free; taskvisor adds restart with backoff on top of the bridge:
+Tokio threads stay unblocked. Taskvisor adds restart with backoff:
 
 ```rust,ignore
 let (tx, rx) = oneshot::channel();
@@ -327,7 +317,7 @@ let sup = Supervisor::new(SupervisorConfig::default(), subs);
 // Filter with RUST_LOG=taskvisor=warn.
 ```
 
-A failing task recovering, live:
+A failing task recovering:
 
 ![taskvisor retries a failing task with backoff and recovers, shown as colored tracing logs](https://raw.githubusercontent.com/soltiHQ/.github/main/assets/demo/taskvisor-recovery.gif)
 
@@ -337,7 +327,6 @@ See [`examples/tracing.rs`](examples/tracing.rs) for the full program and [`exam
 
 ```rust,ignore
 // add_and_watch returns a TaskWaiter resolving to the final TaskOutcome.
-// Delivery is guaranteed (oneshot, not subject to event-bus lag).
 let (id, waiter) = handle
     .add_and_watch(TaskSpec::once(job), Duration::from_secs(1))
     .await?;
@@ -349,9 +338,9 @@ match waiter.wait().await? {
 }
 ```
 
-## Admission control *(feature = `controller`)*
+## Admission control *(feature `controller`)*
 
-Tasks submit to named slots. The policy decides what happens when a slot is busy:
+You submit tasks to named slots. A policy decides what happens when a slot is busy:
 
 | Policy          | Behavior                                               | Use case               |
 |-----------------|--------------------------------------------------------|------------------------|
@@ -365,8 +354,8 @@ let sup = Supervisor::builder(cfg)
     .build();
 let handle = sup.serve();
 
-// Await the admission outcome. A never-admitted submission
-// resolves to TaskOutcome::Rejected — no lost tasks.
+// Await the admission outcome. A submission that is never admitted
+// resolves to TaskOutcome::Rejected.
 let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
 let outcome = waiter.wait().await?;
 ```
@@ -381,23 +370,13 @@ See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examp
 
 ## Examples
 
-All examples run as-is, from simple to advanced:
+All examples run as-is:
 
 ```bash
 cargo run --example basic
-cargo run --example worker
-cargo run --example periodic
-cargo run --example multiple
-cargo run --example queue_consumer
-cargo run --example cpu_job
-cargo run --example subscriber
-cargo run --example metrics
-cargo run --example dynamic
-cargo run --example outcomes
-cargo run --example tracing --features tracing
-cargo run --example slots --features controller
-cargo run --example admission --features controller
 ```
+
+Add `--features tracing` or `--features controller` where the table notes it.
 
 | Example                                         | What it shows                                                                           |
 |-------------------------------------------------|-----------------------------------------------------------------------------------------|
