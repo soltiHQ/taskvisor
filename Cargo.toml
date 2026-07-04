@@ -44,6 +44,7 @@ tracing    = { version = "0.1.44", optional = true, default-features = false, fe
 criterion          = { version = "0.8.2", features = ["async_tokio"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 prometheus         = { version = "0.14.0", default-features = false }
+rayon              = "1.12.0"
 
 [[example]]
 name              = "slots"

@@ -5,9 +5,9 @@
 [![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
-> Task supervisor for Tokio: restarts background tasks on failure with exponential backoff, graceful shutdown, and lifecycle events.
+> Task supervisor for Tokio with backoff, graceful shutdown, and lifecycle events.
 
-You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff and jitter, stops everything cleanly on shutdown, and narrates every step through typed events.
+You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff and jitter, stops everything cleanly on shutdown, and reports every step through typed events.
 
 ## The loop you stop writing
 
@@ -131,24 +131,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   task_removed (task=flaky)
 ```
 
-The same recovery live, narrated through the `tracing` feature:
-
-![taskvisor retries a failing task with backoff and recovers, shown as colored tracing logs](https://raw.githubusercontent.com/soltiHQ/.github/main/assets/demo/taskvisor-recovery.gif)
-
 Restart, backoff, and an event for every step, without writing a retry loop.
 
 ## Why taskvisor?
 
-Most supervision crates stop at restart + backoff. Taskvisor adds the layers a production service actually needs:
+Most supervision crates stop at restart + backoff. Taskvisor also gives you:
 
-|    | Feature                 | What you get                                                                |
-|:--:|-------------------------|-----------------------------------------------------------------------------|
-| 🎯 | **Guaranteed outcomes** | `await` a task's final `TaskOutcome`, even if events are dropped under load |
-| 📡 | **Typed event stream**  | Every start, failure, and backoff on a bus; `tracing` bridge built in       |
-| 🚦 | **Admission control**   | Slot policies (Queue / Replace / DropIfRunning) for "one deploy at a time"  |
-| 🔁 | **Restart policies**    | `Never`, `OnFailure`, `Always`, or `TaskSpec::periodic` — chosen per task   |
-| ⏳  | **Backoff with jitter** | `exponential` / `constant` presets with cap, floor, and four jitter modes   |
-| 🚧 | **Limits**              | Per-attempt timeout, max retries, global concurrency semaphore              |
+- **A final answer per task.** Await one result: done, failed, or canceled. Delivered even when events are dropped under load.
+- **Typed lifecycle events.** Every start, failure, and retry goes to an event bus. A `tracing` bridge is built in.
+- **Admission control.** Per-slot rules for competing submissions: queue, replace, or drop the newcomer. "One deploy at a time" is one line.
+- **Restart policies per task.** Never, on failure, always, or periodic.
+- **Backoff with jitter.** Exponential or constant, with a cap and a floor.
+- **Limits.** Per-attempt timeout, a retry budget, a global concurrency cap.
 
 Taskvisor is not a replacement for tokio or tower.
 It works one level higher: you write the task, taskvisor runs it and tells you what happened.
@@ -204,7 +198,6 @@ your async fn ──► TaskSpec (restart + backoff + timeout) ──► Supervi
 ```
 
 <!-- TODO: replace the ASCII above with the designed scheme from soltiHQ/.github/assets when ready -->
-
 
 
 Each subscriber gets its own bounded queue. A slow subscriber never blocks others or the supervisor.
@@ -301,6 +294,26 @@ handle.shutdown().await?; // cancel all, wait up to `grace`, then force-abort
 Tasks that ignore cancellation are force-aborted after the grace period.
 The outcome is reported either way.
 
+### Run CPU-heavy work without blocking Tokio
+
+Offload the computation to rayon and await the result through a oneshot channel — inside a supervised task.
+Tokio stays free; taskvisor adds restart with backoff on top of the bridge:
+
+```rust,ignore
+let (tx, rx) = oneshot::channel();
+rayon::spawn(move || {
+    let _ = tx.send(heavy_compute());
+});
+
+match ctx.run_until_cancelled(rx).await? {
+    Ok(Ok(value)) => Ok(()),                 // use the value
+    Ok(Err(e)) => Err(TaskError::fail(e)),   // supervisor retries with backoff
+    Err(_) => Err(TaskError::fail("compute thread dropped the channel")),
+}
+```
+
+Full program: [`examples/cpu_job.rs`](examples/cpu_job.rs).
+
 ### Send supervisor events to `tracing`
 
 ```rust,ignore
@@ -310,6 +323,10 @@ let sup = Supervisor::new(SupervisorConfig::default(), subs);
 // Failures arrive as ERROR, retries as DEBUG — in your existing log pipeline.
 // Filter with RUST_LOG=taskvisor=warn.
 ```
+
+A failing task recovering, live:
+
+![taskvisor retries a failing task with backoff and recovers, shown as colored tracing logs](https://raw.githubusercontent.com/soltiHQ/.github/main/assets/demo/taskvisor-recovery.gif)
 
 See [`examples/tracing.rs`](examples/tracing.rs) for the full program and [`examples/metrics.rs`](examples/metrics.rs) for Prometheus counters.
 
@@ -356,10 +373,44 @@ See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examp
 ## Production notes
 
 - **No unsafe.** The crate is `#![forbid(unsafe_code)]`.
-- **Tested.** ~250 unit tests plus 8 integration suites (concurrency, shutdown, timeout, identity, ...). CI runs fmt, clippy per feature combination, unit and integration tests, and per-example builds on every PR.
-- **Small footprint.** Four dependencies: `tokio`, `tokio-util`, `thiserror`, `fastrand`. Optional: `dashmap` (controller), `tracing`.
-- **MSRV 1.90.** MSRV bumps happen only in minor releases.
-- **Pre-1.0.** Breaking changes land in minor versions (0.x → 0.x+1) and are listed in the [release notes](https://github.com/soltiHQ/taskvisor/releases).
+- **Tested.** Unit and integration suites cover concurrency, shutdown, timeouts, and task identity. CI runs fmt, clippy per feature combination, all tests, and per-example builds on every PR.
+- **Small footprint.** Depends on `tokio`, `tokio-util`, `thiserror`, `fastrand`. Optional: `dashmap` (controller), `tracing`.
+
+## Examples
+
+All examples run as-is, from simple to advanced:
+
+```bash
+cargo run --example basic
+cargo run --example worker
+cargo run --example periodic
+cargo run --example multiple
+cargo run --example queue_consumer
+cargo run --example cpu_job
+cargo run --example subscriber
+cargo run --example metrics
+cargo run --example dynamic
+cargo run --example outcomes
+cargo run --example tracing --features tracing
+cargo run --example slots --features controller
+cargo run --example admission --features controller
+```
+
+| Example                                         | What it shows                                                                           |
+|-------------------------------------------------|-----------------------------------------------------------------------------------------|
+| [basic.rs](examples/basic.rs)                   | Run one task and exit: the minimal wiring                                               |
+| [worker.rs](examples/worker.rs)                 | A long-running worker that stops cleanly on Ctrl+C                                      |
+| [periodic.rs](examples/periodic.rs)             | Run a job every N seconds, forever                                                      |
+| [multiple.rs](examples/multiple.rs)             | Several tasks with different restart rules under one supervisor                         |
+| [queue_consumer.rs](examples/queue_consumer.rs) | A message consumer that reconnects after failures                                       |
+| [cpu_job.rs](examples/cpu_job.rs)               | Run CPU-heavy work on rayon, supervised, without blocking Tokio                         |
+| [subscriber.rs](examples/subscriber.rs)         | React to lifecycle events with your own handler                                         |
+| [tracing.rs](examples/tracing.rs)               | Send supervisor events into your logs (feature `tracing`)                               |
+| [metrics.rs](examples/metrics.rs)               | Count lifecycle events as Prometheus metrics                                            |
+| [dynamic.rs](examples/dynamic.rs)               | Add, cancel, and remove tasks while the app is running                                  |
+| [outcomes.rs](examples/outcomes.rs)             | Wait for a task's final result: done, failed, or canceled                               |
+| [slots.rs](examples/slots.rs)                   | Limit concurrency per slot: queue, replace, or drop the newcomer (feature `controller`) |
+| [admission.rs](examples/admission.rs)           | Find out if your submission ran or was rejected (feature `controller`)                  |
 
 ## Performance
 
@@ -371,60 +422,22 @@ cargo bench --bench lifecycle                        # task lifecycle overhead
 cargo bench --bench controller --features controller # admission control
 ```
 
-## Examples
-
-Twelve runnable, tutorial-style examples, ordered as a learning path:
-
-```bash
-cargo run --example basic
-cargo run --example worker
-cargo run --example periodic
-cargo run --example multiple
-cargo run --example queue_consumer
-cargo run --example subscriber
-cargo run --example metrics
-cargo run --example dynamic
-cargo run --example outcomes
-cargo run --example tracing --features tracing
-cargo run --example slots --features controller
-cargo run --example admission --features controller
-```
-
-| Example                                         | What it shows                                                  |
-|-------------------------------------------------|----------------------------------------------------------------|
-| [basic.rs](examples/basic.rs)                   | Minimal hello-world, one task runs once                        |
-| [worker.rs](examples/worker.rs)                 | Long-running worker with graceful Ctrl+C shutdown              |
-| [periodic.rs](examples/periodic.rs)             | Periodic task via `TaskSpec::periodic`                         |
-| [multiple.rs](examples/multiple.rs)             | Three tasks with different policies and backoff                |
-| [queue_consumer.rs](examples/queue_consumer.rs) | Broker consumer with reconnect + restart-on-failure            |
-| [subscriber.rs](examples/subscriber.rs)         | Custom `Subscribe` implementation                              |
-| [tracing.rs](examples/tracing.rs)               | Supervisor events in your `tracing` log pipeline               |
-| [metrics.rs](examples/metrics.rs)               | Prometheus counters from lifecycle events                      |
-| [dynamic.rs](examples/dynamic.rs)               | `serve()` + `SupervisorHandle`: add/remove/cancel at runtime   |
-| [outcomes.rs](examples/outcomes.rs)             | `add_and_watch`: await a task's final `TaskOutcome`            |
-| [slots.rs](examples/slots.rs)                   | Controller admission policies: Queue, Replace, DropIfRunning   |
-| [admission.rs](examples/admission.rs)           | `submit_and_watch`: await admission outcome (incl. `Rejected`) |
-
 ## Feature flags
 
-| Feature      | What it enables                                                                       |
-|--------------|---------------------------------------------------------------------------------------|
-| `controller` | Slot-based admission control: `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
-| `tracing`    | Built-in `TracingBridge` subscriber — events flow into your `tracing` log pipeline    |
-| `logging`    | Built-in `LogWriter` subscriber — event output to stdout (demo/reference)             |
+| Feature              | What it enables                                                                       |
+|----------------------|---------------------------------------------------------------------------------------|
+| `controller`         | Slot-based admission control: `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
+| `tracing`            | Built-in `TracingBridge` subscriber: events flow into your `tracing` log pipeline     |
+| `logging`            | Built-in `LogWriter` subscriber: event output to stdout (demo/reference)              |
+| `tokio-util-interop` | Access to the raw `CancellationToken` behind `TaskContext`, for APIs that need one    |
 
 ```toml
 taskvisor = { version = "0.4", features = ["controller", "tracing"] }
 ```
 
-## Roadmap
-
-Taskvisor is the supervision core of *Solti*, a larger task-orchestration toolkit in development (subprocess execution, HTTP/gRPC API, dashboards). Taskvisor stands on its own today; the rest is future work.
-
 ## Contributing
 
-Found a bug? Have an idea? [Open an issue](https://github.com/soltiHQ/taskvisor/issues) or send a pull request.
-
+Issues and pull requests are welcome. Start with the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md).
 
 <br>
 
