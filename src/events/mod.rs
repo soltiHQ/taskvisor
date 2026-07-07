@@ -54,7 +54,6 @@
 //! With the `logging` feature, `LogWriter` provides a small built-in example.
 
 mod event;
-pub(crate) use event::REASON_MAX_RETRIES_EXCEEDED;
 pub use event::{BackoffSource, Event, EventKind};
 
 mod bus;

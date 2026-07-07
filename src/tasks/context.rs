@@ -27,6 +27,45 @@ impl TaskContext {
         Self { cancel }
     }
 
+    /// A task context that is not connected to a supervisor.
+    ///
+    /// It starts active. Use it in tests when you want to call [`Task::spawn`](crate::Task::spawn)
+    /// or any function that takes a [`TaskContext`] without starting a supervisor.
+    ///
+    /// ```rust
+    /// use taskvisor::TaskContext;
+    ///
+    /// let ctx = TaskContext::detached();
+    /// assert!(!ctx.is_cancelled());
+    /// ```
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn detached() -> Self {
+        Self::from_token(CancellationToken::new())
+    }
+
+    /// A task context that is already cancelled.
+    ///
+    /// Use it in tests to check cancellation code:
+    /// [`run_until_cancelled`](Self::run_until_cancelled) returns
+    /// [`Err(TaskError::Canceled)`](TaskError::Canceled) without polling the future.
+    ///
+    /// ```rust
+    /// use taskvisor::TaskContext;
+    ///
+    /// let ctx = TaskContext::detached_cancelled();
+    /// assert!(ctx.is_cancelled());
+    /// ```
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn detached_cancelled() -> Self {
+        let token = CancellationToken::new();
+        token.cancel();
+        Self::from_token(token)
+    }
+
     /// Waits until the context is cancelled.
     ///
     /// Resolves immediately if the context is already cancelled.
@@ -110,6 +149,29 @@ mod tests {
     };
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn detached_context_starts_active() {
+        let ctx = TaskContext::detached();
+
+        assert!(!ctx.is_cancelled());
+        let out = ctx.run_until_cancelled(async { 7 }).await;
+        assert_eq!(out.expect("detached context starts active"), 7);
+    }
+
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn detached_cancelled_context_short_circuits() {
+        let ctx = TaskContext::detached_cancelled();
+
+        assert!(ctx.is_cancelled());
+        let out = ctx.run_until_cancelled(async { 7 }).await;
+        assert!(
+            matches!(out, Err(TaskError::Canceled)),
+            "an already-cancelled context must win the race"
+        );
+    }
 
     #[tokio::test]
     async fn run_until_cancelled_returns_output_when_future_completes_first() {

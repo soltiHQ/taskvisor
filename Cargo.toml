@@ -22,14 +22,15 @@ exclude = [
 ]
 
 [features]
-default = []
-controller = ["dep:dashmap"]
-logging = []
-tracing = ["dep:tracing"]
+controller         = ["dep:dashmap"]
+default            = []
+logging            = []
+test-util          = []
+tracing            = ["dep:tracing"]
 tokio-util-interop = []
 
 [package.metadata.docs.rs]
-features     = ["logging", "tracing", "controller", "tokio-util-interop"]
+features     = ["logging", "tracing", "controller", "tokio-util-interop", "test-util"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]

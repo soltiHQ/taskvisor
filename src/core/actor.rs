@@ -91,9 +91,10 @@ use crate::{
     TaskError,
     core::runner::run_once,
     error::SharedError,
-    events::{Bus, Event, EventKind, REASON_MAX_RETRIES_EXCEEDED},
+    events::{Bus, Event, EventKind},
     identity::TaskId,
     policies::{BackoffPolicy, RestartPolicy},
+    reasons,
     tasks::Task,
 };
 
@@ -323,7 +324,7 @@ impl TaskActor {
                                     .with_task(task_name.clone())
                                     .with_id(id)
                                     .with_attempt(attempt)
-                                    .with_reason("policy_exhausted_success"),
+                                    .with_reason(reasons::POLICY_EXHAUSTED_SUCCESS),
                             );
                             return ActorExitReason::Completed;
                         }
@@ -358,7 +359,7 @@ impl TaskActor {
                             .with_task(task_name.clone())
                             .with_id(id)
                             .with_attempt(attempt)
-                            .with_reason("task_returned_canceled"),
+                            .with_reason(reasons::TASK_RETURNED_CANCELED),
                     );
                     return ActorExitReason::Canceled;
                 }
@@ -379,7 +380,7 @@ impl TaskActor {
                         {
                             Arc::from(format!(
                                 "{}({}/{}): {}",
-                                REASON_MAX_RETRIES_EXCEEDED,
+                                reasons::MAX_RETRIES_EXCEEDED,
                                 backoff_attempt,
                                 limit.get(),
                                 e

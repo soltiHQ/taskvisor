@@ -66,9 +66,10 @@
 //! ## Optional Features
 //!
 //! - `tokio-util-interop`: exposes raw `tokio_util::sync::CancellationToken` interop through [`TaskContext`] and the prelude.
-//! - `controller`: slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
-//! - `tracing`: built-in `TracingBridge` subscriber that forwards runtime events to the `tracing` ecosystem.
-//! - `logging`: built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
+//! - `controller`:         slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
+//! - `tracing`:            built-in `TracingBridge` subscriber that forwards runtime events to the `tracing` ecosystem.
+//! - `logging`:            built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
+//! - `test-util`:          test helpers ([`TaskContext::detached`], [`TaskId::for_tests`], `TaskOutcome::*_for_tests`).
 //!
 //! ## Quick Start
 //!
@@ -123,6 +124,8 @@ pub mod prelude;
 
 pub mod identity;
 pub use identity::TaskId;
+
+pub mod reasons;
 
 pub mod core;
 pub use core::{

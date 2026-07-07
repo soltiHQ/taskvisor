@@ -404,6 +404,7 @@ cargo bench --bench controller --features controller # admission control
 | `tracing`            | Built-in `TracingBridge` subscriber: events flow into your `tracing` log pipeline     |
 | `logging`            | Built-in `LogWriter` subscriber: event output to stdout (demo/reference)              |
 | `tokio-util-interop` | Access to the raw `CancellationToken` behind `TaskContext`, for APIs that need one    |
+| `test-util`          | Test helpers: `TaskContext::detached()`, `TaskId::for_tests()`, and more              |
 
 ```toml
 taskvisor = { version = "0.4", features = ["controller", "tracing"] }

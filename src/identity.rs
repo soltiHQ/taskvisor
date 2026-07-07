@@ -58,6 +58,22 @@ impl TaskId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// Creates a fresh id for tests.
+    ///
+    /// ```rust
+    /// use taskvisor::TaskId;
+    ///
+    /// let a = TaskId::for_tests();
+    /// let b = TaskId::for_tests();
+    /// assert_ne!(a, b);
+    /// ```
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self::next()
+    }
 }
 
 impl std::fmt::Display for TaskId {
@@ -82,5 +98,16 @@ mod tests {
     #[test]
     fn never_mints_zero() {
         assert!(TaskId::next().get() >= 1);
+    }
+
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn for_tests_draws_from_the_runtime_sequence() {
+        let runtime = TaskId::next();
+        let test = TaskId::for_tests();
+        let runtime_after = TaskId::next();
+
+        assert!(test.get() > runtime.get(), "test ids share the sequence");
+        assert!(runtime_after.get() > test.get(), "no collision is possible");
     }
 }
