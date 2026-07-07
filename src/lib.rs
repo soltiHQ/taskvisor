@@ -69,7 +69,7 @@
 //! - `controller`:         slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
 //! - `tracing`:            built-in `TracingBridge` subscriber that forwards runtime events to the `tracing` ecosystem.
 //! - `logging`:            built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
-//! - `test-util`:          test helpers ([`TaskContext::detached`], [`TaskId::for_tests`], `TaskOutcome::*_for_tests`).
+//! - `test-util`:          test helpers (`TaskContext::detached()`, `TaskId::for_tests()`, `TaskOutcome::*_for_tests`).
 //!
 //! ## Quick Start
 //!
