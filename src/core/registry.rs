@@ -61,6 +61,7 @@ use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
 use crate::core::outcome::TaskOutcome;
 use crate::events::{Bus, Event, EventKind};
 use crate::identity::TaskId;
+use crate::reasons;
 use crate::tasks::TaskSpec;
 
 /// Sender used to resolve a watched task with its final [`TaskOutcome`].
@@ -485,7 +486,8 @@ impl Registry {
     /// Spawns an actor and registers it under `id`.
     ///
     /// Duplicate task names are rejected.
-    /// If a watched add supplied `done`, it is resolved as [`TaskOutcome::Rejected`] with reason `already_exists`.
+    /// If a watched add includes `done`, it resolves as [`TaskOutcome::Rejected`]
+    /// with reason [`ALREADY_EXISTS`](crate::reasons::ALREADY_EXISTS).
     ///
     /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) because registration confirmation fails before the waiter is returned.
     async fn spawn_and_register(&self, id: TaskId, spec: TaskSpec, done: Option<OutcomeTx>) {
@@ -496,14 +498,14 @@ impl Registry {
             drop(st);
             if let Some(done) = done {
                 let _ = done.send(TaskOutcome::Rejected {
-                    reason: Arc::from("already_exists"),
+                    reason: Arc::from(reasons::ALREADY_EXISTS),
                 });
             }
             self.bus.publish(
                 Event::new(EventKind::TaskAddFailed)
                     .with_task(label)
                     .with_id(id)
-                    .with_reason("already_exists"),
+                    .with_reason(reasons::ALREADY_EXISTS),
             );
             return;
         }

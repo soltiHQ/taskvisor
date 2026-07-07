@@ -156,6 +156,45 @@ impl TaskOutcome {
         matches!(self, TaskOutcome::Completed)
     }
 
+    /// Creates a [`Failed`](Self::Failed) outcome for tests.
+    ///
+    /// Real outcomes normally come from the runtime.
+    /// The `Failed` and `Fatal` variants are `#[non_exhaustive]`;
+    /// other crates cannot build them directly.
+    ///
+    /// This helper lets tests cover code that handles failed outcomes; `source` is `None`.
+    ///
+    /// ```rust
+    /// use taskvisor::TaskOutcome;
+    ///
+    /// let outcome = TaskOutcome::failed_for_tests("boom", Some(3));
+    /// assert!(!outcome.is_success());
+    /// ```
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn failed_for_tests(reason: impl Into<Arc<str>>, exit_code: Option<i32>) -> Self {
+        Self::Failed {
+            reason: reason.into(),
+            exit_code,
+            source: None,
+        }
+    }
+
+    /// Creates a [`Fatal`](Self::Fatal) outcome for tests.
+    ///
+    /// See [`failed_for_tests`](Self::failed_for_tests) for why this helper exists; `source` is `None`.
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn fatal_for_tests(reason: impl Into<Arc<str>>, exit_code: Option<i32>) -> Self {
+        Self::Fatal {
+            reason: reason.into(),
+            exit_code,
+            source: None,
+        }
+    }
+
     /// Returns the original error source for [`Failed`](Self::Failed) or [`Fatal`](Self::Fatal).
     ///
     /// Returns `None` when the outcome has no source error.
@@ -260,6 +299,23 @@ impl TaskWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn test_constructors_build_the_terminal_failure_variants() {
+        let failed = TaskOutcome::failed_for_tests("boom", Some(3));
+        assert!(matches!(
+            &failed,
+            TaskOutcome::Failed { reason, exit_code: Some(3), .. } if reason.as_ref() == "boom"
+        ));
+        assert!(failed.source().is_none(), "test outcomes carry no source");
+
+        let fatal = TaskOutcome::fatal_for_tests("bad config", None);
+        assert!(matches!(
+            &fatal,
+            TaskOutcome::Fatal { reason, exit_code: None, .. } if reason.as_ref() == "bad config"
+        ));
+    }
 
     #[test]
     fn labels_are_stable_and_distinct() {

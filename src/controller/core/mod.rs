@@ -320,9 +320,9 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(spec.slot_name().to_owned())
                     .with_id(id)
-                    .with_reason("controller_shutting_down"),
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
             );
-            self.finalize_rejected(id, "controller_shutting_down");
+            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
             return;
         }
 
@@ -506,9 +506,9 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(&slot_name))
                     .with_id(id)
-                    .with_reason("removed_from_queue"),
+                    .with_reason(crate::reasons::REMOVED_FROM_QUEUE),
             );
-            self.finalize_rejected(id, "removed_from_queue");
+            self.finalize_rejected(id, crate::reasons::REMOVED_FROM_QUEUE);
             self.gc_if_idle(&slot_name, slot);
             return;
         }
@@ -708,7 +708,12 @@ impl Controller {
     #[inline]
     fn reject_if_full(&self, slot_name: &str, id: TaskId, slot_len: usize) -> bool {
         if slot_len >= self.config.max_slot_queue {
-            let reason = format!("queue_full: {}/{}", slot_len, self.config.max_slot_queue);
+            let reason = format!(
+                "{}: {}/{}",
+                crate::reasons::QUEUE_FULL,
+                slot_len,
+                self.config.max_slot_queue
+            );
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(slot_name)
@@ -739,9 +744,9 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(slot_name))
                     .with_id(displaced_id)
-                    .with_reason("superseded_by_replace"),
+                    .with_reason(crate::reasons::SUPERSEDED_BY_REPLACE),
             );
-            self.finalize_rejected(displaced_id, "superseded_by_replace");
+            self.finalize_rejected(displaced_id, crate::reasons::SUPERSEDED_BY_REPLACE);
         } else {
             slot.queue.push_front((id, task_spec));
         }
@@ -803,7 +808,10 @@ mod tests {
         let ev = rx.try_recv().expect("displaced head must be rejected");
         assert_eq!(ev.kind, EventKind::ControllerRejected);
         assert_eq!(ev.id, Some(displaced));
-        assert_eq!(ev.reason.as_deref(), Some("superseded_by_replace"));
+        assert_eq!(
+            ev.reason.as_deref(),
+            Some(crate::reasons::SUPERSEDED_BY_REPLACE)
+        );
     }
 
     #[test]

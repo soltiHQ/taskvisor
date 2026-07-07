@@ -37,9 +37,9 @@ impl Controller {
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_id(id)
-                    .with_reason("controller_shutting_down"),
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
             );
-            self.finalize_rejected(id, "controller_shutting_down");
+            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
         }
 
         while let Ok(sub) = rx.try_recv() {
@@ -47,12 +47,12 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(sub.spec.slot_name().to_owned())
                     .with_id(sub.id)
-                    .with_reason("controller_shutting_down"),
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
             );
 
             if let Some(done) = sub.done {
                 let _ = done.send(TaskOutcome::Rejected {
-                    reason: Arc::from("controller_shutting_down"),
+                    reason: Arc::from(crate::reasons::CONTROLLER_SHUTTING_DOWN),
                 });
             }
         }

@@ -22,7 +22,8 @@
 
 use tracing::Level;
 
-use crate::events::{BackoffSource, Event, EventKind, REASON_MAX_RETRIES_EXCEEDED};
+use crate::events::{BackoffSource, Event, EventKind};
+use crate::reasons::MAX_RETRIES_EXCEEDED;
 use crate::subscribers::Subscribe;
 
 /// Subscriber that forwards runtime events to [`tracing`].
@@ -53,12 +54,11 @@ fn level_for(e: &Event) -> Level {
         | EventKind::SubscriberOverflow
         | EventKind::TaskAddFailed => Level::WARN,
 
-        // A task that gave up after its retry budget is a terminal failure signal.
         EventKind::ActorExhausted => {
             let gave_up = e
                 .reason
                 .as_deref()
-                .is_some_and(|r| r.starts_with(REASON_MAX_RETRIES_EXCEEDED));
+                .is_some_and(|r| r.starts_with(MAX_RETRIES_EXCEEDED));
             if gave_up { Level::WARN } else { Level::INFO }
         }
 
