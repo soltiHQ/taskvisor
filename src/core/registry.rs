@@ -324,9 +324,7 @@ impl Registry {
                     msg = bus_rx.recv() => match msg {
                         Ok(ev) => me.guarded("registry", me.handle_bus_event(&ev)).await,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            me.bus
-                                .publish(Event::subscriber_overflow("registry", format!("lagged({n})")));
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             me.guarded("registry", me.reap_finished()).await;
                             continue;
                         }
@@ -843,6 +841,66 @@ mod tests {
 
         reg.reap_finished().await;
         assert!(!reg.is_empty().await, "a running actor must not be reaped");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lag_recovery_keeps_retained_terminal_event() {
+        let bus = Bus::new(1);
+        let runtime_token = CancellationToken::new();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let reg = Registry::new(
+            bus.clone(),
+            runtime_token.clone(),
+            None,
+            Duration::from_millis(50),
+            cmd_rx,
+        );
+
+        let id = TaskId::next();
+        let label: Arc<str> = Arc::from("running-during-lag");
+        let actor_token = CancellationToken::new();
+        let actor_wait = actor_token.clone();
+        let join = tokio::spawn(async move {
+            actor_wait.cancelled().await;
+            ActorExitReason::Canceled
+        });
+
+        {
+            let mut state = reg.state.write().await;
+            state.by_label.insert(Arc::clone(&label), id);
+            state.tasks.insert(
+                id,
+                Handle {
+                    join,
+                    cancel: actor_token.clone(),
+                    label: Arc::clone(&label),
+                    done: None,
+                },
+            );
+        }
+
+        reg.clone().spawn_listener();
+
+        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed"));
+        bus.publish(
+            Event::new(EventKind::ActorExhausted)
+                .with_task(label)
+                .with_id(id),
+        );
+
+        let recovered =
+            tokio::time::timeout(Duration::from_millis(250), reg.wait_until_empty()).await;
+
+        actor_token.cancel();
+        runtime_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), reg.join_listener())
+            .await
+            .expect("registry listener must stop after cancellation");
+
+        assert!(
+            recovered.is_ok(),
+            "lag recovery must preserve and process the retained terminal event"
+        );
     }
 
     #[tokio::test]
