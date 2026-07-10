@@ -262,10 +262,11 @@ use std::time::Duration;
 use taskvisor::{Supervisor, SupervisorConfig};
 
 let sup = Supervisor::builder(SupervisorConfig::default())
-    .with_grace(Duration::from_secs(30))   // shutdown grace period (default 60s)
-    .with_timeout(Duration::from_secs(5))  // default per-attempt timeout (default: none)
-    .with_max_retries(10)                  // default retry limit (default: unlimited)
-    .with_max_concurrent(4)                // global concurrency limit (default: unlimited)
+    .with_grace(Duration::from_secs(30))                      // task shutdown grace period (default 60s)
+    .with_subscriber_shutdown_timeout(Duration::from_secs(5)) // shared subscriber drain timeout
+    .with_timeout(Duration::from_secs(5))                     // default per-attempt timeout (default: none)
+    .with_max_retries(10)                                     // default retry limit (default: unlimited)
+    .with_max_concurrent(4)                                   // global concurrency limit (default: unlimited)
     .build();
 ```
 
@@ -274,6 +275,10 @@ let sup = Supervisor::builder(SupervisorConfig::default())
 Static mode (`run`) installs OS shutdown signal handlers for you.
 In dynamic mode, you stop things yourself: `handle.shutdown()` cancels all tasks and waits up to `grace`.
 Tasks that ignore cancellation are force-aborted after the grace period.
+Subscriber queues then get a separate shared drain timeout (default 5s).
+At that deadline queued events are dropped; a callback already running on Tokio's blocking pool may continue.
+Tokio runtime shutdown may still wait for that running callback.
+Subscriber cleanup is best-effort, so reaching its timeout does not replace the task shutdown result.
 The outcome is reported either way.
 
 ### Run CPU-heavy work without blocking Tokio

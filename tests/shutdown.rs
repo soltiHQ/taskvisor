@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use common::*;
@@ -16,6 +16,102 @@ fn make_stubborn(name: &str) -> TaskRef {
     })
 }
 
+#[derive(Default)]
+struct CallbackGateState {
+    entered: bool,
+    released: bool,
+    finished: bool,
+    watchdog_fired: bool,
+}
+
+type CallbackGate = Arc<(Mutex<CallbackGateState>, Condvar)>;
+
+struct BlockingSubscriber {
+    gate: CallbackGate,
+}
+
+impl Subscribe for BlockingSubscriber {
+    fn on_event(&self, _event: &Event) {
+        let (state, ready) = &*self.gate;
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.entered {
+            return;
+        }
+
+        state.entered = true;
+        ready.notify_all();
+        while !state.released {
+            state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state.finished = true;
+        ready.notify_all();
+    }
+
+    fn name(&self) -> &str {
+        "blocking-shutdown"
+    }
+
+    fn queue_capacity(&self) -> usize {
+        64
+    }
+}
+
+fn blocking_subscriber() -> (Arc<BlockingSubscriber>, CallbackGate) {
+    let gate = Arc::new((Mutex::new(CallbackGateState::default()), Condvar::new()));
+    let subscriber = Arc::new(BlockingSubscriber {
+        gate: Arc::clone(&gate),
+    });
+    (subscriber, gate)
+}
+
+fn spawn_callback_watchdog(gate: CallbackGate) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let (state, ready) = &*gate;
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        while !state.entered && !state.released {
+            state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        if state.released {
+            return;
+        }
+
+        let (mut state, _) = ready
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.released)
+            .unwrap_or_else(|e| e.into_inner());
+        if !state.released {
+            state.watchdog_fired = true;
+            state.released = true;
+            ready.notify_all();
+        }
+    })
+}
+
+fn release_callback(gate: &CallbackGate) {
+    let (state, ready) = &**gate;
+    state.lock().unwrap_or_else(|e| e.into_inner()).released = true;
+    ready.notify_all();
+}
+
+async fn wait_for_callback(
+    gate: &CallbackGate,
+    predicate: impl Fn(&CallbackGateState) -> bool,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let matches = {
+                let state = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+                predicate(&state)
+            };
+            if matches {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 fn served(grace: Duration) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
@@ -26,6 +122,112 @@ fn served(grace: Duration) -> (SupervisorHandle, Arc<EventCollector>) {
     .with_subscribers(subs)
     .build();
     (sup.serve(), collector)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subscriber_deadline_bounds_explicit_shutdown() {
+    let (subscriber, gate) = blocking_subscriber();
+    let watchdog = spawn_callback_watchdog(Arc::clone(&gate));
+    let supervisor = Supervisor::builder(SupervisorConfig::default())
+        .with_subscriber_shutdown_timeout(Duration::from_millis(50))
+        .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
+        .build();
+    let handle = supervisor.serve();
+
+    let add_result = handle
+        .add_and_wait(
+            TaskSpec::restartable(make_coop("subscriber-deadline")),
+            Duration::from_secs(5),
+        )
+        .await;
+    let callback_entered = wait_for_callback(&gate, |state| state.entered).await;
+    let mut shutdown_task = tokio::spawn(async move { handle.shutdown().await });
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(5), &mut shutdown_task).await;
+    let callback_was_still_running = !gate.0.lock().unwrap_or_else(|e| e.into_inner()).finished;
+
+    release_callback(&gate);
+    let callback_finished = wait_for_callback(&gate, |state| state.finished).await;
+    watchdog.join().expect("watchdog thread must not panic");
+    if shutdown_result.is_err() {
+        shutdown_task.abort();
+        let _ = shutdown_task.await;
+    }
+    let watchdog_stayed_idle = !gate
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .watchdog_fired;
+
+    assert!(add_result.is_ok(), "the cooperative task must be admitted");
+    assert!(callback_entered, "the blocking callback must start first");
+    assert!(
+        matches!(shutdown_result, Ok(Ok(Ok(())))),
+        "explicit shutdown must return after the subscriber deadline"
+    );
+    assert!(
+        callback_was_still_running,
+        "Taskvisor must stop waiting without stopping the blocking callback"
+    );
+    assert!(callback_finished, "cleanup must release the callback");
+    assert!(
+        watchdog_stayed_idle,
+        "the test must beat its safety watchdog"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subscriber_deadline_bounds_natural_run_completion() {
+    let (subscriber, gate) = blocking_subscriber();
+    let watchdog = spawn_callback_watchdog(Arc::clone(&gate));
+    let supervisor = Supervisor::builder(SupervisorConfig::default())
+        .with_subscriber_shutdown_timeout(Duration::from_millis(50))
+        .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
+        .build();
+    let task_gate = Arc::new(tokio::sync::Notify::new());
+    let task_gate_for_task = Arc::clone(&task_gate);
+    let task = TaskFn::arc("natural-deadline", move |_ctx: TaskContext| {
+        let task_gate = Arc::clone(&task_gate_for_task);
+        async move {
+            task_gate.notified().await;
+            Ok(())
+        }
+    });
+    let run_supervisor = Arc::clone(&supervisor);
+    let mut run_task =
+        tokio::spawn(async move { run_supervisor.run(vec![TaskSpec::once(task)]).await });
+
+    let callback_entered = wait_for_callback(&gate, |state| state.entered).await;
+    task_gate.notify_one();
+    let run_result = tokio::time::timeout(Duration::from_secs(5), &mut run_task).await;
+    let callback_was_still_running = !gate.0.lock().unwrap_or_else(|e| e.into_inner()).finished;
+
+    release_callback(&gate);
+    let callback_finished = wait_for_callback(&gate, |state| state.finished).await;
+    watchdog.join().expect("watchdog thread must not panic");
+    if run_result.is_err() {
+        run_task.abort();
+        let _ = run_task.await;
+    }
+    let watchdog_stayed_idle = !gate
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .watchdog_fired;
+
+    assert!(callback_entered, "the blocking callback must start first");
+    assert!(
+        matches!(run_result, Ok(Ok(Ok(())))),
+        "natural run completion must return after the subscriber deadline"
+    );
+    assert!(
+        callback_was_still_running,
+        "run must stop waiting without stopping the blocking callback"
+    );
+    assert!(callback_finished, "cleanup must release the callback");
+    assert!(
+        watchdog_stayed_idle,
+        "the test must beat its safety watchdog"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

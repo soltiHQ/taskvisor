@@ -9,6 +9,7 @@
 //!
 //! Delivery is best-effort: events may be dropped if the bus or a subscriber queue falls behind.
 //! Drops and subscriber panics are reported as diagnostic events when possible.
+//! During shutdown, all subscriber queues share one configurable drain timeout.
 //!
 //! See [`Subscribe`] for the public contract.
 //!
@@ -32,7 +33,7 @@ mod subscriber_set;
 mod embedded;
 
 pub use subscriber::Subscribe;
-pub(crate) use subscriber_set::SubscriberSet;
+pub(crate) use subscriber_set::{DEFAULT_SHUTDOWN_TIMEOUT, SubscriberSet};
 
 #[cfg(feature = "logging")]
 pub use embedded::LogWriter;

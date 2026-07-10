@@ -348,7 +348,7 @@ impl SupervisorHandle {
     /// Initiates graceful shutdown of the supervisor runtime.
     ///
     /// Shutdown cancels all registered tasks, waits up to the configured grace period, force-aborts tasks that do not stop,
-    /// joins internal listeners, and closes subscriber workers.
+    /// joins internal listeners, and allows subscriber workers to drain until their separate shutdown timeout.
     ///
     /// With the `controller` feature enabled, the controller stops through the shared runtime cancellation token.
     ///
