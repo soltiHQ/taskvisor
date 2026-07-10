@@ -37,11 +37,11 @@
 use std::{
     future::Future,
     sync::{Arc, Weak},
-    time::Instant,
 };
 
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::broadcast;
@@ -64,6 +64,19 @@ use super::{
 mod introspect;
 mod recovery;
 mod shutdown;
+
+/// Keeps the earliest pending controller-recovery deadline.
+///
+/// Returns the new deadline when the timer must be reset.
+fn schedule_recovery(recovery_at: &mut Option<Instant>, candidate: Instant) -> Option<Instant> {
+    match recovery_at {
+        Some(current) if *current <= candidate => None,
+        _ => {
+            *recovery_at = Some(candidate);
+            Some(candidate)
+        }
+    }
+}
 
 /// Submission accepted by the controller intake channel.
 struct Submission {
@@ -250,20 +263,52 @@ impl Controller {
             .ok_or(ControllerError::AlreadyStarted)?;
 
         let mut bus_rx = self.bus.subscribe();
+        let mut recovery_at = None;
+        let recovery_timer = tokio::time::sleep(recovery::RECOVERY_DELAY);
+        tokio::pin!(recovery_timer);
         loop {
             tokio::select! {
                 _ = token.cancelled() => break,
 
+                _ = &mut recovery_timer, if recovery_at.is_some() => {
+                    recovery_at = None;
+                    if !self.is_shutting_down()
+                        && let Some(next_recovery) = self
+                            .guarded("recover_stale_slots", self.recover_stale_slots())
+                            .await
+                            .flatten()
+                        && let Some(deadline) = schedule_recovery(
+                            &mut recovery_at,
+                            next_recovery,
+                        )
+                    {
+                        recovery_timer.as_mut().reset(deadline);
+                    }
+                }
+
                 Some(sub) = rx.recv() => {
-                    self.guarded("handle_submission", self.handle_submission(sub)).await;
+                    let _ = self.guarded("handle_submission", self.handle_submission(sub)).await;
                 }
                 result = bus_rx.recv() => {
                     match result {
                         Ok(event) => {
-                            self.guarded("handle_event", self.handle_event(event)).await;
+                            let shutdown_requested = event.kind == EventKind::ShutdownRequested;
+                            let _ = self.guarded("handle_event", self.handle_event(event)).await;
+                            if shutdown_requested {
+                                recovery_at = None;
+                            }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            self.guarded("recover_stale_slots", self.recover_stale_slots()).await;
+                            if !self.is_shutting_down() {
+                                // Recovery may publish lifecycle events itself. Delay and coalesce
+                                // it so those events cannot start an immediate lag/recovery loop.
+                                if let Some(deadline) = schedule_recovery(
+                                    &mut recovery_at,
+                                    Instant::now() + recovery::RECOVERY_DELAY,
+                                ) {
+                                    recovery_timer.as_mut().reset(deadline);
+                                }
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -280,13 +325,18 @@ impl Controller {
     ///
     /// This guard does not repair partially updated slot state by itself.
     /// Callers that park watcher state must still make sure the watcher is resolved or returned on every failure path.
-    async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
-        if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task("controller")
-                    .with_reason(format!("{who}_panicked: {msg}")),
-            );
+    /// Returns the work-unit output on success and `None` after a caught panic.
+    async fn guarded<T>(&self, who: &'static str, fut: impl Future<Output = T>) -> Option<T> {
+        match crate::core::panic_guard::guarded(fut).await {
+            Ok(output) => Some(output),
+            Err(msg) => {
+                self.bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task("controller")
+                        .with_reason(format!("{who}_panicked: {msg}")),
+                );
+                None
+            }
         }
     }
 
@@ -967,7 +1017,7 @@ mod tests {
         let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
         let mut rx = ctrl.bus.subscribe();
 
-        ctrl.guarded("unit", async { panic!("boom {}", 1) }).await;
+        let _ = ctrl.guarded("unit", async { panic!("boom {}", 1) }).await;
 
         let ev = rx
             .try_recv()
@@ -1005,27 +1055,42 @@ mod tests {
             .expect("test host uptime must exceed one minute")
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn lag_recovery_keeps_retained_task_added_event() {
-        let bus = Bus::new(1);
-        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
-
-        let id = TaskId::next();
-        let slot_name: Arc<str> = Arc::from("s");
+    fn insert_admitting_slot(
+        ctrl: &Controller,
+        name: &str,
+        id: TaskId,
+        since: Instant,
+    ) -> Arc<Mutex<SlotState>> {
+        let slot_name: Arc<str> = Arc::from(name);
         let slot = Arc::new(Mutex::new(SlotState {
-            status: SlotStatus::Admitting {
-                since: Instant::now(),
-            },
+            status: SlotStatus::Admitting { since },
             running_id: Some(id),
             queue: std::collections::VecDeque::new(),
         }));
         ctrl.slots.insert(Arc::clone(&slot_name), Arc::clone(&slot));
-        ctrl.running.insert(id, Arc::clone(&slot_name));
+        ctrl.running.insert(id, slot_name);
+        slot
+    }
 
-        let runtime_token = CancellationToken::new();
-        let runner_ctrl = Arc::clone(&ctrl);
-        let runner_token = runtime_token.clone();
+    async fn wait_for_slot_status(
+        slot: &Arc<Mutex<SlotState>>,
+        expected: impl Fn(SlotStatus) -> bool,
+    ) -> bool {
+        for _ in 0..100 {
+            if expected(slot.lock().await.status) {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+        false
+    }
+
+    async fn start_controller_loop(
+        ctrl: &Arc<Controller>,
+        token: &CancellationToken,
+    ) -> tokio::task::JoinHandle<Result<(), ControllerError>> {
+        let runner_ctrl = Arc::clone(ctrl);
+        let runner_token = token.clone();
         let runner = tokio::spawn(async move { runner_ctrl.run_inner(runner_token).await });
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1038,30 +1103,159 @@ mod tests {
         })
         .await
         .expect("controller loop must take its receiver and subscribe to the bus");
+        runner
+    }
 
-        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed"));
-        bus.publish(
-            Event::new(EventKind::TaskAdded)
-                .with_task(Arc::clone(&slot_name))
-                .with_id(id),
-        );
-
-        let reached_running = poll_until(Duration::from_millis(250), || {
-            let slot = Arc::clone(&slot);
-            async move { matches!(slot.lock().await.status, SlotStatus::Running { .. }) }
-        })
-        .await;
-
-        runtime_token.cancel();
+    async fn stop_controller_loop(
+        token: CancellationToken,
+        runner: tokio::task::JoinHandle<Result<(), ControllerError>>,
+    ) {
+        token.cancel();
         tokio::time::timeout(Duration::from_secs(1), runner)
             .await
             .expect("controller loop must stop after cancellation")
             .expect("controller loop task must not panic")
             .expect("controller loop must exit cleanly");
+    }
+
+    async fn induce_lag_with_task_added(
+        bus: &Bus,
+        tail_name: &str,
+        tail_id: TaskId,
+        tail_slot: &Arc<Mutex<SlotState>>,
+    ) -> bool {
+        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed"));
+        bus.publish(
+            Event::new(EventKind::TaskAdded)
+                .with_task(tail_name.to_owned())
+                .with_id(tail_id),
+        );
+        wait_for_slot_status(tail_slot, |status| {
+            matches!(status, SlotStatus::Running { .. })
+        })
+        .await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lag_recovery_keeps_retained_task_added_event() {
+        let bus = Bus::new(1);
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
+
+        let id = TaskId::next();
+        let slot = insert_admitting_slot(&ctrl, "s", id, Instant::now());
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        let reached_running = induce_lag_with_task_added(&bus, "s", id, &slot).await;
+        stop_controller_loop(token, runner).await;
 
         assert!(
             reached_running,
             "lag recovery must preserve and process the retained TaskAdded event"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn repeated_lag_keeps_first_deadline_and_rearms_young_slots() {
+        let bus = Bus::new(1);
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
+
+        let first = insert_admitting_slot(&ctrl, "first", TaskId::next(), Instant::now());
+        let first_tail_id = TaskId::next();
+        let first_tail = insert_admitting_slot(&ctrl, "first-tail", first_tail_id, Instant::now());
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        assert!(
+            induce_lag_with_task_added(&bus, "first-tail", first_tail_id, &first_tail).await,
+            "first retained event must be processed"
+        );
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(
+            matches!(first.lock().await.status, SlotStatus::Admitting { .. }),
+            "recovery must not run before the safety delay"
+        );
+
+        let stale_since = Instant::now()
+            .checked_sub(recovery::RECOVERY_DELAY)
+            .expect("paused clock must support a five-second lookback");
+        let second = insert_admitting_slot(&ctrl, "second", TaskId::next(), stale_since);
+        let late = insert_admitting_slot(&ctrl, "late", TaskId::next(), Instant::now());
+        let second_tail_id = TaskId::next();
+        let second_tail =
+            insert_admitting_slot(&ctrl, "second-tail", second_tail_id, Instant::now());
+
+        assert!(
+            induce_lag_with_task_added(&bus, "second-tail", second_tail_id, &second_tail).await,
+            "second retained event must be processed"
+        );
+        assert!(
+            matches!(second.lock().await.status, SlotStatus::Admitting { .. }),
+            "repeated lag must not run stale-slot recovery immediately"
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            wait_for_slot_status(&first, |status| matches!(status, SlotStatus::Idle)).await
+                && wait_for_slot_status(&second, |status| matches!(status, SlotStatus::Idle)).await,
+            "repeated lag must keep the first recovery deadline"
+        );
+        assert!(
+            matches!(late.lock().await.status, SlotStatus::Admitting { .. }),
+            "a newer slot must not be recovered before its safety delay"
+        );
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(
+            wait_for_slot_status(&late, |status| matches!(status, SlotStatus::Idle)).await,
+            "a newer slot must schedule its own delayed recovery"
+        );
+        stop_controller_loop(token, runner).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn shutdown_request_cancels_pending_lag_recovery() {
+        let bus = Bus::new(1);
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
+
+        let target = insert_admitting_slot(&ctrl, "target", TaskId::next(), Instant::now());
+        let tail_id = TaskId::next();
+        let tail = insert_admitting_slot(&ctrl, "tail", tail_id, Instant::now());
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        assert!(
+            induce_lag_with_task_added(&bus, "tail", tail_id, &tail).await,
+            "retained event must confirm that lag was handled"
+        );
+        bus.publish(Event::new(EventKind::ShutdownRequested));
+
+        let mut shutdown_observed = false;
+        for _ in 0..100 {
+            if ctrl.is_shutting_down() {
+                shutdown_observed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(recovery::RECOVERY_DELAY + Duration::from_secs(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let target_unchanged = matches!(target.lock().await.status, SlotStatus::Admitting { .. });
+
+        stop_controller_loop(token, runner).await;
+        assert!(
+            shutdown_observed,
+            "controller must observe shutdown request"
+        );
+        assert!(
+            target_unchanged,
+            "pending recovery must not run after shutdown is requested"
         );
     }
 
@@ -1094,7 +1288,7 @@ mod tests {
         );
         ctrl.running.insert(id, Arc::from("s"));
 
-        ctrl.recover_stale_slots().await;
+        let _ = ctrl.recover_stale_slots().await;
 
         let slot_arc = ctrl.slots.get("s").map(|e| e.clone()).expect("slot exists");
         let slot = slot_arc.lock().await;
@@ -1125,7 +1319,7 @@ mod tests {
         );
         ctrl.running.insert(id, Arc::from("s"));
 
-        ctrl.recover_stale_slots().await;
+        let _ = ctrl.recover_stale_slots().await;
 
         let removed = poll_until(Duration::from_secs(2), || async {
             !sup.core().contains_id(id).await

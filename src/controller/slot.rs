@@ -6,7 +6,9 @@
 //! This module only stores slot state.
 //! The transition logic lives in `controller::core`.
 
-use std::{collections::VecDeque, time::Instant};
+use std::collections::VecDeque;
+
+use tokio::time::Instant;
 
 use crate::TaskSpec;
 use crate::identity::TaskId;
