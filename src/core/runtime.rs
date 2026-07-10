@@ -340,7 +340,7 @@ impl SupervisorCore {
     /// Initiates explicit graceful shutdown.
     ///
     /// Publishes `ShutdownRequested`, drains tasks with grace, cancels the runtime token, joins internal listeners,
-    /// and closes subscriber workers.
+    /// and closes subscriber workers within their configured timeout.
     pub(crate) async fn shutdown(&self) -> Result<(), RuntimeError> {
         self.bus.publish(Event::new(EventKind::ShutdownRequested));
         let res = self.drain_with_grace().await;

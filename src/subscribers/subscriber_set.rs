@@ -35,11 +35,14 @@
 //!
 //! See [`Subscribe`] for the subscriber trait contract.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::events::{Bus, Event};
 use crate::subscribers::Subscribe;
+
+/// Default time allowed for subscriber queues to drain during shutdown.
+pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-subscriber channel metadata.
 struct SubscriberChannel {
@@ -59,8 +62,9 @@ struct SubscriberChannel {
 ///
 /// ## Shutdown
 ///
-/// [`close`](Self::close) drops all senders and waits for workers to finish draining queued events.
-/// There is no timeout here: subscriber `on_event` implementations must return promptly.
+/// [`close`](Self::close) drops all senders and gives every worker one shared timeout to drain queued events.
+/// At the deadline, unfinished queue workers are aborted and queued events are dropped.
+/// A callback already running on Tokio's blocking pool may continue after `close` returns.
 ///
 /// ## Also
 ///
@@ -76,6 +80,9 @@ pub(crate) struct SubscriberSet {
     /// Worker join handles. Taken once during [`close`](Self::close).
     workers: std::sync::Mutex<Vec<JoinHandle<()>>>,
 
+    /// One shared deadline for draining all subscriber workers.
+    shutdown_timeout: Duration,
+
     bus: Bus,
 }
 
@@ -85,8 +92,19 @@ impl SubscriberSet {
     ///
     /// The subscriber name is read once and stored as `Arc<str>`.
     /// This supports dynamic names while keeping diagnostic events stable for the lifetime of the subscriber worker.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
+        Self::new_with_shutdown_timeout(subs, bus, DEFAULT_SHUTDOWN_TIMEOUT)
+    }
+
+    /// Creates a subscriber set with an explicit shared shutdown timeout.
+    #[must_use]
+    pub(crate) fn new_with_shutdown_timeout(
+        subs: Vec<Arc<dyn Subscribe>>,
+        bus: Bus,
+        shutdown_timeout: Duration,
+    ) -> Self {
         let mut channels = Vec::with_capacity(subs.len());
         let mut workers = Vec::with_capacity(subs.len());
 
@@ -142,6 +160,7 @@ impl SubscriberSet {
         Self {
             channels: std::sync::Mutex::new(channels),
             workers: std::sync::Mutex::new(workers),
+            shutdown_timeout,
             bus,
         }
     }
@@ -181,25 +200,46 @@ impl SubscriberSet {
         }
     }
 
-    /// Closes subscriber queues and waits for workers to drain.
+    /// Closes subscriber queues and waits for workers until the shared shutdown deadline.
     ///
     /// Safe to call more than once. Later calls are no-ops.
     ///
-    /// This does not abort stuck workers.
-    /// If a subscriber blocks inside `on_event`, this method may wait until that call returns.
+    /// When the timeout expires, unfinished async queue workers are aborted.
+    /// Callbacks already running on Tokio's blocking pool cannot be aborted and may finish later.
     pub(crate) async fn close(&self) {
         {
             let mut channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
             channels.clear();
         }
 
-        let workers = {
+        let mut workers = {
             let mut w = self.workers.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *w)
         };
 
-        for h in workers {
-            let _ = h.await;
+        let mut joined = 0;
+        let drained = if self.shutdown_timeout.is_zero() {
+            false
+        } else {
+            tokio::time::timeout(self.shutdown_timeout, async {
+                for worker in &mut workers {
+                    let _ = worker.await;
+                    joined += 1;
+                }
+            })
+            .await
+            .is_ok()
+        };
+
+        if drained {
+            return;
+        }
+
+        for worker in workers.iter().skip(joined) {
+            worker.abort();
+        }
+        for worker in workers.iter_mut().skip(joined) {
+            let _ = worker.await;
         }
     }
 }
@@ -382,8 +422,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn blocking_callback_keeps_runtime_responsive_and_close_joins_it() {
+    fn blocking_order_sub() -> (Arc<BlockingOrderSub>, BlockingGate) {
         let first_gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
         let sub = Arc::new(BlockingOrderSub {
             first_gate: Arc::clone(&first_gate),
@@ -392,14 +431,12 @@ mod tests {
             max_active: AtomicUsize::new(0),
             seen: Mutex::new(Vec::new()),
         });
-        let set = Arc::new(SubscriberSet::new(
-            vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
-            Bus::new(64),
-        ));
+        (sub, first_gate)
+    }
 
-        let watchdog_gate = Arc::clone(&first_gate);
-        let watchdog = std::thread::spawn(move || {
-            let (state, ready) = &*watchdog_gate;
+    fn spawn_gate_watchdog(gate: BlockingGate) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (state, ready) = &*gate;
             let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
             while !state.entered && !state.released {
                 state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -416,7 +453,44 @@ mod tests {
                 state.released = true;
                 ready.notify_all();
             }
-        });
+        })
+    }
+
+    fn release_gate(gate: &BlockingGate) {
+        let (state, ready) = &**gate;
+        state.lock().unwrap_or_else(|e| e.into_inner()).released = true;
+        ready.notify_all();
+    }
+
+    async fn wait_for_gate(
+        gate: &BlockingGate,
+        predicate: impl Fn(&BlockingGateState) -> bool,
+    ) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let matches = {
+                    let state = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+                    predicate(&state)
+                };
+                if matches {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_callback_keeps_runtime_responsive_and_close_joins_it() {
+        let (sub, first_gate) = blocking_order_sub();
+        let set = Arc::new(SubscriberSet::new(
+            vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
+            Bus::new(64),
+        ));
+
+        let watchdog = spawn_gate_watchdog(Arc::clone(&first_gate));
 
         set.emit_arc(ev("first"));
         set.emit_arc(ev("second"));
@@ -452,11 +526,7 @@ mod tests {
         })
         .await;
 
-        {
-            let (state, ready) = &*first_gate;
-            state.lock().unwrap_or_else(|e| e.into_inner()).released = true;
-            ready.notify_all();
-        }
+        release_gate(&first_gate);
 
         tokio::time::timeout(Duration::from_secs(5), close_task)
             .await
@@ -477,6 +547,121 @@ mod tests {
         assert!(state.finished);
         assert!(!state.watchdog_fired);
         assert!(sub.second_entered.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_shutdown_timeout_aborts_worker_and_drops_queued_events() {
+        let (sub, first_gate) = blocking_order_sub();
+        let set = SubscriberSet::new_with_shutdown_timeout(
+            vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
+            Bus::new(64),
+            Duration::ZERO,
+        );
+        let watchdog = spawn_gate_watchdog(Arc::clone(&first_gate));
+
+        set.emit_arc(ev("first"));
+        set.emit_arc(ev("second"));
+        let first_entered = wait_for_gate(&first_gate, |state| state.entered).await;
+
+        let close_result = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
+        let first_was_still_running = !first_gate
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finished;
+        let second_was_waiting = !sub.second_entered.load(Ordering::Acquire);
+
+        release_gate(&first_gate);
+        let first_finished = wait_for_gate(&first_gate, |state| state.finished).await;
+        watchdog.join().expect("watchdog thread must not panic");
+        let second_reappeared = tokio::time::timeout(Duration::from_millis(250), async {
+            while !sub.second_entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        let repeated_close = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
+
+        assert!(first_entered, "the first callback must start before close");
+        assert!(
+            close_result.is_ok(),
+            "zero subscriber shutdown timeout must return immediately"
+        );
+        assert!(
+            first_was_still_running,
+            "close cannot stop an already-running blocking callback"
+        );
+        assert!(
+            second_was_waiting,
+            "the second callback must still be queued"
+        );
+        assert!(first_finished, "cleanup must release the running callback");
+        assert!(
+            !second_reappeared,
+            "aborting the queue worker must drop callbacks left behind the running one"
+        );
+        assert!(repeated_close.is_ok(), "repeated close must remain a no-op");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subscriber_workers_share_one_shutdown_deadline() {
+        let mut subscribers = Vec::<Arc<dyn Subscribe>>::new();
+        let mut gates = Vec::new();
+        let mut watchdogs = Vec::new();
+        for _ in 0..3 {
+            let (sub, gate) = blocking_order_sub();
+            subscribers.push(sub);
+            watchdogs.push(spawn_gate_watchdog(Arc::clone(&gate)));
+            gates.push(gate);
+        }
+
+        let set = SubscriberSet::new_with_shutdown_timeout(
+            subscribers,
+            Bus::new(64),
+            Duration::from_millis(200),
+        );
+        set.emit_arc(ev("first"));
+        let all_entered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready = gates
+                    .iter()
+                    .all(|gate| gate.0.lock().unwrap_or_else(|e| e.into_inner()).entered);
+                if ready {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+
+        let close_result = tokio::time::timeout(Duration::from_millis(450), set.close()).await;
+        let callbacks_were_still_running = gates
+            .iter()
+            .all(|gate| !gate.0.lock().unwrap_or_else(|e| e.into_inner()).finished);
+
+        for gate in &gates {
+            release_gate(gate);
+        }
+        let mut all_finished = true;
+        for gate in &gates {
+            all_finished &= wait_for_gate(gate, |state| state.finished).await;
+        }
+        for watchdog in watchdogs {
+            watchdog.join().expect("watchdog thread must not panic");
+        }
+
+        assert!(all_entered, "all callbacks must start before close");
+        assert!(
+            close_result.is_ok(),
+            "all subscriber workers must share one 200 ms deadline"
+        );
+        assert!(
+            callbacks_were_still_running,
+            "the deadline must stop waiting, not stop blocking callbacks"
+        );
+        assert!(all_finished, "cleanup must release every callback");
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@
 //!
 //! let supervisor = SupervisorBuilder::new(SupervisorConfig::default())
 //!     .with_grace(Duration::from_secs(30))
+//!     .with_subscriber_shutdown_timeout(Duration::from_secs(5))
 //!     .with_timeout(Duration::from_secs(5))
 //!     .with_max_retries(10)
 //!     .with_max_concurrent(4)
@@ -30,7 +31,7 @@ use crate::{
     core::SupervisorConfig,
     events::Bus,
     policies::{BackoffPolicy, RestartPolicy},
-    subscribers::{Subscribe, SubscriberSet},
+    subscribers::{DEFAULT_SHUTDOWN_TIMEOUT, Subscribe, SubscriberSet},
 };
 
 /// Builder for constructing a [`Supervisor`](crate::Supervisor).
@@ -48,6 +49,7 @@ use crate::{
 pub struct SupervisorBuilder {
     cfg: SupervisorConfig,
     subscribers: Vec<Arc<dyn Subscribe>>,
+    subscriber_shutdown_timeout: Duration,
 
     #[cfg(feature = "controller")]
     controller_config: Option<crate::controller::ControllerConfig>,
@@ -61,6 +63,7 @@ impl SupervisorBuilder {
         Self {
             cfg,
             subscribers: Vec::new(),
+            subscriber_shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
 
             #[cfg(feature = "controller")]
             controller_config: None,
@@ -73,6 +76,18 @@ impl SupervisorBuilder {
     /// `Duration::ZERO` means no graceful wait.
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.cfg.grace = grace;
+        self
+    }
+
+    /// Sets the shared timeout for draining subscriber queues during shutdown.
+    ///
+    /// The default is five seconds.
+    /// `Duration::ZERO` closes the queues and aborts their async workers without waiting for queued events.
+    /// A callback already running on Tokio's blocking pool cannot be aborted and may finish later.
+    /// Tokio runtime shutdown may still wait for that running blocking callback.
+    /// Reaching this best-effort cleanup timeout does not produce a [`RuntimeError`](crate::RuntimeError).
+    pub fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.subscriber_shutdown_timeout = timeout;
         self
     }
 
@@ -173,7 +188,11 @@ impl SupervisorBuilder {
     /// Task execution starts when the caller runs or serves the supervisor.
     pub fn build(self) -> Arc<Supervisor> {
         let bus = Bus::new(self.cfg.bus_capacity_clamped());
-        let subs = Arc::new(SubscriberSet::new(self.subscribers, bus.clone()));
+        let subs = Arc::new(SubscriberSet::new_with_shutdown_timeout(
+            self.subscribers,
+            bus.clone(),
+            self.subscriber_shutdown_timeout,
+        ));
         let runtime_token = tokio_util::sync::CancellationToken::new();
 
         let semaphore = self
@@ -223,10 +242,17 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn default_subscriber_shutdown_timeout_is_five_seconds() {
+        let builder = SupervisorBuilder::new(SupervisorConfig::default());
+        assert_eq!(builder.subscriber_shutdown_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
     fn setters_override_config_fields() {
         let backoff = BackoffPolicy::exponential(Duration::from_millis(200));
         let b = SupervisorBuilder::new(SupervisorConfig::default())
             .with_grace(Duration::from_secs(30))
+            .with_subscriber_shutdown_timeout(Duration::from_secs(2))
             .with_timeout(Duration::from_secs(5))
             .with_max_retries(10)
             .with_max_concurrent(4)
@@ -235,6 +261,7 @@ mod tests {
             .with_backoff(backoff);
 
         assert_eq!(b.cfg.grace, Duration::from_secs(30));
+        assert_eq!(b.subscriber_shutdown_timeout, Duration::from_secs(2));
         assert_eq!(b.cfg.timeout, Some(Duration::from_secs(5)));
         assert_eq!(b.cfg.max_retries.map(|n| n.get()), Some(10));
         assert_eq!(b.cfg.max_concurrent.map(|n| n.get()), Some(4));

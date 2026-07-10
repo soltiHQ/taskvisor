@@ -54,7 +54,9 @@ use crate::events::Event;
 /// When Taskvisor delivers events, a dedicated queue worker schedules one callback at a time on Tokio's blocking pool.
 ///
 /// Keep [`on_event`](Self::on_event) fast; for async I/O, send data to a channel and process it elsewhere.
-/// Taskvisor waits for queued callbacks during shutdown; a callback that does not return can delay shutdown.
+/// During shutdown, Taskvisor gives all subscriber queues one shared drain timeout.
+/// At the deadline, queued events are dropped; an already-running callback may continue after Taskvisor returns.
+/// Tokio runtime shutdown may still wait for that running blocking callback.
 ///
 /// Panics are caught and isolated.
 /// A panic while handling an ordinary event is reported as `SubscriberPanicked`.
