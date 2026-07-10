@@ -262,12 +262,7 @@ impl Controller {
                         Ok(event) => {
                             self.guarded("handle_event", self.handle_event(event)).await;
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task("controller")
-                                    .with_reason(format!("bus_lagged: missed {n} events, recovering slots")),
-                            );
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
                             self.guarded("recover_stale_slots", self.recover_stale_slots()).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -1008,6 +1003,66 @@ mod tests {
         Instant::now()
             .checked_sub(Duration::from_secs(60))
             .expect("test host uptime must exceed one minute")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lag_recovery_keeps_retained_task_added_event() {
+        let bus = Bus::new(1);
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
+
+        let id = TaskId::next();
+        let slot_name: Arc<str> = Arc::from("s");
+        let slot = Arc::new(Mutex::new(SlotState {
+            status: SlotStatus::Admitting {
+                since: Instant::now(),
+            },
+            running_id: Some(id),
+            queue: std::collections::VecDeque::new(),
+        }));
+        ctrl.slots.insert(Arc::clone(&slot_name), Arc::clone(&slot));
+        ctrl.running.insert(id, Arc::clone(&slot_name));
+
+        let runtime_token = CancellationToken::new();
+        let runner_ctrl = Arc::clone(&ctrl);
+        let runner_token = runtime_token.clone();
+        let runner = tokio::spawn(async move { runner_ctrl.run_inner(runner_token).await });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if ctrl.rx.read().await.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("controller loop must take its receiver and subscribe to the bus");
+
+        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed"));
+        bus.publish(
+            Event::new(EventKind::TaskAdded)
+                .with_task(Arc::clone(&slot_name))
+                .with_id(id),
+        );
+
+        let reached_running = poll_until(Duration::from_millis(250), || {
+            let slot = Arc::clone(&slot);
+            async move { matches!(slot.lock().await.status, SlotStatus::Running { .. }) }
+        })
+        .await;
+
+        runtime_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), runner)
+            .await
+            .expect("controller loop must stop after cancellation")
+            .expect("controller loop task must not panic")
+            .expect("controller loop must exit cleanly");
+
+        assert!(
+            reached_running,
+            "lag recovery must preserve and process the retained TaskAdded event"
+        );
     }
 
     async fn sup_with_live_task() -> (Arc<Supervisor>, crate::core::SupervisorHandle, TaskId) {
