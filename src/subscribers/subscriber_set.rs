@@ -2,7 +2,7 @@
 //!
 //! [`SubscriberSet`] sends each event to every registered subscriber.
 //!
-//! Each subscriber has its own bounded queue and one worker task.
+//! Each subscriber has its own bounded queue and one async queue worker.
 //! `emit_arc` uses `try_send`; it does not wait for slow subscribers.
 //! A slow subscriber can only overflow its own queue.
 //!
@@ -11,9 +11,9 @@
 //! ```text
 //! emit(event)
 //!     │
-//!     ├──► [queue 1] ──► worker 1 ──► subscriber1.on_event()
-//!     ├──► [queue 2] ──► worker 2 ──► subscriber2.on_event()
-//!     └──► [queue N] ──► worker N ──► subscriberN.on_event()
+//!     ├──► [queue 1] ──► worker 1 ──► blocking pool ──► subscriber1.on_event()
+//!     ├──► [queue 2] ──► worker 2 ──► blocking pool ──► subscriber2.on_event()
+//!     └──► [queue N] ──► worker N ──► blocking pool ──► subscriberN.on_event()
 //! ```
 //!
 //! ## Rules
@@ -27,7 +27,7 @@
 //!
 //! ## Panic Handling
 //!
-//! Worker tasks wrap `on_event` in `catch_unwind`.
+//! Queue workers run `on_event` inside blocking tasks wrapped in `catch_unwind`.
 //!
 //! This protects the runtime and other subscribers from a panicking subscriber.
 //! It does not protect the subscriber's own shared state.
@@ -51,11 +51,11 @@ struct SubscriberChannel {
 ///
 /// `SubscriberSet` owns:
 /// - one bounded queue per subscriber,
-/// - one worker task per subscriber,
+/// - one async queue worker per subscriber,
 /// - snapshotted subscriber names for diagnostics.
 ///
 /// Delivery is best-effort.
-/// Slow subscribers may drop events from their own queue, but they do not block other subscribers or task execution.
+/// Slow subscribers may drop events from their own queue, but callbacks do not block Tokio async workers.
 ///
 /// ## Shutdown
 ///
@@ -80,7 +80,8 @@ pub(crate) struct SubscriberSet {
 }
 
 impl SubscriberSet {
-    /// Creates a new set and starts one worker task per subscriber.
+    /// Creates a new set and starts one async queue worker per subscriber.
+    /// Each worker runs one callback at a time on Tokio's blocking pool.
     ///
     /// The subscriber name is read once and stored as `Arc<str>`.
     /// This supports dynamic names while keeping diagnostic events stable for the lifetime of the subscriber worker.
@@ -100,18 +101,36 @@ impl SubscriberSet {
 
             let handle = tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        s.on_event(ev.as_ref());
-                    }));
+                    let is_internal_event = ev.is_internal_diagnostic();
+                    let callback_sub = Arc::clone(&s);
+                    let result = tokio::task::spawn_blocking(move || {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            callback_sub.on_event(ev.as_ref());
+                        }))
+                    })
+                    .await;
 
-                    if let Err(panic_err) = result
-                        && !ev.is_internal_diagnostic()
-                    {
-                        let info = extract_panic_info(&panic_err);
-                        bus_for_worker.publish(Event::subscriber_panicked(
-                            Arc::clone(&name_for_worker),
-                            info,
-                        ));
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(panic_err)) => {
+                            if !is_internal_event {
+                                let info = extract_panic_info(&panic_err);
+                                bus_for_worker.publish(Event::subscriber_panicked(
+                                    Arc::clone(&name_for_worker),
+                                    info,
+                                ));
+                            }
+                        }
+                        Err(join_err) if join_err.is_cancelled() => break,
+                        Err(join_err) => {
+                            if !is_internal_event {
+                                bus_for_worker.publish(Event::subscriber_panicked(
+                                    Arc::clone(&name_for_worker),
+                                    format!("callback task failed: {join_err}"),
+                                ));
+                            }
+                            break;
+                        }
                     }
                 }
             });
@@ -202,9 +221,10 @@ mod tests {
     use super::*;
     use crate::events::EventKind;
     use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
+    use std::time::Duration;
     use tokio::sync::broadcast;
 
     fn ev(task: &str) -> Arc<Event> {
@@ -309,6 +329,156 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct BlockingGateState {
+        entered: bool,
+        released: bool,
+        finished: bool,
+        watchdog_fired: bool,
+    }
+
+    type BlockingGate = Arc<(Mutex<BlockingGateState>, Condvar)>;
+
+    struct BlockingOrderSub {
+        first_gate: BlockingGate,
+        second_entered: AtomicBool,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl Subscribe for BlockingOrderSub {
+        fn on_event(&self, event: &Event) {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+
+            let task = event.task.as_deref().unwrap_or_default();
+            self.seen.lock().unwrap().push(task.to_owned());
+            match task {
+                "first" => {
+                    let (state, ready) = &*self.first_gate;
+                    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.entered = true;
+                    ready.notify_all();
+                    while !state.released {
+                        state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
+                    }
+                    state.finished = true;
+                    ready.notify_all();
+                }
+                "second" => self.second_entered.store(true, Ordering::Release),
+                _ => {}
+            }
+
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        fn name(&self) -> &str {
+            "blocking-order"
+        }
+
+        fn queue_capacity(&self) -> usize {
+            4
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_callback_keeps_runtime_responsive_and_close_joins_it() {
+        let first_gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let sub = Arc::new(BlockingOrderSub {
+            first_gate: Arc::clone(&first_gate),
+            second_entered: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            seen: Mutex::new(Vec::new()),
+        });
+        let set = Arc::new(SubscriberSet::new(
+            vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
+            Bus::new(64),
+        ));
+
+        let watchdog_gate = Arc::clone(&first_gate);
+        let watchdog = std::thread::spawn(move || {
+            let (state, ready) = &*watchdog_gate;
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            while !state.entered && !state.released {
+                state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            if state.released {
+                return;
+            }
+
+            let (mut state, _) = ready
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.released)
+                .unwrap_or_else(|e| e.into_inner());
+            if !state.released {
+                state.watchdog_fired = true;
+                state.released = true;
+                ready.notify_all();
+            }
+        });
+
+        set.emit_arc(ev("first"));
+        set.emit_arc(ev("second"));
+
+        let close_set = Arc::clone(&set);
+        let close_started = Arc::new(AtomicBool::new(false));
+        let close_started_for_task = Arc::clone(&close_started);
+        let close_task = tokio::spawn(async move {
+            close_started_for_task.store(true, Ordering::Release);
+            close_set.close().await;
+        });
+
+        let responsive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let entered = first_gate
+                    .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entered;
+                if entered && close_started.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let state = first_gate.0.lock().unwrap_or_else(|e| e.into_inner());
+            !state.released
+                && !state.finished
+                && !state.watchdog_fired
+                && !sub.second_entered.load(Ordering::Acquire)
+                && !close_task.is_finished()
+        })
+        .await;
+
+        {
+            let (state, ready) = &*first_gate;
+            state.lock().unwrap_or_else(|e| e.into_inner()).released = true;
+            ready.notify_all();
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), close_task)
+            .await
+            .expect("close must finish after the callback is released")
+            .expect("close task must not panic");
+        watchdog.join().expect("watchdog thread must not panic");
+
+        assert!(
+            matches!(responsive, Ok(true)),
+            "Tokio timers must run while a subscriber callback blocks; callbacks must stay serial and close must still wait"
+        );
+        assert_eq!(sub.max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *sub.seen.lock().unwrap_or_else(|e| e.into_inner()),
+            ["first", "second"]
+        );
+        let state = first_gate.0.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.finished);
+        assert!(!state.watchdog_fired);
+        assert!(sub.second_entered.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn overflow_reported_for_ordinary_but_not_diagnostic_events() {
         {
@@ -353,10 +523,13 @@ mod tests {
         for _ in 0..3 {
             set.emit_arc(ev("t"));
         }
-        set.close().await;
+        tokio::time::timeout(Duration::from_secs(5), set.close())
+            .await
+            .expect("subscriber worker must continue after panics and close cleanly");
 
-        assert!(
-            count(&mut rx, EventKind::SubscriberPanicked) >= 3,
+        assert_eq!(
+            count(&mut rx, EventKind::SubscriberPanicked),
+            3,
             "each ordinary-event panic must be reported, and the worker must continue"
         );
     }

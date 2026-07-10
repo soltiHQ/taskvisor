@@ -7,9 +7,9 @@
 //
 //! ## What this shows
 //!
+//! - **`on_event(&self, event: &Event)`** - your sync handler, run on Tokio's blocking pool.
 //! - **`Subscribe` trait** - extension point for observability.
 //! - **`queue_capacity()`** - per-subscriber buffer size (overflow → event dropped).
-//! - **`on_event(&self, event: &Event)`** - your handler, called synchronously.
 //! - **`name()`** - identifier for logs and overflow/panic events.
 //!
 //! ## How subscribers are wired
@@ -18,8 +18,8 @@
 //! Supervisor::new(config, vec![metrics])
 //!                               ▼
 //!                        SubscriberSet
-//!                         ├── [mpsc queue] → worker → metrics.on_event()
-//!                         └── [mpsc queue] → worker → other_sub.on_event()
+//!                         ├── [mpsc queue] → worker → blocking pool → metrics.on_event()
+//!                         └── [mpsc queue] → worker → blocking pool → other_sub.on_event()
 //! ```
 //!
 //! ## Runtime flavor

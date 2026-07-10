@@ -1,10 +1,11 @@
 //! # Subscriber.
 //!
-//! Subscribers observe runtime events without blocking the supervisor.
+//! Subscribers observe runtime events without running callbacks on Tokio async workers.
 //!
 //! [`Subscribe`] is the trait for custom event handlers.
-//! Each subscriber gets its own bounded queue and one worker task.
-//! A slow subscriber can overflow its own queue, but it does not block other subscribers or task execution.
+//! Each subscriber gets its own bounded queue and one queue worker task.
+//! Event publishers enqueue without waiting, and the queue worker runs callbacks on Tokio's blocking pool.
+//! A slow subscriber can overflow its own queue without occupying Tokio async worker threads or blocking event publishers.
 //!
 //! Delivery is best-effort: events may be dropped if the bus or a subscriber queue falls behind.
 //! Drops and subscriber panics are reported as diagnostic events when possible.
@@ -17,8 +18,8 @@
 //! Bus (broadcast) ──► internal subscriber listener
 //!                         ├─► AliveTracker::update()
 //!                         └─► SubscriberSet::emit_arc()
-//!                                   ├─► [queue S1] ──► worker ──► S1.on_event()
-//!                                   ├─► [queue S2] ──► worker ──► S2.on_event()
+//!                                   ├─► [queue S1] ──► worker ──► blocking pool ──► S1.on_event()
+//!                                   ├─► [queue S2] ──► worker ──► blocking pool ──► S2.on_event()
 //!                                   └─► ...
 //! ```
 //!
