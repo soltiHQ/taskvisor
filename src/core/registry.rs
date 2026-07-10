@@ -12,7 +12,11 @@
 //!
 //! ```text
 //! Management plane:
-//!   SupervisorCore -> mpsc -> RegistryCommand::Add / Remove
+//!   SupervisorCore                 Registry
+//!        |                            |
+//!        |-- command (mpsc) --------->|
+//!        |                            |-- update registry state
+//!        |<-- reply (oneshot) --------|
 //!
 //! Event plane:
 //!   TaskActor -> broadcast bus -> ActorExhausted / ActorDead -> cleanup
@@ -27,11 +31,13 @@
 //! Add(id, spec)
 //!   -> spawn actor
 //!   -> insert id/name indexes
+//!   -> reply registered
 //!   -> publish TaskAdded
 //!
 //! Remove(id)
 //!   -> remove handle from registry
 //!   -> cancel actor token
+//!   -> reply claimed
 //!   -> join actor
 //!   -> publish TaskRemoved
 //!
@@ -44,6 +50,7 @@
 //! ## Rules
 //!
 //! - Watched tasks resolve their `TaskOutcome` when the actor join is reported.
+//! - Command replies report registry decisions, not terminal task outcomes.
 //! - Cleanup is idempotent. Duplicate or stale terminal events become no-ops.
 //! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
 //! - Task name is a human label and a duplicate-name admission gate.
@@ -59,6 +66,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
 use crate::core::outcome::TaskOutcome;
+use crate::error::RuntimeError;
 use crate::events::{Bus, Event, EventKind};
 use crate::identity::TaskId;
 use crate::reasons;
@@ -67,14 +75,37 @@ use crate::tasks::TaskSpec;
 /// Sender used to resolve a watched task with its final [`TaskOutcome`].
 pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
 
+/// Authoritative result of one registry add command.
+pub(crate) type AddReply = Result<(), RuntimeError>;
+
+/// Receiver for an authoritative registry add result.
+pub(crate) type AddReplyRx = oneshot::Receiver<AddReply>;
+
+/// Authoritative result of one registry remove command.
+///
+/// `Ok(true)` means the registry claimed the task and sent cancellation.
+/// It does not mean the actor has terminated yet.
+pub(crate) type RemoveReply = Result<bool, RuntimeError>;
+
+/// Receiver for an authoritative registry remove result.
+pub(crate) type RemoveReplyRx = oneshot::Receiver<RemoveReply>;
+
 /// Command sent to the registry over the management channel.
 pub(crate) enum RegistryCommand {
     /// Register a task under a pre-minted runtime identity.
-    Add(TaskId, TaskSpec, Option<OutcomeTx>),
+    Add {
+        id: TaskId,
+        spec: TaskSpec,
+        outcome: Option<OutcomeTx>,
+        reply: oneshot::Sender<AddReply>,
+    },
     /// Remove a task by runtime identity.
     ///
     /// The public caller publishes `TaskRemoveRequested` before sending this.
-    Remove(TaskId),
+    Remove {
+        id: TaskId,
+        reply: oneshot::Sender<RemoveReply>,
+    },
 }
 
 /// Registry-owned actor handle for one registered task.
@@ -311,12 +342,12 @@ impl Registry {
                     _ = rt.cancelled() => break,
 
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(RegistryCommand::Add(id, spec, done)) => {
-                            me.guarded("registry", me.spawn_and_register(id, spec, done))
+                        Some(RegistryCommand::Add { id, spec, outcome, reply }) => {
+                            me.guarded("registry", me.spawn_and_register(id, spec, outcome, reply))
                             .await;
                         }
-                        Some(RegistryCommand::Remove(id)) => {
-                            me.guarded("registry", me.remove_task(id)).await;
+                        Some(RegistryCommand::Remove { id, reply }) => {
+                            me.guarded("registry", me.remove_task(id, reply)).await;
                         }
                         None => break,
                     },
@@ -335,12 +366,17 @@ impl Registry {
             cmd_rx.close();
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    RegistryCommand::Add(id, spec, done) => {
-                        me.guarded("registry", me.spawn_and_register(id, spec, done))
+                    RegistryCommand::Add {
+                        id,
+                        spec,
+                        outcome,
+                        reply,
+                    } => {
+                        me.guarded("registry", me.spawn_and_register(id, spec, outcome, reply))
                             .await;
                     }
-                    RegistryCommand::Remove(id) => {
-                        me.guarded("registry", me.remove_task(id)).await;
+                    RegistryCommand::Remove { id, reply } => {
+                        me.guarded("registry", me.remove_task(id, reply)).await;
                     }
                 }
             }
@@ -488,12 +524,21 @@ impl Registry {
     /// with reason [`ALREADY_EXISTS`](crate::reasons::ALREADY_EXISTS).
     ///
     /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) because registration confirmation fails before the waiter is returned.
-    async fn spawn_and_register(&self, id: TaskId, spec: TaskSpec, done: Option<OutcomeTx>) {
+    async fn spawn_and_register(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+        reply: oneshot::Sender<AddReply>,
+    ) {
         let label: Arc<str> = Arc::from(spec.task().name());
 
         let mut st = self.state.write().await;
         if st.by_label.contains_key(&label) {
             drop(st);
+            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists {
+                name: Arc::clone(&label),
+            }));
             if let Some(done) = done {
                 let _ = done.send(TaskOutcome::Rejected {
                     reason: Arc::from(reasons::ALREADY_EXISTS),
@@ -539,6 +584,7 @@ impl Registry {
         st.by_label.insert(label.clone(), id);
         drop(st);
 
+        let _ = reply.send(Ok(()));
         self.bus.publish(
             Event::new(EventKind::TaskAdded)
                 .with_task(label)
@@ -551,15 +597,17 @@ impl Registry {
     /// If the task exists, its actor token is cancelled and a detached join reporter publishes the final `TaskRemoved`.
     ///
     /// If the task is unknown, publishes `TaskRemoved` with reason `task_not_found`.
-    async fn remove_task(&self, id: TaskId) {
+    async fn remove_task(&self, id: TaskId, reply: oneshot::Sender<RemoveReply>) {
         self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
             self.notify_after_remove(len_after);
 
             handle.cancel.cancel();
+            let _ = reply.send(Ok(true));
             self.spawn_join_report(id, handle.label, handle.join, Some(self.grace), handle.done);
         } else {
             self.pending_joins.dec(id);
+            let _ = reply.send(Ok(false));
             self.bus.publish(
                 Event::new(EventKind::TaskRemoved)
                     .with_id(id)
@@ -759,6 +807,350 @@ mod tests {
         Registry::new(bus, token, None, Duration::from_secs(5), rx)
     }
 
+    fn started_registry(
+        bus_capacity: usize,
+        grace: Duration,
+    ) -> (
+        Arc<Registry>,
+        Bus,
+        CancellationToken,
+        mpsc::UnboundedSender<RegistryCommand>,
+    ) {
+        let bus = Bus::new(bus_capacity);
+        let token = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let registry = Registry::new(bus.clone(), token.clone(), None, grace, rx);
+        registry.clone().spawn_listener();
+        (registry, bus, token, tx)
+    }
+
+    fn send_add(
+        tx: &mpsc::UnboundedSender<RegistryCommand>,
+        id: TaskId,
+        spec: TaskSpec,
+        outcome: Option<OutcomeTx>,
+    ) -> AddReplyRx {
+        let (reply, reply_rx) = oneshot::channel();
+        tx.send(RegistryCommand::Add {
+            id,
+            spec,
+            outcome,
+            reply,
+        })
+        .expect("registry command channel must stay open");
+        reply_rx
+    }
+
+    fn send_remove(tx: &mpsc::UnboundedSender<RegistryCommand>, id: TaskId) -> RemoveReplyRx {
+        let (reply, reply_rx) = oneshot::channel();
+        tx.send(RegistryCommand::Remove { id, reply })
+            .expect("registry command channel must stay open");
+        reply_rx
+    }
+
+    async fn receive_reply<T>(reply: oneshot::Receiver<T>, name: &str) -> T {
+        tokio::time::timeout(Duration::from_secs(2), reply)
+            .await
+            .unwrap_or_else(|_| panic!("{name} timed out"))
+            .unwrap_or_else(|_| panic!("{name} sender was dropped"))
+    }
+
+    async fn stop_registry(registry: &Registry, token: &CancellationToken) {
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), registry.join_listener())
+            .await
+            .expect("registry listener must stop");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn add_reply_commits_state_without_event_confirmation() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let (registry, bus, token, tx) = started_registry(1, Duration::from_secs(1));
+        let mut stale_events = bus.subscribe();
+        let id = TaskId::next();
+        let task: TaskRef = TaskFn::arc("reply-add", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+
+        let reply = send_add(&tx, id, TaskSpec::restartable(task), None);
+        assert!(
+            receive_reply(reply, "add reply").await.is_ok(),
+            "registry must accept a unique task"
+        );
+        assert!(
+            registry.contains(id).await,
+            "reply requires committed id state"
+        );
+        assert_eq!(
+            registry.id_for_label("reply-add").await,
+            Some(id),
+            "reply requires committed label state"
+        );
+        assert_eq!(registry.list().await, vec![(id, Arc::from("reply-add"))]);
+
+        for _ in 0..4 {
+            bus.publish(Event::new(EventKind::TaskStarting).with_task("noise"));
+        }
+        assert!(
+            matches!(stale_events.try_recv(), Err(TryRecvError::Lagged(_))),
+            "the observer must lag in this regression setup"
+        );
+        assert!(
+            registry.contains(id).await,
+            "event lag must not change the authoritative add result"
+        );
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_add_reply_rejects_without_starting_body() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let first_id = TaskId::next();
+        let first: TaskRef = TaskFn::arc("duplicate", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        assert!(
+            receive_reply(
+                send_add(&tx, first_id, TaskSpec::restartable(first), None),
+                "first add reply",
+            )
+            .await
+            .is_ok()
+        );
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let duplicate_runs = Arc::clone(&runs);
+        let duplicate: TaskRef = TaskFn::arc("duplicate", move |_ctx: TaskContext| {
+            duplicate_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let second_id = TaskId::next();
+        let (outcome, outcome_rx) = oneshot::channel();
+        let duplicate_reply = receive_reply(
+            send_add(&tx, second_id, TaskSpec::once(duplicate), Some(outcome)),
+            "duplicate add reply",
+        )
+        .await;
+
+        assert!(
+            matches!(
+                duplicate_reply,
+                Err(RuntimeError::TaskAlreadyExists { name }) if name.as_ref() == "duplicate"
+            ),
+            "duplicate add must return its authoritative rejection"
+        );
+        assert!(!registry.contains(second_id).await);
+        assert_eq!(registry.id_for_label("duplicate").await, Some(first_id));
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "rejected body must not run");
+        assert!(matches!(
+            receive_reply(outcome_rx, "duplicate outcome").await,
+            TaskOutcome::Rejected { reason } if reason.as_ref() == reasons::ALREADY_EXISTS
+        ));
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remove_reply_claims_once_before_terminal_completion() {
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let cancellation_seen = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("remove-once", move |ctx: TaskContext| {
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&task_release);
+            async move {
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Err(TaskError::Canceled)
+            }
+        });
+        let id = TaskId::next();
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::restartable(task), None),
+                "setup add reply",
+            )
+            .await
+            .is_ok()
+        );
+        while events.try_recv().is_ok() {}
+
+        assert!(
+            matches!(
+                receive_reply(send_remove(&tx, id), "first remove reply").await,
+                Ok(true)
+            ),
+            "the first remove must claim the task"
+        );
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("the task must observe cancellation");
+        assert!(registry.pending_joins.contains(id));
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(
+                event.kind,
+                EventKind::TaskRemoved,
+                "remove reply must not wait for or invent terminal completion"
+            );
+        }
+
+        assert!(
+            matches!(
+                receive_reply(send_remove(&tx, id), "second remove reply").await,
+                Ok(false)
+            ),
+            "a second remove cannot claim the same task"
+        );
+
+        release.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.pending_joins.wait_drained(),
+        )
+        .await
+        .expect("the released task must finish its join");
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_remove_replies_false_without_pending_join() {
+        let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
+
+        assert!(
+            matches!(
+                receive_reply(send_remove(&tx, TaskId::next()), "unknown remove reply").await,
+                Ok(false)
+            ),
+            "unknown remove must return false"
+        );
+        assert!(
+            registry.pending_joins.is_empty(),
+            "unknown removal must not leak pending join state"
+        );
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_add_reply_does_not_stop_command_processing() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let first_id = TaskId::next();
+        let first: TaskRef = TaskFn::arc("dropped-add-a", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        drop(send_add(&tx, first_id, TaskSpec::restartable(first), None));
+
+        let second_id = TaskId::next();
+        let second: TaskRef = TaskFn::arc("dropped-add-b", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        assert!(
+            receive_reply(
+                send_add(&tx, second_id, TaskSpec::restartable(second), None),
+                "second add reply",
+            )
+            .await
+            .is_ok()
+        );
+
+        assert!(registry.contains(first_id).await);
+        assert!(registry.contains(second_id).await);
+        let mut added = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.kind == EventKind::TaskAdded {
+                added += 1;
+            }
+        }
+        assert_eq!(added, 2, "a dropped reply must not suppress TaskAdded");
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_remove_reply_does_not_skip_join_cleanup() {
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let cancellation_seen = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("dropped-remove", move |ctx: TaskContext| {
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&task_release);
+            async move {
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Err(TaskError::Canceled)
+            }
+        });
+        let id = TaskId::next();
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::restartable(task), None),
+                "setup add reply",
+            )
+            .await
+            .is_ok()
+        );
+        while events.try_recv().is_ok() {}
+
+        drop(send_remove(&tx, id));
+        assert!(
+            matches!(
+                receive_reply(
+                    send_remove(&tx, TaskId::next()),
+                    "synchronizing remove reply",
+                )
+                .await,
+                Ok(false)
+            ),
+            "the listener must process commands after a dropped reply"
+        );
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("dropped receiver must not suppress cancellation");
+
+        release.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.pending_joins.wait_drained(),
+        )
+        .await
+        .expect("dropped receiver must not suppress join cleanup");
+        let mut saw_removed = false;
+        while let Ok(event) = events.try_recv() {
+            if event.kind == EventKind::TaskRemoved && event.id == Some(id) {
+                saw_removed = true;
+            }
+        }
+        assert!(saw_removed, "join cleanup must still publish TaskRemoved");
+
+        stop_registry(&registry, &token).await;
+    }
+
     #[tokio::test]
     async fn wait_joins_within_reports_stuck_labels_then_drains() {
         let reg = registry();
@@ -918,18 +1310,29 @@ mod tests {
             Err(TaskError::Canceled)
         });
         let (done_tx, done_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
         let id = TaskId::next();
-        tx.send(RegistryCommand::Add(
+        tx.send(RegistryCommand::Add {
             id,
-            TaskSpec::restartable(task),
-            Some(done_tx),
-        ))
+            spec: TaskSpec::restartable(task),
+            outcome: Some(done_tx),
+            reply: reply_tx,
+        })
         .expect("channel is open before shutdown");
 
         token.cancel();
         tokio::time::timeout(Duration::from_secs(2), reg.join_listener())
             .await
             .expect("join_listener must not hang");
+
+        let reply = tokio::time::timeout(Duration::from_secs(1), reply_rx)
+            .await
+            .expect("buffered Add reply must resolve")
+            .expect("buffered Add reply sender must not be dropped");
+        assert!(
+            reply.is_ok(),
+            "buffered Add must be registered before drain"
+        );
 
         let outcome = tokio::time::timeout(Duration::from_secs(1), done_rx)
             .await
@@ -945,8 +1348,13 @@ mod tests {
             "wait_drained must leave no in-flight joins after shutdown"
         );
 
+        let (reply, _reply_rx) = oneshot::channel();
         assert!(
-            tx.send(RegistryCommand::Remove(TaskId::next())).is_err(),
+            tx.send(RegistryCommand::Remove {
+                id: TaskId::next(),
+                reply,
+            })
+            .is_err(),
             "after shutdown the command channel is closed; sends must return Err"
         );
     }

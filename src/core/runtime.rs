@@ -63,12 +63,15 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::broadcast, sync::mpsc, time::timeout};
+use tokio::{
+    sync::{broadcast, mpsc, oneshot},
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{
     alive::AliveTracker,
-    registry::{Registry, RegistryCommand},
+    registry::{AddReplyRx, OutcomeTx, Registry, RegistryCommand, RemoveReplyRx},
 };
 use crate::{
     core::SupervisorConfig,
@@ -167,26 +170,11 @@ impl SupervisorCore {
         &self,
         id: TaskId,
         spec: TaskSpec,
-        done: Option<crate::core::registry::OutcomeTx>,
-    ) -> Result<TaskId, (RuntimeError, Option<crate::core::registry::OutcomeTx>)> {
-        if self.is_shutting_down() {
-            return Err((RuntimeError::ShuttingDown, done));
-        }
-        self.bus.publish(
-            Event::new(EventKind::TaskAddRequested)
-                .with_task(spec.task().name())
-                .with_id(id),
-        );
-        match self.cmd_tx.send(RegistryCommand::Add(id, spec, done)) {
-            Ok(()) => Ok(id),
-            Err(mpsc::error::SendError(cmd)) => {
-                let done = match cmd {
-                    RegistryCommand::Add(_, _, done) => done,
-                    RegistryCommand::Remove(_) => None,
-                };
-                Err((RuntimeError::ShuttingDown, done))
-            }
-        }
+        done: Option<OutcomeTx>,
+    ) -> Result<TaskId, (RuntimeError, Option<OutcomeTx>)> {
+        let (id, reply) = self.enqueue_add_task(id, spec, done)?;
+        drop(reply);
+        Ok(id)
     }
 
     /// Queues a watched task add command.
@@ -209,20 +197,50 @@ impl SupervisorCore {
         &self,
         id: TaskId,
         spec: TaskSpec,
-        done: Option<crate::core::registry::OutcomeTx>,
+        done: Option<OutcomeTx>,
     ) -> Result<TaskId, RuntimeError> {
+        match self.enqueue_add_task(id, spec, done) {
+            Ok((id, reply)) => {
+                drop(reply);
+                Ok(id)
+            }
+            Err((err, _done)) => Err(err),
+        }
+    }
+
+    /// Queues one add command and returns its authoritative registry reply.
+    fn enqueue_add_task(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+    ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
         if self.is_shutting_down() {
-            return Err(RuntimeError::ShuttingDown);
+            return Err((RuntimeError::ShuttingDown, done));
         }
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
                 .with_task(spec.task().name())
                 .with_id(id),
         );
-        self.cmd_tx
-            .send(RegistryCommand::Add(id, spec, done))
-            .map_err(|_| RuntimeError::ShuttingDown)?;
-        Ok(id)
+        let (reply, reply_rx) = oneshot::channel();
+        match self.cmd_tx.send(RegistryCommand::Add {
+            id,
+            spec,
+            outcome: done,
+            reply,
+        }) {
+            Ok(()) => Ok((id, reply_rx)),
+            Err(mpsc::error::SendError(cmd)) => {
+                let done = match cmd {
+                    RegistryCommand::Add { outcome, .. } => outcome,
+                    RegistryCommand::Remove { .. } => {
+                        unreachable!("an Add send error must return the Add command")
+                    }
+                };
+                Err((RuntimeError::ShuttingDown, done))
+            }
+        }
     }
 
     /// Queues a remove command by runtime identity.
@@ -232,9 +250,18 @@ impl SupervisorCore {
     pub(crate) fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
         self.bus
             .publish(Event::new(EventKind::TaskRemoveRequested).with_id(id));
+        let reply = self.enqueue_remove(id)?;
+        drop(reply);
+        Ok(())
+    }
+
+    /// Queues one remove command and returns its authoritative registry reply.
+    fn enqueue_remove(&self, id: TaskId) -> Result<RemoveReplyRx, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
         self.cmd_tx
-            .send(RegistryCommand::Remove(id))
-            .map_err(|_| RuntimeError::ShuttingDown)
+            .send(RegistryCommand::Remove { id, reply })
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        Ok(reply_rx)
     }
 
     /// Returns registered tasks as `(id, label)` pairs from the registry.
@@ -387,9 +414,8 @@ impl SupervisorCore {
                 .with_id(id)
                 .with_reason("manual_cancel"),
         );
-        self.cmd_tx
-            .send(RegistryCommand::Remove(id))
-            .map_err(|_| RuntimeError::ShuttingDown)?;
+        let reply = self.enqueue_remove(id)?;
+        drop(reply);
         self.wait_task_removed(&mut rx, id, wait_for).await
     }
 
