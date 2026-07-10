@@ -190,7 +190,7 @@ handle.shutdown().await?;
 Two separate channels report what happened. The event bus is best-effort (dashed lines).
 The final outcome is delivered once per task (bold line). It does not go through the bus.
 
-Each subscriber gets its own bounded queue. A slow subscriber never blocks others or the supervisor.
+Each subscriber gets its own bounded queue. Callbacks run on Tokio's blocking pool, a slow callback does not occupy async worker threads or block event publishers.
 Module-level concepts are documented in depth on [docs.rs](https://docs.rs/taskvisor).
 
 ## Error handling

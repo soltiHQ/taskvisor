@@ -3,19 +3,19 @@
 //! [`Subscribe`] is the extension point for observing runtime events.
 //!
 //! Each subscriber gets:
-//! - a dedicated worker task,
+//! - a dedicated queue worker task,
 //! - a bounded queue,
 //! - panic isolation.
 //!
 //! Delivery is best-effort.
 //! If a subscriber falls behind, new events may be dropped for that subscriber only.
-//! Other subscribers and task execution are not blocked.
+//! Callbacks run on Tokio's blocking pool instead of its async workers.
 //!
 //! ## Flow
 //!
 //! ```text
-//! SubscriberSet ──► [bounded queue] ──► worker ──► subscriber.on_event()
-//!                                   └─► panic ──► SubscriberPanicked
+//! SubscriberSet ──► [bounded queue] ──► worker ──► blocking pool ──► subscriber.on_event()
+//!                                   └─► overflow/panic diagnostics
 //! ```
 //!
 //! ## Rules
@@ -25,7 +25,7 @@
 //! - Diagnostic events are not re-reported if they overflow or panic, to avoid feedback loops.
 //! - Events are processed sequentially (FIFO) per subscriber.
 //! - Queue overflow drops the event for this subscriber only.
-//! - A slow subscriber only affects its own queue.
+//! - A slow subscriber can fill only its own queue.
 //!
 //! ## Example
 //!
@@ -51,9 +51,10 @@ use crate::events::Event;
 /// Event subscriber for runtime observability.
 ///
 /// `Subscribe` is synchronous by design.
-/// The runtime already moves delivery to a dedicated worker task for each subscriber.
+/// When Taskvisor delivers events, a dedicated queue worker schedules one callback at a time on Tokio's blocking pool.
 ///
 /// Keep [`on_event`](Self::on_event) fast; for async I/O, send data to a channel and process it elsewhere.
+/// Taskvisor waits for queued callbacks during shutdown; a callback that does not return can delay shutdown.
 ///
 /// Panics are caught and isolated.
 /// A panic while handling an ordinary event is reported as `SubscriberPanicked`.
@@ -61,7 +62,7 @@ use crate::events::Event;
 pub trait Subscribe: Send + Sync + 'static {
     /// Processes one event.
     ///
-    /// Called from this subscriber's worker task, not from the publisher.
+    /// When Taskvisor delivers an event, it calls this method on Tokio's blocking pool, not from the publisher or an async worker.
     /// Events are delivered in FIFO order per subscriber.
     fn on_event(&self, event: &Event);
 
