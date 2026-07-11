@@ -81,7 +81,10 @@ fn bench_add(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let rt = rt_fn();
                 rt.block_on(async {
-                    let sup = Supervisor::new(bench_config(), vec![]);
+                    let mut cfg = bench_config();
+                    cfg.registry_queue_capacity =
+                        usize::try_from(iters).unwrap_or(usize::MAX).max(1);
+                    let sup = Supervisor::new(cfg, vec![]);
                     let handle = sup.serve();
 
                     let mut total = Duration::ZERO;

@@ -14,8 +14,8 @@
 //!
 //! ## Normalized Fields
 //!
-//! `bus_capacity` is normalized with [`bus_capacity_clamped`](SupervisorConfig::bus_capacity_clamped) before the event bus is created.
-//! This keeps the broadcast channel capacity at least `1`.
+//! `bus_capacity` and `registry_queue_capacity` are normalized to at least `1`
+//! before their channels are created.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
@@ -55,6 +55,16 @@ pub struct SupervisorConfig {
     /// Use [`bus_capacity_clamped`](Self::bus_capacity_clamped) when creating the bus; the effective capacity is at least `1`.
     pub bus_capacity: usize,
 
+    /// Capacity of the registry management command queue.
+    ///
+    /// This bounds pending add and remove commands.
+    /// The registry may process one additional command while this many commands are buffered.
+    ///
+    /// Sync management methods fail with [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when the queue has no capacity.
+    ///
+    /// Use [`registry_queue_capacity_clamped`](Self::registry_queue_capacity_clamped) when creating the queue; the effective capacity is at least `1`.
+    pub registry_queue_capacity: usize,
+
     /// Default restart policy for tasks created with [`task_spec`](Self::task_spec).
     ///
     /// Individual [`TaskSpec`] values may override this.
@@ -93,6 +103,15 @@ impl SupervisorConfig {
         self.bus_capacity.max(1)
     }
 
+    /// Returns the effective registry command queue capacity.
+    ///
+    /// The returned value is always at least `1`.
+    #[inline]
+    #[must_use]
+    pub fn registry_queue_capacity_clamped(&self) -> usize {
+        self.registry_queue_capacity.max(1)
+    }
+
     /// Builds a [`TaskSpec`] that inherits this config's task defaults.
     ///
     /// The created spec receives:
@@ -127,6 +146,7 @@ impl Default for SupervisorConfig {
     /// - `grace = 60s`
     /// - `max_concurrent = None`
     /// - `bus_capacity = 1024`
+    /// - `registry_queue_capacity = 1024`
     /// - `restart = RestartPolicy::OnFailure`
     /// - `backoff = BackoffPolicy::default()`
     /// - `timeout = None`
@@ -136,6 +156,7 @@ impl Default for SupervisorConfig {
             grace: Duration::from_secs(60),
             max_concurrent: None,
             bus_capacity: 1024,
+            registry_queue_capacity: 1024,
             timeout: None,
             restart: RestartPolicy::default(),
             backoff: BackoffPolicy::default(),
@@ -153,6 +174,7 @@ mod tests {
         let cfg = SupervisorConfig::default();
         assert_eq!(cfg.max_concurrent, None, "default is unlimited concurrency");
         assert_eq!(cfg.timeout, None, "default has no per-task timeout");
+        assert_eq!(cfg.registry_queue_capacity, 1024);
     }
 
     #[test]
@@ -175,6 +197,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.bus_capacity_clamped(), 1);
+    }
+
+    #[test]
+    fn registry_queue_capacity_clamped_never_zero() {
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.registry_queue_capacity_clamped(), 1);
     }
 
     #[test]

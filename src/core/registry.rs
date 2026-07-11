@@ -14,7 +14,7 @@
 //! Management plane:
 //!   SupervisorCore                 Registry
 //!        |                            |
-//!        |-- command (mpsc) --------->|
+//!        |-- command (bounded mpsc) ->|
 //!        |                            |-- update registry state
 //!        |<-- reply (oneshot) --------|
 //!
@@ -256,7 +256,7 @@ pub(crate) struct Registry {
     semaphore: Option<Arc<Semaphore>>,
     grace: Duration,
     empty_notify: Notify,
-    cmd_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryCommand>>>,
+    cmd_rx: std::sync::Mutex<Option<mpsc::Receiver<RegistryCommand>>>,
     completion_tx: mpsc::UnboundedSender<TaskId>,
     completion_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<TaskId>>>,
     pending_joins: Arc<PendingJoins>,
@@ -270,7 +270,7 @@ impl Registry {
         runtime_token: CancellationToken,
         semaphore: Option<Arc<Semaphore>>,
         grace: Duration,
-        cmd_rx: mpsc::UnboundedReceiver<RegistryCommand>,
+        cmd_rx: mpsc::Receiver<RegistryCommand>,
     ) -> Arc<Self> {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
@@ -803,7 +803,7 @@ mod tests {
     fn registry() -> Arc<Registry> {
         let bus = Bus::new(64);
         let token = CancellationToken::new();
-        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_tx, rx) = mpsc::channel(64);
         Registry::new(bus, token, None, Duration::from_secs(5), rx)
     }
 
@@ -814,24 +814,24 @@ mod tests {
         Arc<Registry>,
         Bus,
         CancellationToken,
-        mpsc::UnboundedSender<RegistryCommand>,
+        mpsc::Sender<RegistryCommand>,
     ) {
         let bus = Bus::new(bus_capacity);
         let token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(64);
         let registry = Registry::new(bus.clone(), token.clone(), None, grace, rx);
         registry.clone().spawn_listener();
         (registry, bus, token, tx)
     }
 
     fn send_add(
-        tx: &mpsc::UnboundedSender<RegistryCommand>,
+        tx: &mpsc::Sender<RegistryCommand>,
         id: TaskId,
         spec: TaskSpec,
         outcome: Option<OutcomeTx>,
     ) -> AddReplyRx {
         let (reply, reply_rx) = oneshot::channel();
-        tx.send(RegistryCommand::Add {
+        tx.try_send(RegistryCommand::Add {
             id,
             spec,
             outcome,
@@ -841,9 +841,9 @@ mod tests {
         reply_rx
     }
 
-    fn send_remove(tx: &mpsc::UnboundedSender<RegistryCommand>, id: TaskId) -> RemoveReplyRx {
+    fn send_remove(tx: &mpsc::Sender<RegistryCommand>, id: TaskId) -> RemoveReplyRx {
         let (reply, reply_rx) = oneshot::channel();
-        tx.send(RegistryCommand::Remove { id, reply })
+        tx.try_send(RegistryCommand::Remove { id, reply })
             .expect("registry command channel must stay open");
         reply_rx
     }
@@ -1554,9 +1554,8 @@ mod tests {
 
         let bus = Bus::new(64);
         let token = CancellationToken::new();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1);
         let reg = Registry::new(bus, token.clone(), None, Duration::from_millis(50), rx);
-        reg.clone().spawn_listener();
 
         let task: TaskRef = TaskFn::arc("buffered", |ctx: TaskContext| async move {
             ctx.cancelled().await;
@@ -1565,7 +1564,7 @@ mod tests {
         let (done_tx, done_rx) = oneshot::channel();
         let (reply_tx, reply_rx) = oneshot::channel();
         let id = TaskId::next();
-        tx.send(RegistryCommand::Add {
+        tx.try_send(RegistryCommand::Add {
             id,
             spec: TaskSpec::restartable(task),
             outcome: Some(done_tx),
@@ -1574,6 +1573,7 @@ mod tests {
         .expect("channel is open before shutdown");
 
         token.cancel();
+        reg.clone().spawn_listener();
         tokio::time::timeout(Duration::from_secs(2), reg.join_listener())
             .await
             .expect("join_listener must not hang");
@@ -1603,7 +1603,7 @@ mod tests {
 
         let (reply, _reply_rx) = oneshot::channel();
         assert!(
-            tx.send(RegistryCommand::Remove {
+            tx.try_send(RegistryCommand::Remove {
                 id: TaskId::next(),
                 reply,
             })

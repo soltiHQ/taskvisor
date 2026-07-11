@@ -96,7 +96,7 @@ impl SupervisorHandle {
     /// Adds a task to the supervisor at runtime.
     ///
     /// This is fire-and-forget.
-    /// It mints a [`TaskId`], publishes `TaskAddRequested`, sends an `Add` command to the registry, and returns the id as soon as the command is queued.
+    /// It mints a [`TaskId`], reserves command queue capacity, publishes `TaskAddRequested`, queues an `Add` command, and returns the id.
     ///
     /// `Ok(id)` means the add command was accepted by the runtime command channel.
     /// It does not mean the registry has accepted the task yet.
@@ -105,6 +105,7 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         self.core.add_task(spec)
@@ -119,6 +120,7 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
     /// - [`RuntimeError::TaskAddTimeout`] when no confirmation arrives in time.
@@ -142,6 +144,7 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
     /// - [`RuntimeError::TaskAddTimeout`] when no confirmation arrives in time.
@@ -232,7 +235,7 @@ impl SupervisorHandle {
     /// Removes a task by identity.
     ///
     /// This is fire-and-forget.
-    /// It publishes `TaskRemoveRequested`, sends a remove command to the registry, and returns when the command is queued.
+    /// It reserves command queue capacity, publishes `TaskRemoveRequested`, queues a remove command, and returns.
     ///
     /// `Ok(())` does not mean the task existed or has already stopped.
     /// Unknown ids are handled by the registry as no-op removals.
@@ -241,6 +244,7 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
         self.core.remove(id)
@@ -253,6 +257,7 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         match self.core.id_for_label(name).await {
@@ -305,6 +310,7 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`RuntimeError::TaskRemoveTimeout`] when removal was not confirmed in time.
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         self.core.cancel(id).await
@@ -336,6 +342,7 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`RuntimeError::TaskRemoveTimeout`] when confirmation does not arrive in time.
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel_with_timeout(
         &self,

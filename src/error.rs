@@ -45,6 +45,12 @@ pub enum RuntimeError {
         name: Arc<str>,
     },
 
+    /// The bounded registry command queue has no free capacity.
+    ///
+    /// The command was not accepted and no registry state was changed.
+    #[error("registry command queue is full")]
+    CommandQueueFull,
+
     /// Timed out while waiting for removal confirmation.
     #[error("timeout waiting for task {id} removal after {timeout:?}")]
     TaskRemoveTimeout {
@@ -94,6 +100,7 @@ impl RuntimeError {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
+            RuntimeError::CommandQueueFull => "runtime_command_queue_full",
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
             RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
@@ -337,6 +344,13 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_queue_full_has_stable_label() {
+        let error = RuntimeError::CommandQueueFull;
+        assert_eq!(error.as_label(), "runtime_command_queue_full");
+        assert_eq!(error.to_string(), "registry command queue is full");
+    }
 
     #[test]
     fn exit_code_is_some_for_fail_with_code() {

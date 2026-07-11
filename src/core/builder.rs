@@ -141,6 +141,15 @@ impl SupervisorBuilder {
         self
     }
 
+    /// Builder: sets the registry management command queue capacity.
+    ///
+    /// The effective capacity is at least `1`.
+    /// Sync management methods fail fast when the queue is full.
+    pub fn with_registry_queue_capacity(mut self, registry_queue_capacity: usize) -> Self {
+        self.cfg.registry_queue_capacity = registry_queue_capacity;
+        self
+    }
+
     /// Builder: sets the default restart policy for tasks created through [`SupervisorConfig::task_spec`].
     ///
     /// Restart controls whether a task runs again after it exits.
@@ -200,7 +209,7 @@ impl SupervisorBuilder {
             .max_concurrent
             .map(|n| Arc::new(sync::Semaphore::new(n.get())));
 
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(self.cfg.registry_queue_capacity_clamped());
         let registry = Registry::new(
             bus.clone(),
             runtime_token.clone(),
@@ -257,6 +266,7 @@ mod tests {
             .with_max_retries(10)
             .with_max_concurrent(4)
             .with_bus_capacity(2048)
+            .with_registry_queue_capacity(256)
             .with_restart(RestartPolicy::Never)
             .with_backoff(backoff);
 
@@ -266,6 +276,7 @@ mod tests {
         assert_eq!(b.cfg.max_retries.map(|n| n.get()), Some(10));
         assert_eq!(b.cfg.max_concurrent.map(|n| n.get()), Some(4));
         assert_eq!(b.cfg.bus_capacity, 2048);
+        assert_eq!(b.cfg.registry_queue_capacity, 256);
         assert!(
             matches!(b.cfg.restart, RestartPolicy::Never),
             "with_restart must store the given policy"

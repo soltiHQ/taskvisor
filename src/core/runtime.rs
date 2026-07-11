@@ -97,7 +97,7 @@ pub(crate) struct SupervisorCore {
     started: AtomicBool,
     running: AtomicBool,
     shutting_down: AtomicBool,
-    cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
+    cmd_tx: mpsc::Sender<RegistryCommand>,
     subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -121,7 +121,7 @@ impl SupervisorCore {
         alive: Arc<AliveTracker>,
         registry: Arc<Registry>,
         runtime_token: CancellationToken,
-        cmd_tx: mpsc::UnboundedSender<RegistryCommand>,
+        cmd_tx: mpsc::Sender<RegistryCommand>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
@@ -192,6 +192,7 @@ impl SupervisorCore {
 
     /// Sends the registry `Add` command and publishes `TaskAddRequested`.
     ///
+    /// Returns `CommandQueueFull` when the bounded queue has no capacity.
     /// Returns `ShuttingDown` if admission is already closed or the registry command channel is closed.
     fn add_task_inner(
         &self,
@@ -209,6 +210,8 @@ impl SupervisorCore {
     }
 
     /// Queues one add command and returns its authoritative registry reply.
+    ///
+    /// This is fail-fast while the public management API remains synchronous.
     fn enqueue_add_task(
         &self,
         id: TaskId,
@@ -218,29 +221,63 @@ impl SupervisorCore {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
+        let permit = match self.cmd_tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err((RuntimeError::CommandQueueFull, done));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err((RuntimeError::ShuttingDown, done));
+            }
+        };
+        let label: Arc<str> = Arc::from(spec.task().name());
+        let (reply, reply_rx) = oneshot::channel();
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
-                .with_task(spec.task().name())
+                .with_task(label)
                 .with_id(id),
         );
-        let (reply, reply_rx) = oneshot::channel();
-        match self.cmd_tx.send(RegistryCommand::Add {
+        permit.send(RegistryCommand::Add {
             id,
             spec,
             outcome: done,
             reply,
-        }) {
-            Ok(()) => Ok((id, reply_rx)),
-            Err(mpsc::error::SendError(cmd)) => {
-                let done = match cmd {
-                    RegistryCommand::Add { outcome, .. } => outcome,
-                    RegistryCommand::Remove { .. } => {
-                        unreachable!("an Add send error must return the Add command")
-                    }
-                };
-                Err((RuntimeError::ShuttingDown, done))
-            }
+        });
+        Ok((id, reply_rx))
+    }
+
+    /// Waits for bounded queue capacity, then queues one static-run add command.
+    async fn enqueue_add_task_wait(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+    ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
+        if self.is_shutting_down() {
+            return Err((RuntimeError::ShuttingDown, done));
         }
+        let permit = match self.cmd_tx.reserve().await {
+            Ok(permit) => permit,
+            Err(_) => return Err((RuntimeError::ShuttingDown, done)),
+        };
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err((RuntimeError::ShuttingDown, done));
+        }
+        let label: Arc<str> = Arc::from(spec.task().name());
+        let (reply, reply_rx) = oneshot::channel();
+        self.bus.publish(
+            Event::new(EventKind::TaskAddRequested)
+                .with_task(label)
+                .with_id(id),
+        );
+        permit.send(RegistryCommand::Add {
+            id,
+            spec,
+            outcome: done,
+            reply,
+        });
+        Ok((id, reply_rx))
     }
 
     /// Queues a remove command by runtime identity.
@@ -248,19 +285,30 @@ impl SupervisorCore {
     /// This is fire-and-forget.
     /// `Ok(())` means the command was sent, not that the task existed or has already stopped.
     pub(crate) fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
-        self.bus
-            .publish(Event::new(EventKind::TaskRemoveRequested).with_id(id));
-        let reply = self.enqueue_remove(id)?;
+        let reply = self.enqueue_remove(id, None)?;
         drop(reply);
         Ok(())
     }
 
-    /// Queues one remove command and returns its authoritative registry reply.
-    fn enqueue_remove(&self, id: TaskId) -> Result<RemoveReplyRx, RuntimeError> {
+    /// Publishes one remove request, queues its command, and returns the authoritative reply.
+    ///
+    /// This is fail-fast while the public management API remains synchronous.
+    fn enqueue_remove(
+        &self,
+        id: TaskId,
+        reason: Option<&'static str>,
+    ) -> Result<RemoveReplyRx, RuntimeError> {
+        let permit = self.cmd_tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
+            mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
+        })?;
         let (reply, reply_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(RegistryCommand::Remove { id, reply })
-            .map_err(|_| RuntimeError::ShuttingDown)?;
+        let mut event = Event::new(EventKind::TaskRemoveRequested).with_id(id);
+        if let Some(reason) = reason {
+            event = event.with_reason(reason);
+        }
+        self.bus.publish(event);
+        permit.send(RegistryCommand::Remove { id, reply });
         Ok(reply_rx)
     }
 
@@ -316,7 +364,12 @@ impl SupervisorCore {
             let mut rx = self.bus.subscribe();
             let mut pending_ids = Vec::with_capacity(tasks.len());
             for spec in tasks {
-                pending_ids.push(self.add_task(spec)?);
+                let (id, reply) = self
+                    .enqueue_add_task_wait(TaskId::next(), spec, None)
+                    .await
+                    .map_err(|(error, _done)| error)?;
+                drop(reply);
+                pending_ids.push(id);
             }
             self.wait_tasks_registered(&mut rx, &pending_ids).await;
         }
@@ -409,12 +462,7 @@ impl SupervisorCore {
             return Ok(false);
         }
 
-        self.bus.publish(
-            Event::new(EventKind::TaskRemoveRequested)
-                .with_id(id)
-                .with_reason("manual_cancel"),
-        );
-        let reply = self.enqueue_remove(id)?;
+        let reply = self.enqueue_remove(id, Some("manual_cancel"))?;
         drop(reply);
         self.wait_task_removed(&mut rx, id, wait_for).await
     }
@@ -667,7 +715,7 @@ mod tests {
         let bus = Bus::new(cfg.bus_capacity_clamped());
         let subs = Arc::new(SubscriberSet::new(subs, bus.clone()));
         let token = CancellationToken::new();
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.registry_queue_capacity_clamped());
         let registry = Registry::new(bus.clone(), token.clone(), None, cfg.grace, cmd_rx);
         let alive = Arc::new(AliveTracker::new());
         SupervisorCore::new_internal(cfg, bus, subs, alive, registry, token, cmd_tx)
@@ -802,6 +850,178 @@ mod tests {
             matches!(res, Err(RuntimeError::ShuttingDown)),
             "add() after shutdown began must be rejected, got {res:?}"
         );
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bounded_command_queue_reports_full_and_recovers_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskOutcome, TaskRef};
+
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the first command must fill the only queue slot");
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let rejected_runs = Arc::clone(&runs);
+        let rejected: TaskRef = TaskFn::arc("queue-full-add", move |_ctx: TaskContext| {
+            rejected_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let rejected_id = TaskId::next();
+        let (outcome, outcome_rx) = oneshot::channel();
+        let full_add = core.enqueue_add_task(rejected_id, TaskSpec::once(rejected), Some(outcome));
+        match full_add {
+            Err((RuntimeError::CommandQueueFull, Some(returned))) => {
+                returned
+                    .send(TaskOutcome::Rejected {
+                        reason: Arc::from("command_queue_full"),
+                    })
+                    .expect("the full command must return its outcome sender");
+            }
+            other => panic!("second command must report CommandQueueFull, got {other:?}"),
+        }
+        assert!(matches!(
+            outcome_rx.await,
+            Ok(TaskOutcome::Rejected { reason }) if reason.as_ref() == "command_queue_full"
+        ));
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert!(!core.contains_id(rejected_id).await);
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(rejected_id) || event.kind != EventKind::TaskAddRequested,
+                "a command rejected before enqueue must not publish TaskAddRequested"
+            );
+        }
+
+        let rejected_remove_id = TaskId::next();
+        assert!(matches!(
+            core.remove(rejected_remove_id),
+            Err(RuntimeError::CommandQueueFull)
+        ));
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(rejected_remove_id)
+                    || event.kind != EventKind::TaskRemoveRequested,
+                "a command rejected before enqueue must not publish TaskRemoveRequested"
+            );
+        }
+
+        core.start();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), filler_reply)
+                .await
+                .expect("filler reply must resolve"),
+            Ok(Ok(false))
+        ));
+
+        let accepted: TaskRef = TaskFn::arc("capacity-recovered", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let accepted_id = TaskId::next();
+        let (_, accepted_reply) = core
+            .enqueue_add_task(accepted_id, TaskSpec::restartable(accepted), None)
+            .expect("capacity must recover after the filler is received");
+        assert!(matches!(
+            timeout(Duration::from_secs(2), accepted_reply)
+                .await
+                .expect("accepted add reply must resolve"),
+            Ok(Ok(()))
+        ));
+        assert!(core.contains_id(accepted_id).await);
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn static_run_backpressures_initial_batch_larger_than_queue() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let tasks = (0..4)
+            .map(|index| {
+                let runs = Arc::clone(&runs);
+                let task: TaskRef =
+                    TaskFn::arc(format!("static-{index}"), move |_ctx: TaskContext| {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(()) }
+                    });
+                TaskSpec::once(task)
+            })
+            .collect();
+
+        timeout(Duration::from_secs(2), core.run(tasks))
+            .await
+            .expect("static run must not block on its bounded initial queue")
+            .expect("static run must not fail when its batch exceeds queue capacity");
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_command_queue_returns_shutting_down_and_watcher() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskOutcome, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        core.start();
+        core.runtime_token.cancel();
+        timeout(Duration::from_secs(2), core.registry.join_listener())
+            .await
+            .expect("registry listener must stop");
+        let mut events = core.bus.subscribe();
+
+        let remove_id = TaskId::next();
+        assert!(matches!(
+            core.remove(remove_id),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(remove_id) || event.kind != EventKind::TaskRemoveRequested,
+                "a remove rejected by a closed queue must not publish TaskRemoveRequested"
+            );
+        }
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let rejected_runs = Arc::clone(&runs);
+        let task: TaskRef = TaskFn::arc("closed-command", move |_ctx: TaskContext| {
+            rejected_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let (outcome, outcome_rx) = oneshot::channel();
+        match core.enqueue_add_task(TaskId::next(), TaskSpec::once(task), Some(outcome)) {
+            Err((RuntimeError::ShuttingDown, Some(returned))) => {
+                returned
+                    .send(TaskOutcome::Rejected {
+                        reason: Arc::from("shutting_down"),
+                    })
+                    .expect("closed queue must return its outcome sender");
+            }
+            other => panic!("closed command queue must return ShuttingDown, got {other:?}"),
+        }
+        assert!(matches!(
+            outcome_rx.await,
+            Ok(TaskOutcome::Rejected { reason }) if reason.as_ref() == "shutting_down"
+        ));
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
 
         let _ = core.shutdown().await;
     }
