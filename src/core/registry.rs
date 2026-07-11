@@ -18,12 +18,12 @@
 //!        |                            |-- update registry state
 //!        |<-- reply (oneshot) --------|
 //!
-//! Event plane:
-//!   TaskActor -> broadcast bus -> ActorExhausted / ActorDead -> cleanup
-//! ```
+//! Completion plane:
+//!   TaskActor -> completion mpsc -> registry cleanup
 //!
-//! Add and remove commands use the management channel, not the lossy event bus.
-//! Actor terminal events arrive through the bus and trigger registry cleanup.
+//! Observability plane:
+//!   TaskActor -> broadcast bus -> subscribers / controller
+//! ```
 //!
 //! ## Flow
 //!
@@ -41,7 +41,7 @@
 //!   -> join actor
 //!   -> publish TaskRemoved
 //!
-//! ActorExhausted(id) / ActorDead(id)
+//! Actor completion(id)
 //!   -> remove handle from registry
 //!   -> join actor
 //!   -> publish TaskRemoved
@@ -51,10 +51,10 @@
 //!
 //! - Watched tasks resolve their `TaskOutcome` when the actor join is reported.
 //! - Command replies report registry decisions, not terminal task outcomes.
-//! - Cleanup is idempotent. Duplicate or stale terminal events become no-ops.
+//! - Cleanup is idempotent. Duplicate or stale completion signals become no-ops.
 //! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
 //! - Task name is a human label and a duplicate-name admission gate.
-//!   Cleanup waits for actor-level terminal events.
+//!   Cleanup waits for the actor completion signal and join result.
 //! - `TaskRemoved` means the registry has finished cleanup for that identity.
 //! - `TaskId` is the canonical identity.
 
@@ -114,6 +114,18 @@ struct Handle {
     cancel: CancellationToken,
     label: Arc<str>,
     done: Option<OutcomeTx>,
+}
+
+/// Sends one completion signal when an actor task returns, panics, or is aborted.
+struct ActorCompletionGuard {
+    id: TaskId,
+    tx: mpsc::UnboundedSender<TaskId>,
+}
+
+impl Drop for ActorCompletionGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.send(self.id);
+    }
 }
 
 /// Registry indexes guarded by one lock.
@@ -228,8 +240,9 @@ impl PendingJoins {
 
 /// Owns registered task actors and task membership.
 ///
-/// The registry accepts add/remove commands, listens for actor terminal events, joins actors after removal or completion, and publishes
-/// registry-level lifecycle events such as `TaskAdded` and `TaskRemoved`.
+/// The registry accepts add/remove commands, receives reliable actor completion
+/// signals, joins actors after removal or completion, and publishes registry-level
+/// lifecycle events such as `TaskAdded` and `TaskRemoved`.
 ///
 /// # Also
 ///
@@ -244,6 +257,8 @@ pub(crate) struct Registry {
     grace: Duration,
     empty_notify: Notify,
     cmd_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryCommand>>>,
+    completion_tx: mpsc::UnboundedSender<TaskId>,
+    completion_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<TaskId>>>,
     pending_joins: Arc<PendingJoins>,
     listener_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -257,6 +272,7 @@ impl Registry {
         grace: Duration,
         cmd_rx: mpsc::UnboundedReceiver<RegistryCommand>,
     ) -> Arc<Self> {
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             state: RwLock::new(Inner::default()),
             bus,
@@ -265,6 +281,8 @@ impl Registry {
             grace,
             empty_notify: Notify::new(),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
+            completion_tx,
+            completion_rx: std::sync::Mutex::new(Some(completion_rx)),
             pending_joins: Arc::new(PendingJoins::default()),
             listener_handle: std::sync::Mutex::new(None),
         })
@@ -316,10 +334,10 @@ impl Registry {
 
     /// Starts the registry listener task.
     ///
-    /// The listener consumes the command receiver stored during construction.
+    /// The listener consumes receivers stored during construction.
     /// It listens to:
     /// - management commands from `cmd_rx`,
-    /// - actor terminal events from the broadcast bus.
+    /// - actor identity signals from the reliable completion channel.
     ///
     /// On runtime shutdown, it closes the command receiver, drains already buffered commands, cancels remaining actors with zero extra grace, and waits for all join reporters to finish.
     pub fn spawn_listener(self: Arc<Self>) {
@@ -329,8 +347,13 @@ impl Registry {
             .unwrap_or_else(|e| e.into_inner())
             .take()
             .expect("spawn_listener called exactly once");
+        let mut completion_rx = self
+            .completion_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("spawn_listener called exactly once");
 
-        let mut bus_rx = self.bus.subscribe();
         let rt = self.runtime_token.clone();
         let me = self.clone();
 
@@ -341,6 +364,11 @@ impl Registry {
 
                     _ = rt.cancelled() => break,
 
+                    completed = completion_rx.recv() => match completed {
+                        Some(id) => me.guarded("registry", me.cleanup_task(id)).await,
+                        None => break,
+                    },
+
                     cmd = cmd_rx.recv() => match cmd {
                         Some(RegistryCommand::Add { id, spec, outcome, reply }) => {
                             me.guarded("registry", me.spawn_and_register(id, spec, outcome, reply))
@@ -350,20 +378,12 @@ impl Registry {
                             me.guarded("registry", me.remove_task(id, reply)).await;
                         }
                         None => break,
-                    },
-
-                    msg = bus_rx.recv() => match msg {
-                        Ok(ev) => me.guarded("registry", me.handle_bus_event(&ev)).await,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            me.guarded("registry", me.reap_finished()).await;
-                            continue;
-                        }
                     }
                 }
             }
 
             cmd_rx.close();
+            completion_rx.close();
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     RegistryCommand::Add {
@@ -414,21 +434,6 @@ impl Registry {
                 who,
                 format!("listener panic: {msg}"),
             ));
-        }
-    }
-
-    /// Handles registry-relevant lifecycle events from the bus.
-    ///
-    /// Only actor terminal events trigger cleanup.
-    /// Attempt-level events such as `TaskStopped` or `TaskFailed` are ignored here.
-    async fn handle_bus_event(&self, event: &Event) {
-        match event.kind {
-            EventKind::ActorExhausted | EventKind::ActorDead => {
-                if let Some(id) = event.id {
-                    self.cleanup_task(id).await;
-                }
-            }
-            _ => {}
         }
     }
 
@@ -517,6 +522,22 @@ impl Registry {
         stuck
     }
 
+    /// Spawns an actor future with a reliable identity completion signal.
+    fn spawn_tracked_actor(
+        id: TaskId,
+        completion_tx: mpsc::UnboundedSender<TaskId>,
+        future: impl Future<Output = ActorExitReason> + Send + 'static,
+    ) -> JoinHandle<ActorExitReason> {
+        let completion = ActorCompletionGuard {
+            id,
+            tx: completion_tx,
+        };
+        tokio::spawn(async move {
+            let _completion = completion;
+            future.await
+        })
+    }
+
     /// Spawns an actor and registers it under `id`.
     ///
     /// Duplicate task names are rejected.
@@ -570,7 +591,8 @@ impl Registry {
         );
 
         let task_token_clone = task_token.clone();
-        let join_handle = tokio::spawn(async move { actor.run(task_token_clone).await });
+        let join_handle =
+            Self::spawn_tracked_actor(id, self.completion_tx.clone(), actor.run(task_token_clone));
 
         st.tasks.insert(
             id,
@@ -596,7 +618,7 @@ impl Registry {
     ///
     /// If the task exists, its actor token is cancelled and a detached join reporter publishes the final `TaskRemoved`.
     ///
-    /// If the task is unknown, publishes `TaskRemoved` with reason `task_not_found`.
+    /// If the task is unknown or cleanup already owns it, replies `Ok(false)` without publishing a terminal event.
     async fn remove_task(&self, id: TaskId, reply: oneshot::Sender<RemoveReply>) {
         self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
@@ -608,18 +630,13 @@ impl Registry {
         } else {
             self.pending_joins.dec(id);
             let _ = reply.send(Ok(false));
-            self.bus.publish(
-                Event::new(EventKind::TaskRemoved)
-                    .with_id(id)
-                    .with_reason("task_not_found"),
-            );
         }
     }
 
     /// Cleans up a finished actor by identity.
     ///
-    /// Called after `ActorExhausted` or `ActorDead`.
-    /// Duplicate/stale cleanup events are no-ops.
+    /// Called after the actor's reliable completion signal is received.
+    /// Duplicate or stale completion signals are no-ops.
     async fn cleanup_task(&self, id: TaskId) {
         self.pending_joins.inc(id);
         if let Some((handle, len_after)) = self.take_handle(id).await {
@@ -688,23 +705,6 @@ impl Registry {
                 }
             }
         });
-    }
-
-    /// Reaps actors whose join handle has already finished.
-    ///
-    /// Used as recovery after broadcast lag, when an actor terminal event may have been skipped by the registry listener.
-    async fn reap_finished(&self) {
-        let finished: Vec<TaskId> = {
-            let st = self.state.read().await;
-            st.tasks
-                .iter()
-                .filter(|(_, h)| h.join.is_finished())
-                .map(|(id, _)| *id)
-                .collect()
-        };
-        for id in finished {
-            self.cleanup_task(id).await;
-        }
     }
 
     /// Reports the result of a joined actor.
@@ -853,6 +853,16 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("{name} timed out"))
             .unwrap_or_else(|_| panic!("{name} sender was dropped"))
+    }
+
+    async fn receive_completion(
+        completion_rx: &mut mpsc::UnboundedReceiver<TaskId>,
+        name: &str,
+    ) -> TaskId {
+        tokio::time::timeout(Duration::from_secs(2), completion_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{name} timed out"))
+            .unwrap_or_else(|| panic!("{name} channel was closed"))
     }
 
     async fn stop_registry(registry: &Registry, token: &CancellationToken) {
@@ -1029,18 +1039,33 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn unknown_remove_replies_false_without_pending_join() {
-        let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let unknown = TaskId::next();
 
         assert!(
             matches!(
-                receive_reply(send_remove(&tx, TaskId::next()), "unknown remove reply").await,
+                receive_reply(send_remove(&tx, unknown), "unknown remove reply").await,
                 Ok(false)
             ),
             "unknown remove must return false"
         );
+        assert!(matches!(
+            receive_reply(
+                send_remove(&tx, TaskId::next()),
+                "unknown remove barrier reply",
+            )
+            .await,
+            Ok(false)
+        ));
         assert!(
             registry.pending_joins.is_empty(),
             "unknown removal must not leak pending join state"
+        );
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.id != Some(unknown) || event.kind != EventKind::TaskRemoved),
+            "unknown removal must not invent a terminal event"
         );
 
         stop_registry(&registry, &token).await;
@@ -1185,114 +1210,342 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reap_finished_removes_completed_handles() {
-        let reg = registry();
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
+        use std::sync::atomic::{AtomicBool, Ordering};
 
-        let join = tokio::spawn(async { ActorExitReason::Completed });
-        while !join.is_finished() {
-            tokio::task::yield_now().await;
-        }
-        reg.state.write().await.tasks.insert(
-            TaskId::next(),
-            Handle {
-                join,
-                cancel: CancellationToken::new(),
-                label: Arc::from("done"),
-                done: None,
-            },
-        );
-        assert!(!reg.is_empty().await);
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
 
-        reg.reap_finished().await;
+        let panic_id = TaskId::next();
+        let panic_handle =
+            Registry::spawn_tracked_actor(panic_id, completion_tx.clone(), async move {
+                panic!("outer actor panic")
+            });
+        let panic_result = panic_handle.await;
         assert!(
-            reg.is_empty().await,
-            "reap_finished must drop the completed handle"
+            panic_result.is_err_and(|error| error.is_panic()),
+            "outer actor panic must stay visible through JoinError"
         );
-    }
+        assert_eq!(
+            receive_completion(&mut completion_rx, "panic completion").await,
+            panic_id
+        );
 
-    #[tokio::test]
-    async fn reap_finished_keeps_running_handles() {
-        let reg = registry();
-
-        let cancel = CancellationToken::new();
-        let child = cancel.clone();
-        let join = tokio::spawn(async move {
-            child.cancelled().await;
-            ActorExitReason::Canceled
+        let polled = Arc::new(AtomicBool::new(false));
+        let polled_by_task = Arc::clone(&polled);
+        let abort_id = TaskId::next();
+        let abort_handle = Registry::spawn_tracked_actor(abort_id, completion_tx, async move {
+            polled_by_task.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            ActorExitReason::Completed
         });
-        reg.state.write().await.tasks.insert(
-            TaskId::next(),
-            Handle {
-                join,
-                cancel,
-                label: Arc::from("running"),
-                done: None,
-            },
+        abort_handle.abort();
+        let abort_result = abort_handle.await;
+        assert!(
+            abort_result.is_err_and(|error| error.is_cancelled()),
+            "aborted actor must return a cancelled JoinError"
         );
-
-        reg.reap_finished().await;
-        assert!(!reg.is_empty().await, "a running actor must not be reaped");
+        assert!(
+            !polled.load(Ordering::SeqCst),
+            "the abort regression requires abort-before-first-poll"
+        );
+        assert_eq!(
+            receive_completion(&mut completion_rx, "abort completion").await,
+            abort_id
+        );
+        assert!(
+            completion_rx.try_recv().is_err(),
+            "each actor exit must send one completion identity"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lag_recovery_keeps_retained_terminal_event() {
-        let bus = Bus::new(1);
-        let runtime_token = CancellationToken::new();
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let reg = Registry::new(
-            bus.clone(),
-            runtime_token.clone(),
-            None,
-            Duration::from_millis(50),
-            cmd_rx,
+    async fn natural_completion_cleans_registry_when_event_observer_lags() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let (registry, bus, token, tx) = started_registry(1, Duration::from_secs(1));
+        let mut stale_events = bus.subscribe();
+        let task: TaskRef = TaskFn::arc("completion-no-bus", |_ctx: TaskContext| async { Ok(()) });
+        let id = TaskId::next();
+        let (outcome, outcome_rx) = oneshot::channel();
+
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::once(task), Some(outcome)),
+                "fast add reply",
+            )
+            .await
+            .is_ok()
+        );
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("completion channel must remove the finished task");
+        assert!(
+            registry
+                .wait_joins_within(Duration::from_secs(2))
+                .await
+                .is_empty()
+        );
+        assert!(matches!(
+            receive_reply(outcome_rx, "fast task outcome").await,
+            TaskOutcome::Completed
+        ));
+        assert_eq!(registry.id_for_label("completion-no-bus").await, None);
+        assert!(
+            matches!(stale_events.try_recv(), Err(TryRecvError::Lagged(_))),
+            "the observer must lose terminal events in this regression setup"
         );
 
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forged_terminal_event_does_not_remove_running_actor() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let _observer = bus.subscribe();
+        assert_eq!(
+            bus.receiver_count(),
+            1,
+            "the registry listener must not subscribe to the event bus"
+        );
         let id = TaskId::next();
-        let label: Arc<str> = Arc::from("running-during-lag");
-        let actor_token = CancellationToken::new();
-        let actor_wait = actor_token.clone();
-        let join = tokio::spawn(async move {
-            actor_wait.cancelled().await;
-            ActorExitReason::Canceled
+        let task: TaskRef = TaskFn::arc("ignore-terminal-event", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
         });
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::restartable(task), None),
+                "running add reply",
+            )
+            .await
+            .is_ok()
+        );
 
-        {
-            let mut state = reg.state.write().await;
-            state.by_label.insert(Arc::clone(&label), id);
-            state.tasks.insert(
-                id,
-                Handle {
-                    join,
-                    cancel: actor_token.clone(),
-                    label: Arc::clone(&label),
-                    done: None,
-                },
-            );
-        }
-
-        reg.clone().spawn_listener();
-
-        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed"));
         bus.publish(
             Event::new(EventKind::ActorExhausted)
-                .with_task(label)
+                .with_task("ignore-terminal-event")
                 .with_id(id),
         );
 
-        let recovered =
-            tokio::time::timeout(Duration::from_millis(250), reg.wait_until_empty()).await;
-
-        actor_token.cancel();
-        runtime_token.cancel();
-        tokio::time::timeout(Duration::from_secs(1), reg.join_listener())
-            .await
-            .expect("registry listener must stop after cancellation");
-
+        let barrier_id = TaskId::next();
+        let barrier: TaskRef = TaskFn::arc("event-barrier", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
         assert!(
-            recovered.is_ok(),
-            "lag recovery must preserve and process the retained terminal event"
+            receive_reply(
+                send_add(&tx, barrier_id, TaskSpec::restartable(barrier), None,),
+                "barrier add reply",
+            )
+            .await
+            .is_ok()
         );
+        assert!(
+            registry.contains(id).await,
+            "terminal events are observability and cannot trigger cleanup"
+        );
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn outer_actor_panic_is_reaped_by_completion_channel() {
+        let (registry, bus, token, _tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let id = TaskId::next();
+        let label: Arc<str> = Arc::from("outer-panic");
+        let (done, done_rx) = oneshot::channel();
+
+        let mut state = registry.state.write().await;
+        let join = Registry::spawn_tracked_actor(id, registry.completion_tx.clone(), async move {
+            panic!("outer actor panic")
+        });
+        state.by_label.insert(Arc::clone(&label), id);
+        state.tasks.insert(
+            id,
+            Handle {
+                join,
+                cancel: CancellationToken::new(),
+                label: Arc::clone(&label),
+                done: Some(done),
+            },
+        );
+        drop(state);
+
+        assert!(matches!(
+            receive_reply(done_rx, "panic outcome").await,
+            TaskOutcome::Panicked
+        ));
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("panicked actor must leave the registry");
+        assert!(
+            registry
+                .wait_joins_within(Duration::from_secs(2))
+                .await
+                .is_empty()
+        );
+
+        let mut actor_dead = 0;
+        let mut task_removed = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.id == Some(id) && event.kind == EventKind::ActorDead {
+                actor_dead += 1;
+            }
+            if event.id == Some(id) && event.kind == EventKind::TaskRemoved {
+                task_removed += 1;
+            }
+        }
+        assert_eq!(actor_dead, 1);
+        assert_eq!(task_removed, 1);
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remove_path_owns_cleanup_when_completion_signal_arrives() {
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let cancellation_seen = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("remove-completion-race", move |ctx: TaskContext| {
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&task_release);
+            async move {
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Err(TaskError::Canceled)
+            }
+        });
+        let id = TaskId::next();
+        let (done, done_rx) = oneshot::channel();
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::restartable(task), Some(done),),
+                "race add reply",
+            )
+            .await
+            .is_ok()
+        );
+        while events.try_recv().is_ok() {}
+
+        assert!(matches!(
+            receive_reply(send_remove(&tx, id), "race remove reply").await,
+            Ok(true)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("removed task must observe cancellation");
+        release.notify_one();
+        assert!(matches!(
+            receive_reply(done_rx, "race outcome").await,
+            TaskOutcome::Canceled
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.pending_joins.wait_drained(),
+        )
+        .await
+        .expect("remove-owned join must drain");
+
+        assert!(matches!(
+            receive_reply(send_remove(&tx, TaskId::next()), "completion barrier reply",).await,
+            Ok(false)
+        ));
+        let removed_count = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
+            .count();
+        assert_eq!(
+            removed_count, 1,
+            "stale completion signal must not duplicate terminal cleanup"
+        );
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_claim_before_remove_emits_one_terminal_event() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let release = Arc::new(Notify::new());
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("completion-first", move |_ctx: TaskContext| {
+            let release = Arc::clone(&task_release);
+            async move {
+                release.notified().await;
+                Ok(())
+            }
+        });
+        let id = TaskId::next();
+        let (done, done_rx) = oneshot::channel();
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::once(task), Some(done)),
+                "completion-first add reply",
+            )
+            .await
+            .is_ok()
+        );
+        while events.try_recv().is_ok() {}
+
+        registry
+            .completion_tx
+            .send(id)
+            .expect("completion receiver must be open");
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("completion branch must claim the handle");
+        assert!(registry.pending_joins.contains(id));
+        assert!(matches!(
+            receive_reply(send_remove(&tx, id), "completion-first remove reply").await,
+            Ok(false)
+        ));
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.id != Some(id) || event.kind != EventKind::TaskRemoved),
+            "remove must not report termination while cleanup is still joining"
+        );
+
+        release.notify_one();
+        assert!(matches!(
+            receive_reply(done_rx, "completion-first outcome").await,
+            TaskOutcome::Completed
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.pending_joins.wait_drained(),
+        )
+        .await
+        .expect("completion-owned join must drain");
+
+        assert!(matches!(
+            receive_reply(
+                send_remove(&tx, TaskId::next()),
+                "duplicate completion barrier reply",
+            )
+            .await,
+            Ok(false)
+        ));
+        let removed_count = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
+            .count();
+        assert_eq!(
+            removed_count, 1,
+            "completion-first race must publish one terminal event"
+        );
+
+        stop_registry(&registry, &token).await;
     }
 
     #[tokio::test]

@@ -219,7 +219,7 @@ async fn remove_by_id_removes_only_that_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn remove_unknown_id_is_noop_emits_task_not_found() {
+async fn remove_unknown_id_is_noop_without_terminal_event() {
     let (handle, collector) = served_with_collector(5);
     with_timeout(10, async {
         let id_keep = handle
@@ -232,11 +232,19 @@ async fn remove_unknown_id_is_noop_emits_task_not_found() {
         let stale = stale_id(&handle).await;
 
         handle.remove(stale).expect("remove stale ok");
-        assert!(
-            poll_until(Duration::from_secs(2), || async {
-                collector.any_reason_contains(EventKind::TaskRemoved, "task_not_found")
-            })
+        handle
+            .add_and_wait(
+                TaskSpec::restartable(make_coop("remove-unknown-barrier")),
+                Duration::from_secs(2),
+            )
             .await
+            .expect("later add confirms that the unknown remove was processed");
+        assert!(
+            collector
+                .by_id(stale)
+                .iter()
+                .all(|event| event.kind != EventKind::TaskRemoved),
+            "an unknown id has no terminal transition to report"
         );
         let list = handle.list().await;
         assert!(list.iter().any(|(i, l)| *i == id_keep && &**l == "keep"));
