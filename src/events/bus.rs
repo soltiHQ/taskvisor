@@ -9,8 +9,8 @@
 //! Publishers:
 //!   Supervisor ─┐
 //!   Registry    ├──► Bus ──► receiver: subscriber_listener ──► SubscriberSet ──► Subscribe impls
-//!   TaskActor   ┤       ├──► receiver: registry listener
-//!   Runner      ┤       └──► receiver: controller (feature = "controller")
+//!   TaskActor   ┤       └──► receiver: controller (feature = "controller")
+//!   Runner      ┤
 //!   Subscribers ┘
 //! ```
 //!
@@ -80,6 +80,12 @@ impl Bus {
     /// If it falls behind, `recv()` returns `RecvError::Lagged(n)` before continuing with retained events.
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
         self.tx.subscribe()
+    }
+
+    /// Returns the current receiver count for internal architecture tests.
+    #[cfg(test)]
+    pub(crate) fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
     }
 }
 
