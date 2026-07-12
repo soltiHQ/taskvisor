@@ -12,14 +12,14 @@ pub enum ControllerError {
     #[error("controller not configured")]
     NotConfigured,
 
-    /// The controller intake queue is full.
+    /// The ordered controller command queue is full.
     ///
     /// Returned only by `try_submit`.
-    /// Use async `submit` or `submit_and_watch` if the caller should wait for intake capacity instead of failing fast.
+    /// Use async `submit` or `submit_and_watch` if the caller should wait for command capacity instead of failing fast.
     #[error("submission queue full")]
     Full,
 
-    /// The controller intake channel is closed.
+    /// The controller command channel is closed.
     ///
     /// This usually means the controller loop has stopped or the supervisor is shutting down.
     #[error("controller channel closed")]

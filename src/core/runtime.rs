@@ -703,6 +703,12 @@ impl SupervisorCore {
         self.registry.contains(id).await
     }
 
+    /// Returns currently available registry command slots for controller backpressure tests.
+    #[cfg(all(test, feature = "controller"))]
+    pub(crate) fn registry_command_capacity(&self) -> usize {
+        self.cmd_tx.capacity()
+    }
+
     /// Resolves a label to the identity currently holding it (if any).
     #[cfg(test)]
     pub(crate) async fn id_for_label(&self, name: &str) -> Option<TaskId> {

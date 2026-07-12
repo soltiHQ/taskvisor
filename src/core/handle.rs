@@ -3,8 +3,9 @@
 //! [`SupervisorHandle`] is returned by [`Supervisor::serve`](crate::Supervisor::serve).
 //! It is the runtime API for adding, removing, cancelling, listing, and shutting down tasks after the supervisor has been started.
 //!
-//! The handle talks directly to [`SupervisorCore`].
-//! With the `controller` feature enabled, it may also hold a controller handle for slot-based submissions.
+//! The handle talks to [`SupervisorCore`] for registered tasks.
+//! With the `controller` feature enabled, identity removal and cancellation are first ordered with
+//! slot-based submissions so queued work can be removed before it reaches the registry.
 //!
 //! [`Supervisor::run`](crate::Supervisor::run) is the static entry point for a fixed task set.
 //! Use `serve` when tasks must be managed at runtime.
@@ -161,33 +162,48 @@ impl SupervisorHandle {
 
     /// Removes a task by identity.
     ///
-    /// This waits for command queue capacity and then for the direct registry reply.
-    /// `Ok(true)` means this call claimed the task, changed it to `Removing`, and sent cancellation.
-    /// `Ok(false)` means the task was unknown, already removing, or already terminated.
+    /// With a configured controller, this first orders the id after earlier submissions.
+    /// Queued work is removed directly.
+    /// Otherwise this waits for registry command capacity and the direct registry reply.
     ///
-    /// This does not wait for terminal task cleanup.
+    /// `Ok(true)` means this call either removed a queued controller submission or claimed a registered task, changed it to `Removing`, and sent cancellation.
+    /// `Ok(false)` means the id was unknown, already claimed, or already terminated.
+    ///
+    /// For registered tasks, this does not wait for terminal cleanup.
+    /// Removing queued controller work is complete when this method returns.
     /// Use [`cancel`](Self::cancel) when the call must return after termination.
     ///
-    /// Dropping this future after its command was queued does not roll the Remove back.
-    /// The registry may still claim and remove the task.
+    /// With a configured controller, dropping this future before its ordered command is accepted may stop the operation.
+    /// Once accepted, the controller owns both queued lookup and registry fallback, so dropping the caller does not undo the operation.
+    /// Without a controller, a registry Remove command that was already committed also continues.
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &self.controller {
+            return controller.handle().remove(id).await;
+        }
         self.core.remove(id).await
     }
 
     /// Tries to remove a task without waiting for command queue capacity.
     ///
-    /// When queue admission succeeds, this still waits for the direct registry reply.
+    /// When the id is not queued in the controller, successful command admission still waits for the direct registry reply.
     /// Its boolean result has the same meaning as [`remove`](Self::remove).
+    /// With a configured controller, this also fails fast when the ordered controller command channel is full.
+    /// Once the controller or registry accepts the command, dropping the caller does not undo it.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
+    /// - [`RuntimeError::CommandQueueFull`] when a bounded controller or registry management queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn try_remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &self.controller {
+            return controller.handle().try_remove(id).await;
+        }
         self.core.try_remove(id).await
     }
 
@@ -197,6 +213,7 @@ impl SupervisorHandle {
     /// `Ok(true)` means this call claimed the label owner and sent cancellation.
     /// `Ok(false)` means there was no registered owner to claim.
     /// This does not wait for terminal task cleanup.
+    /// Queued controller submissions are not registered label owners; remove them by the [`TaskId`] returned from `submit` or `submit_and_watch`.
     ///
     /// # Errors
     ///
@@ -233,17 +250,32 @@ impl SupervisorHandle {
         self.core.is_alive(name).await
     }
 
-    /// Requests cancellation and waits for registry terminal completion.
+    /// Cancels queued or registered work by identity.
     ///
-    /// Returns `Ok(true)` only to the caller that claimed removal.
+    /// When the controller claims still-queued work, it removes it directly without a registry
+    /// cleanup wait. Registered work waits for terminal registry completion after the actor is
+    /// joined and its identity is released.
+    /// Returns `Ok(true)` only to the caller that removed a queued controller submission or
+    /// claimed registry removal.
     /// A caller that joins an existing removal returns `Ok(false)` after the same terminal completion.
-    /// An unknown or terminated id returns `Ok(false)` immediately.
+    /// An unknown or terminated id returns `Ok(false)` without waiting for terminal completion.
+    /// A watched queued submission resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
+    /// with reason `removed_from_queue` because its task body never started.
+    ///
+    /// With a configured controller, dropping this future before its ordered command is accepted
+    /// may stop the operation. Once accepted, the controller owns both queued lookup and registry
+    /// fallback, so dropping the caller does not undo cancellation.
+    /// Without a controller, a registry Cancel command that was already committed also continues.
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &self.controller {
+            return controller.handle().cancel(id).await;
+        }
         self.core.cancel(id).await
     }
 
@@ -252,15 +284,22 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// Same as [`cancel`](Self::cancel).
+    /// Queued controller submissions are not registered label owners; cancel them by their
+    /// returned [`TaskId`].
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core.cancel_by_label(Arc::from(name)).await
     }
 
     /// Cancels a task with an explicit confirmation window.
     ///
-    /// The registry claim/join decision is not part of `wait_for`.
+    /// When the controller claims still-queued work, it removes it directly, so `wait_for` does
+    /// not apply to that path.
+    /// Controller ordering and the registry claim/join decision are not part of `wait_for`.
     /// The timer starts only while this caller waits for shared terminal completion.
     /// A timeout does not stop removal or change the registry's force-abort grace period.
+    /// Once the ordered controller command is accepted, dropping this future does not stop its
+    /// queued lookup or registry fallback.
+    /// Without a controller, dropping the caller does not undo a committed registry cancellation.
     ///
     /// On completion, the boolean follows the same claimant rules as [`cancel`](Self::cancel).
     ///
@@ -274,6 +313,10 @@ impl SupervisorHandle {
         id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &self.controller {
+            return controller.handle().cancel_with_timeout(id, wait_for).await;
+        }
         self.core.cancel_with_timeout(id, wait_for).await
     }
 

@@ -4,7 +4,7 @@
 //!
 //! It owns:
 //!
-//! - the bounded intake channel for incoming [`ControllerSpec`] submissions,
+//! - the bounded ordered channel for submissions and identity operations,
 //! - the per-slot state map,
 //! - the reverse index from running [`TaskId`] to slot,
 //! - watched submission senders until they are handed to the runtime or rejected.
@@ -66,7 +66,40 @@ use super::{
 mod introspect;
 mod shutdown;
 
-/// Submission accepted by the controller intake channel.
+/// Work accepted by the ordered controller command channel.
+enum ControllerCommand {
+    /// Apply admission policy for one new submission.
+    Submit(Submission),
+    /// Apply one identity operation after all earlier controller submissions.
+    ///
+    /// The controller removes queued work itself and owns registry fallback for every other id.
+    ManageIdentity {
+        id: TaskId,
+        operation: IdentityOperation,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+}
+
+/// Identity operation owned by one accepted controller command.
+#[derive(Clone, Copy, Debug)]
+enum IdentityOperation {
+    Remove,
+    TryRemove,
+    Cancel,
+    CancelWithTimeout(std::time::Duration),
+}
+
+impl IdentityOperation {
+    /// Optional reason carried by `TaskRemoveRequested` when queued work is removed.
+    fn request_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Remove | Self::TryRemove => None,
+            Self::Cancel | Self::CancelWithTimeout(_) => Some("manual_cancel"),
+        }
+    }
+}
+
+/// Submission accepted by the controller command channel.
 struct Submission {
     /// Pre-minted identity used for events, slot state, and final outcome correlation.
     id: TaskId,
@@ -94,43 +127,53 @@ struct CompletionResult {
     slot_name: Arc<str>,
 }
 
-/// Internal handle used by `SupervisorHandle` to submit work to the controller.
+/// Result of ordering removal for one controller-owned runtime task.
+struct RemovalResult {
+    /// Runtime identity whose removal was requested.
+    id: TaskId,
+    /// Slot that owned `id` when removal tracking started.
+    slot_name: Arc<str>,
+    /// Direct registry claim decision or management-plane failure.
+    decision: Result<bool, RuntimeError>,
+}
+
+/// Internal handle used by `SupervisorHandle` to send ordered controller commands.
 #[derive(Clone)]
 pub(crate) struct ControllerHandle {
-    tx: mpsc::Sender<Submission>,
+    tx: mpsc::Sender<ControllerCommand>,
 }
 
 impl ControllerHandle {
-    /// Sends a submission to the controller intake channel.
+    /// Sends a submission to the ordered controller command channel.
     ///
-    /// This waits for intake-channel capacity.
+    /// This waits for command-channel capacity.
     /// `Ok(id)` means the controller received the submission.
     /// It does not mean the task has been admitted to the runtime yet.
     pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.tx
-            .send(Submission {
+            .send(ControllerCommand::Submit(Submission {
                 id,
                 spec,
                 done: None,
-            })
+            }))
             .await
             .map_err(|_| ControllerError::Closed)?;
         Ok(id)
     }
 
-    /// Tries to send a submission without waiting for intake-channel capacity.
+    /// Tries to send a submission without waiting for command-channel capacity.
     ///
-    /// `ControllerError::Full` means the controller intake channel is full.
+    /// `ControllerError::Full` means the controller command channel is full.
     /// It does not mean the target slot queue is full.
     pub fn try_submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.tx
-            .try_send(Submission {
+            .try_send(ControllerCommand::Submit(Submission {
                 id,
                 spec,
                 done: None,
-            })
+            }))
             .map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => ControllerError::Full,
                 mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
@@ -138,7 +181,7 @@ impl ControllerHandle {
         Ok(id)
     }
 
-    /// Sends a watched submission to the controller intake channel.
+    /// Sends a watched submission to the ordered controller command channel.
     ///
     /// The returned receiver resolves to:
     /// - `TaskOutcome::Rejected` if the controller never admits the task body,
@@ -153,24 +196,84 @@ impl ControllerHandle {
         let id = TaskId::next();
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Submission {
+            .send(ControllerCommand::Submit(Submission {
                 id,
                 spec,
                 done: Some(tx),
-            })
+            }))
             .await
             .map_err(|_| ControllerError::Closed)?;
         Ok((id, rx))
+    }
+
+    /// Sends one waiting identity operation to the ordered controller command channel.
+    async fn manage_identity(
+        &self,
+        id: TaskId,
+        operation: IdentityOperation,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ControllerCommand::ManageIdentity {
+                id,
+                operation,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)?
+    }
+
+    /// Sends one fail-fast identity operation to the ordered controller command channel.
+    async fn try_manage_identity(
+        &self,
+        id: TaskId,
+        operation: IdentityOperation,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .try_send(ControllerCommand::ManageIdentity {
+                id,
+                operation,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RuntimeError::CommandQueueFull,
+                mpsc::error::TrySendError::Closed(_) => RuntimeError::ShuttingDown,
+            })?;
+        reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)?
+    }
+
+    pub(crate) async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.manage_identity(id, IdentityOperation::Remove).await
+    }
+
+    pub(crate) async fn try_remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.try_manage_identity(id, IdentityOperation::TryRemove)
+            .await
+    }
+
+    pub(crate) async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.manage_identity(id, IdentityOperation::Cancel).await
+    }
+
+    pub(crate) async fn cancel_with_timeout(
+        &self,
+        id: TaskId,
+        wait_for: std::time::Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.manage_identity(id, IdentityOperation::CancelWithTimeout(wait_for))
+            .await
     }
 }
 
 /// Slot-based admission controller.
 ///
 /// The controller is driven by four inputs:
-/// - submissions from its intake channel,
+/// - submissions and identity operations from its ordered command channel,
 /// - direct registry replies for in-flight admission,
 /// - shared registry completion signals for admitted slot owners,
-/// - queued-removal and shutdown requests from the bus.
+/// - shutdown requests from the bus.
 ///
 /// Task lifecycle events such as `TaskAdded`, `TaskAddFailed`, and `TaskRemoved` are observability
 /// only and never decide slot state.
@@ -179,7 +282,7 @@ pub(crate) struct Controller {
     config: ControllerConfig,
     /// Runtime control surface. Weak avoids an ownership cycle with the supervisor.
     supervisor: Weak<SupervisorCore>,
-    /// Runtime event bus used for lifecycle input and controller diagnostics.
+    /// Runtime event bus used for shutdown input and controller diagnostics.
     bus: Bus,
     /// Per-slot mutable state.
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
@@ -187,16 +290,16 @@ pub(crate) struct Controller {
     running: DashMap<TaskId, Arc<str>>,
     /// Watched submissions not yet handed to the runtime registry.
     watchers: DashMap<TaskId, OutcomeTx>,
-    /// Intake sender cloned into `ControllerHandle`.
-    tx: mpsc::Sender<Submission>,
-    /// Single-use intake receiver owned by the controller loop.
-    rx: RwLock<Option<mpsc::Receiver<Submission>>>,
+    /// Ordered command sender cloned into `ControllerHandle`.
+    tx: mpsc::Sender<ControllerCommand>,
+    /// Single-use command receiver owned by the controller loop.
+    rx: RwLock<Option<mpsc::Receiver<ControllerCommand>>>,
     /// Set after `ShutdownRequested` is observed.
     shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl Controller {
-    /// Creates a controller and its bounded intake channel.
+    /// Creates a controller and its bounded ordered command channel.
     ///
     /// The controller is inert until [`run`](Self::run) is called.
     /// `queue_capacity = 0` is clamped to `1`.
@@ -242,7 +345,7 @@ impl Controller {
 
     /// Spawns the controller loop.
     ///
-    /// The intake receiver is single-use.
+    /// The command receiver is single-use.
     /// If the loop is started twice, the spawned task publishes a controller diagnostic event.
     pub fn run(self: Arc<Self>, token: CancellationToken) {
         let bus = self.bus.clone();
@@ -259,10 +362,11 @@ impl Controller {
 
     /// Runs the controller event loop.
     ///
-    /// The loop receives submissions, registry admission/completion results, and remaining
-    /// controller control events from the runtime bus.
+    /// The loop receives ordered controller commands, registry admission/completion results, and
+    /// shutdown events from the runtime bus.
     ///
-    /// On shutdown, it closes the intake receiver, drains buffered submissions, and resolves pending watched submissions as `Rejected`.
+    /// On shutdown, it closes the command receiver, drains buffered commands, and resolves pending
+    /// submissions and removal replies.
     async fn run_inner(&self, token: CancellationToken) -> Result<(), ControllerError> {
         let mut rx = self
             .rx
@@ -274,17 +378,41 @@ impl Controller {
         let mut bus_rx = self.bus.subscribe();
         let mut admissions = JoinSet::new();
         let mut completions = JoinSet::new();
+        let mut removals = JoinSet::new();
+        let mut identity_operations = JoinSet::new();
+        let identity_operation_limit = self.config.queue_capacity.max(1);
         loop {
             tokio::select! {
                 _ = token.cancelled() => break,
 
-                Some(sub) = rx.recv() => {
-                    let _ = self
-                        .guarded(
-                            "handle_submission",
-                            self.handle_submission(sub, &mut admissions),
-                        )
-                        .await;
+                Some(command) = rx.recv(), if identity_operations.len() < identity_operation_limit => {
+                    match command {
+                        ControllerCommand::Submit(sub) => {
+                            let _ = self
+                                .guarded(
+                                    "handle_submission",
+                                    self.handle_submission(sub, &mut admissions, &mut removals),
+                                )
+                                .await;
+                        }
+                        ControllerCommand::ManageIdentity {
+                            id,
+                            operation,
+                            reply,
+                        } => {
+                            let _ = self
+                                .guarded(
+                                    "handle_identity_operation",
+                                    self.handle_identity_operation(
+                                        id,
+                                        operation,
+                                        reply,
+                                        &mut identity_operations,
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
                 }
                 result = admissions.join_next(), if !admissions.is_empty() => {
                     match result {
@@ -296,6 +424,7 @@ impl Controller {
                                         result,
                                         &mut admissions,
                                         &mut completions,
+                                        &mut removals,
                                     ),
                                 )
                                 .await;
@@ -325,6 +454,32 @@ impl Controller {
                                 Event::new(EventKind::ControllerRejected)
                                     .with_task("controller")
                                     .with_reason(format!("completion_waiter_failed: {error}")),
+                            );
+                        }
+                        None => {}
+                    }
+                }
+                result = removals.join_next(), if !removals.is_empty() => {
+                    match result {
+                        Some(Ok(result)) => self.handle_removal_result(result),
+                        Some(Err(error)) => {
+                            self.bus.publish(
+                                Event::new(EventKind::ControllerRejected)
+                                    .with_task("controller")
+                                    .with_reason(format!("removal_waiter_failed: {error}")),
+                            );
+                        }
+                        None => {}
+                    }
+                }
+                result = identity_operations.join_next(), if !identity_operations.is_empty() => {
+                    match result {
+                        Some(Ok(())) => {}
+                        Some(Err(error)) => {
+                            self.bus.publish(
+                                Event::new(EventKind::ControllerRejected)
+                                    .with_task("controller")
+                                    .with_reason(format!("identity_operation_failed: {error}")),
                             );
                         }
                         None => {}
@@ -383,7 +538,12 @@ impl Controller {
     /// - busy + `DropIfRunning`: reject immediately.
     ///
     /// A slot becomes `Running` only after the direct registry Add reply succeeds.
-    async fn handle_submission(&self, sub: Submission, admissions: &mut JoinSet<AdmissionResult>) {
+    async fn handle_submission(
+        &self,
+        sub: Submission,
+        admissions: &mut JoinSet<AdmissionResult>,
+        removals: &mut JoinSet<RemovalResult>,
+    ) {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
@@ -441,23 +601,13 @@ impl Controller {
                 }
             }
             (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
-                if let Some(rid) = slot.running_id
-                    && let Err(e) = sup.try_remove(rid).await
-                {
-                    let reason = format!("remove_failed: {e}");
-                    self.bus.publish(
-                        Event::new(EventKind::ControllerRejected)
-                            .with_task(Arc::clone(&slot_name))
-                            .with_id(id)
-                            .with_reason(reason.clone()),
-                    );
-                    self.finalize_rejected(id, &reason);
-                    return;
-                }
                 self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
                 slot.status = SlotStatus::Terminating {
                     cancelled_at: Instant::now(),
                 };
+                if let Some(rid) = slot.running_id {
+                    Self::track_removal(removals, Arc::clone(&sup), rid, Arc::clone(&slot_name));
+                }
                 self.bus.publish(
                     Event::new(EventKind::ControllerSlotTransition)
                         .with_task(Arc::clone(&slot_name))
@@ -537,30 +687,63 @@ impl Controller {
         }
     }
 
-    /// Routes runtime bus events that still affect queued submissions or shutdown state.
+    /// Routes runtime bus events that still affect shutdown state.
     ///
-    /// Task lifecycle events are observability only. Admission and terminal slot cleanup use
-    /// direct registry signals.
+    /// Task lifecycle and removal-request events are observability only. Admission, queued
+    /// removal, and terminal slot cleanup use direct control signals.
     async fn handle_event(&self, event: Arc<Event>) {
-        match event.kind {
-            EventKind::TaskRemoveRequested => self.on_remove_requested(&event).await,
-            EventKind::ShutdownRequested => {
-                self.shutting_down
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
-            _ => {}
+        if event.kind == EventKind::ShutdownRequested {
+            self.shutting_down
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
-    /// Handles removal of a queued, not-yet-admitted submission.
+    /// Applies one accepted identity operation after all earlier controller commands.
     ///
-    /// If the removed id is still waiting in a slot queue, the controller removes it and resolves its watcher as `Rejected("removed_from_queue")`.
-    ///
-    /// Already-admitted tasks are removed by the runtime path, not here.
-    async fn on_remove_requested(&self, event: &Event) {
-        let Some(id) = event.id else {
+    /// The controller claims still-queued work directly. For every other id, it owns the registry
+    /// fallback in a tracked task so dropping the public caller cannot stop an accepted operation.
+    async fn handle_identity_operation(
+        &self,
+        id: TaskId,
+        operation: IdentityOperation,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+        identity_operations: &mut JoinSet<()>,
+    ) {
+        if self
+            .remove_queued_submission(id, operation.request_reason())
+            .await
+        {
+            let _ = reply.send(Ok(true));
+            return;
+        }
+
+        let Some(supervisor) = self.supervisor.upgrade() else {
+            let _ = reply.send(Err(RuntimeError::ShuttingDown));
             return;
         };
+
+        identity_operations.spawn(async move {
+            let result = match operation {
+                IdentityOperation::Remove => supervisor.remove(id).await,
+                IdentityOperation::TryRemove => supervisor.try_remove(id).await,
+                IdentityOperation::Cancel => supervisor.cancel(id).await,
+                IdentityOperation::CancelWithTimeout(wait_for) => {
+                    supervisor.cancel_with_timeout(id, wait_for).await
+                }
+            };
+            let _ = reply.send(result);
+        });
+    }
+
+    /// Removes one queued, not-yet-admitted submission by identity.
+    ///
+    /// Returns `true` only when this call claimed the queued submission. A claimed watched
+    /// submission resolves as `Rejected("removed_from_queue")` because its task body never ran.
+    async fn remove_queued_submission(
+        &self,
+        id: TaskId,
+        request_reason: Option<&'static str>,
+    ) -> bool {
         let slot_keys: Vec<Arc<str>> = self
             .slots
             .iter()
@@ -575,7 +758,19 @@ impl Controller {
             let Some(pos) = slot.queue.iter().position(|(qid, _)| *qid == id) else {
                 continue;
             };
-            slot.queue.remove(pos);
+            let task_name: Arc<str> = Arc::from(slot.queue[pos].1.name());
+            let mut request = Event::new(EventKind::TaskRemoveRequested)
+                .with_task(task_name)
+                .with_id(id);
+            if let Some(reason) = request_reason {
+                request = request.with_reason(reason);
+            }
+            self.bus.publish(request);
+            drop(
+                slot.queue
+                    .remove(pos)
+                    .expect("the queued submission position was checked above"),
+            );
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(&slot_name))
@@ -584,8 +779,9 @@ impl Controller {
             );
             self.finalize_rejected(id, crate::reasons::REMOVED_FROM_QUEUE);
             self.gc_if_idle(&slot_name, slot);
-            return;
+            return true;
         }
+        false
     }
 
     /// Applies one authoritative registry registration decision.
@@ -597,6 +793,7 @@ impl Controller {
         result: AdmissionResult,
         admissions: &mut JoinSet<AdmissionResult>,
         completions: &mut JoinSet<CompletionResult>,
+        removals: &mut JoinSet<RemovalResult>,
     ) {
         let AdmissionResult {
             id,
@@ -635,14 +832,7 @@ impl Controller {
                         let Some(sup) = self.supervisor.upgrade() else {
                             return;
                         };
-                        if let Err(error) = sup.remove(id).await {
-                            self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task(slot_name)
-                                    .with_id(id)
-                                    .with_reason(format!("remove_failed: {error}")),
-                            );
-                        }
+                        Self::track_removal(removals, sup, id, slot_name);
                     }
                     SlotStatus::Idle | SlotStatus::Running { .. } => {}
                 }
@@ -782,6 +972,45 @@ impl Controller {
         });
     }
 
+    /// Orders one runtime removal without blocking the controller loop on registry backpressure.
+    fn track_removal(
+        removals: &mut JoinSet<RemovalResult>,
+        supervisor: Arc<SupervisorCore>,
+        id: TaskId,
+        slot_name: Arc<str>,
+    ) {
+        removals.spawn(async move {
+            let decision = supervisor.remove(id).await;
+            RemovalResult {
+                id,
+                slot_name,
+                decision,
+            }
+        });
+    }
+
+    /// Reports a failed removal request without changing slot ownership.
+    ///
+    /// Successful claims and already-removing tasks both finish through the reliable completion
+    /// signal. An error is diagnostic only; shutdown cleanup remains authoritative.
+    fn handle_removal_result(&self, result: RemovalResult) {
+        let is_current = self
+            .running
+            .get(&result.id)
+            .is_some_and(|slot| slot.as_ref() == result.slot_name.as_ref());
+        if !is_current {
+            return;
+        }
+        if let Err(error) = result.decision {
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(result.slot_name)
+                    .with_id(result.id)
+                    .with_reason(format!("remove_failed: {error}")),
+            );
+        }
+    }
+
     /// Starts the next queued submission, if any.
     ///
     /// Failed starts are rejected and the function continues with the next queued item.
@@ -901,7 +1130,10 @@ mod tests {
     use crate::Supervisor;
     use crate::TaskContext;
     use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef, TaskSpec};
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::Duration;
 
     fn make_spec(name: &str) -> TaskSpec {
@@ -1044,6 +1276,7 @@ mod tests {
         for kind in [
             EventKind::TaskAdded,
             EventKind::TaskAddFailed,
+            EventKind::TaskRemoveRequested,
             EventKind::TaskRemoved,
         ] {
             let event = Arc::new(Event::new(kind).with_task("t").with_id(id));
@@ -1112,6 +1345,27 @@ mod tests {
             matches!(outcome, TaskOutcome::Rejected { .. }),
             "a buffered submission on shutdown must resolve Rejected, got {outcome:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_resolves_buffered_removal_reply() {
+        let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+        let (reply, reply_rx) = oneshot::channel();
+        ctrl.tx
+            .try_send(ControllerCommand::ManageIdentity {
+                id: TaskId::next(),
+                operation: IdentityOperation::Cancel,
+                reply,
+            })
+            .expect("the controller command channel has capacity");
+
+        let mut rx = ctrl.rx.write().await.take().expect("rx present");
+        ctrl.finalize_pending_on_shutdown(&mut rx);
+
+        assert!(matches!(
+            reply_rx.await,
+            Ok(Err(RuntimeError::ShuttingDown))
+        ));
     }
 
     #[tokio::test]
@@ -1229,6 +1483,236 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn accepted_cancel_continues_after_caller_future_is_dropped() {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let runtime_handle = sup.serve();
+        let id = runtime_handle
+            .add(waiting_spec("dropped-cancel-caller"))
+            .await
+            .expect("the direct task must register");
+
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+            .with_controller(Some(Arc::clone(&ctrl)));
+
+        let mut cancel = Box::pin(handle.cancel(id));
+        std::future::poll_fn(|cx| match cancel.as_mut().poll(cx) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(result) => {
+                panic!("cancel must wait for the stopped controller loop, got {result:?}")
+            }
+        })
+        .await;
+        drop(cancel);
+
+        assert_eq!(
+            ctrl.tx.capacity(),
+            ControllerConfig::default().queue_capacity - 1,
+            "the cancel command must be accepted before its caller is dropped"
+        );
+
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                handle
+                    .list()
+                    .await
+                    .iter()
+                    .all(|(task_id, _)| *task_id != id)
+            })
+            .await,
+            "the controller must complete registry fallback without the public caller"
+        );
+
+        stop_controller_loop(token, runner).await;
+        let _ = runtime_handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn try_remove_reports_full_controller_command_queue() {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let runtime_handle = sup.serve();
+        let ctrl = Controller::new(
+            ControllerConfig {
+                queue_capacity: 1,
+                ..Default::default()
+            },
+            sup.core(),
+            Bus::new(64),
+        );
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+            .with_controller(Some(Arc::clone(&ctrl)));
+
+        ctrl.handle()
+            .try_submit(
+                ControllerSpec::queue(waiting_spec("controller-queue-filler")).with_slot("s"),
+            )
+            .expect("the filler must occupy the controller command queue");
+
+        assert!(matches!(
+            handle.try_remove(TaskId::next()).await,
+            Err(RuntimeError::CommandQueueFull)
+        ));
+
+        let mut rx = ctrl.rx.write().await.take().expect("rx present");
+        ctrl.finalize_pending_on_shutdown(&mut rx);
+        drop(rx);
+        let _ = runtime_handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn try_remove_propagates_full_registry_queue_after_controller_admission() {
+        let sup = Supervisor::new(
+            crate::SupervisorConfig {
+                registry_queue_capacity: 1,
+                ..Default::default()
+            },
+            vec![],
+        );
+        let filler_id = TaskId::next();
+        let (_filler_reply, _filler_completion) = sup
+            .core()
+            .add_task_with_id_watched(filler_id, waiting_spec("registry-queue-filler"), None)
+            .expect("the filler must occupy the registry queue");
+        assert_eq!(sup.core().registry_command_capacity(), 0);
+
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+            .with_controller(Some(Arc::clone(&ctrl)));
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        assert!(matches!(
+            handle.try_remove(TaskId::next()).await,
+            Err(RuntimeError::CommandQueueFull)
+        ));
+        assert_eq!(
+            sup.core().registry_command_capacity(),
+            0,
+            "a rejected fallback must not consume or replace the queued registry command"
+        );
+
+        stop_controller_loop(token, runner).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identity_operation_limit_preserves_command_backpressure() {
+        let sup = Supervisor::new(
+            crate::SupervisorConfig {
+                grace: Duration::from_secs(2),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let runtime_handle = sup.serve();
+
+        let task_started = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&task_started);
+        let cancellation_observed = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&cancellation_observed);
+        let (release, released) = oneshot::channel();
+        let released = Arc::new(StdMutex::new(Some(released)));
+        let task_release = Arc::clone(&released);
+        let task: TaskRef = TaskFn::arc("bounded-identity-owner", move |ctx: TaskContext| {
+            let started = Arc::clone(&started);
+            let observed = Arc::clone(&observed);
+            let released = task_release
+                .lock()
+                .expect("release lock poisoned")
+                .take()
+                .expect("the task runs once");
+            async move {
+                started.store(true, Ordering::SeqCst);
+                ctx.cancelled().await;
+                observed.store(true, Ordering::SeqCst);
+                let _ = released.await;
+                Ok(())
+            }
+        });
+        let owner_id = runtime_handle
+            .add(TaskSpec::once(task))
+            .await
+            .expect("the direct task must register");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                task_started.load(Ordering::SeqCst)
+            })
+            .await,
+            "the direct task body must start before cancellation"
+        );
+
+        let ctrl = Controller::new(
+            ControllerConfig {
+                queue_capacity: 1,
+                ..Default::default()
+            },
+            sup.core(),
+            Bus::new(64),
+        );
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+            .with_controller(Some(Arc::clone(&ctrl)));
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        let cancel_handle = handle.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_handle
+                .cancel_with_timeout(owner_id, Duration::from_secs(10))
+                .await
+        });
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                cancellation_observed.load(Ordering::SeqCst)
+            })
+            .await,
+            "the first identity operation must remain in flight"
+        );
+
+        let buffered_ran = Arc::new(AtomicBool::new(false));
+        let ran = Arc::clone(&buffered_ran);
+        let buffered: TaskRef = TaskFn::arc("buffered-after-identity", move |_ctx| {
+            let ran = Arc::clone(&ran);
+            async move {
+                ran.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+        handle
+            .submit(ControllerSpec::queue(TaskSpec::once(buffered)).with_slot("buffered"))
+            .await
+            .expect("one later command must fit in the bounded controller queue");
+
+        assert!(matches!(
+            handle.try_submit(
+                ControllerSpec::queue(waiting_spec("overflow-after-identity"))
+                    .with_slot("overflow"),
+            ),
+            Err(ControllerError::Full)
+        ));
+        assert!(
+            !buffered_ran.load(Ordering::SeqCst),
+            "the controller must not drain commands past its in-flight identity limit"
+        );
+
+        release.send(()).expect("the task is waiting for release");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), cancel).await,
+            Ok(Ok(Ok(true)))
+        ));
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                buffered_ran.load(Ordering::SeqCst)
+            })
+            .await,
+            "the buffered command must resume after identity cleanup"
+        );
+
+        stop_controller_loop(token, runner).await;
+        let _ = runtime_handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn registry_reply_marks_slot_running_without_task_added() {
         let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
         let handle = sup.serve();
@@ -1340,6 +1824,221 @@ mod tests {
 
         stop_controller_loop(token, runner).await;
         let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replace_stays_responsive_under_registry_backpressure() {
+        let sup = Supervisor::new(
+            crate::SupervisorConfig {
+                registry_queue_capacity: 1,
+                ..Default::default()
+            },
+            vec![],
+        );
+        let runtime_handle = sup.serve();
+        let owner_id = runtime_handle
+            .add(waiting_spec("replace-owner"))
+            .await
+            .expect("the owner must register");
+
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+        let slot_name: Arc<str> = Arc::from("s");
+        ctrl.slots.insert(
+            Arc::clone(&slot_name),
+            Arc::new(Mutex::new(SlotState {
+                status: SlotStatus::Running {
+                    started_at: Instant::now(),
+                },
+                running_id: Some(owner_id),
+                queue: std::collections::VecDeque::new(),
+            })),
+        );
+        ctrl.running.insert(owner_id, Arc::clone(&slot_name));
+
+        // On a current-thread runtime the registry cannot consume this command until this test
+        // yields, so it occupies the only queue slot while both Replace commands are handled.
+        let filler_id = TaskId::next();
+        let (filler_reply, _filler_completion) = sup
+            .core()
+            .add_task_with_id_watched(filler_id, waiting_spec("replace-filler"), None)
+            .expect("the filler must occupy the registry queue");
+        assert_eq!(sup.core().registry_command_capacity(), 0);
+
+        let first_id = TaskId::next();
+        let (first_done, first_outcome) = oneshot::channel();
+        let first = Submission {
+            id: first_id,
+            spec: ControllerSpec::replace(waiting_spec("replace-first")).with_slot("s"),
+            done: Some(first_done),
+        };
+        let mut admissions = JoinSet::new();
+        let mut removals = JoinSet::new();
+        let mut first = Box::pin(ctrl.handle_submission(first, &mut admissions, &mut removals));
+        std::future::poll_fn(|cx| match first.as_mut().poll(cx) {
+            std::task::Poll::Ready(()) => std::task::Poll::Ready(()),
+            std::task::Poll::Pending => {
+                panic!("Replace must not wait inside the controller loop for registry capacity")
+            }
+        })
+        .await;
+        drop(first);
+        assert_eq!(removals.len(), 1, "one owner removal must be tracked");
+
+        let second_id = TaskId::next();
+        let second = Submission {
+            id: second_id,
+            spec: ControllerSpec::replace(waiting_spec("replace-second")).with_slot("s"),
+            done: None,
+        };
+        let mut second = Box::pin(ctrl.handle_submission(second, &mut admissions, &mut removals));
+        std::future::poll_fn(|cx| match second.as_mut().poll(cx) {
+            std::task::Poll::Ready(()) => std::task::Poll::Ready(()),
+            std::task::Poll::Pending => {
+                panic!("a newer Replace must stay responsive while removal is backpressured")
+            }
+        })
+        .await;
+        drop(second);
+
+        let slot = ctrl
+            .slots
+            .get("s")
+            .map(|entry| entry.clone())
+            .expect("the slot must remain tracked");
+        let slot = slot.lock().await;
+        assert!(matches!(slot.status, SlotStatus::Terminating { .. }));
+        assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(second_id));
+        drop(slot);
+        assert_eq!(
+            removals.len(),
+            1,
+            "repeated Replace must not enqueue duplicate owner removals"
+        );
+        assert!(matches!(
+            first_outcome.await,
+            Ok(TaskOutcome::Rejected { reason })
+                if reason.as_ref() == crate::reasons::SUPERSEDED_BY_REPLACE
+        ));
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), filler_reply).await,
+            Ok(Ok(Ok(())))
+        ));
+        let removal = tokio::time::timeout(Duration::from_secs(2), removals.join_next())
+            .await
+            .expect("the owner removal must resume after registry capacity recovers")
+            .expect("one removal waiter must exist")
+            .expect("the removal waiter must not panic");
+        assert_eq!(removal.id, owner_id);
+        assert!(matches!(removal.decision, Ok(true)));
+
+        let _ = runtime_handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_cancel_is_ordered_without_runtime_bus_events() {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let runtime_handle = sup.serve();
+        // Runtime lifecycle and removal events cannot reach this controller.
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+            .with_controller(Some(Arc::clone(&ctrl)));
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        let owner_id = handle
+            .submit(ControllerSpec::queue(waiting_spec("cancel-owner")).with_slot("s"))
+            .await
+            .expect("the owner submission must enter the controller");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                let Some(slot) = ctrl.slots.get("s").map(|entry| entry.clone()) else {
+                    return false;
+                };
+                let slot = slot.lock().await;
+                slot.running_id == Some(owner_id)
+                    && matches!(slot.status, SlotStatus::Running { .. })
+            })
+            .await,
+            "the first task must own the slot"
+        );
+
+        let victim_ran = Arc::new(AtomicBool::new(false));
+        let ran = Arc::clone(&victim_ran);
+        let victim: TaskRef = TaskFn::arc("cancel-victim", move |_ctx: TaskContext| {
+            let ran = Arc::clone(&ran);
+            async move {
+                ran.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+        let (victim_id, waiter) = handle
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(victim)).with_slot("s"))
+            .await
+            .expect("the queued submission must enter the controller channel");
+
+        assert!(
+            handle
+                .cancel(victim_id)
+                .await
+                .expect("ordered queued cancellation must succeed"),
+            "the first cancellation caller must claim the queued submission"
+        );
+        let outcome = waiter.wait().await.expect("the queued waiter must resolve");
+        assert!(
+            matches!(outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
+        );
+
+        let try_ran = Arc::clone(&victim_ran);
+        let try_victim: TaskRef = TaskFn::arc("try-remove-victim", move |_ctx: TaskContext| {
+            let ran = Arc::clone(&try_ran);
+            async move {
+                ran.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+        let (try_id, try_waiter) = handle
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(try_victim)).with_slot("s"))
+            .await
+            .expect("the second queued submission must enter the controller channel");
+        assert!(
+            handle
+                .try_remove(try_id)
+                .await
+                .expect("the ordered controller channel has capacity"),
+            "try_remove must claim queued controller work"
+        );
+        let try_outcome = try_waiter
+            .wait()
+            .await
+            .expect("the try_remove waiter must resolve");
+        assert!(
+            matches!(try_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
+        );
+
+        assert!(
+            handle
+                .cancel(owner_id)
+                .await
+                .expect("the admitted owner must be cancelled")
+        );
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.slots.get("s").is_none()
+                    && !ctrl.running.contains_key(&owner_id)
+                    && !ctrl.running.contains_key(&victim_id)
+                    && !ctrl.running.contains_key(&try_id)
+            })
+            .await,
+            "the slot must settle after its owner completes"
+        );
+        assert!(
+            !victim_ran.load(Ordering::SeqCst),
+            "a queued submission claimed by cancel must never start"
+        );
+
+        stop_controller_loop(token, runner).await;
+        let _ = runtime_handle.shutdown().await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1503,6 +2202,7 @@ mod tests {
 
         let mut admissions = JoinSet::new();
         let mut completions = JoinSet::new();
+        let mut removals = JoinSet::new();
         {
             let mut slot = slot_arc.lock().await;
             slot.queue
@@ -1518,7 +2218,7 @@ mod tests {
                 .expect("registry admission reply must arrive")
                 .expect("one admission must be in flight")
                 .expect("admission waiter must not fail");
-            ctrl.handle_admission_result(result, &mut admissions, &mut completions)
+            ctrl.handle_admission_result(result, &mut admissions, &mut completions, &mut removals)
                 .await;
         }
 

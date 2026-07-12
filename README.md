@@ -357,6 +357,10 @@ let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
 let outcome = waiter.wait().await?;
 ```
 
+Use the returned `TaskId` with `handle.remove(id)` or `handle.cancel(id)`. If the submission is
+still queued, the controller removes it directly and a watched submission resolves to
+`TaskOutcome::Rejected` with reason `removed_from_queue`.
+
 See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examples/admission.rs).
 
 ## Production notes

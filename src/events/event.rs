@@ -212,9 +212,12 @@ pub enum EventKind {
 
     /// Request to remove a task from the supervisor.
     ///
+    /// This is a best-effort observability event, not a removal command or acknowledgement.
+    ///
     /// Sets:
     /// - `id`: task run identity
-    /// - `task`: task name
+    /// - `task`: task name, when known
+    /// - `reason`: optional removal reason
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     TaskRemoveRequested,

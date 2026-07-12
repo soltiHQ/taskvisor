@@ -65,6 +65,8 @@
 //! - Build submissions with [`ControllerSpec::queue`], [`ControllerSpec::replace`], or [`ControllerSpec::drop_if_running`].
 //! - Configure with `Supervisor::builder(...).with_controller(ControllerConfig)`.
 //! - Submit with `SupervisorHandle::submit`, `try_submit`, or `submit_and_watch`.
+//! - Remove or cancel by the [`TaskId`](crate::TaskId) returned from submission; queued work is
+//!   removed through the reliable controller command path before registry fallback.
 //! - Inspect live slot state with `SupervisorHandle::controller_snapshot`.
 //!
 //! ## Events

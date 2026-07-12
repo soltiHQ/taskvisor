@@ -101,8 +101,8 @@ async fn submit_and_watch_resolves_rejected_on_drop_if_running() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn submit_and_watch_resolves_rejected_when_removed_from_queue() {
-    let (handle, collector) = served_controller(ControllerConfig::default());
+async fn cancel_immediately_removes_a_watched_queued_submission() {
+    let (handle, _collector) = served_controller(ControllerConfig::default());
 
     with_timeout(10, async {
         handle
@@ -127,17 +127,15 @@ async fn submit_and_watch_resolves_rejected_when_removed_from_queue() {
             .await
             .expect("queued submit_and_watch ok");
         assert!(
-            poll_until(Duration::from_secs(2), || async {
-                collector
-                    .find_all(EventKind::ControllerSubmitted)
-                    .iter()
-                    .any(|e| e.id == Some(victim_id))
-            })
-            .await
+            handle.cancel(victim_id).await.expect("cancel accepted"),
+            "cancel must claim a queued controller submission even before observability catches up"
         );
         assert!(
-            !handle.remove(victim_id).await.expect("remove accepted"),
-            "a controller-queued task is not registered yet"
+            !handle
+                .cancel(victim_id)
+                .await
+                .expect("second cancel must resolve"),
+            "a queued submission can be claimed only once"
         );
 
         match waiter.wait().await.expect("waiter errored") {
@@ -146,6 +144,27 @@ async fn submit_and_watch_resolves_rejected_when_removed_from_queue() {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_add_still_cancels_when_controller_is_configured() {
+    let (handle, _collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        let id = handle
+            .add(TaskSpec::restartable(make_coop("direct-cancel")))
+            .await
+            .expect("direct add must register");
+
+        assert!(
+            handle.cancel(id).await.expect("direct cancel must succeed"),
+            "controller routing must fall through to the registry for a direct task"
+        );
+        assert!(handle.list().await.is_empty());
 
         handle.shutdown().await.expect("shutdown ok");
     })
@@ -269,8 +288,8 @@ async fn remove_of_queued_submission_purges_it_before_start() {
         );
 
         assert!(
-            !handle.remove(victim_id).await.expect("remove accepted"),
-            "a controller-queued task is not registered yet"
+            handle.remove(victim_id).await.expect("remove accepted"),
+            "remove must claim a queued controller submission"
         );
         assert!(
             poll_until(Duration::from_secs(2), || async {

@@ -1,22 +1,24 @@
 //! Controller shutdown drain.
 //!
-//! When the controller loop exits, some submissions may still be waiting for a terminal decision.
+//! When the controller loop exits, submissions and control callers may still be waiting for a
+//! terminal decision.
 //!
 //! They can be in two places:
 //! - `watchers`: submissions already seen by the controller, with a parked waiter,
-//! - `rx`: submissions accepted by the intake channel but not processed yet.
+//! - `rx`: commands accepted by the controller channel but not processed yet.
 //!
-//! This module resolves both groups as `TaskOutcome::Rejected` with `controller_shutting_down`.
+//! This module rejects pending submissions and resolves pending control replies as shutting down.
 
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::RuntimeError;
 use crate::core::TaskOutcome;
 use crate::events::{Event, EventKind};
 use crate::identity::TaskId;
 
-use super::{Controller, Submission};
+use super::{Controller, ControllerCommand};
 
 impl Controller {
     /// Resolves every still-pending watched submission during controller shutdown.
@@ -26,10 +28,11 @@ impl Controller {
     ///
     /// The drain is split into two parts:
     /// - already parked watchers are rejected through [`finalize_rejected`](Self::finalize_rejected),
-    /// - not-yet-processed intake submissions are drained from `rx` and rejected directly.
+    /// - not-yet-processed submission commands are drained from `rx` and rejected directly,
+    /// - not-yet-processed identity operations resolve to `RuntimeError::ShuttingDown`.
     ///
     /// `rx.close()` prevents new messages from being accepted while the remaining buffered submissions are drained.
-    pub(super) fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<Submission>) {
+    pub(super) fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<ControllerCommand>) {
         rx.close();
 
         let pending: Vec<TaskId> = self.watchers.iter().map(|e| *e.key()).collect();
@@ -42,18 +45,25 @@ impl Controller {
             self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
         }
 
-        while let Ok(sub) = rx.try_recv() {
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task(sub.spec.slot_name().to_owned())
-                    .with_id(sub.id)
-                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
-            );
+        while let Ok(command) = rx.try_recv() {
+            match command {
+                ControllerCommand::Submit(sub) => {
+                    self.bus.publish(
+                        Event::new(EventKind::ControllerRejected)
+                            .with_task(sub.spec.slot_name().to_owned())
+                            .with_id(sub.id)
+                            .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
+                    );
 
-            if let Some(done) = sub.done {
-                let _ = done.send(TaskOutcome::Rejected {
-                    reason: Arc::from(crate::reasons::CONTROLLER_SHUTTING_DOWN),
-                });
+                    if let Some(done) = sub.done {
+                        let _ = done.send(TaskOutcome::Rejected {
+                            reason: Arc::from(crate::reasons::CONTROLLER_SHUTTING_DOWN),
+                        });
+                    }
+                }
+                ControllerCommand::ManageIdentity { reply, .. } => {
+                    let _ = reply.send(Err(RuntimeError::ShuttingDown));
+                }
             }
         }
     }

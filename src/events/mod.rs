@@ -38,8 +38,11 @@
 //! After fatal failure:
 //!   TaskFailed ──► ActorDead
 //!
-//! Remove:
+//! Remove registered work:
 //!   TaskRemoveRequested ──► TaskRemoved
+//!
+//! Remove queued controller work:
+//!   TaskRemoveRequested ──► ControllerRejected(removed_from_queue)
 //!
 //! Shutdown:
 //!   ShutdownRequested ──► AllStoppedWithinGrace | GraceExceeded

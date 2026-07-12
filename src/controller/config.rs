@@ -2,10 +2,10 @@
 //!
 //! [`ControllerConfig`] controls controller buffering:
 //! - `max_slot_queue` limits pending submissions inside each slot,
-//! - `queue_capacity` limits the controller's intake channel.
+//! - `queue_capacity` limits the controller's ordered command channel.
 //!
 //! These are different queues.
-//! `queue_capacity` is about getting a submission into the controller.
+//! `queue_capacity` is about getting a submission or identity-removal command into the controller.
 //! `max_slot_queue` is about how many accepted submissions may wait behind a busy slot.
 
 /// Configuration for the controller.
@@ -24,13 +24,18 @@
 /// ```
 #[derive(Clone, Debug)]
 pub struct ControllerConfig {
-    /// Capacity of the controller intake channel.
+    /// Capacity of the ordered controller command channel.
     ///
-    /// This is the queue in front of the controller loop.
+    /// This queue carries submissions and identity-removal commands in one order.
+    /// The same value limits controller-owned identity operations that are waiting on the registry
+    /// or terminal task cleanup. When that limit is reached, the controller leaves later commands
+    /// in this bounded queue until an operation finishes.
     /// When it is full:
     /// - `submit()` waits for capacity,
     /// - `submit_and_watch()` waits for capacity,
     /// - `try_submit()` returns [`ControllerError::Full`](crate::ControllerError::Full).
+    /// - `remove()`, `cancel()`, and `cancel_with_timeout()` wait for capacity,
+    /// - `try_remove()` returns [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull).
     ///
     /// A value of `0` is clamped to `1`.
     pub queue_capacity: usize,

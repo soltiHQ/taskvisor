@@ -45,10 +45,11 @@ pub enum RuntimeError {
         name: Arc<str>,
     },
 
-    /// The bounded registry command queue has no free capacity.
+    /// A bounded management command queue has no free capacity.
     ///
-    /// The command was not accepted and no registry state was changed.
-    #[error("registry command queue is full")]
+    /// The requested state change was not accepted by the full queue. An earlier controller
+    /// ordering check may already have completed, but it does not change task or slot ownership.
+    #[error("management command queue is full")]
     CommandQueueFull,
 
     /// Timed out while waiting for registry terminal completion.
@@ -339,7 +340,7 @@ mod tests {
     fn command_queue_full_has_stable_label() {
         let error = RuntimeError::CommandQueueFull;
         assert_eq!(error.as_label(), "runtime_command_queue_full");
-        assert_eq!(error.to_string(), "registry command queue is full");
+        assert_eq!(error.to_string(), "management command queue is full");
     }
 
     #[test]
