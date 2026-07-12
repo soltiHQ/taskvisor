@@ -49,9 +49,8 @@
 //!   submit
 //!   │
 //!   ▼
-//! Admitting ── TaskAdded ──► Running ── TaskRemoved ──► Idle or next queued task
-//!   │                           │
-//!   └── TaskAddFailed ──────────┘
+//! Admitting ── Add reply Ok ──► Running ── TaskRemoved ──► Idle or next queued task
+//!   └── Add reply Err ────────► Idle or next queued task
 //!
 //! Running + Replace
 //!   └── request remove ──► Terminating ── TaskRemoved ──► next queued task
@@ -59,6 +58,7 @@
 //!
 //! The controller starts the next queued task only after `TaskRemoved`.
 //! This avoids racing the registry while the previous task is still being deregistered.
+//! Registration events remain available for observability, but they do not decide admission.
 //!
 //! ## Public Surface
 //!

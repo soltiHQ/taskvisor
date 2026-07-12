@@ -1,12 +1,10 @@
 //! Controller recovery after bus lag.
 //!
-//! The controller normally advances slots from runtime events:
-//! - `TaskRemoved` frees a slot and starts the next queued submission,
-//! - `TaskAddFailed` frees a slot after a failed registry add,
-//! - `TaskAdded` promotes `Admitting` to `Running`.
+//! The controller still observes `TaskRemoved` to free a slot and start the next queued
+//! submission. Admission itself uses direct registry replies and does not need bus recovery.
 //!
 //! The bus is lossy.
-//! If the controller listener lags, one of those events may be missed.
+//! If the controller listener lags, a completion event may be missed.
 //! This module performs a conservative reconciliation pass against the runtime registry.
 //!
 //! Recovery is delayed and coalesced by the controller loop.
@@ -15,12 +13,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::controller::slot::SlotStatus;
 use crate::events::{Event, EventKind};
 
-use super::{Controller, schedule_recovery};
+use super::{AdmissionResult, Controller, schedule_recovery};
 
 /// Delay before controller state is reconciled after event-bus lag.
 pub(super) const RECOVERY_DELAY: Duration = Duration::from_secs(5);
@@ -29,7 +28,10 @@ impl Controller {
     /// Reconciles stale non-idle slots after the controller misses bus events.
     ///
     /// Returns the earliest deadline for a slot that is still too young to reconcile.
-    pub(super) async fn recover_stale_slots(&self) -> Option<Instant> {
+    pub(super) async fn recover_stale_slots(
+        &self,
+        admissions: &mut JoinSet<AdmissionResult>,
+    ) -> Option<Instant> {
         if self.is_shutting_down() {
             return None;
         }
@@ -53,8 +55,13 @@ impl Controller {
                 continue;
             }
 
+            // Registration decisions arrive on the reliable admission plane.
+            // Bus lag must never guess the result of an in-flight Add command.
+            if matches!(slot.status, SlotStatus::Admitting { .. }) {
+                continue;
+            }
+
             let eligible_at = match slot.status {
-                SlotStatus::Admitting { since } => Some(since + RECOVERY_DELAY),
                 SlotStatus::Terminating { cancelled_at } => Some(cancelled_at + RECOVERY_DELAY),
                 _ => None,
             };
@@ -71,29 +78,15 @@ impl Controller {
             };
 
             if alive {
-                match slot.status {
-                    SlotStatus::Admitting { .. } => {
-                        slot.status = SlotStatus::Running {
-                            started_at: Instant::now(),
-                        };
-                        self.bus.publish(
-                            Event::new(EventKind::ControllerSlotTransition)
-                                .with_task(Arc::clone(&slot_name))
-                                .with_reason("admitting→running (lag recovery)"),
-                        );
-                    }
-                    SlotStatus::Terminating { .. } => {
-                        if let Some(rid) = slot.running_id
-                            && let Err(e) = sup.try_remove(rid).await
-                        {
-                            self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task(Arc::clone(&slot_name))
-                                    .with_reason(format!("recovery_remove_failed: {e}")),
-                            );
-                        }
-                    }
-                    _ => {}
+                if let SlotStatus::Terminating { .. } = slot.status
+                    && let Some(rid) = slot.running_id
+                    && let Err(e) = sup.try_remove(rid).await
+                {
+                    self.bus.publish(
+                        Event::new(EventKind::ControllerRejected)
+                            .with_task(Arc::clone(&slot_name))
+                            .with_reason(format!("recovery_remove_failed: {e}")),
+                    );
                 }
                 continue;
             }
@@ -104,7 +97,7 @@ impl Controller {
             slot.status = SlotStatus::Idle;
 
             if !self.is_shutting_down() {
-                self.start_next_from_queue(&sup, &mut slot, &slot_name);
+                self.start_next_from_queue(&sup, &mut slot, &slot_name, admissions);
             }
 
             self.gc_if_idle(&slot_name, slot);

@@ -286,7 +286,7 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: the transition, e.g. `admitting→running`, `running→terminating (replace)`, `admitting→running (lag recovery)`
+    /// - `reason`: the transition, e.g. `admitting→running` or `running→terminating (replace)`
     ControllerSlotTransition,
 }
 
