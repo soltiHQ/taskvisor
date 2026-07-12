@@ -9,7 +9,7 @@
 //! Publishers:
 //!   Supervisor ─┐
 //!   Registry    ├──► Bus ──► receiver: subscriber_listener ──► SubscriberSet ──► Subscribe impls
-//!   TaskActor   ┤       └──► receiver: controller (feature = "controller")
+//!   TaskActor   ┤
 //!   Runner      ┤
 //!   Subscribers ┘
 //! ```
@@ -25,7 +25,7 @@
 //! - If a receiver is too slow, it gets `RecvError::Lagged(n)` and skips old events.
 //! - If there are no active receivers, published events are dropped.
 //!
-//! This bus is for observability and runtime coordination.
+//! This bus is for observability.
 //! It is not durable storage and does not provide exactly-once delivery.
 
 use std::sync::Arc;

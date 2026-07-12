@@ -200,9 +200,9 @@ enum ShutdownTrigger {
 
 /// Runtime implementation behind the public [`Supervisor`](super::supervisor::Supervisor).
 ///
-/// This type is controller-agnostic.
-/// The public facade may compose it with an optional controller, but the core itself only manages
-/// registry commands, events, subscribers, alive tracking, and shutdown.
+/// This type does not implement controller admission.
+/// With the `controller` feature, it keeps only a weak lifecycle link so the shared shutdown
+/// operation can join the optional controller before subscriber cleanup finishes.
 pub(crate) struct SupervisorCore {
     cfg: SupervisorConfig,
     pub(super) bus: Bus,
@@ -214,6 +214,8 @@ pub(crate) struct SupervisorCore {
     running: AtomicBool,
     shutting_down: AtomicBool,
     shutdown: ShutdownCoordinator,
+    #[cfg(feature = "controller")]
+    controller: std::sync::OnceLock<std::sync::Weak<crate::controller::Controller>>,
     admission_gate: std::sync::Mutex<()>,
     cmd_tx: mpsc::Sender<RegistryCommand>,
     subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -252,6 +254,8 @@ impl SupervisorCore {
             running: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             shutdown: ShutdownCoordinator::new(),
+            #[cfg(feature = "controller")]
+            controller: std::sync::OnceLock::new(),
             admission_gate: std::sync::Mutex::new(()),
             cmd_tx,
             subscriber_handle: std::sync::Mutex::new(None),
@@ -261,6 +265,21 @@ impl SupervisorCore {
     /// Returns true once shutdown has started and management admission is closed.
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Returns the reliable signal that fires when the shared shutdown operation starts.
+    #[cfg(feature = "controller")]
+    pub(crate) fn shutdown_started_token(&self) -> CancellationToken {
+        self.shutdown.started.clone()
+    }
+
+    /// Registers the optional controller as a participant in shared runtime cleanup.
+    #[cfg(feature = "controller")]
+    pub(crate) fn attach_controller(&self, controller: &Arc<crate::controller::Controller>) {
+        assert!(
+            self.controller.set(Arc::downgrade(controller)).is_ok(),
+            "the controller lifecycle may be attached only once"
+        );
     }
 
     /// Marks the runtime as shutting down.
@@ -316,6 +335,9 @@ impl SupervisorCore {
 
         self.mark_shutting_down();
         *operation = Some(Arc::clone(&shared));
+        if matches!(&trigger, ShutdownTrigger::Requested) {
+            self.bus.publish(Event::new(EventKind::ShutdownRequested));
+        }
         self.shutdown.started.cancel();
         drop(operation);
 
@@ -785,7 +807,6 @@ impl SupervisorCore {
     async fn resolve_shutdown(&self, trigger: ShutdownTrigger) -> ShutdownOutcome {
         match trigger {
             ShutdownTrigger::Requested => {
-                self.bus.publish(Event::new(EventKind::ShutdownRequested));
                 ShutdownOutcome::from_drain_result(self.drain_with_grace().await)
             }
             ShutdownTrigger::Natural => {
@@ -821,6 +842,18 @@ impl SupervisorCore {
     /// Cancels runtime listeners and closes subscribers, attempting every phase.
     async fn finish_shutdown_cleanup(&self) -> bool {
         let mut clean = true;
+
+        #[cfg(feature = "controller")]
+        if let Some(controller) = self.controller.get().and_then(std::sync::Weak::upgrade) {
+            match crate::core::panic_guard::guarded(controller.join()).await {
+                Ok(true) => {}
+                Ok(false) => clean = false,
+                Err(panic) => {
+                    self.report_shutdown_panic("controller cleanup", panic);
+                    clean = false;
+                }
+            }
+        }
 
         self.runtime_token.cancel();
 

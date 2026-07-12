@@ -267,7 +267,8 @@ pub enum EventKind {
     /// Controller submission rejected (queue full, add failed, superseded, etc).
     ///
     /// Sets:
-    /// - `task`: slot name
+    /// - `task`: slot name when known, or `controller` for loop-level diagnostics; may be absent
+    ///   when shutdown rejects a buffered submission whose slot defaults to user task metadata
     /// - `id`: the rejected submission's [`TaskId`], when the rejection concerns a specific submission.
     ///   Absent for slot- or loop-level diagnostics that have no submission behind
     ///   them (e.g. a failed deferred removal or the controller loop exiting).

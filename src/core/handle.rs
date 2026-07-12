@@ -322,7 +322,8 @@ impl SupervisorHandle {
 
     /// Initiates graceful shutdown of the supervisor runtime.
     ///
-    /// With the `controller` feature enabled, the controller stops through the shared runtime cancellation token.
+    /// With the `controller` feature enabled, this returns only after the controller command
+    /// channel is closed, pending controller work is resolved, and the controller loop is joined.
     ///
     /// # Errors
     ///

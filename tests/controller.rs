@@ -833,3 +833,53 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn natural_run_joins_controller_before_return() {
+    let sup = Supervisor::builder(SupervisorConfig::default())
+        .with_controller(ControllerConfig::default())
+        .build();
+
+    with_timeout(5, async {
+        sup.run(vec![])
+            .await
+            .expect("empty run must finish cleanly");
+
+        let handle = sup.serve();
+        let result = handle.try_submit(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+            "after-natural-shutdown",
+        ))));
+        assert_eq!(result, Err(ControllerError::Closed));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_static_batch_keeps_controller_running() {
+    let sup = Supervisor::builder(SupervisorConfig::default())
+        .with_controller(ControllerConfig::default())
+        .build();
+    let first = TaskSpec::once(make_ok_once("duplicate-static"));
+    let second = TaskSpec::once(make_ok_once("duplicate-static"));
+
+    with_timeout(5, async {
+        assert!(matches!(
+            sup.run(vec![first, second]).await,
+            Err(RuntimeError::TaskAlreadyExists { .. })
+        ));
+
+        let handle = sup.serve();
+        let (_id, waiter) = handle
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+                "after-rejected-static-batch",
+            ))))
+            .await
+            .expect("batch rejection must not stop controller intake");
+        assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
+        handle
+            .shutdown()
+            .await
+            .expect("shutdown must join controller");
+    })
+    .await;
+}

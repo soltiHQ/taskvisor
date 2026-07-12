@@ -85,6 +85,8 @@
 //! - `Queue` is FIFO.
 //! - `Replace` is latest-wins for the next queued submission.
 //! - Slot advancement is gated on reliable terminal registry cleanup.
+//! - Runtime shutdown closes controller intake, resolves pending work, and joins the controller
+//!   loop before the shared shutdown result is returned.
 
 mod view;
 pub use view::{ControllerSnapshot, SlotStatusKind, SlotView};

@@ -234,12 +234,15 @@ impl SupervisorBuilder {
             .controller_config
             .map(|ctrl_cfg| crate::controller::Controller::new(ctrl_cfg, &core, bus.clone()));
 
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &controller {
+            core.attach_controller(controller);
+        }
+
         Supervisor::from_parts(
             core,
             #[cfg(feature = "controller")]
             controller,
-            #[cfg(feature = "controller")]
-            runtime_token,
         )
     }
 }

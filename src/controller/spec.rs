@@ -120,6 +120,11 @@ impl ControllerSpec {
             .unwrap_or_else(|| self.task_spec.name())
     }
 
+    /// Returns an explicit slot without calling user-provided task metadata.
+    pub(super) fn configured_slot(&self) -> Option<&str> {
+        self.slot.as_deref()
+    }
+
     /// Creates a submission with FIFO queue admission.
     ///
     /// If the slot is idle, the task is admitted immediately.

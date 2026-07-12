@@ -361,6 +361,9 @@ Use the returned `TaskId` with `handle.remove(id)` or `handle.cancel(id)`. If th
 still queued, the controller removes it directly and a watched submission resolves to
 `TaskOutcome::Rejected` with reason `removed_from_queue`.
 
+`handle.shutdown().await` closes controller intake, resolves pending controller work, and joins
+the controller loop before it returns.
+
 See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examples/admission.rs).
 
 ## Production notes

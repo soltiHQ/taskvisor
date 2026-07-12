@@ -59,10 +59,6 @@ pub struct Supervisor {
 
     #[cfg(feature = "controller")]
     controller: Option<Arc<crate::controller::Controller>>,
-    #[cfg(feature = "controller")]
-    runtime_token: tokio_util::sync::CancellationToken,
-    #[cfg(feature = "controller")]
-    controller_started: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Supervisor {
@@ -78,27 +74,19 @@ impl Supervisor {
     pub(super) fn from_parts(
         core: Arc<SupervisorCore>,
         #[cfg(feature = "controller")] controller: Option<Arc<crate::controller::Controller>>,
-        #[cfg(feature = "controller")] runtime_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
             core,
             #[cfg(feature = "controller")]
             controller,
-            #[cfg(feature = "controller")]
-            runtime_token,
-            #[cfg(feature = "controller")]
-            controller_started: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /// Starts the controller loop once, if a controller is configured.
     #[cfg(feature = "controller")]
     fn start_controller(&self) {
-        use std::sync::atomic::Ordering;
-        if let Some(ctrl) = &self.controller
-            && !self.controller_started.swap(true, Ordering::AcqRel)
-        {
-            ctrl.clone().run(self.runtime_token.clone());
+        if let Some(controller) = &self.controller {
+            controller.run();
         }
     }
 

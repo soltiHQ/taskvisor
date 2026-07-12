@@ -11,49 +11,34 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinSet};
 
 use crate::RuntimeError;
 use crate::core::TaskOutcome;
 use crate::events::{Event, EventKind};
-use crate::identity::TaskId;
 
 use super::{Controller, ControllerCommand};
 
 impl Controller {
-    /// Resolves every still-pending watched submission during controller shutdown.
+    /// Closes the controller command channel and resolves every buffered command.
     ///
     /// This preserves the `submit_and_watch` contract:
     /// a submission that never reaches the runtime must resolve as [`TaskOutcome::Rejected`], not as a dropped oneshot.
-    ///
-    /// The drain is split into two parts:
-    /// - already parked watchers are rejected through [`finalize_rejected`](Self::finalize_rejected),
-    /// - not-yet-processed submission commands are drained from `rx` and rejected directly,
-    /// - not-yet-processed identity operations resolve to `RuntimeError::ShuttingDown`.
     ///
     /// `rx.close()` prevents new messages from being accepted while the remaining buffered submissions are drained.
     pub(super) fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<ControllerCommand>) {
         rx.close();
 
-        let pending: Vec<TaskId> = self.watchers.iter().map(|e| *e.key()).collect();
-        for id in pending {
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_id(id)
-                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
-            );
-            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
-        }
-
         while let Ok(command) = rx.try_recv() {
             match command {
                 ControllerCommand::Submit(sub) => {
-                    self.bus.publish(
-                        Event::new(EventKind::ControllerRejected)
-                            .with_task(sub.spec.slot_name().to_owned())
-                            .with_id(sub.id)
-                            .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
-                    );
+                    let mut event = Event::new(EventKind::ControllerRejected)
+                        .with_id(sub.id)
+                        .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN);
+                    if let Some(slot_name) = sub.spec.configured_slot() {
+                        event = event.with_task(slot_name.to_owned());
+                    }
+                    self.bus.publish(event);
 
                     if let Some(done) = sub.done {
                         let _ = done.send(TaskOutcome::Rejected {
@@ -66,5 +51,39 @@ impl Controller {
                 }
             }
         }
+    }
+
+    /// Rejects queued slot work, resolves every remaining watcher, and clears slot indexes.
+    pub(super) async fn finalize_slot_state_on_shutdown(&self) {
+        let slot_names: Vec<Arc<str>> = self
+            .slots
+            .iter()
+            .map(|entry| Arc::clone(entry.key()))
+            .collect();
+
+        for slot_name in slot_names {
+            let Some(slot) = self.slots.get(&*slot_name).map(|entry| entry.clone()) else {
+                continue;
+            };
+            let mut slot = slot.lock().await;
+            while let Some((id, _spec)) = slot.queue.pop_front() {
+                self.bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
+                        .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
+                );
+                self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+            }
+        }
+
+        self.finalize_remaining_watchers();
+        self.slots.clear();
+        self.running.clear();
+    }
+
+    /// Waits until every already-aborted controller worker has finished cancellation.
+    pub(super) async fn drain_workers<T: 'static>(workers: &mut JoinSet<T>) {
+        while workers.join_next().await.is_some() {}
     }
 }

@@ -37,16 +37,14 @@
 
 use std::{
     future::Future,
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock, Weak},
 };
 
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-
-use tokio::sync::broadcast;
 
 use crate::{
     RuntimeError, TaskSpec,
@@ -99,6 +97,33 @@ impl IdentityOperation {
     }
 }
 
+/// Ensures an accepted identity caller receives an explicit shutdown result if its worker aborts.
+struct IdentityReply {
+    sender: Option<oneshot::Sender<Result<bool, RuntimeError>>>,
+}
+
+impl IdentityReply {
+    fn new(sender: oneshot::Sender<Result<bool, RuntimeError>>) -> Self {
+        Self {
+            sender: Some(sender),
+        }
+    }
+
+    fn send(mut self, result: Result<bool, RuntimeError>) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+impl Drop for IdentityReply {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Err(RuntimeError::ShuttingDown));
+        }
+    }
+}
+
 /// Submission accepted by the controller command channel.
 struct Submission {
     /// Pre-minted identity used for events, slot state, and final outcome correlation.
@@ -135,6 +160,57 @@ struct RemovalResult {
     slot_name: Arc<str>,
     /// Direct registry claim decision or management-plane failure.
     decision: Result<bool, RuntimeError>,
+}
+
+/// One shared controller loop task with a cancellation-safe, idempotent join.
+struct ControllerTask {
+    state: Mutex<ControllerTaskState>,
+}
+
+enum ControllerTaskState {
+    Running(JoinHandle<()>),
+    Joined(bool),
+}
+
+impl ControllerTask {
+    fn new(handle: JoinHandle<()>) -> Self {
+        Self {
+            state: Mutex::new(ControllerTaskState::Running(handle)),
+        }
+    }
+
+    /// Joins the stored task without taking it out of shared state before the await.
+    ///
+    /// If this future is dropped, a later caller can continue polling the same `JoinHandle`.
+    /// Returns `false` when Tokio reports that the controller task did not join cleanly.
+    async fn join(&self, bus: &Bus) -> bool {
+        let mut state = self.state.lock().await;
+        if let ControllerTaskState::Joined(clean) = &*state {
+            return *clean;
+        }
+        let ControllerTaskState::Running(handle) = &mut *state else {
+            unreachable!("joined controller state was returned above")
+        };
+
+        let clean = match handle.await {
+            Ok(()) => true,
+            Err(error) => {
+                bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task("controller")
+                        .with_reason(format!("controller_join_failed: {error}")),
+                );
+                false
+            }
+        };
+        *state = ControllerTaskState::Joined(clean);
+        clean
+    }
+
+    #[cfg(test)]
+    async fn is_joined(&self) -> bool {
+        matches!(*self.state.lock().await, ControllerTaskState::Joined(_))
+    }
 }
 
 /// Internal handle used by `SupervisorHandle` to send ordered controller commands.
@@ -273,7 +349,7 @@ impl ControllerHandle {
 /// - submissions and identity operations from its ordered command channel,
 /// - direct registry replies for in-flight admission,
 /// - shared registry completion signals for admitted slot owners,
-/// - shutdown requests from the bus.
+/// - the reliable runtime shutdown-start signal.
 ///
 /// Task lifecycle events such as `TaskAdded`, `TaskAddFailed`, and `TaskRemoved` are observability
 /// only and never decide slot state.
@@ -282,8 +358,10 @@ pub(crate) struct Controller {
     config: ControllerConfig,
     /// Runtime control surface. Weak avoids an ownership cycle with the supervisor.
     supervisor: Weak<SupervisorCore>,
-    /// Runtime event bus used for shutdown input and controller diagnostics.
+    /// Runtime event bus used for controller observability and diagnostics.
     bus: Bus,
+    /// Reliable signal fired when the runtime's shared shutdown operation starts.
+    shutdown_token: CancellationToken,
     /// Per-slot mutable state.
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
     /// Reverse index from current runtime task id to slot name.
@@ -294,8 +372,10 @@ pub(crate) struct Controller {
     tx: mpsc::Sender<ControllerCommand>,
     /// Single-use command receiver owned by the controller loop.
     rx: RwLock<Option<mpsc::Receiver<ControllerCommand>>>,
-    /// Set after `ShutdownRequested` is observed.
+    /// Set after the reliable runtime shutdown signal is observed.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Single controller loop task shared by every start and join caller.
+    task: OnceLock<ControllerTask>,
 }
 
 impl Controller {
@@ -305,17 +385,20 @@ impl Controller {
     /// `queue_capacity = 0` is clamped to `1`.
     pub fn new(config: ControllerConfig, supervisor: &Arc<SupervisorCore>, bus: Bus) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(config.queue_capacity.max(1));
+        let shutdown_token = supervisor.shutdown_started_token();
 
         Arc::new(Self {
             config,
             supervisor: Arc::downgrade(supervisor),
             bus,
+            shutdown_token,
             slots: DashMap::new(),
             running: DashMap::new(),
             watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            task: OnceLock::new(),
         })
     }
 
@@ -330,10 +413,31 @@ impl Controller {
         }
     }
 
-    /// Returns `true` after the controller has observed `ShutdownRequested`.
-    fn is_shutting_down(&self) -> bool {
+    /// Marks the controller as no longer accepting or advancing work.
+    fn mark_shutting_down(&self) {
         self.shutting_down
-            .load(std::sync::atomic::Ordering::Acquire)
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns `true` after the reliable runtime shutdown signal is observed.
+    fn is_shutting_down(&self) -> bool {
+        self.shutdown_token.is_cancelled()
+            || self
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Rejects any watcher retained after normal or abnormal loop exit.
+    fn finalize_remaining_watchers(&self) {
+        let pending: Vec<TaskId> = self.watchers.iter().map(|entry| *entry.key()).collect();
+        for id in pending {
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_id(id)
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
+            );
+            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+        }
     }
 
     /// Returns a cloneable handle for sending controller submissions.
@@ -343,27 +447,69 @@ impl Controller {
         }
     }
 
-    /// Spawns the controller loop.
+    /// Starts the single owned controller loop.
     ///
-    /// The command receiver is single-use.
-    /// If the loop is started twice, the spawned task publishes a controller diagnostic event.
-    pub fn run(self: Arc<Self>, token: CancellationToken) {
-        let bus = self.bus.clone();
-        tokio::spawn(async move {
-            if let Err(e) = self.run_inner(token).await {
-                bus.publish(
+    /// Later calls are no-ops. Runtime shutdown joins this exact task before cleanup completes.
+    pub fn run(self: &Arc<Self>) {
+        self.task.get_or_init(|| {
+            let controller = Arc::clone(self);
+            ControllerTask::new(tokio::spawn(async move {
+                controller.run_task().await;
+            }))
+        });
+    }
+
+    /// Runs the controller loop behind its outer panic boundary and final state cleanup.
+    async fn run_task(self: Arc<Self>) {
+        let token = self.shutdown_token.clone();
+        match crate::core::panic_guard::guarded(self.run_inner(token)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task("controller")
-                        .with_reason(format!("controller_loop_exited: {e}")),
+                        .with_reason(format!("controller_loop_exited: {error}")),
                 );
             }
-        });
+            Err(panic) => {
+                self.bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task("controller")
+                        .with_reason(format!("controller_loop_panicked: {panic}")),
+                );
+            }
+        }
+
+        self.mark_shutting_down();
+        self.finalize_remaining_watchers();
+        self.slots.clear();
+        self.running.clear();
+    }
+
+    /// Waits for the owned controller loop exactly once.
+    ///
+    /// Concurrent and later callers share the stored join state.
+    /// Returns `false` when the controller task did not join cleanly.
+    pub(crate) async fn join(&self) -> bool {
+        if let Some(task) = self.task.get() {
+            task.join(&self.bus).await
+        } else {
+            true
+        }
+    }
+
+    #[cfg(test)]
+    async fn is_joined(&self) -> bool {
+        match self.task.get() {
+            Some(task) => task.is_joined().await,
+            None => false,
+        }
     }
 
     /// Runs the controller event loop.
     ///
     /// The loop receives ordered controller commands, registry admission/completion results, and
-    /// shutdown events from the runtime bus.
+    /// the reliable runtime shutdown-start signal.
     ///
     /// On shutdown, it closes the command receiver, drains buffered commands, and resolves pending
     /// submissions and removal replies.
@@ -375,15 +521,20 @@ impl Controller {
             .take()
             .ok_or(ControllerError::AlreadyStarted)?;
 
-        let mut bus_rx = self.bus.subscribe();
         let mut admissions = JoinSet::new();
         let mut completions = JoinSet::new();
         let mut removals = JoinSet::new();
         let mut identity_operations = JoinSet::new();
         let identity_operation_limit = self.config.queue_capacity.max(1);
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => break,
+        let loop_result = crate::core::panic_guard::guarded(async {
+            loop {
+                tokio::select! {
+                biased;
+
+                _ = token.cancelled() => {
+                    self.mark_shutting_down();
+                    break;
+                },
 
                 Some(command) = rx.recv(), if identity_operations.len() < identity_operation_limit => {
                     match command {
@@ -485,23 +636,27 @@ impl Controller {
                         None => {}
                     }
                 }
-                result = bus_rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            let _ = self
-                                .guarded(
-                                    "handle_event",
-                                    self.handle_event(event),
-                                )
-                                .await;
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
                 }
             }
-        }
+        })
+        .await;
         self.finalize_pending_on_shutdown(&mut rx);
+        admissions.abort_all();
+        completions.abort_all();
+        removals.abort_all();
+        identity_operations.abort_all();
+        Self::drain_workers(&mut admissions).await;
+        Self::drain_workers(&mut completions).await;
+        Self::drain_workers(&mut removals).await;
+        Self::drain_workers(&mut identity_operations).await;
+        self.finalize_slot_state_on_shutdown().await;
+        if let Err(panic) = loop_result {
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task("controller")
+                    .with_reason(format!("controller_loop_panicked: {panic}")),
+            );
+        }
         Ok(())
     }
 
@@ -568,6 +723,16 @@ impl Controller {
 
         let slot_arc = self.get_or_create_slot(&slot_name);
         let mut slot = slot_arc.lock().await;
+        if self.is_shutting_down() {
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(Arc::clone(&slot_name))
+                    .with_id(id)
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
+            );
+            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+            return;
+        }
 
         match (&slot.status, admission) {
             (SlotStatus::Idle, _) => {
@@ -687,17 +852,6 @@ impl Controller {
         }
     }
 
-    /// Routes runtime bus events that still affect shutdown state.
-    ///
-    /// Task lifecycle and removal-request events are observability only. Admission, queued
-    /// removal, and terminal slot cleanup use direct control signals.
-    async fn handle_event(&self, event: Arc<Event>) {
-        if event.kind == EventKind::ShutdownRequested {
-            self.shutting_down
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
     /// Applies one accepted identity operation after all earlier controller commands.
     ///
     /// The controller claims still-queued work directly. For every other id, it owns the registry
@@ -709,16 +863,25 @@ impl Controller {
         reply: oneshot::Sender<Result<bool, RuntimeError>>,
         identity_operations: &mut JoinSet<()>,
     ) {
+        let reply = IdentityReply::new(reply);
+        if self.is_shutting_down() {
+            reply.send(Err(RuntimeError::ShuttingDown));
+            return;
+        }
         if self
             .remove_queued_submission(id, operation.request_reason())
             .await
         {
-            let _ = reply.send(Ok(true));
+            reply.send(Ok(true));
+            return;
+        }
+        if self.is_shutting_down() {
+            reply.send(Err(RuntimeError::ShuttingDown));
             return;
         }
 
         let Some(supervisor) = self.supervisor.upgrade() else {
-            let _ = reply.send(Err(RuntimeError::ShuttingDown));
+            reply.send(Err(RuntimeError::ShuttingDown));
             return;
         };
 
@@ -731,7 +894,7 @@ impl Controller {
                     supervisor.cancel_with_timeout(id, wait_for).await
                 }
             };
-            let _ = reply.send(result);
+            reply.send(result);
         });
     }
 
@@ -755,6 +918,9 @@ impl Controller {
                 continue;
             };
             let mut slot = slot_arc.lock().await;
+            if self.is_shutting_down() {
+                return false;
+            }
             let Some(pos) = slot.queue.iter().position(|(qid, _)| *qid == id) else {
                 continue;
             };
@@ -1129,12 +1295,24 @@ mod tests {
     use super::*;
     use crate::Supervisor;
     use crate::TaskContext;
-    use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef, TaskSpec};
+    use crate::{BackoffPolicy, BoxTaskFuture, RestartPolicy, Task, TaskFn, TaskRef, TaskSpec};
     use std::sync::{
         Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     };
     use std::time::Duration;
+
+    struct PanickingNameTask;
+
+    impl Task for PanickingNameTask {
+        fn name(&self) -> &str {
+            panic!("injected task name panic")
+        }
+
+        fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     fn make_spec(name: &str) -> TaskSpec {
         let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
@@ -1258,39 +1436,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_events_do_not_decide_slot_state() {
-        let bus = Bus::new(64);
-        let ctrl = make_controller(ControllerConfig::default(), bus);
-        let id = TaskId::next();
-
-        let slot_arc = ctrl.get_or_create_slot("t");
-        {
-            let mut slot = slot_arc.lock().await;
-            slot.status = SlotStatus::Admitting {
-                since: Instant::now(),
-            };
-            slot.running_id = Some(id);
-        }
-        ctrl.running.insert(id, Arc::from("t"));
-
-        for kind in [
-            EventKind::TaskAdded,
-            EventKind::TaskAddFailed,
-            EventKind::TaskRemoveRequested,
-            EventKind::TaskRemoved,
-        ] {
-            let event = Arc::new(Event::new(kind).with_task("t").with_id(id));
-            ctrl.handle_event(event).await;
-        }
-
-        let slot = slot_arc.lock().await;
-        assert!(
-            matches!(slot.status, SlotStatus::Admitting { .. }),
-            "task lifecycle events must remain observability-only"
-        );
-    }
-
-    #[tokio::test]
     async fn stale_completion_does_not_free_current_owner() {
         let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
         let current_id = TaskId::next();
@@ -1348,6 +1493,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
+        let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+        let watched_id = TaskId::next();
+        let unwatched_id = TaskId::next();
+        let running_id = TaskId::next();
+        let (done, outcome) = oneshot::channel();
+        ctrl.watchers.insert(watched_id, done);
+
+        let slot = ctrl.get_or_create_slot("shutdown-slot");
+        {
+            let mut slot = slot.lock().await;
+            slot.status = SlotStatus::Running {
+                started_at: Instant::now(),
+            };
+            slot.running_id = Some(running_id);
+            slot.queue
+                .push_back((watched_id, waiting_spec("watched-shutdown-queue")));
+            slot.queue
+                .push_back((unwatched_id, waiting_spec("plain-shutdown-queue")));
+        }
+        ctrl.running.insert(running_id, Arc::from("shutdown-slot"));
+
+        ctrl.finalize_slot_state_on_shutdown().await;
+
+        assert!(matches!(
+            outcome.await,
+            Ok(TaskOutcome::Rejected { reason })
+                if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
+        ));
+        assert!(ctrl.watchers.is_empty());
+        assert!(ctrl.slots.is_empty());
+        assert!(ctrl.running.is_empty());
+    }
+
+    #[tokio::test]
     async fn shutdown_resolves_buffered_removal_reply() {
         let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
         let (reply, reply_rx) = oneshot::channel();
@@ -1366,6 +1546,81 @@ mod tests {
             reply_rx.await,
             Ok(Err(RuntimeError::ShuttingDown))
         ));
+    }
+
+    #[tokio::test]
+    async fn aborted_identity_worker_sends_explicit_shutdown_reply() {
+        let (reply, reply_rx) = oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
+        let mut workers = JoinSet::new();
+        workers.spawn(async move {
+            let _reply = IdentityReply::new(reply);
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("the identity worker must start")
+            .expect("the identity worker must signal start");
+
+        workers.abort_all();
+        Controller::drain_workers(&mut workers).await;
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), reply_rx).await,
+            Ok(Ok(Err(RuntimeError::ShuttingDown)))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn controller_task_join_can_resume_after_a_dropped_waiter() {
+        let (release, released) = oneshot::channel::<()>();
+        let task = Arc::new(ControllerTask::new(tokio::spawn(async move {
+            let _ = released.await;
+        })));
+        let bus = Bus::new(8);
+
+        let first_task = Arc::clone(&task);
+        let first_bus = bus.clone();
+        let first = tokio::spawn(async move { first_task.join(&first_bus).await });
+        assert!(
+            poll_until(Duration::from_secs(1), || async {
+                task.state.try_lock().is_err()
+            })
+            .await,
+            "the first waiter must own the shared join state"
+        );
+        first.abort();
+        let _ = first.await;
+        assert!(
+            poll_until(Duration::from_secs(1), || async {
+                task.state.try_lock().is_ok()
+            })
+            .await,
+            "aborting the first waiter must release the shared join state"
+        );
+
+        let second_task = Arc::clone(&task);
+        let second_bus = bus.clone();
+        let second = tokio::spawn(async move { second_task.join(&second_bus).await });
+        assert!(
+            poll_until(Duration::from_secs(1), || async {
+                task.state.try_lock().is_err()
+            })
+            .await,
+            "the second waiter must resume ownership of the stored JoinHandle"
+        );
+        assert!(
+            !second.is_finished(),
+            "the stored JoinHandle must remain pending after the first waiter is dropped"
+        );
+
+        release.send(()).expect("the controller task is waiting");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), second).await,
+            Ok(Ok(true))
+        ));
+        assert!(task.is_joined().await);
     }
 
     #[tokio::test]
@@ -1395,12 +1650,14 @@ mod tests {
             config,
             supervisor: Weak::new(),
             bus,
+            shutdown_token: CancellationToken::new(),
             slots: DashMap::new(),
             running: DashMap::new(),
             watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            task: OnceLock::new(),
         }
     }
 
@@ -1466,7 +1723,7 @@ mod tests {
             }
         })
         .await
-        .expect("controller loop must take its receiver and subscribe to the bus");
+        .expect("controller loop must take its command receiver");
         runner
     }
 
@@ -1480,6 +1737,179 @@ mod tests {
             .expect("controller loop must stop after cancellation")
             .expect("controller loop task must not panic")
             .expect("controller loop must exit cleanly");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter() {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let _runtime_handle = sup.serve();
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+        sup.core().attach_controller(&ctrl);
+        ctrl.run();
+        ctrl.run();
+
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+            .with_controller(Some(Arc::clone(&ctrl)));
+        let slot = ctrl.get_or_create_slot("blocked-shutdown-slot");
+        let slot_guard = slot.lock().await;
+
+        handle
+            .submit(
+                ControllerSpec::queue(waiting_spec("blocked-shutdown-task"))
+                    .with_slot("blocked-shutdown-slot"),
+            )
+            .await
+            .expect("the blocking submission must enter the controller queue");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.tx.capacity() == ctrl.config.queue_capacity.max(1)
+            })
+            .await,
+            "the controller must receive the command and block on the held slot lock"
+        );
+
+        let (_queued_id, queued_waiter) = handle
+            .submit_and_watch(
+                ControllerSpec::queue(waiting_spec("buffered-during-shutdown"))
+                    .with_slot("buffered-during-shutdown"),
+            )
+            .await
+            .expect("the watched command must be buffered behind the blocked handler");
+        let (_panicking_id, panicking_waiter) = handle
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(Arc::new(
+                PanickingNameTask,
+            ))))
+            .await
+            .expect("the hostile watched command must remain buffered for shutdown drain");
+        let identity_handle = handle.clone();
+        let identity = tokio::spawn(async move { identity_handle.cancel(TaskId::next()).await });
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.tx.capacity() == ctrl.config.queue_capacity.max(1) - 3
+            })
+            .await,
+            "all later commands must remain buffered before shutdown"
+        );
+
+        let first_handle = handle.clone();
+        let first_shutdown = tokio::spawn(async move { first_handle.shutdown().await });
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                sup.core().is_shutting_down()
+            })
+            .await,
+            "shared runtime shutdown must start"
+        );
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.task
+                    .get()
+                    .is_some_and(|task| task.state.try_lock().is_err())
+            })
+            .await,
+            "the shared shutdown owner must reach the controller join"
+        );
+        assert!(
+            !first_shutdown.is_finished(),
+            "public shutdown must wait for the blocked controller loop"
+        );
+
+        first_shutdown.abort();
+        let _ = first_shutdown.await;
+
+        let second_shutdown = tokio::spawn(async move { handle.shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !second_shutdown.is_finished(),
+            "dropping one shutdown waiter must not detach the shared controller join"
+        );
+
+        drop(slot_guard);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), second_shutdown).await,
+            Ok(Ok(Ok(())))
+        ));
+        assert!(ctrl.is_joined().await);
+        assert!(ctrl.slots.is_empty());
+        assert!(ctrl.running.is_empty());
+        assert!(ctrl.watchers.is_empty());
+        let queued_outcome = tokio::time::timeout(Duration::from_millis(50), queued_waiter.wait())
+            .await
+            .expect("the buffered watcher must already be settled")
+            .expect("the buffered watched command must resolve before shutdown returns");
+        assert!(matches!(
+            queued_outcome,
+            TaskOutcome::Rejected { reason }
+                if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
+        ));
+        let panicking_outcome =
+            tokio::time::timeout(Duration::from_millis(50), panicking_waiter.wait())
+                .await
+                .expect("the hostile buffered watcher must already be settled")
+                .expect("the hostile buffered watcher must resolve as an outcome");
+        assert!(matches!(
+            panicking_outcome,
+            TaskOutcome::Rejected { reason }
+                if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
+        ));
+        assert!(identity.is_finished());
+        assert!(matches!(
+            identity.await,
+            Ok(Err(RuntimeError::ShuttingDown))
+        ));
+
+        let late = ctrl
+            .handle()
+            .try_submit(ControllerSpec::queue(waiting_spec("late-after-join")));
+        assert!(matches!(late, Err(ControllerError::Closed)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn natural_run_waits_for_controller_join() {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+        sup.core().attach_controller(&ctrl);
+        ctrl.run();
+
+        let slot = ctrl.get_or_create_slot("blocked-natural-slot");
+        let slot_guard = slot.lock().await;
+        ctrl.handle()
+            .submit(
+                ControllerSpec::queue(waiting_spec("blocked-natural-task"))
+                    .with_slot("blocked-natural-slot"),
+            )
+            .await
+            .expect("the blocking submission must enter controller intake");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.tx.capacity() == ctrl.config.queue_capacity.max(1)
+            })
+            .await,
+            "the controller must block on the held slot before natural shutdown"
+        );
+
+        let run_sup = Arc::clone(&sup);
+        let run = tokio::spawn(async move { run_sup.run(vec![]).await });
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.task
+                    .get()
+                    .is_some_and(|task| task.state.try_lock().is_err())
+            })
+            .await,
+            "natural shutdown must reach the shared controller join"
+        );
+        assert!(
+            !run.is_finished(),
+            "natural run must not return while the controller loop is blocked"
+        );
+
+        drop(slot_guard);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), run).await,
+            Ok(Ok(Ok(())))
+        ));
+        assert!(ctrl.is_joined().await);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1743,7 +2173,6 @@ mod tests {
         })
         .await;
 
-        stop_controller_loop(token, runner).await;
         assert!(
             reached_running,
             "the direct registry reply must confirm admission without TaskAdded"
@@ -1752,6 +2181,10 @@ mod tests {
             ctrl.running.get(&id).as_deref().map(AsRef::as_ref),
             Some("s")
         );
+
+        stop_controller_loop(token, runner).await;
+        assert!(ctrl.running.is_empty());
+        assert!(ctrl.slots.is_empty());
 
         let _ = handle.shutdown().await;
     }
@@ -2257,7 +2690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_queue_advancement_after_shutdown_requested() {
+    async fn no_queue_advancement_after_shutdown_starts() {
         let (sup, handle, id) = sup_with_live_task().await;
         let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
@@ -2279,8 +2712,7 @@ mod tests {
         );
         ctrl.running.insert(id, Arc::from("s"));
         let mut admissions = JoinSet::new();
-        ctrl.handle_event(Arc::new(Event::new(EventKind::ShutdownRequested)))
-            .await;
+        ctrl.mark_shutting_down();
         ctrl.handle_completion_result(
             CompletionResult {
                 id,
