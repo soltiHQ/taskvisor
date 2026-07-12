@@ -35,15 +35,17 @@
 //!   -> publish TaskAdded
 //!
 //! Remove(id)
-//!   -> remove handle from registry
+//!   -> change Registered to Removing
 //!   -> cancel actor token
 //!   -> reply claimed
 //!   -> join actor
+//!   -> release id/name indexes
 //!   -> publish TaskRemoved
 //!
 //! Actor completion(id)
-//!   -> remove handle from registry
+//!   -> change Registered to Removing
 //!   -> join actor
+//!   -> release id/name indexes
 //!   -> publish TaskRemoved
 //! ```
 //!
@@ -53,8 +55,9 @@
 //! - Command replies report registry decisions, not terminal task outcomes.
 //! - Cleanup is idempotent. Duplicate or stale completion signals become no-ops.
 //! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
-//! - Task name is a human label and a duplicate-name admission gate.
-//!   Cleanup waits for the actor completion signal and join result.
+//! - Task name is a label and a duplicate-name admission gate; reserved while the task is `Registered` or `Removing`.
+//! - `list`, identity lookup, and empty checks include removing tasks.
+//! - Cleanup waits for the actor completion signal and join result.
 //! - `TaskRemoved` means the registry has finished cleanup for that identity.
 //! - `TaskId` is the canonical identity.
 
@@ -112,8 +115,27 @@ pub(crate) enum RegistryCommand {
 struct Handle {
     join: JoinHandle<ActorExitReason>,
     cancel: CancellationToken,
-    label: Arc<str>,
     done: Option<OutcomeTx>,
+}
+
+/// Lifecycle phase of one authoritative registry entry.
+enum EntryState {
+    /// The actor can still be claimed by remove, completion, or shutdown.
+    Registered(Handle),
+    /// One owner has the actor handle and is waiting for its terminal join.
+    Removing,
+}
+
+/// Authoritative membership record kept until terminal join cleanup finishes.
+struct Entry {
+    label: Arc<str>,
+    state: EntryState,
+}
+
+/// Terminal result passed from the single join owner to registry cleanup.
+enum JoinCompletion {
+    Joined(Result<ActorExitReason, JoinError>),
+    ForceAborted,
 }
 
 /// Sends one completion signal when an actor task returns, panics, or is aborted.
@@ -134,7 +156,9 @@ impl Drop for ActorCompletionGuard {
 #[derive(Default)]
 struct Inner {
     /// Canonical task map keyed by runtime identity.
-    tasks: HashMap<TaskId, Handle>,
+    ///
+    /// Entries stay here in both `Registered` and `Removing` phases.
+    tasks: HashMap<TaskId, Entry>,
 
     /// Label lookup used for duplicate-name checks and label-based operations.
     by_label: HashMap<Arc<str>, TaskId>,
@@ -150,9 +174,9 @@ struct PendingInner {
     labels: HashMap<TaskId, Arc<str>>,
 }
 
-/// Tracks actor joins that are running outside the registry map.
+/// Tracks actor joins owned by removing entries.
 ///
-/// This is used after remove/cleanup paths move a handle out of `state.tasks` but still need to wait for the actor join and final `TaskRemoved`.
+/// This provides shutdown diagnostics and a wait barrier while the registry map remains the authority for task membership.
 #[derive(Default)]
 struct PendingJoins {
     inner: std::sync::Mutex<PendingInner>,
@@ -250,12 +274,12 @@ impl PendingJoins {
 /// - [`SupervisorCore`](super::runtime::SupervisorCore) - sends registry commands
 /// - [`TaskOutcome`] - final result for watched tasks
 pub(crate) struct Registry {
-    state: RwLock<Inner>,
+    state: Arc<RwLock<Inner>>,
     bus: Bus,
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
     grace: Duration,
-    empty_notify: Notify,
+    empty_notify: Arc<Notify>,
     cmd_rx: std::sync::Mutex<Option<mpsc::Receiver<RegistryCommand>>>,
     completion_tx: mpsc::UnboundedSender<TaskId>,
     completion_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<TaskId>>>,
@@ -274,12 +298,12 @@ impl Registry {
     ) -> Arc<Self> {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
-            state: RwLock::new(Inner::default()),
+            state: Arc::new(RwLock::new(Inner::default())),
             bus,
             runtime_token,
             semaphore,
             grace,
-            empty_notify: Notify::new(),
+            empty_notify: Arc::new(Notify::new()),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
             completion_tx,
             completion_rx: std::sync::Mutex::new(Some(completion_rx)),
@@ -288,7 +312,7 @@ impl Registry {
         })
     }
 
-    /// Returns true when `id` is no longer registered and has no join in flight.
+    /// Returns true when `id` has no registry entry and no join in flight.
     ///
     /// Used as a fallback when a `TaskRemoved` event may have been missed because of broadcast lag.
     pub async fn is_terminated(&self, id: TaskId) -> bool {
@@ -300,8 +324,8 @@ impl Registry {
 
     /// Waits for detached join reporters to finish.
     ///
-    /// Detached join reporters are created after remove/cleanup paths take a task out of `state.tasks`.
-    /// They are no longer covered by [`cancel_all_within`](Self::cancel_all_within), but shutdown still needs their final `TaskRemoved` events before the subscriber listener stops.
+    /// Join reporters own actor handles for entries in the `Removing` phase.
+    /// Shutdown still needs their final `TaskRemoved` events before the subscriber listener stops.
     ///
     /// Returns labels for joins still in flight after `grace`.
     pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
@@ -309,22 +333,14 @@ impl Registry {
         self.pending_joins.pending_labels()
     }
 
-    #[inline]
-    fn notify_after_remove(&self, len_after: usize) {
-        if len_after == 0 {
-            self.empty_notify.notify_one();
-        }
-    }
-
-    /// Waits until no tasks remain registered.
-    ///
-    /// This only checks the registry map.
-    /// Detached joins may still be in flight; use [`wait_joins_within`](Self::wait_joins_within) for those.
+    /// Waits until no registered or removing tasks remain.
     ///
     /// Uses register-before-check to avoid losing a wakeup.
     pub async fn wait_until_empty(&self) {
         loop {
             let notified = self.empty_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.is_empty().await {
                 return;
             }
@@ -437,19 +453,19 @@ impl Registry {
         }
     }
 
-    /// Returns registered tasks as `(id, label)` pairs, sorted by identity.
+    /// Returns registered and removing tasks as `(id, label)` pairs, sorted by identity.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         let st = self.state.read().await;
         let mut v: Vec<(TaskId, Arc<str>)> = st
             .tasks
             .iter()
-            .map(|(id, h)| (*id, h.label.clone()))
+            .map(|(id, entry)| (*id, Arc::clone(&entry.label)))
             .collect();
         v.sort_by_key(|(id, _)| *id);
         v
     }
 
-    /// Returns true if `id` is currently registered.
+    /// Returns true if `id` is registered or removing.
     pub async fn contains(&self, id: TaskId) -> bool {
         self.state.read().await.tasks.contains_key(&id)
     }
@@ -459,9 +475,7 @@ impl Registry {
         self.state.read().await.by_label.get(name).copied()
     }
 
-    /// Returns true if no tasks are currently registered.
-    ///
-    /// Detached joins may still be running after the map becomes empty.
+    /// Returns true if no tasks are registered or removing.
     pub async fn is_empty(&self) -> bool {
         self.state.read().await.tasks.is_empty()
     }
@@ -469,7 +483,7 @@ impl Registry {
     /// Cancels all registered tasks and waits for them within one shared grace window.
     ///
     /// Steps:
-    /// - remove all handles from the registry map,
+    /// - change every `Registered` entry to `Removing`,
     /// - cancel every actor token,
     /// - join each actor until the shared deadline,
     /// - abort actors that do not finish in time,
@@ -478,43 +492,52 @@ impl Registry {
     /// Returns labels of tasks that were force-aborted.
     pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
-        let handles: Vec<(TaskId, Handle)> = {
+        let handles: Vec<(TaskId, Arc<str>, Handle)> = {
             let mut st = self.state.write().await;
-            st.by_label.clear();
-            let drained = st.tasks.drain().collect::<Vec<_>>();
-            self.empty_notify.notify_waiters();
-            drained
+            let ids: Vec<TaskId> = st.tasks.keys().copied().collect();
+            ids.into_iter()
+                .filter_map(|id| {
+                    Self::claim_registered(&mut st, &self.pending_joins, id)
+                        .map(|(label, handle)| (id, label, handle))
+                })
+                .collect()
         };
-        for (id, h) in &handles {
-            self.pending_joins.inc(*id);
+        for (_, _, h) in &handles {
             h.cancel.cancel();
         }
 
         let deadline = tokio::time::Instant::now() + grace;
         let mut stuck = Vec::new();
 
-        for (id, h) in handles {
-            let label = h.label.clone();
+        for (id, label, h) in handles {
             let mut join = h.join;
             match tokio::time::timeout_at(deadline, &mut join).await {
                 Ok(res) => {
-                    self.pending_joins.dec(id);
-                    Self::report_join(&self.bus, id, &label, res, h.done);
+                    Self::finish_removal(
+                        &self.state,
+                        &self.empty_notify,
+                        &self.pending_joins,
+                        &self.bus,
+                        id,
+                        h.done,
+                        JoinCompletion::Joined(res),
+                    )
+                    .await;
                 }
                 Err(_elapsed) => {
                     join.abort();
                     let _ = join.await;
-                    self.pending_joins.dec(id);
-                    if let Some(done) = h.done {
-                        let _ = done.send(TaskOutcome::ForceAborted);
-                    }
-                    self.bus.publish(
-                        Event::new(EventKind::TaskRemoved)
-                            .with_task(Arc::clone(&label))
-                            .with_id(id)
-                            .with_reason("force_terminated_after_grace"),
-                    );
-                    stuck.push(label);
+                    stuck.push(Arc::clone(&label));
+                    Self::finish_removal(
+                        &self.state,
+                        &self.empty_notify,
+                        &self.pending_joins,
+                        &self.bus,
+                        id,
+                        h.done,
+                        JoinCompletion::ForceAborted,
+                    )
+                    .await;
                 }
             }
         }
@@ -541,8 +564,6 @@ impl Registry {
     /// Spawns an actor and registers it under `id`.
     ///
     /// Duplicate task names are rejected.
-    /// If a watched add includes `done`, it resolves as [`TaskOutcome::Rejected`]
-    /// with reason [`ALREADY_EXISTS`](crate::reasons::ALREADY_EXISTS).
     ///
     /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) because registration confirmation fails before the waiter is returned.
     async fn spawn_and_register(
@@ -596,11 +617,13 @@ impl Registry {
 
         st.tasks.insert(
             id,
-            Handle {
-                join: join_handle,
-                cancel: task_token,
-                label: label.clone(),
-                done,
+            Entry {
+                label: Arc::clone(&label),
+                state: EntryState::Registered(Handle {
+                    join: join_handle,
+                    cancel: task_token,
+                    done,
+                }),
             },
         );
         st.by_label.insert(label.clone(), id);
@@ -620,15 +643,11 @@ impl Registry {
     ///
     /// If the task is unknown or cleanup already owns it, replies `Ok(false)` without publishing a terminal event.
     async fn remove_task(&self, id: TaskId, reply: oneshot::Sender<RemoveReply>) {
-        self.pending_joins.inc(id);
-        if let Some((handle, len_after)) = self.take_handle(id).await {
-            self.notify_after_remove(len_after);
-
+        if let Some((_label, handle)) = self.claim_task(id).await {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
-            self.spawn_join_report(id, handle.label, handle.join, Some(self.grace), handle.done);
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);
         } else {
-            self.pending_joins.dec(id);
             let _ = reply.send(Ok(false));
         }
     }
@@ -638,24 +657,40 @@ impl Registry {
     /// Called after the actor's reliable completion signal is received.
     /// Duplicate or stale completion signals are no-ops.
     async fn cleanup_task(&self, id: TaskId) {
-        self.pending_joins.inc(id);
-        if let Some((handle, len_after)) = self.take_handle(id).await {
-            self.notify_after_remove(len_after);
-            self.spawn_join_report(id, handle.label, handle.join, Some(self.grace), handle.done);
-        } else {
-            self.pending_joins.dec(id);
+        if let Some((_label, handle)) = self.claim_task(id).await {
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);
         }
     }
 
-    /// Removes a handle and its label index entry atomically.
+    /// Changes one task from `Registered` to `Removing`.
     ///
-    /// Returns the removed handle and the number of registered tasks left.
-    async fn take_handle(&self, id: TaskId) -> Option<(Handle, usize)> {
+    /// The winning caller gets the only actor handle.
+    /// Identity and label indexes stay in the registry until that caller finishes the join.
+    async fn claim_task(&self, id: TaskId) -> Option<(Arc<str>, Handle)> {
         let mut st = self.state.write().await;
-        let h = st.tasks.remove(&id)?;
-        st.by_label.remove(&h.label);
-        let len_after = st.tasks.len();
-        Some((h, len_after))
+        Self::claim_registered(&mut st, &self.pending_joins, id)
+    }
+
+    /// Locked implementation of the `Registered` to `Removing` transition.
+    fn claim_registered(
+        st: &mut Inner,
+        pending_joins: &PendingJoins,
+        id: TaskId,
+    ) -> Option<(Arc<str>, Handle)> {
+        let entry = st.tasks.get_mut(&id)?;
+        if matches!(&entry.state, EntryState::Removing) {
+            return None;
+        }
+
+        let EntryState::Registered(handle) =
+            std::mem::replace(&mut entry.state, EntryState::Removing)
+        else {
+            unreachable!("a removing entry was checked above")
+        };
+        let label = Arc::clone(&entry.label);
+        pending_joins.inc(id);
+        pending_joins.label(id, Arc::clone(&label));
+        Some((label, handle))
     }
 
     /// Joins an actor in a detached task and reports its final result.
@@ -667,44 +702,86 @@ impl Registry {
     fn spawn_join_report(
         &self,
         id: TaskId,
-        name: Arc<str>,
         join: JoinHandle<ActorExitReason>,
         force_after: Option<Duration>,
         done: Option<OutcomeTx>,
     ) {
         let bus = self.bus.clone();
+        let state = Arc::clone(&self.state);
+        let empty_notify = Arc::clone(&self.empty_notify);
         let pending = Arc::clone(&self.pending_joins);
-        pending.label(id, Arc::clone(&name));
         tokio::spawn(async move {
             let mut join = join;
-            match force_after {
+            let completion = match force_after {
                 Some(grace) => match tokio::time::timeout(grace, &mut join).await {
-                    Ok(res) => {
-                        Self::report_join(&bus, id, &name, res, done);
-                        pending.dec(id);
-                    }
+                    Ok(res) => JoinCompletion::Joined(res),
                     Err(_) => {
                         join.abort();
                         let _ = join.await;
-                        if let Some(done) = done {
-                            let _ = done.send(TaskOutcome::ForceAborted);
-                        }
-                        bus.publish(
-                            Event::new(EventKind::TaskRemoved)
-                                .with_task(name)
-                                .with_id(id)
-                                .with_reason("force_terminated_after_grace"),
-                        );
-                        pending.dec(id);
+                        JoinCompletion::ForceAborted
                     }
                 },
-                None => {
-                    let res = join.await;
-                    Self::report_join(&bus, id, &name, res, done);
-                    pending.dec(id);
-                }
-            }
+                None => JoinCompletion::Joined(join.await),
+            };
+
+            Self::finish_removal(&state, &empty_notify, &pending, &bus, id, done, completion).await;
         });
+    }
+
+    /// Commits terminal cleanup for one `Removing` entry.
+    ///
+    /// State removal, outcome delivery, terminal events, and pending-join cleanup finish before an empty-registry waiter can continue.
+    async fn finish_removal(
+        state: &RwLock<Inner>,
+        empty_notify: &Notify,
+        pending_joins: &PendingJoins,
+        bus: &Bus,
+        id: TaskId,
+        done: Option<OutcomeTx>,
+        completion: JoinCompletion,
+    ) {
+        let mut st = state.write().await;
+        let is_removing = st
+            .tasks
+            .get(&id)
+            .is_some_and(|entry| matches!(&entry.state, EntryState::Removing));
+        if !is_removing {
+            drop(st);
+            pending_joins.dec(id);
+            return;
+        }
+
+        let entry = st
+            .tasks
+            .remove(&id)
+            .expect("the removing entry was checked above");
+        if st.by_label.get(entry.label.as_ref()) == Some(&id) {
+            st.by_label.remove(entry.label.as_ref());
+        }
+
+        match completion {
+            JoinCompletion::Joined(res) => {
+                Self::report_join(bus, id, &entry.label, res, done);
+            }
+            JoinCompletion::ForceAborted => {
+                if let Some(done) = done {
+                    let _ = done.send(TaskOutcome::ForceAborted);
+                }
+                bus.publish(
+                    Event::new(EventKind::TaskRemoved)
+                        .with_task(Arc::clone(&entry.label))
+                        .with_id(id)
+                        .with_reason("force_terminated_after_grace"),
+                );
+            }
+        }
+        pending_joins.dec(id);
+
+        let is_empty = st.tasks.is_empty();
+        drop(st);
+        if is_empty {
+            empty_notify.notify_waiters();
+        }
     }
 
     /// Reports the result of a joined actor.
@@ -805,6 +882,72 @@ mod tests {
         let token = CancellationToken::new();
         let (_tx, rx) = mpsc::channel(64);
         Registry::new(bus, token, None, Duration::from_secs(5), rx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_cleanup_wakes_all_empty_waiters() {
+        use tokio::sync::Barrier;
+
+        let registry = registry();
+        let id = TaskId::next();
+        let label: Arc<str> = Arc::from("empty-waiters");
+        let mut state = registry.state.write().await;
+        state.by_label.insert(Arc::clone(&label), id);
+        state.tasks.insert(
+            id,
+            Entry {
+                label: Arc::clone(&label),
+                state: EntryState::Removing,
+            },
+        );
+        registry.pending_joins.inc(id);
+        registry.pending_joins.label(id, label);
+
+        let ready = Arc::new(Barrier::new(3));
+        let first_registry = Arc::clone(&registry);
+        let first_ready = Arc::clone(&ready);
+        let first = tokio::spawn(async move {
+            first_ready.wait().await;
+            first_registry.wait_until_empty().await;
+        });
+        let second_registry = Arc::clone(&registry);
+        let second_ready = Arc::clone(&ready);
+        let second = tokio::spawn(async move {
+            second_ready.wait().await;
+            second_registry.wait_until_empty().await;
+        });
+
+        ready.wait().await;
+        tokio::task::yield_now().await;
+        drop(state);
+
+        let state_barrier = registry.state.write().await;
+        drop(state_barrier);
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+
+        Registry::finish_removal(
+            &registry.state,
+            &registry.empty_notify,
+            &registry.pending_joins,
+            &registry.bus,
+            id,
+            None,
+            JoinCompletion::Joined(Ok(ActorExitReason::Completed)),
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("the first empty waiter must wake")
+            .expect("the first empty waiter must not panic");
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("the second empty waiter must wake")
+            .expect("the second empty waiter must not panic");
+        assert!(registry.is_empty().await);
+        assert_eq!(registry.id_for_label("empty-waiters").await, None);
+        assert!(registry.pending_joins.is_empty());
     }
 
     fn started_registry(
@@ -1011,6 +1154,22 @@ mod tests {
             .await
             .expect("the task must observe cancellation");
         assert!(registry.pending_joins.contains(id));
+        assert!(
+            registry.contains(id).await,
+            "a removing task must keep its registry identity"
+        );
+        assert_eq!(
+            registry.list().await,
+            vec![(id, Arc::from("remove-once"))],
+            "a removing task must stay visible in registry listings"
+        );
+        assert_eq!(registry.id_for_label("remove-once").await, Some(id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), registry.wait_until_empty())
+                .await
+                .is_err(),
+            "the registry cannot become empty before the actor join"
+        );
         while let Ok(event) = events.try_recv() {
             assert_ne!(
                 event.kind,
@@ -1034,6 +1193,117 @@ mod tests {
         )
         .await
         .expect("the released task must finish its join");
+        assert!(!registry.contains(id).await);
+        assert_eq!(registry.id_for_label("remove-once").await, None);
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_task_keeps_label_reserved_until_terminal_join() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(5));
+        let cancellation_seen = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let task_release = Arc::clone(&release);
+        let first: TaskRef = TaskFn::arc("reserved-name", move |ctx: TaskContext| {
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&task_release);
+            async move {
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Err(TaskError::Canceled)
+            }
+        });
+        let first_id = TaskId::next();
+        assert!(
+            receive_reply(
+                send_add(&tx, first_id, TaskSpec::restartable(first), None),
+                "reserved-name add reply",
+            )
+            .await
+            .is_ok()
+        );
+        assert!(matches!(
+            receive_reply(send_remove(&tx, first_id), "reserved-name remove reply").await,
+            Ok(true)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("the old task must observe cancellation");
+
+        let duplicate_runs = Arc::new(AtomicUsize::new(0));
+        let runs_by_task = Arc::clone(&duplicate_runs);
+        let duplicate: TaskRef = TaskFn::arc("reserved-name", move |_ctx: TaskContext| {
+            runs_by_task.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let duplicate_id = TaskId::next();
+        let duplicate_reply = receive_reply(
+            send_add(&tx, duplicate_id, TaskSpec::once(duplicate), None),
+            "removing duplicate add reply",
+        )
+        .await;
+        assert!(
+            matches!(
+                duplicate_reply,
+                Err(RuntimeError::TaskAlreadyExists { name })
+                    if name.as_ref() == "reserved-name"
+            ),
+            "a removing task must keep its label reserved"
+        );
+        assert_eq!(
+            duplicate_runs.load(Ordering::SeqCst),
+            0,
+            "a rejected replacement body must not run"
+        );
+        assert_eq!(registry.id_for_label("reserved-name").await, Some(first_id));
+        assert_eq!(
+            registry.list().await,
+            vec![(first_id, Arc::from("reserved-name"))]
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), registry.wait_until_empty())
+                .await
+                .is_err(),
+            "terminal join must control when the registry becomes empty"
+        );
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("terminal join must release the old task identity");
+        assert_eq!(registry.id_for_label("reserved-name").await, None);
+        assert!(!registry.pending_joins.contains(first_id));
+
+        let replacement: TaskRef = TaskFn::arc("reserved-name", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let replacement_id = TaskId::next();
+        assert!(
+            receive_reply(
+                send_add(
+                    &tx,
+                    replacement_id,
+                    TaskSpec::restartable(replacement),
+                    None,
+                ),
+                "replacement add reply",
+            )
+            .await
+            .is_ok(),
+            "the label must be reusable after terminal cleanup"
+        );
+        assert_eq!(
+            registry.id_for_label("reserved-name").await,
+            Some(replacement_id)
+        );
+
         stop_registry(&registry, &token).await;
     }
 
@@ -1367,11 +1637,13 @@ mod tests {
         state.by_label.insert(Arc::clone(&label), id);
         state.tasks.insert(
             id,
-            Handle {
-                join,
-                cancel: CancellationToken::new(),
+            Entry {
                 label: Arc::clone(&label),
-                done: Some(done),
+                state: EntryState::Registered(Handle {
+                    join,
+                    cancel: CancellationToken::new(),
+                    done: Some(done),
+                }),
             },
         );
         drop(state);
@@ -1476,7 +1748,7 @@ mod tests {
     async fn completion_claim_before_remove_emits_one_terminal_event() {
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(5));
         let mut events = bus.subscribe();
         let release = Arc::new(Notify::new());
         let task_release = Arc::clone(&release);
@@ -1503,10 +1775,23 @@ mod tests {
             .completion_tx
             .send(id)
             .expect("completion receiver must be open");
-        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
-            .await
-            .expect("completion branch must claim the handle");
+        assert!(matches!(
+            receive_reply(
+                send_remove(&tx, TaskId::next()),
+                "completion claim barrier reply",
+            )
+            .await,
+            Ok(false)
+        ));
         assert!(registry.pending_joins.contains(id));
+        assert!(registry.contains(id).await);
+        assert_eq!(registry.id_for_label("completion-first").await, Some(id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), registry.wait_until_empty())
+                .await
+                .is_err(),
+            "completion ownership must retain membership until join"
+        );
         assert!(matches!(
             receive_reply(send_remove(&tx, id), "completion-first remove reply").await,
             Ok(false)
@@ -1522,12 +1807,10 @@ mod tests {
             receive_reply(done_rx, "completion-first outcome").await,
             TaskOutcome::Completed
         ));
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            registry.pending_joins.wait_drained(),
-        )
-        .await
-        .expect("completion-owned join must drain");
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("completion-owned join must finish registry cleanup");
+        assert!(!registry.pending_joins.contains(id));
 
         assert!(matches!(
             receive_reply(
