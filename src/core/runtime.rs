@@ -79,7 +79,7 @@ use crate::core::{
     alive::AliveTracker,
     registry::{
         AddBatchItem, AddReplyRx, CancelDecision, CancelReplyRx, OutcomeTx, Registry,
-        RegistryCommand, RemoveReplyRx,
+        RegistryCommand, RemovalCompletion, RemoveReplyRx,
     },
 };
 use crate::{
@@ -379,21 +379,23 @@ impl SupervisorCore {
     /// Queues a task add command under a pre-minted identity.
     ///
     /// Used by the controller so a submission keeps the same [`TaskId`] from admission through registry registration.
+    /// Returns the direct Add reply and a shared signal that resolves only after terminal registry cleanup releases the task id and label.
     #[cfg(feature = "controller")]
     pub(crate) fn add_task_with_id_watched(
         &self,
         id: TaskId,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
-    ) -> Result<AddReplyRx, (RuntimeError, Option<OutcomeTx>)> {
-        let (_id, reply) = self.enqueue_add_task(id, spec, done)?;
-        Ok(reply)
+    ) -> Result<(AddReplyRx, RemovalCompletion), (RuntimeError, Option<OutcomeTx>)> {
+        let completion = RemovalCompletion::new();
+        let (_id, reply) =
+            self.enqueue_add_task_with_completion(id, spec, done, Some(completion.clone()))?;
+        Ok((reply, completion))
     }
 
     /// Adds a watched task and waits for the registry registration decision.
     ///
-    /// Returns the minted [`TaskId`] and a receiver that resolves to the final [`TaskOutcome`](crate::TaskOutcome)
-    /// if the task is registered and later terminates.
+    /// Returns the minted [`TaskId`] and a receiver that resolves to the final [`TaskOutcome`](crate::TaskOutcome) if the task is registered and later terminates.
     pub(crate) async fn add_task_watched(
         &self,
         spec: TaskSpec,
@@ -425,6 +427,17 @@ impl SupervisorCore {
         spec: TaskSpec,
         done: Option<OutcomeTx>,
     ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
+        self.enqueue_add_task_with_completion(id, spec, done, None)
+    }
+
+    /// Queues one Add command with an optional shared terminal completion signal.
+    fn enqueue_add_task_with_completion(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+        completion: Option<RemovalCompletion>,
+    ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
@@ -442,7 +455,7 @@ impl SupervisorCore {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
         };
-        Ok(self.commit_add(permit, id, label, spec, done))
+        Ok(self.commit_add(permit, id, label, spec, done, completion))
     }
 
     /// Waits for bounded queue capacity, then queues one Add command.
@@ -464,7 +477,7 @@ impl SupervisorCore {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
         };
-        Ok(self.commit_add(permit, id, label, spec, done))
+        Ok(self.commit_add(permit, id, label, spec, done, None))
     }
 
     /// Publishes the request event and makes an already-reserved Add visible.
@@ -478,6 +491,7 @@ impl SupervisorCore {
         label: Arc<str>,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
+        completion: Option<RemovalCompletion>,
     ) -> (TaskId, AddReplyRx) {
         let (reply, reply_rx) = oneshot::channel();
         self.bus.publish(
@@ -489,6 +503,7 @@ impl SupervisorCore {
             id,
             spec,
             outcome: done,
+            completion,
             reply,
         });
         (id, reply_rx)
@@ -683,7 +698,7 @@ impl SupervisorCore {
     }
 
     /// Returns true if `id` is currently registered.
-    #[cfg(any(test, feature = "controller"))]
+    #[cfg(test)]
     pub(crate) async fn contains_id(&self, id: TaskId) -> bool {
         self.registry.contains(id).await
     }
@@ -2219,6 +2234,37 @@ mod tests {
             }
             other => panic!("add must hand the watcher back on failure, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "controller")]
+    #[tokio::test]
+    async fn controller_completion_waits_for_registry_membership_cleanup() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        core.start();
+        let id = TaskId::next();
+        let task: TaskRef = TaskFn::arc("completion-cleanup", |_ctx: TaskContext| async { Ok(()) });
+        let (reply, completion) = core
+            .add_task_with_id_watched(id, TaskSpec::once(task), None)
+            .expect("controller Add must enter the registry queue");
+
+        assert!(matches!(reply.await, Ok(Ok(()))));
+        timeout(Duration::from_secs(2), completion.wait())
+            .await
+            .expect("controller completion must arrive after terminal cleanup");
+        assert!(
+            !core.contains_id(id).await,
+            "completion must mean the registry id is gone"
+        );
+
+        let replacement: TaskRef =
+            TaskFn::arc("completion-cleanup", |_ctx: TaskContext| async { Ok(()) });
+        core.add_task(TaskSpec::once(replacement))
+            .await
+            .expect("completion must mean the registry label can be reused");
+
+        let _ = core.shutdown().await;
     }
 
     #[tokio::test]

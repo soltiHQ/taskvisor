@@ -64,11 +64,12 @@ pub(super) enum SlotStatus {
 
     /// The current owner is being removed.
     ///
-    /// The slot waits for `TaskRemoved` before it starts the next queued submission.
+    /// The slot waits for reliable terminal registry cleanup before it starts the next queued
+    /// submission.
     Terminating {
         /// Time when removal was requested.
         ///
-        /// Used by lag recovery to re-issue cleanup if the slot stays stuck.
+        /// Used for controller snapshots.
         cancelled_at: Instant,
     },
 }

@@ -10,7 +10,7 @@
 //! ## Busy Slots
 //!
 //! A slot is busy while it is:
-//! - `Terminating`: the task is being removed, and the controller waits for `TaskRemoved`,
+//! - `Terminating`: the task is being removed, and the controller waits for registry completion,
 //! - `Admitting`: the Add command was sent, but its direct registry reply is still pending,
 //! - `Running`: the registry accepted the task.
 //!
@@ -49,7 +49,7 @@ pub enum AdmissionPolicy {
     /// Replace the next pending submission for this slot.
     ///
     /// If the slot is running, the controller asks the runtime to remove the current owner.
-    /// The replacement starts only after `TaskRemoved` is observed.
+    /// The replacement starts only after terminal registry cleanup is confirmed.
     ///
     /// Repeated `Replace` submissions do not grow the queue.
     /// They supersede the queued head, so the latest replacement wins.
