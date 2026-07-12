@@ -42,8 +42,8 @@
 //!
 //! run(tasks)
 //!   starts listeners
-//!   adds initial tasks
-//!   waits for registration confirmation best-effort
+//!   registers all initial tasks as one atomic batch
+//!   waits for the direct registry reply
 //!   waits for OS shutdown signal or natural completion
 //!
 //! shutdown()
@@ -61,6 +61,7 @@
 //! - Explicit, signal, and natural shutdown paths join one detached operation.
 //! - Every shutdown waiter receives the same cached result after full cleanup.
 //! - The first shutdown trigger controls the result and request events.
+//! - Static `run()` tasks are accepted or rejected as one registry operation.
 //! - Registry membership is keyed by `TaskId`.
 //! - `run()` is single-shot. A second call returns `RuntimeError::AlreadyRunning`.
 //! - `snapshot` and `is_alive` are best-effort views from the alive tracker.
@@ -77,8 +78,8 @@ use tokio_util::sync::CancellationToken;
 use crate::core::{
     alive::AliveTracker,
     registry::{
-        AddReplyRx, CancelDecision, CancelReplyRx, OutcomeTx, Registry, RegistryCommand,
-        RemoveReplyRx,
+        AddBatchItem, AddReplyRx, CancelDecision, CancelReplyRx, OutcomeTx, Registry,
+        RegistryCommand, RemoveReplyRx,
     },
 };
 use crate::{
@@ -498,6 +499,44 @@ impl SupervisorCore {
         (id, reply_rx)
     }
 
+    /// Waits for one queue slot, then commits the complete static task batch.
+    async fn enqueue_add_batch_wait(
+        &self,
+        items: Vec<AddBatchItem>,
+    ) -> Result<AddReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self
+            .cmd_tx
+            .reserve()
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        let Some(_admission) = self.command_admission() else {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        };
+
+        let (reply, reply_rx) = oneshot::channel();
+        for item in &items {
+            self.bus.publish(
+                Event::new(EventKind::TaskAddRequested)
+                    .with_task(Arc::clone(&item.label))
+                    .with_id(item.id),
+            );
+        }
+        permit.send(RegistryCommand::AddBatch { items, reply });
+        Ok(reply_rx)
+    }
+
+    /// Resolves the authoritative decision for one static registration batch.
+    async fn await_add_batch_reply(reply: AddReplyRx) -> Result<(), RuntimeError> {
+        match reply.await {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeError::ShuttingDown),
+        }
+    }
+
     /// Removes a task after queue capacity and the registry claim decision.
     pub(crate) async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_remove_wait(id, None).await?;
@@ -677,9 +716,8 @@ impl SupervisorCore {
 
     /// Runs a static task set until OS shutdown signal or natural completion.
     ///
-    /// This starts the runtime listeners, queues the initial tasks, waits for their
-    /// registration confirmations best-effort, then drives shutdown/natural
-    /// completion.
+    /// This starts the runtime listeners, registers the initial tasks as one
+    /// atomic batch, then drives shutdown or natural completion.
     ///
     /// Single-shot: a second or concurrent call returns [`RuntimeError::AlreadyRunning`].
     pub(crate) async fn run(self: &Arc<Self>, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
@@ -691,72 +729,33 @@ impl SupervisorCore {
         }
         self.start();
 
-        if !tasks.is_empty() {
-            let mut rx = self.bus.subscribe();
-            let mut pending_ids = Vec::with_capacity(tasks.len());
-            for spec in tasks {
-                let queued = self.enqueue_add_task_wait(TaskId::next(), spec, None).await;
-                let (id, reply) = match queued {
-                    Ok(queued) => queued,
-                    Err((RuntimeError::ShuttingDown, _))
-                        if self.shutdown.started.is_cancelled() =>
-                    {
-                        return self.wait_started_shutdown().await;
-                    }
-                    Err((error, _)) => return Err(error),
-                };
-                drop(reply);
-                pending_ids.push(id);
-            }
-            tokio::select! {
-                _ = self.shutdown.started.cancelled() => {
-                    return self.wait_started_shutdown().await;
-                }
-                _ = self.wait_tasks_registered(&mut rx, &pending_ids) => {}
-            }
+        if tasks.is_empty() {
+            return self.drive_shutdown().await;
         }
-        self.drive_shutdown().await
-    }
 
-    /// Best-effort wait for initial task registration events.
-    ///
-    /// Waits for `TaskAdded` or `TaskAddFailed` for every initial task id.
-    /// If the bus receiver lags, falls back to registry membership.
-    ///
-    /// This wait has a fixed backstop and currently does not return an error when the backstop expires.
-    async fn wait_tasks_registered(
-        &self,
-        rx: &mut broadcast::Receiver<Arc<Event>>,
-        ids: &[TaskId],
-    ) {
-        let mut pending: Vec<TaskId> = ids.to_vec();
-
-        let confirm = async {
-            while !pending.is_empty() {
-                match rx.recv().await {
-                    Ok(ev)
-                        if matches!(ev.kind, EventKind::TaskAdded | EventKind::TaskAddFailed) =>
-                    {
-                        if let Some(id) = ev.id {
-                            pending.retain(|p| *p != id);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let mut still = Vec::new();
-                        for id in std::mem::take(&mut pending) {
-                            if !self.registry.contains(id).await {
-                                still.push(id);
-                            }
-                        }
-                        pending = still;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
+        let items = tasks
+            .into_iter()
+            .map(|spec| AddBatchItem {
+                id: TaskId::next(),
+                label: Arc::from(spec.task().name()),
+                spec,
+            })
+            .collect();
+        let reply = match self.enqueue_add_batch_wait(items).await {
+            Ok(reply) => reply,
+            Err(RuntimeError::ShuttingDown) if self.shutdown.started.is_cancelled() => {
+                return self.wait_started_shutdown().await;
             }
+            Err(error) => return Err(error),
         };
-        const CONFIRM_BACKSTOP: Duration = Duration::from_secs(5);
-        let _ = timeout(CONFIRM_BACKSTOP, confirm).await;
+
+        match Self::await_add_batch_reply(reply).await {
+            Ok(()) => self.drive_shutdown().await,
+            Err(RuntimeError::ShuttingDown) if self.shutdown.started.is_cancelled() => {
+                self.wait_started_shutdown().await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Initiates explicit graceful shutdown.
@@ -1342,6 +1341,208 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_fence_processes_whole_committed_batch_before_drain() {
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            grace: Duration::from_secs(1),
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+        let mut ids = Vec::new();
+        let mut items = Vec::new();
+        for label in ["batch-before-shutdown-a", "batch-before-shutdown-b"] {
+            let task: TaskRef = TaskFn::arc(label, |ctx: TaskContext| async move {
+                ctx.cancelled().await;
+                Err(TaskError::Canceled)
+            });
+            let id = TaskId::next();
+            ids.push(id);
+            items.push(AddBatchItem {
+                id,
+                label: Arc::from(label),
+                spec: TaskSpec::restartable(task),
+            });
+        }
+        let batch_reply = core
+            .enqueue_add_batch_wait(items)
+            .await
+            .expect("the whole batch must commit before shutdown starts");
+
+        let mut shutdown = Box::pin(core.shutdown());
+        assert_pending_once(shutdown.as_mut()).await;
+        core.start();
+
+        assert!(matches!(
+            timeout(Duration::from_secs(2), batch_reply)
+                .await
+                .expect("the committed batch reply must resolve"),
+            Ok(Ok(()))
+        ));
+        timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown must pass the batch fence")
+            .expect("the accepted batch must drain cleanly");
+        assert!(core.registry.list().await.is_empty());
+
+        let observed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        for id in ids {
+            assert!(
+                observed
+                    .iter()
+                    .any(|event| { event.id == Some(id) && event.kind == EventKind::TaskAdded })
+            );
+            assert!(
+                observed
+                    .iter()
+                    .any(|event| { event.id == Some(id) && event.kind == EventKind::TaskRemoved })
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn committed_duplicate_batch_keeps_its_error_during_shutdown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        let mut events = core.bus.subscribe();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut items = Vec::new();
+        for label in ["shutdown-peer", "shutdown-duplicate", "shutdown-duplicate"] {
+            let runs = Arc::clone(&runs);
+            let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            items.push(AddBatchItem {
+                id: TaskId::next(),
+                label: Arc::from(label),
+                spec: TaskSpec::once(task),
+            });
+        }
+        let batch_reply = core
+            .enqueue_add_batch_wait(items)
+            .await
+            .expect("the duplicate batch must commit before shutdown starts");
+
+        let mut shutdown = Box::pin(core.shutdown());
+        assert_pending_once(shutdown.as_mut()).await;
+        core.start();
+
+        let batch_result = timeout(
+            Duration::from_secs(2),
+            SupervisorCore::await_add_batch_reply(batch_reply),
+        )
+        .await
+        .expect("the committed duplicate batch must receive its decision");
+        assert!(matches!(
+            batch_result,
+            Err(RuntimeError::TaskAlreadyExists { name })
+                if name.as_ref() == "shutdown-duplicate"
+        ));
+        timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("explicit shutdown must finish after the batch decision")
+            .expect("the rejected batch leaves an empty clean runtime");
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        let observed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| event.kind == EventKind::TaskAddFailed)
+                .count(),
+            3
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| event.kind == EventKind::TaskAdded)
+                .count(),
+            0
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| event.kind == EventKind::ShutdownRequested)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backpressured_batch_loses_whole_admission_race_to_shutdown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            grace: Duration::from_secs(1),
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the command queue");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut ids = Vec::new();
+        let mut items = Vec::new();
+        for label in ["batch-after-shutdown-a", "batch-after-shutdown-b"] {
+            let runs = Arc::clone(&runs);
+            let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            let id = TaskId::next();
+            ids.push(id);
+            items.push(AddBatchItem {
+                id,
+                label: Arc::from(label),
+                spec: TaskSpec::once(task),
+            });
+        }
+
+        let mut batch = Box::pin(core.enqueue_add_batch_wait(items));
+        assert_pending_once(batch.as_mut()).await;
+        let mut shutdown = Box::pin(core.shutdown());
+        assert_pending_once(shutdown.as_mut()).await;
+        core.start();
+
+        timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("the fence must not wait for the backpressured batch")
+            .expect("the empty runtime must shut down cleanly");
+        assert!(matches!(
+            timeout(Duration::from_secs(2), filler_reply)
+                .await
+                .expect("the filler reply must resolve"),
+            Ok(Ok(false))
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(2), batch)
+                .await
+                .expect("the whole batch must wake after admission closes"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        while let Ok(event) = events.try_recv() {
+            if let Some(id) = event.id {
+                assert!(
+                    !ids.contains(&id) || event.kind != EventKind::TaskAddRequested,
+                    "a batch rejected behind the admission gate must stay silent"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn unpolled_backpressured_add_does_not_block_shutdown_fence() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1908,16 +2109,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn static_run_backpressures_initial_batch_larger_than_queue() {
+    async fn static_run_batch_uses_one_queue_slot_with_lagged_observer() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
         let cfg = SupervisorConfig {
+            bus_capacity: 1,
             registry_queue_capacity: 1,
             ..Default::default()
         };
         let core = core(cfg);
+        let mut stale_events = core.bus.subscribe();
+        for index in 0..4 {
+            core.bus
+                .publish(Event::new(EventKind::TaskStarting).with_task(format!("noise-{index}")));
+        }
+        assert!(matches!(
+            stale_events.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
         let runs = Arc::new(AtomicUsize::new(0));
         let tasks = (0..4)
             .map(|index| {

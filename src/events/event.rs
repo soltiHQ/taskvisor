@@ -177,8 +177,8 @@ pub enum EventKind {
 
     /// Request to add a new task to the supervisor.
     ///
-    /// Published by Supervisor on the bus for observability before sending
-    /// the `Add` command to Registry via mpsc.
+    /// Published before an `Add` command is sent. For an atomic `AddBatch`, one
+    /// request event is published per item before the whole command is sent.
     ///
     /// Sets:
     /// - `id`: task run identity (pre-allocated for this add request)
@@ -196,15 +196,16 @@ pub enum EventKind {
     /// - `seq`: global sequence
     TaskAdded,
 
-    /// Task could not be added: a task with the same name is already registered.
+    /// Task could not be added because its name conflicts or its atomic static
+    /// batch was rejected.
     ///
-    /// Published by Registry instead of `TaskAdded` when an `Add` command targets a name that already exists;
-    /// no new actor is spawned.
+    /// Published by Registry instead of `TaskAdded`. No actor is spawned for a
+    /// rejected dynamic add or for any item in a rejected static batch.
     ///
     /// Sets:
     /// - `id`: task run identity of the rejected add request
     /// - `task`: task name
-    /// - `reason`: e.g. "already_exists"
+    /// - `reason`: e.g. "already_exists" or "batch_rejected"
     /// - `at`: wall-clock timestamp
     /// - `seq`: global sequence
     TaskAddFailed,

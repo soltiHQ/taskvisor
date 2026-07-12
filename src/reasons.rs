@@ -11,6 +11,7 @@
 //! | [`TASK_RETURNED_CANCELED`]   | `ActorExhausted`                                       | The task stopped itself.               |
 //! | [`MAX_RETRIES_EXCEEDED`]     | `ActorExhausted` (prefix)                              | Retry limit reached.                   |
 //! | [`ALREADY_EXISTS`]           | `TaskAddFailed`, `TaskOutcome::Rejected`               | A task with this name already exists.  |
+//! | [`BATCH_REJECTED`]           | `TaskAddFailed`                                        | Another item rejected the whole batch. |
 //! | [`QUEUE_FULL`]               | `ControllerRejected`, `TaskOutcome::Rejected` (prefix) | The slot queue is full.                |
 //! | [`REMOVED_FROM_QUEUE`]       | `ControllerRejected`, `TaskOutcome::Rejected`          | A queued task was removed.             |
 //! | [`SUPERSEDED_BY_REPLACE`]    | `ControllerRejected`, `TaskOutcome::Rejected`          | A newer `Replace` task took its place. |
@@ -37,6 +38,9 @@ pub const MAX_RETRIES_EXCEEDED: &str = "max_retries_exceeded";
 /// Registration/rejection reason: another running task already uses this name.
 pub const ALREADY_EXISTS: &str = "already_exists";
 
+/// Registration reason: another item caused an atomic static batch to be rejected.
+pub const BATCH_REJECTED: &str = "batch_rejected";
+
 /// Rejection reason **prefix**: a controller slot queue is full.
 ///
 /// The full reason is `queue_full: <depth>/<limit>`.
@@ -62,6 +66,7 @@ mod tests {
         assert_eq!(TASK_RETURNED_CANCELED, "task_returned_canceled");
         assert_eq!(MAX_RETRIES_EXCEEDED, "max_retries_exceeded");
         assert_eq!(ALREADY_EXISTS, "already_exists");
+        assert_eq!(BATCH_REJECTED, "batch_rejected");
         assert_eq!(QUEUE_FULL, "queue_full");
         assert_eq!(REMOVED_FROM_QUEUE, "removed_from_queue");
         assert_eq!(SUPERSEDED_BY_REPLACE, "superseded_by_replace");

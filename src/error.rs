@@ -38,8 +38,8 @@ pub enum RuntimeError {
         stuck: Vec<Arc<str>>,
     },
 
-    /// A task with the same name is already registered.
-    #[error("task '{name}' already exists in registry")]
+    /// A task with the same name is already registered or repeated in an atomic batch.
+    #[error("task name '{name}' already exists")]
     TaskAlreadyExists {
         /// Duplicate task name.
         name: Arc<str>,

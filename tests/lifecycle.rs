@@ -464,6 +464,84 @@ async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn duplicate_static_batch_starts_no_task_body() {
+    let collector = EventCollector::new();
+    let supervisor = Supervisor::new(
+        SupervisorConfig::default(),
+        vec![collector.clone() as Arc<dyn Subscribe>],
+    );
+    let runs = Arc::new(AtomicU32::new(0));
+    let specs = ["unique", "duplicate", "duplicate"]
+        .into_iter()
+        .map(|label| {
+            let runs = Arc::clone(&runs);
+            let task = TaskFn::arc(label, move |_ctx: TaskContext| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            TaskSpec::once(task)
+        })
+        .collect();
+
+    let result = with_timeout(5, supervisor.run(specs)).await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::TaskAlreadyExists { ref name }) if name.as_ref() == "duplicate"
+        ),
+        "the duplicate label must reject the full batch: {result:?}"
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        supervisor.run(vec![]).await,
+        Err(RuntimeError::AlreadyRunning)
+    ));
+
+    let handle = supervisor.serve();
+    handle
+        .add(TaskSpec::restartable(make_coop("after-batch-error")))
+        .await
+        .expect("a rejected batch must leave the runtime open");
+    handle
+        .shutdown()
+        .await
+        .expect("the reused runtime must shut down cleanly");
+
+    assert_eq!(collector.count(EventKind::TaskAddRequested), 4);
+    assert_eq!(collector.count(EventKind::TaskAddFailed), 3);
+    assert_eq!(collector.count(EventKind::TaskAdded), 1);
+    assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 1);
+
+    for label in ["unique", "duplicate"] {
+        assert!(collector.by_label(label).iter().all(|event| {
+            !matches!(event.kind, EventKind::TaskAdded | EventKind::TaskStarting)
+        }));
+    }
+
+    let unique_failure = collector
+        .by_label("unique")
+        .into_iter()
+        .find(|event| event.kind == EventKind::TaskAddFailed)
+        .expect("unique item must receive its batch rejection event");
+    assert_eq!(
+        unique_failure.reason.as_deref(),
+        Some(taskvisor::reasons::BATCH_REJECTED)
+    );
+    let duplicate_reasons: Vec<_> = collector
+        .by_label("duplicate")
+        .into_iter()
+        .filter(|event| event.kind == EventKind::TaskAddFailed)
+        .filter_map(|event| event.reason)
+        .collect();
+    assert!(
+        duplicate_reasons
+            .iter()
+            .any(|reason| reason.as_ref() == taskvisor::reasons::ALREADY_EXISTS)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn terminal_events_carry_attempt_duration() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
