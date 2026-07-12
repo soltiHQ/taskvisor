@@ -144,7 +144,7 @@ impl SupervisorBuilder {
     /// Builder: sets the registry management command queue capacity.
     ///
     /// The effective capacity is at least `1`.
-    /// Sync management methods fail fast when the queue is full.
+    /// Management methods that do not wait for capacity fail fast when the queue is full.
     pub fn with_registry_queue_capacity(mut self, registry_queue_capacity: usize) -> Self {
         self.cfg.registry_queue_capacity = registry_queue_capacity;
         self

@@ -60,15 +60,6 @@ pub enum RuntimeError {
         timeout: Duration,
     },
 
-    /// Timed out while waiting for registration confirmation.
-    #[error("timeout waiting for task '{name}' registration after {timeout:?}")]
-    TaskAddTimeout {
-        /// Task name that was not confirmed in time.
-        name: Arc<str>,
-        /// Wait duration before timing out.
-        timeout: Duration,
-    },
-
     /// OS signal listener setup failed.
     ///
     /// Signal-based shutdown is unavailable.
@@ -102,7 +93,6 @@ impl RuntimeError {
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::CommandQueueFull => "runtime_command_queue_full",
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
-            RuntimeError::TaskAddTimeout { .. } => "runtime_task_add_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
             RuntimeError::AlreadyRunning => "runtime_already_running",

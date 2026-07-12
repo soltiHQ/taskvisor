@@ -1267,7 +1267,7 @@ mod tests {
             Ok(())
         });
         let id = handle
-            .add_and_wait(TaskSpec::restartable(task), Duration::from_secs(1))
+            .add(TaskSpec::restartable(task))
             .await
             .expect("task should register");
         (sup, handle, id)

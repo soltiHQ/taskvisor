@@ -150,12 +150,25 @@ impl SupervisorCore {
         self.shutting_down.store(true, Ordering::Release);
     }
 
-    /// Queues a task add command and returns its minted [`TaskId`].
+    /// Adds a task and waits for the registry registration decision.
     ///
-    /// `Ok(id)` means the command was sent to the registry listener.
-    /// Registration may still fail later, for example because the task name already exists.
-    pub(crate) fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        self.add_task_inner(TaskId::next(), spec, None)
+    /// This waits for queue capacity before sending the command.
+    pub(crate) async fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
+        let (id, reply) = self
+            .enqueue_add_task_wait(TaskId::next(), spec, None)
+            .await
+            .map_err(|(error, _done)| error)?;
+        Self::await_add_reply(id, reply).await
+    }
+
+    /// Tries to add a task without waiting for queue capacity.
+    ///
+    /// After the command enters the queue, this still waits for the registry registration decision.
+    pub(crate) async fn try_add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
+        let (id, reply) = self
+            .enqueue_add_task(TaskId::next(), spec, None)
+            .map_err(|(error, _done)| error)?;
+        Self::await_add_reply(id, reply).await
     }
 
     /// Queues a task add command under a pre-minted identity.
@@ -177,41 +190,35 @@ impl SupervisorCore {
         Ok(id)
     }
 
-    /// Queues a watched task add command.
+    /// Adds a watched task and waits for the registry registration decision.
     ///
     /// Returns the minted [`TaskId`] and a receiver that resolves to the final [`TaskOutcome`](crate::TaskOutcome)
     /// if the task is registered and later terminates.
-    pub(crate) fn add_task_watched(
+    pub(crate) async fn add_task_watched(
         &self,
         spec: TaskSpec,
     ) -> Result<(TaskId, tokio::sync::oneshot::Receiver<crate::TaskOutcome>), RuntimeError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let id = self.add_task_inner(TaskId::next(), spec, Some(tx))?;
+        let (id, reply) = self
+            .enqueue_add_task_wait(TaskId::next(), spec, Some(tx))
+            .await
+            .map_err(|(error, _done)| error)?;
+        let id = Self::await_add_reply(id, reply).await?;
         Ok((id, rx))
     }
 
-    /// Sends the registry `Add` command and publishes `TaskAddRequested`.
-    ///
-    /// Returns `CommandQueueFull` when the bounded queue has no capacity.
-    /// Returns `ShuttingDown` if admission is already closed or the registry command channel is closed.
-    fn add_task_inner(
-        &self,
-        id: TaskId,
-        spec: TaskSpec,
-        done: Option<OutcomeTx>,
-    ) -> Result<TaskId, RuntimeError> {
-        match self.enqueue_add_task(id, spec, done) {
-            Ok((id, reply)) => {
-                drop(reply);
-                Ok(id)
-            }
-            Err((err, _done)) => Err(err),
+    /// Resolves one authoritative registry Add reply.
+    async fn await_add_reply(id: TaskId, reply: AddReplyRx) -> Result<TaskId, RuntimeError> {
+        match reply.await {
+            Ok(Ok(())) => Ok(id),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(RuntimeError::ShuttingDown),
         }
     }
 
     /// Queues one add command and returns its authoritative registry reply.
     ///
-    /// This is fail-fast while the public management API remains synchronous.
+    /// Used by `try_add` and the controller's fail-fast admission path.
     fn enqueue_add_task(
         &self,
         id: TaskId,
@@ -230,23 +237,14 @@ impl SupervisorCore {
                 return Err((RuntimeError::ShuttingDown, done));
             }
         };
-        let label: Arc<str> = Arc::from(spec.task().name());
-        let (reply, reply_rx) = oneshot::channel();
-        self.bus.publish(
-            Event::new(EventKind::TaskAddRequested)
-                .with_task(label)
-                .with_id(id),
-        );
-        permit.send(RegistryCommand::Add {
-            id,
-            spec,
-            outcome: done,
-            reply,
-        });
-        Ok((id, reply_rx))
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err((RuntimeError::ShuttingDown, done));
+        }
+        Ok(self.commit_add(permit, id, spec, done))
     }
 
-    /// Waits for bounded queue capacity, then queues one static-run add command.
+    /// Waits for bounded queue capacity, then queues one Add command.
     async fn enqueue_add_task_wait(
         &self,
         id: TaskId,
@@ -264,6 +262,20 @@ impl SupervisorCore {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
         }
+        Ok(self.commit_add(permit, id, spec, done))
+    }
+
+    /// Publishes the request event and makes an already-reserved Add visible.
+    ///
+    /// Reserving capacity before this call keeps rejected commands silent while
+    /// preserving `TaskAddRequested` before the registry result event.
+    fn commit_add(
+        &self,
+        permit: mpsc::Permit<'_, RegistryCommand>,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+    ) -> (TaskId, AddReplyRx) {
         let label: Arc<str> = Arc::from(spec.task().name());
         let (reply, reply_rx) = oneshot::channel();
         self.bus.publish(
@@ -277,7 +289,7 @@ impl SupervisorCore {
             outcome: done,
             reply,
         });
-        Ok((id, reply_rx))
+        (id, reply_rx)
     }
 
     /// Queues a remove command by runtime identity.
@@ -328,6 +340,7 @@ impl SupervisorCore {
     }
 
     /// Returns a new bus receiver for event subscription.
+    #[cfg(test)]
     pub(crate) fn subscribe_bus(&self) -> broadcast::Receiver<Arc<Event>> {
         self.bus.subscribe()
     }
@@ -671,17 +684,12 @@ impl SupervisorCore {
 mod tests {
     use super::*;
     use crate::subscribers::Subscribe;
-    use std::sync::Mutex;
+    use std::{future::Future, pin::Pin, sync::Mutex, task::Poll};
 
-    /// Subscriber that records a clone of every event it receives.
-    ///
-    /// A large queue keeps the recorder from lagging itself, so tests assert on the bus
-    /// contents, not on subscriber-side drops.
     struct RecordingSub {
         seen: Arc<Mutex<Vec<Event>>>,
     }
     impl RecordingSub {
-        /// Returns the subscriber plus a shared handle to the events it records.
         fn new() -> (Arc<Self>, Arc<Mutex<Vec<Event>>>) {
             let seen = Arc::new(Mutex::new(Vec::new()));
             (
@@ -719,6 +727,14 @@ mod tests {
         let registry = Registry::new(bus.clone(), token.clone(), None, cfg.grace, cmd_rx);
         let alive = Arc::new(AliveTracker::new());
         SupervisorCore::new_internal(cfg, bus, subs, alive, registry, token, cmd_tx)
+    }
+
+    async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
+        std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("future completed before the expected ordering point"),
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -837,7 +853,7 @@ mod tests {
             ctx.cancelled().await;
             Ok(())
         });
-        assert!(core.add_task(TaskSpec::restartable(early)).is_ok());
+        assert!(core.add_task(TaskSpec::restartable(early)).await.is_ok());
 
         core.mark_shutting_down();
 
@@ -845,11 +861,224 @@ mod tests {
             ctx.cancelled().await;
             Ok(())
         });
-        let res = core.add_task(TaskSpec::restartable(late));
+        let res = core.add_task(TaskSpec::restartable(late)).await;
         assert!(
             matches!(res, Err(RuntimeError::ShuttingDown)),
             "add() after shutdown began must be rejected, got {res:?}"
         );
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn confirmed_add_waits_for_capacity_and_registry_reply() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the only queue slot");
+
+        let task: TaskRef = TaskFn::arc("backpressured-add", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let mut add = Box::pin(core.add_task(TaskSpec::restartable(task)));
+        assert_pending_once(add.as_mut()).await;
+        assert!(core.id_for_label("backpressured-add").await.is_none());
+
+        core.start();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), filler_reply)
+                .await
+                .expect("filler reply must resolve"),
+            Ok(Ok(false))
+        ));
+        let id = timeout(Duration::from_secs(2), add)
+            .await
+            .expect("add must wake after capacity is released")
+            .expect("registry must accept the task");
+        assert!(core.contains_id(id).await);
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backpressured_add_returns_shutting_down_when_queue_closes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the only queue slot");
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let task_runs = Arc::clone(&runs);
+        let task: TaskRef = TaskFn::arc("closed-while-waiting", move |_ctx: TaskContext| {
+            task_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let mut add = Box::pin(core.add_task(TaskSpec::once(task)));
+        assert_pending_once(add.as_mut()).await;
+
+        core.runtime_token.cancel();
+        core.start();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), add)
+                .await
+                .expect("closing the queue must wake the waiting Add"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        let _ = timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("the buffered filler must still resolve");
+        core.registry.join_listener().await;
+        assert!(core.id_for_label("closed-while-waiting").await.is_none());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn try_add_reports_full_without_event_or_task_start() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the only queue slot");
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let task_runs = Arc::clone(&runs);
+        let task: TaskRef = TaskFn::arc("try-add-full", move |_ctx: TaskContext| {
+            task_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        assert!(matches!(
+            core.try_add_task(TaskSpec::once(task)).await,
+            Err(RuntimeError::CommandQueueFull)
+        ));
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert!(core.id_for_label("try-add-full").await.is_none());
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.kind != EventKind::TaskAddRequested
+                    || event.task.as_deref() != Some("try-add-full"),
+                "an Add rejected before enqueue must not publish TaskAddRequested"
+            );
+        }
+
+        core.start();
+        let _ = timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve");
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn try_add_waits_for_registry_decision_after_admission() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        let task: TaskRef = TaskFn::arc("try-add-confirmed", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let mut add = Box::pin(core.try_add_task(TaskSpec::restartable(task)));
+        assert_pending_once(add.as_mut()).await;
+        assert!(core.id_for_label("try-add-confirmed").await.is_none());
+
+        core.start();
+        let id = timeout(Duration::from_secs(2), add)
+            .await
+            .expect("try_add must resolve after the registry processes its command")
+            .expect("registry must accept the task");
+        assert!(core.contains_id(id).await);
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_add_before_enqueue_rolls_back_admission() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the only queue slot");
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let task_runs = Arc::clone(&runs);
+        let task: TaskRef = TaskFn::arc("dropped-before-enqueue", move |_ctx: TaskContext| {
+            task_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let mut add = Box::pin(core.add_task(TaskSpec::once(task)));
+        assert_pending_once(add.as_mut()).await;
+        drop(add);
+
+        core.start();
+        let _ = timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve");
+        assert!(core.id_for_label("dropped-before-enqueue").await.is_none());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_add_after_enqueue_does_not_roll_command_back() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        let (started_tx, started_rx) = oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let task_started = Arc::clone(&started_tx);
+        let task: TaskRef = TaskFn::arc("dropped-after-enqueue", move |ctx: TaskContext| {
+            let task_started = Arc::clone(&task_started);
+            async move {
+                if let Some(tx) = task_started.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                ctx.cancelled().await;
+                Ok(())
+            }
+        });
+
+        let mut add = Box::pin(core.add_task(TaskSpec::once(task)));
+        assert_pending_once(add.as_mut()).await;
+        drop(add);
+
+        core.start();
+        timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("the queued task must start after its caller is dropped")
+            .expect("the task must signal start");
+        assert!(core.id_for_label("dropped-after-enqueue").await.is_some());
 
         let _ = core.shutdown().await;
     }
@@ -1110,6 +1339,7 @@ mod tests {
         });
         let id = core
             .add_task(TaskSpec::restartable(t))
+            .await
             .expect("add accepted");
 
         let registered = timeout(Duration::from_secs(2), async {

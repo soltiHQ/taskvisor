@@ -175,7 +175,7 @@ Taskvisor restarts them on failure and reports every step as an event. You can a
 // Dynamic mode
 let handle = sup.serve();
 
-let id = handle.add(spec)?;                       // returns a TaskId
+let id = handle.add(spec).await?;                 // registry accepted this TaskId
 handle.cancel(id).await?;                         // cancel by identity
 handle.cancel_by_label("task-name").await?;       // ...or by label
 let tasks = handle.list().await;                  // Vec<(TaskId, name)>
@@ -325,7 +325,7 @@ See [`examples/tracing.rs`](examples/tracing.rs) for the full program and [`exam
 ```rust,ignore
 // add_and_watch returns a TaskWaiter resolving to the final TaskOutcome.
 let (id, waiter) = handle
-    .add_and_watch(TaskSpec::once(job), Duration::from_secs(1))
+    .add_and_watch(TaskSpec::once(job))
     .await?;
 
 match waiter.wait().await? {

@@ -60,7 +60,7 @@ pub struct SupervisorConfig {
     /// This bounds pending add and remove commands.
     /// The registry may process one additional command while this many commands are buffered.
     ///
-    /// Sync management methods fail with [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when the queue has no capacity.
+    /// Management methods that do not wait for queue capacity fail with [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when the queue has no capacity.
     ///
     /// Use [`registry_queue_capacity_clamped`](Self::registry_queue_capacity_clamped) when creating the queue; the effective capacity is at least `1`.
     pub registry_queue_capacity: usize,

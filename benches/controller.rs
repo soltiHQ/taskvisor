@@ -1,7 +1,7 @@
 //! # Controller: admission policy overhead
 //!
-//! The controller wraps `handle.add()` with admission policies (Queue, Replace, DropIfRunning).
-//! This benchmark compares direct `add()` vs `submit()` to isolate the controller's cost, and then compares the three policies.
+//! Measures controller submission and admission policies (Queue, Replace, DropIfRunning).
+//! The groups cover queued completion, replacement, rejection, the `try_submit` hot path, and multi-slot fan-out.
 //!
 //! ## What is measured
 //!

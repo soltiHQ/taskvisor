@@ -311,10 +311,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
     let spec = TaskSpec::restartable(task).with_restart(RestartPolicy::Always { interval: None });
 
     with_timeout(15, async {
-        handle
-            .add_and_wait(spec, Duration::from_secs(1))
-            .await
-            .expect("add_and_wait ok");
+        handle.add(spec).await.expect("add ok");
         assert!(
             poll_until(Duration::from_secs(5), || async {
                 counter.load(Ordering::SeqCst) >= 5
@@ -355,10 +352,7 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
     });
 
     with_timeout(15, async {
-        handle
-            .add_and_wait(spec, Duration::from_secs(1))
-            .await
-            .expect("add_and_wait ok");
+        handle.add(spec).await.expect("add ok");
         assert!(
             poll_until(Duration::from_secs(5), || async {
                 counter.load(Ordering::SeqCst) >= 3
@@ -410,10 +404,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
         .with_backoff(fast_backoff());
 
     with_timeout(15, async {
-        handle
-            .add_and_wait(spec, Duration::from_secs(1))
-            .await
-            .expect("add_and_wait ok");
+        handle.add(spec).await.expect("add ok");
         assert!(
             poll_until(Duration::from_secs(5), || async {
                 n.load(Ordering::SeqCst) >= 6

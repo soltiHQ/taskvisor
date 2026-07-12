@@ -12,11 +12,9 @@
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
 use std::{sync::Arc, time::Duration};
-use tokio::sync::broadcast;
 
 use crate::core::SupervisorCore;
 use crate::error::RuntimeError;
-use crate::events::EventKind;
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
 
@@ -51,7 +49,7 @@ use super::outcome::TaskWaiter;
 ///         }
 ///     });
 ///
-///     let id = handle.add(TaskSpec::restartable(task))?;
+///     let id = handle.add(TaskSpec::restartable(task)).await?;
 ///     let _ = handle.cancel(id).await?;
 ///     handle.shutdown().await?;
 ///     Ok(())
@@ -93,66 +91,50 @@ impl SupervisorHandle {
         self
     }
 
-    /// Adds a task to the supervisor at runtime.
+    /// Adds a task and waits for registry acceptance.
     ///
-    /// This is fire-and-forget.
-    /// It mints a [`TaskId`], reserves command queue capacity, publishes `TaskAddRequested`, queues an `Add` command, and returns the id.
+    /// This waits for command queue capacity and then for the direct registry reply.
+    /// `Ok(id)` means the registry accepted the task identity and label.
+    /// Registration does not depend on lifecycle event delivery.
     ///
-    /// `Ok(id)` means the add command was accepted by the runtime command channel.
-    /// It does not mean the registry has accepted the task yet.
-    ///
-    /// For duplicate-name errors or registration confirmation, use [`add_and_wait`](Self::add_and_wait).
+    /// Dropping this future after its command was queued does not roll the Add back.
+    /// The registry may still accept and start the task.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        self.core.add_task(spec)
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
+    pub async fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
+        self.core.add_task(spec).await
     }
 
-    /// Adds a task and waits for registry confirmation.
+    /// Tries to add a task without waiting for command queue capacity.
     ///
-    /// This subscribes to the event bus before sending the add command, then waits for the matching `TaskAdded` or `TaskAddFailed` event.
-    ///
-    /// Returns `Ok(TaskId)` when the task is registered.
-    /// Correlation uses the minted [`TaskId`], not the task name.
+    /// When queue admission succeeds, this still waits for the direct registry reply.
+    /// `Ok(id)` therefore has the same meaning as [`add`](Self::add).
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
-    /// - [`RuntimeError::TaskAddTimeout`] when no confirmation arrives in time.
-    pub async fn add_and_wait(
-        &self,
-        spec: TaskSpec,
-        timeout: Duration,
-    ) -> Result<TaskId, RuntimeError> {
-        let target: Arc<str> = Arc::from(spec.task().name());
-        let mut rx = self.core.subscribe_bus();
-        let id = self.core.add_task(spec)?;
-        self.wait_registered(&mut rx, id, target, timeout).await
+    pub async fn try_add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
+        self.core.try_add_task(spec).await
     }
 
-    /// Adds a task, waits for registration, and returns a [`TaskWaiter`].
+    /// Adds a task and returns a [`TaskWaiter`] after registry acceptance.
     ///
     /// The waiter resolves to the final [`TaskOutcome`](crate::TaskOutcome) of the supervised task run.
-    ///
-    /// Returns `Ok((TaskId, TaskWaiter))` when the task is registered.
-    /// Registration semantics are the same as [`add_and_wait`](Self::add_and_wait).
+    /// Registration semantics are the same as [`add`](Self::add).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
-    /// - [`RuntimeError::TaskAddTimeout`] when no confirmation arrives in time.
     ///
     /// ## Example
     ///
     /// ```rust,no_run
-    /// # use std::time::Duration;
     /// # use taskvisor::prelude::*;
     /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
@@ -162,7 +144,7 @@ impl SupervisorHandle {
     /// });
     ///
     /// let (_id, waiter) = handle
-    ///     .add_and_watch(TaskSpec::once(job), Duration::from_secs(1))
+    ///     .add_and_watch(TaskSpec::once(job))
     ///     .await?;
     ///
     /// let outcome = waiter.wait().await?;
@@ -172,64 +154,9 @@ impl SupervisorHandle {
     pub async fn add_and_watch(
         &self,
         spec: TaskSpec,
-        timeout: Duration,
     ) -> Result<(TaskId, TaskWaiter), RuntimeError> {
-        let target: Arc<str> = Arc::from(spec.task().name());
-        let mut rx = self.core.subscribe_bus();
-        let (id, done_rx) = self.core.add_task_watched(spec)?;
-        self.wait_registered(&mut rx, id, target, timeout).await?;
+        let (id, done_rx) = self.core.add_task_watched(spec).await?;
         Ok((id, TaskWaiter::new(id, done_rx)))
-    }
-
-    /// Waits for the registry confirmation event for `id`.
-    ///
-    /// On bus lag or closure, this falls back to registry state before returning a timeout.
-    /// The fallback prevents false negatives when the confirmation event was missed but the task is still registered.
-    async fn wait_registered(
-        &self,
-        rx: &mut broadcast::Receiver<Arc<crate::Event>>,
-        id: TaskId,
-        target: Arc<str>,
-        timeout: Duration,
-    ) -> Result<TaskId, RuntimeError> {
-        let target2 = Arc::clone(&target);
-        let wait = async move {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) if ev.id == Some(id) && ev.kind == EventKind::TaskAdded => {
-                        return Ok(id);
-                    }
-                    Ok(ev) if ev.id == Some(id) && ev.kind == EventKind::TaskAddFailed => {
-                        return Err(RuntimeError::TaskAlreadyExists { name: target2 });
-                    }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if self.core.contains_id(id).await {
-                            return Ok(id);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-            if self.core.contains_id(id).await {
-                Ok(id)
-            } else {
-                Err(RuntimeError::TaskAddTimeout {
-                    name: target2,
-                    timeout,
-                })
-            }
-        };
-
-        match tokio::time::timeout(timeout, wait).await {
-            Ok(result) => result,
-            Err(_) => Err(RuntimeError::TaskAddTimeout {
-                name: target,
-                timeout,
-            }),
-        }
     }
 
     /// Removes a task by identity.

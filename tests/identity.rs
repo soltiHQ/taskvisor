@@ -23,12 +23,9 @@ fn served_with_collector(grace_secs: u64) -> (SupervisorHandle, Arc<EventCollect
 
 async fn stale_id(handle: &SupervisorHandle) -> TaskId {
     let id = handle
-        .add_and_wait(
-            TaskSpec::restartable(make_coop("throwaway")),
-            Duration::from_secs(2),
-        )
+        .add(TaskSpec::restartable(make_coop("throwaway")))
         .await
-        .expect("add_and_wait ok");
+        .expect("add ok");
     assert!(handle.cancel(id).await.expect("cancel ok"));
     assert!(
         poll_until(Duration::from_secs(2), || async {
@@ -45,6 +42,7 @@ async fn add_returns_taskid_and_task_runs() {
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable(make_coop("worker")))
+            .await
             .expect("add ok");
         assert!(
             poll_until(Duration::from_secs(2), || async {
@@ -61,16 +59,13 @@ async fn add_returns_taskid_and_task_runs() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn add_and_wait_confirms_running_returns_id() {
+async fn add_confirms_registration_and_returns_id() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let id = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("w")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("w")))
             .await
-            .expect("add_and_wait ok");
+            .expect("add ok");
         assert!(
             poll_until(Duration::from_secs(1), || async {
                 handle.is_alive("w").await
@@ -87,37 +82,31 @@ async fn add_and_wait_confirms_running_returns_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn two_tasks_same_name_get_different_ids_only_first_runs() {
-    let (handle, collector) = served_with_collector(5);
+async fn duplicate_add_returns_error_and_only_first_runs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (handle, _collector) = served_with_collector(5);
     with_timeout(10, async {
         let id1 = handle
             .add(TaskSpec::restartable(make_coop("dup")))
-            .expect("add1");
-        let id2 = handle
-            .add(TaskSpec::restartable(make_coop("dup")))
-            .expect("add2");
-        assert_ne!(id1, id2, "same name must still mint distinct ids");
-
-        assert!(
-            poll_until(Duration::from_secs(2), || async {
-                collector
-                    .by_id(id1)
-                    .iter()
-                    .any(|e| e.kind == EventKind::TaskAdded)
-                    && collector
-                        .by_id(id2)
-                        .iter()
-                        .any(|e| e.kind == EventKind::TaskAddFailed)
-            })
             .await
-        );
+            .expect("add1");
 
-        let failed = collector
-            .by_id(id2)
-            .into_iter()
-            .find(|e| e.kind == EventKind::TaskAddFailed)
-            .unwrap();
-        assert!(failed.reason.as_deref().unwrap().contains("already_exists"));
+        let rejected_runs = Arc::new(AtomicUsize::new(0));
+        let task_runs = Arc::clone(&rejected_runs);
+        let rejected: TaskRef = TaskFn::arc("dup", move |_ctx: TaskContext| {
+            task_runs.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        let error = handle
+            .add(TaskSpec::once(rejected))
+            .await
+            .expect_err("duplicate add must fail");
+        assert!(matches!(
+            error,
+            RuntimeError::TaskAlreadyExists { ref name } if name.as_ref() == "dup"
+        ));
+        assert_eq!(rejected_runs.load(Ordering::SeqCst), 0);
 
         let list = handle.list().await;
         assert_eq!(list.len(), 1);
@@ -129,21 +118,15 @@ async fn two_tasks_same_name_get_different_ids_only_first_runs() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn add_and_wait_duplicate_name_returns_already_exists() {
+async fn add_duplicate_name_returns_already_exists() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let _ = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("dup")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("dup")))
             .await
             .expect("first add ok");
         let err = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("dup")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("dup")))
             .await
             .expect_err("second add must fail");
         match err {
@@ -156,23 +139,14 @@ async fn add_and_wait_duplicate_name_returns_already_exists() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn add_and_wait_tiny_timeout_accepts_ok_or_addtimeout() {
+async fn fast_task_registration_has_no_library_timeout() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
-        let res = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("slow_reg")),
-                Duration::from_millis(1),
-            )
-            .await;
-        match res {
-            Ok(_) => {}
-            Err(RuntimeError::TaskAddTimeout { name, timeout }) => {
-                assert_eq!(&*name, "slow_reg");
-                assert_eq!(timeout, Duration::from_millis(1));
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        let id = handle
+            .add(TaskSpec::once(make_ok_once("fast-registration")))
+            .await
+            .expect("registry reply must confirm even a fast task");
+        assert!(id.get() > 0);
         let _ = handle.shutdown().await;
     })
     .await;
@@ -183,17 +157,11 @@ async fn remove_by_id_removes_only_that_id() {
     let (handle, collector) = served_with_collector(5);
     with_timeout(10, async {
         let id_a = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("a")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("a")))
             .await
             .expect("add a");
         let id_b = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("b")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("b")))
             .await
             .expect("add b");
 
@@ -223,20 +191,14 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
     let (handle, collector) = served_with_collector(5);
     with_timeout(10, async {
         let id_keep = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("keep")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("keep")))
             .await
             .expect("add keep");
         let stale = stale_id(&handle).await;
 
         handle.remove(stale).expect("remove stale ok");
         handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("remove-unknown-barrier")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("remove-unknown-barrier")))
             .await
             .expect("later add confirms that the unknown remove was processed");
         assert!(
@@ -258,10 +220,7 @@ async fn remove_by_label_returns_true_then_false() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let _ = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("svc")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("svc")))
             .await
             .expect("add svc");
 
@@ -289,10 +248,7 @@ async fn cancel_by_id_true_then_false_on_double_cancel() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let id = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("c")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("c")))
             .await
             .expect("add c");
         assert!(handle.cancel(id).await.expect("cancel1"));
@@ -319,10 +275,7 @@ async fn cancel_by_label_true_then_false() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let _ = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("lbl")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("lbl")))
             .await
             .expect("add lbl");
         assert!(handle.cancel_by_label("lbl").await.expect("c1"));
@@ -345,10 +298,7 @@ async fn cancel_with_timeout_true_for_cooperative_task() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let id = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("coop")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("coop")))
             .await
             .expect("add coop");
         assert!(
@@ -372,7 +322,7 @@ async fn cancel_with_timeout_errors_on_stuck_task() {
             Ok(())
         });
         let id = handle
-            .add_and_wait(TaskSpec::restartable(task), Duration::from_secs(2))
+            .add(TaskSpec::restartable(task))
             .await
             .expect("add stubborn");
 
@@ -414,7 +364,7 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
             Ok(())
         });
         let id = handle
-            .add_and_wait(TaskSpec::restartable(task), Duration::from_secs(2))
+            .add(TaskSpec::restartable(task))
             .await
             .expect("add stuck-runner");
 
@@ -440,24 +390,15 @@ async fn list_reflects_registered_set_sorted_by_id() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let id_x = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("x")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("x")))
             .await
             .unwrap();
         let id_y = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("y")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("y")))
             .await
             .unwrap();
         let id_z = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("z")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("z")))
             .await
             .unwrap();
 
@@ -489,17 +430,11 @@ async fn snapshot_and_is_alive_track_alive_set() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let _ = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("live")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("live")))
             .await
             .unwrap();
         let _ = handle
-            .add_and_wait(
-                TaskSpec::once(make_ok_once("oneshot")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::once(make_ok_once("oneshot")))
             .await
             .unwrap();
 
@@ -546,10 +481,7 @@ async fn events_carry_correct_id_across_full_lifecycle() {
     let (handle, collector) = served_with_collector(5);
     with_timeout(10, async {
         let id = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("life")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("life")))
             .await
             .unwrap();
         assert!(handle.cancel(id).await.expect("cancel"));
@@ -582,10 +514,7 @@ async fn re_add_same_label_after_removal_succeeds_with_new_id() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let id1 = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("reuse")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("reuse")))
             .await
             .unwrap();
         assert!(handle.cancel(id1).await.expect("cancel"));
@@ -596,10 +525,7 @@ async fn re_add_same_label_after_removal_succeeds_with_new_id() {
             .await
         );
         let id2 = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("reuse")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("reuse")))
             .await
             .unwrap();
         assert_ne!(id1, id2, "re-added label must get a fresh id");
@@ -619,15 +545,10 @@ async fn add_after_shutdown_returns_shutting_down() {
         with_timeout(5, handle.shutdown())
             .await
             .expect("shutdown ok");
-        assert!(
-            poll_until(Duration::from_secs(2), || async {
-                matches!(
-                    h2.add(TaskSpec::once(make_ok_once("late"))),
-                    Err(RuntimeError::ShuttingDown)
-                )
-            })
-            .await
-        );
+        assert!(matches!(
+            h2.add(TaskSpec::once(make_ok_once("late"))).await,
+            Err(RuntimeError::ShuttingDown)
+        ));
     })
     .await;
 }
