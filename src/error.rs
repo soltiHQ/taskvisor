@@ -63,7 +63,7 @@ pub enum RuntimeError {
     /// OS signal listener setup failed.
     ///
     /// Signal-based shutdown is unavailable.
-    /// The original [`std::io::Error`] is preserved as the source.
+    /// The I/O error kind, message, and source chain are preserved for every caller that joins the shared shutdown operation.
     #[error("failed to install shutdown signal handlers: {source}")]
     SignalSetupFailed {
         /// I/O error returned by signal registration.

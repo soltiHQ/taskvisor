@@ -38,11 +38,12 @@
 //! Completion plane:
 //!   Registry ──oneshot outcome──► TaskWaiter
 //!            └─shared terminal──► cancel callers
+//!   SupervisorCore ──shared result──► shutdown callers
 //! ```
 //!
 //! The management plane uses an mpsc command channel. Add, remove, and cancel commands are not delivered through the lossy event bus.
 //! The event plane is best-effort and used for logs, metrics, snapshots, and subscriber integrations. Slow consumers can lag and miss events.
-//! The completion plane provides watched task outcomes and shared terminal completion for cancellation callers.
+//! The completion plane provides watched task outcomes, terminal cancellation completion, and one cached shutdown result.
 //!
 //! ## Main Flow
 //!
