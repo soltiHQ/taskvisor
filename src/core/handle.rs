@@ -233,19 +233,14 @@ impl SupervisorHandle {
         self.core.is_alive(name).await
     }
 
-    /// Requests cancellation of a task and waits for removal confirmation.
+    /// Requests cancellation and waits for registry terminal completion.
     ///
-    /// The task receives cooperative cancellation.
-    /// The method waits up to the configured shutdown grace period for the matching `TaskRemoved` event.
-    ///
-    /// Returns `Ok(true)` when the task was present and removal was confirmed.
-    /// Returns `Ok(false)` when no registered task has this id.
-    ///
-    /// A task that ignores cancellation is force-aborted by the registry after the configured grace period.
+    /// Returns `Ok(true)` only to the caller that claimed removal.
+    /// A caller that joins an existing removal returns `Ok(false)` after the same terminal completion.
+    /// An unknown or terminated id returns `Ok(false)` immediately.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::TaskRemoveTimeout`] when removal was not confirmed in time.
     /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
@@ -254,26 +249,20 @@ impl SupervisorHandle {
 
     /// Cancels the task currently holding `name`.
     ///
-    /// Returns `Ok(false)` if no registered task currently has this label.
-    /// Otherwise, behaves like [`cancel`](Self::cancel).
-    ///
     /// # Errors
     ///
     /// Same as [`cancel`](Self::cancel).
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        match self.core.id_for_label(name).await {
-            Some(id) => self.core.cancel(id).await,
-            None => Ok(false),
-        }
+        self.core.cancel_by_label(Arc::from(name)).await
     }
 
     /// Cancels a task with an explicit confirmation window.
     ///
-    /// `wait_for` controls how long this call waits for `TaskRemoved`.
-    /// It does not change the registry's force-abort grace period.
+    /// The registry claim/join decision is not part of `wait_for`.
+    /// The timer starts only while this caller waits for shared terminal completion.
+    /// A timeout does not stop removal or change the registry's force-abort grace period.
     ///
-    /// Returns `Ok(true)` when removal is confirmed within `wait_for`.
-    /// Returns `Ok(false)` when no registered task has this id.
+    /// On completion, the boolean follows the same claimant rules as [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///

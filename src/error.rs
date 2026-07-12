@@ -51,10 +51,10 @@ pub enum RuntimeError {
     #[error("registry command queue is full")]
     CommandQueueFull,
 
-    /// Timed out while waiting for removal confirmation.
+    /// Timed out while waiting for registry terminal completion.
     #[error("timeout waiting for task {id} removal after {timeout:?}")]
     TaskRemoveTimeout {
-        /// Task id that did not report removal in time.
+        /// Task id whose terminal cleanup did not finish in time.
         id: TaskId,
         /// Wait duration before timing out.
         timeout: Duration,

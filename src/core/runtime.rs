@@ -28,7 +28,7 @@
 //!                               -> close subscribers
 //! ```
 //!
-//! Add/remove commands use the management plane.
+//! Add, remove, and cancel commands use the management plane.
 //! They are not delivered through the lossy event bus.
 //!
 //! Events are used for observability, alive snapshots, and subscriber delivery.
@@ -71,7 +71,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::{
     alive::AliveTracker,
-    registry::{AddReplyRx, OutcomeTx, Registry, RegistryCommand, RemoveReplyRx},
+    registry::{
+        AddReplyRx, CancelDecision, CancelReplyRx, OutcomeTx, Registry, RegistryCommand,
+        RemoveReplyRx,
+    },
 };
 use crate::{
     core::SupervisorConfig,
@@ -399,6 +402,44 @@ impl SupervisorCore {
         reply_rx
     }
 
+    /// Queues one fail-fast Cancel command by identity.
+    fn enqueue_cancel(&self, id: TaskId) -> Result<CancelReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self.cmd_tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
+            mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
+        })?;
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        }
+
+        let (reply, reply_rx) = oneshot::channel();
+        permit.send(RegistryCommand::Cancel { id, reply });
+        Ok(reply_rx)
+    }
+
+    /// Queues one fail-fast atomic Cancel command by label.
+    fn enqueue_cancel_by_label(&self, label: Arc<str>) -> Result<CancelReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self.cmd_tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
+            mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
+        })?;
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        }
+
+        let (reply, reply_rx) = oneshot::channel();
+        permit.send(RegistryCommand::CancelByLabel { label, reply });
+        Ok(reply_rx)
+    }
+
     /// Returns registered tasks as `(id, label)` pairs from the registry.
     pub(crate) async fn list_tasks(&self) -> Vec<(TaskId, Arc<str>)> {
         self.registry.list().await
@@ -411,14 +452,9 @@ impl SupervisorCore {
     }
 
     /// Resolves a label to the identity currently holding it (if any).
+    #[cfg(test)]
     pub(crate) async fn id_for_label(&self, name: &str) -> Option<TaskId> {
         self.registry.id_for_label(name).await
-    }
-
-    /// Returns a new bus receiver for event subscription.
-    #[cfg(test)]
-    pub(crate) fn subscribe_bus(&self) -> broadcast::Receiver<Arc<Event>> {
-        self.bus.subscribe()
     }
 
     /// Starts runtime listeners without blocking.
@@ -532,28 +568,64 @@ impl SupervisorCore {
         self.alive.is_alive(name).await
     }
 
-    /// Cancels a task by identity and waits for `TaskRemoved`.
+    /// Cancels a task by identity and waits for registry terminal completion.
     pub(crate) async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
-        self.cancel_with_timeout(id, self.cfg.grace).await
+        let decision = Self::await_cancel_reply(self.enqueue_cancel(id)?).await?;
+        Self::wait_cancel_decision(decision, None).await
     }
 
     /// Cancels a task with an explicit confirmation window.
     ///
-    /// `wait_for` controls how long this call waits for `TaskRemoved`.
-    /// It does not change the registry's force-abort grace period.
+    /// The registry decision is not part of `wait_for`. The timeout only bounds
+    /// this caller's wait for shared terminal completion and does not stop removal.
     pub(crate) async fn cancel_with_timeout(
         &self,
         id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
-        let mut rx = self.bus.subscribe();
-        if !self.registry.contains(id).await {
+        let decision = Self::await_cancel_reply(self.enqueue_cancel(id)?).await?;
+        Self::wait_cancel_decision(decision, Some(wait_for)).await
+    }
+
+    /// Cancels the task that owns `label` at the registry ordering point.
+    pub(crate) async fn cancel_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
+        let decision = Self::await_cancel_reply(self.enqueue_cancel_by_label(label)?).await?;
+        Self::wait_cancel_decision(decision, None).await
+    }
+
+    /// Resolves one authoritative registry cancellation decision.
+    async fn await_cancel_reply(
+        reply: CancelReplyRx,
+    ) -> Result<Option<CancelDecision>, RuntimeError> {
+        match reply.await {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeError::ShuttingDown),
+        }
+    }
+
+    /// Waits for one shared terminal completion and preserves its claim result.
+    async fn wait_cancel_decision(
+        decision: Option<CancelDecision>,
+        wait_for: Option<Duration>,
+    ) -> Result<bool, RuntimeError> {
+        let Some(decision) = decision else {
             return Ok(false);
+        };
+        let id = decision.id;
+        let claimed = decision.claimed;
+
+        if let Some(wait_for) = wait_for {
+            if timeout(wait_for, decision.wait()).await.is_err() && !decision.is_complete() {
+                return Err(RuntimeError::TaskRemoveTimeout {
+                    id,
+                    timeout: wait_for,
+                });
+            }
+        } else {
+            decision.wait().await;
         }
 
-        let reply = self.enqueue_remove(id, Some("manual_cancel"))?;
-        drop(reply);
-        self.wait_task_removed(&mut rx, id, wait_for).await
+        Ok(claimed)
     }
 
     /// Applies one event to alive tracking and subscriber fan-out.
@@ -708,50 +780,6 @@ impl SupervisorCore {
         } else {
             self.bus.publish(Event::new(EventKind::GraceExceeded));
             Err(RuntimeError::GraceExceeded { grace, stuck })
-        }
-    }
-
-    /// Waits for a task to terminate.
-    ///
-    /// Success is normally observed through `TaskRemoved`.
-    /// If the bus receiver lags or closes, falls back to registry termination state.
-    async fn wait_task_removed(
-        &self,
-        rx: &mut broadcast::Receiver<Arc<Event>>,
-        id: TaskId,
-        wait_for: Duration,
-    ) -> Result<bool, RuntimeError> {
-        let wait_for_event = async {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) if matches!(ev.kind, EventKind::TaskRemoved) && ev.id == Some(id) => {
-                        return true;
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if self.registry.is_terminated(id).await {
-                            return true;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return self.registry.is_terminated(id).await;
-                    }
-                }
-            }
-        };
-
-        match timeout(wait_for, wait_for_event).await {
-            Ok(true) => Ok(true),
-            Ok(false) | Err(_) => {
-                if self.registry.is_terminated(id).await {
-                    Ok(true)
-                } else {
-                    Err(RuntimeError::TaskRemoveTimeout {
-                        id,
-                        timeout: wait_for,
-                    })
-                }
-            }
         }
     }
 }
@@ -1095,6 +1123,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn cancel_by_label_orders_after_an_already_queued_add() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        let mut events = core.bus.subscribe();
+        let task: TaskRef = TaskFn::arc("ordered-cancel-label", |ctx: TaskContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        });
+        let id = TaskId::next();
+        let (_, add_reply) = core
+            .enqueue_add_task(id, TaskSpec::restartable(task), None)
+            .expect("the Add command must enter the queue first");
+
+        let mut cancel = Box::pin(core.cancel_by_label(Arc::from("ordered-cancel-label")));
+        assert_pending_once(cancel.as_mut()).await;
+        core.start();
+
+        assert!(matches!(
+            timeout(Duration::from_secs(2), add_reply)
+                .await
+                .expect("Add reply must resolve"),
+            Ok(Ok(()))
+        ));
+        assert!(
+            timeout(Duration::from_secs(2), cancel)
+                .await
+                .expect("label Cancel must resolve after terminal cleanup")
+                .expect("label Cancel must receive a registry reply"),
+            "the label lookup must happen after the queued Add is committed"
+        );
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event.kind == EventKind::TaskRemoveRequested
+                && event.id == Some(id)
+                && event.task.as_deref() == Some("ordered-cancel-label")
+                && event.reason.as_deref() == Some("manual_cancel")
+        }));
+        assert!(!core.contains_id(id).await);
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn backpressured_remove_returns_shutting_down_without_request_event() {
         let cfg = SupervisorConfig {
             registry_queue_capacity: 1,
@@ -1369,6 +1440,19 @@ mod tests {
             );
         }
 
+        let rejected_cancel_id = TaskId::next();
+        assert!(matches!(
+            core.cancel(rejected_cancel_id).await,
+            Err(RuntimeError::CommandQueueFull)
+        ));
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(rejected_cancel_id)
+                    || event.kind != EventKind::TaskRemoveRequested,
+                "a Cancel rejected before enqueue must not publish TaskRemoveRequested"
+            );
+        }
+
         core.start();
         assert!(matches!(
             timeout(Duration::from_secs(2), filler_reply)
@@ -1547,69 +1631,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_task_removed_survives_bus_lag() {
+    async fn cancel_uses_registry_completion_when_event_bus_lags() {
         use crate::{TaskContext, TaskFn, TaskRef};
+        use tokio::sync::broadcast::error::TryRecvError;
 
         let cfg = SupervisorConfig {
-            bus_capacity: 8,
+            bus_capacity: 1,
             ..Default::default()
         };
         let core = core(cfg);
         core.start();
 
-        let t: TaskRef = TaskFn::arc("laggy", |ctx: TaskContext| async move {
-            ctx.cancelled().await;
-            Ok(())
+        let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("laggy-cancel", move |ctx: TaskContext| {
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&task_release);
+            async move {
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Ok(())
+            }
         });
         let id = core
-            .add_task(TaskSpec::restartable(t))
+            .add_task(TaskSpec::restartable(task))
             .await
             .expect("add accepted");
 
-        let registered = timeout(Duration::from_secs(2), async {
-            loop {
-                if core.contains_id(id).await {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await;
-        registered.expect("task must register");
+        let mut stale_events = core.bus.subscribe();
+        let receiver_count = core.bus.receiver_count();
+        let mut cancel = Box::pin(core.cancel(id));
+        tokio::select! {
+            result = &mut cancel => panic!("cancel returned before actor termination: {result:?}"),
+            _ = cancellation_seen.notified() => {}
+        }
+        assert_eq!(
+            core.bus.receiver_count(),
+            receiver_count,
+            "cancel must not create a correctness receiver on the event bus"
+        );
+        assert_pending_once(cancel.as_mut()).await;
 
-        let mut lagged_rx = core.subscribe_bus();
-        let mut observer = core.subscribe_bus();
-
-        assert!(core.remove(id).await.expect("remove should be accepted"));
-
-        let observed = timeout(Duration::from_secs(2), async {
-            loop {
-                if let Ok(ev) = observer.recv().await
-                    && ev.kind == EventKind::TaskRemoved
-                    && ev.id == Some(id)
-                {
-                    return;
-                }
-            }
-        })
-        .await;
-        observed.expect("TaskRemoved must be observed by a healthy receiver");
-
-        for _ in 0..32 {
+        for _ in 0..16 {
             core.bus
                 .publish(Event::new(EventKind::TaskStarting).with_task("noise"));
         }
-
-        let res = timeout(
-            Duration::from_secs(1),
-            core.wait_task_removed(&mut lagged_rx, id, Duration::from_millis(300)),
-        )
-        .await
-        .expect("wait_task_removed must not hang");
         assert!(
-            matches!(res, Ok(true)),
-            "a lagged receiver must fall back to runtime state instead of reporting \
-             a spurious TaskRemoveTimeout, got {res:?}"
+            matches!(stale_events.try_recv(), Err(TryRecvError::Lagged(_))),
+            "the observer must lag in this regression setup"
+        );
+
+        release.notify_one();
+        assert!(
+            timeout(Duration::from_secs(2), cancel)
+                .await
+                .expect("cancel must finish after terminal cleanup")
+                .expect("cancel must receive a registry result")
+        );
+        assert!(
+            !core.contains_id(id).await,
+            "terminal completion must follow registry state cleanup"
         );
 
         let _ = core.shutdown().await;

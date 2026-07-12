@@ -44,7 +44,7 @@
 //! - `sup.serve()`: starts listeners, returns a handle. Non-blocking.
 //! - `handle.add(spec).await`: register a new task dynamically, returns its `TaskId`.
 //! - `handle.remove(id).await`: claim removal by identity (or `remove_by_label(name).await`).
-//! - `handle.cancel(id)`: cancel and wait for confirmation (or `cancel_by_label(name)`).
+//! - `handle.cancel(id).await`: cancel and wait for terminal cleanup (or `cancel_by_label(name).await`).
 //! - `handle.list()`: snapshot of active `(TaskId, name)` pairs.
 //! - `handle.is_alive(name)`: check if a specific task is running.
 //! - `handle.shutdown()`: graceful stop (consumes the handle).

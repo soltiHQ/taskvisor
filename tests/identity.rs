@@ -334,34 +334,71 @@ async fn cancel_with_timeout_true_for_cooperative_task() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_with_timeout_errors_on_stuck_task() {
+async fn cancel_timeout_does_not_stop_shared_removal() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
-        let task = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok(())
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started_by_task = Arc::clone(&started);
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let release_by_task = Arc::clone(&release);
+        let task = TaskFn::arc("timeout-shared", move |ctx: TaskContext| {
+            let started = Arc::clone(&started_by_task);
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&release_by_task);
+            async move {
+                started.notify_one();
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Ok(())
+            }
         });
         let id = handle
             .add(TaskSpec::restartable(task))
             .await
-            .expect("add stubborn");
-
-        match handle
-            .cancel_with_timeout(id, Duration::from_millis(150))
+            .expect("add timeout-shared");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
             .await
-        {
+            .expect("task must start before cancellation");
+
+        match handle.cancel_with_timeout(id, Duration::ZERO).await {
             Err(RuntimeError::TaskRemoveTimeout {
                 id: timed_id,
                 timeout,
             }) => {
                 assert_eq!(timed_id, id);
-                assert_eq!(timeout, Duration::from_millis(150));
+                assert_eq!(timeout, Duration::ZERO);
             }
             other => panic!(
-                "expected TaskRemoveTimeout for a task that ignores cancellation, got {other:?}"
+                "expected TaskRemoveTimeout while terminal completion is blocked, got {other:?}"
             ),
         }
-        let _ = with_timeout(5, handle.shutdown()).await;
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("timed-out caller must leave cancellation running");
+        assert_eq!(handle.list().await, vec![(id, Arc::from("timeout-shared"))]);
+
+        let mut joined_cancel = Box::pin(handle.cancel(id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut joined_cancel)
+                .await
+                .is_err(),
+            "a later cancel must join the same blocked terminal completion"
+        );
+
+        release.notify_one();
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(2), joined_cancel)
+                .await
+                .expect("joined cancel must finish after release")
+                .expect("joined cancel must not fail"),
+            "the caller that joins an existing removal returns false"
+        );
+        assert!(handle.list().await.is_empty());
+
+        let _ = handle.shutdown().await;
     })
     .await;
 }
