@@ -45,16 +45,16 @@ pub(super) enum SlotStatus {
 
     /// The controller sent the task to the runtime, but the registry has not confirmed it yet.
     ///
-    /// The slot becomes `Running` when `TaskAdded` is observed.
-    /// It becomes `Idle` or advances to the next queued task if `TaskAddFailed` is observed.
+    /// The slot becomes `Running` when the direct registry Add reply succeeds.
+    /// It becomes `Idle` or advances to the next queued task when that reply rejects the Add.
     Admitting {
         /// Time when admission was requested.
         ///
-        /// Used by lag recovery to decide whether an `Admitting` slot is stale.
+        /// Used for controller snapshots.
         since: Instant,
     },
 
-    /// The runtime confirmed the task with `TaskAdded`.
+    /// The registry accepted the task through its direct Add reply.
     Running {
         /// Time when the slot entered `Running`.
         ///

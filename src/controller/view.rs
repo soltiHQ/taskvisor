@@ -19,15 +19,12 @@ use crate::identity::TaskId;
 pub enum SlotStatusKind {
     /// No current slot owner.
     Idle,
-
     /// A submission was admitted and sent to the runtime, but registration is not confirmed yet.
     ///
-    /// The slot is waiting for `TaskAdded` or `TaskAddFailed`.
+    /// The slot is waiting for the direct registry Add reply.
     Admitting,
-
-    /// The runtime confirmed the task with `TaskAdded`, and the slot is occupied.
+    /// The registry accepted the task, and the slot is occupied.
     Running,
-
     /// The current slot owner is being retired.
     ///
     /// The controller is waiting for the runtime to publish `TaskRemoved`.

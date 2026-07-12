@@ -11,8 +11,8 @@
 //!
 //! A slot is busy while it is:
 //! - `Terminating`: the task is being removed, and the controller waits for `TaskRemoved`,
-//! - `Admitting`: the task was sent to the runtime, but `TaskAdded` is not seen yet,
-//! - `Running`: the task is registered and running.
+//! - `Admitting`: the Add command was sent, but its direct registry reply is still pending,
+//! - `Running`: the registry accepted the task.
 //!
 //! When a new submission targets a busy slot, [`AdmissionPolicy`] decides what happens.
 //!

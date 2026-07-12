@@ -106,4 +106,4 @@ mod shutdown;
 
 mod registry;
 #[cfg(feature = "controller")]
-pub(crate) use registry::OutcomeTx;
+pub(crate) use registry::{AddReplyRx, OutcomeTx};

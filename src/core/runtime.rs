@@ -379,20 +379,15 @@ impl SupervisorCore {
     /// Queues a task add command under a pre-minted identity.
     ///
     /// Used by the controller so a submission keeps the same [`TaskId`] from admission through registry registration.
-    ///
-    /// Unlike [`add_task`](Self::add_task), this **hands the watcher `done` back** in the error
-    /// tuple on failure instead of dropping it, so the controller can resolve the submission's
-    /// waiter with `Rejected` rather than leaving it to observe a canceled oneshot.
     #[cfg(feature = "controller")]
     pub(crate) fn add_task_with_id_watched(
         &self,
         id: TaskId,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
-    ) -> Result<TaskId, (RuntimeError, Option<OutcomeTx>)> {
-        let (id, reply) = self.enqueue_add_task(id, spec, done)?;
-        drop(reply);
-        Ok(id)
+    ) -> Result<AddReplyRx, (RuntimeError, Option<OutcomeTx>)> {
+        let (_id, reply) = self.enqueue_add_task(id, spec, done)?;
+        Ok(reply)
     }
 
     /// Adds a watched task and waits for the registry registration decision.
