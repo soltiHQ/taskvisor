@@ -16,15 +16,16 @@
 //!   submit
 //!   |
 //!   v
-//! Admitting -- Add reply Ok --> Running -- TaskRemoved --> Idle or next queued submission
+//! Admitting -- Add reply Ok --> Running -- registry completion --> Idle or next queued submission
 //!   |                           |
 //!   | Add reply Err             | Replace
 //!   v                           v
-//! Idle or next queued         Terminating -- TaskRemoved --> Idle or next queued submission
+//! Idle or next queued         Terminating -- registry completion --> Idle or next queued submission
 //! ```
 //!
 //! The controller advances admission from direct registry replies.
-//! It starts queued work only after `TaskRemoved`; the registry has finished removing the previous task before the next one is added.
+//! It starts queued work only after the registry confirms that the previous actor is joined and
+//! its id and label are removed. Lifecycle events are observability only.
 //!
 //! ## Submission Outcomes
 //!
@@ -49,7 +50,7 @@ use tokio::sync::broadcast;
 
 use crate::{
     RuntimeError, TaskSpec,
-    core::{AddReplyRx, OutcomeTx, SupervisorCore, TaskOutcome},
+    core::{AddReplyRx, OutcomeTx, RemovalCompletion, SupervisorCore, TaskOutcome},
     events::{Bus, Event, EventKind},
     identity::TaskId,
 };
@@ -63,21 +64,7 @@ use super::{
 };
 
 mod introspect;
-mod recovery;
 mod shutdown;
-
-/// Keeps the earliest pending controller-recovery deadline.
-///
-/// Returns the new deadline when the timer must be reset.
-fn schedule_recovery(recovery_at: &mut Option<Instant>, candidate: Instant) -> Option<Instant> {
-    match recovery_at {
-        Some(current) if *current <= candidate => None,
-        _ => {
-            *recovery_at = Some(candidate);
-            Some(candidate)
-        }
-    }
-}
 
 /// Submission accepted by the controller intake channel.
 struct Submission {
@@ -95,8 +82,16 @@ struct AdmissionResult {
     id: TaskId,
     /// Slot that owned `id` when the Add command was committed.
     slot_name: Arc<str>,
-    /// Direct registry decision. Events do not participate in this result.
-    decision: Result<(), RuntimeError>,
+    /// Direct registry decision and the terminal signal for an accepted task.
+    decision: Result<RemovalCompletion, RuntimeError>,
+}
+
+/// Reliable registry cleanup for one admitted slot owner.
+struct CompletionResult {
+    /// Runtime identity that reached terminal registry cleanup.
+    id: TaskId,
+    /// Slot that owned `id` when completion tracking started.
+    slot_name: Arc<str>,
 }
 
 /// Internal handle used by `SupervisorHandle` to submit work to the controller.
@@ -171,13 +166,14 @@ impl ControllerHandle {
 
 /// Slot-based admission controller.
 ///
-/// The controller is driven by three inputs:
+/// The controller is driven by four inputs:
 /// - submissions from its intake channel,
 /// - direct registry replies for in-flight admission,
-/// - remaining runtime lifecycle events from the bus.
+/// - shared registry completion signals for admitted slot owners,
+/// - queued-removal and shutdown requests from the bus.
 ///
-/// `TaskAdded` and `TaskAddFailed` are observability only.
-/// The bus still drives queued removal, task completion, and shutdown observation.
+/// Task lifecycle events such as `TaskAdded`, `TaskAddFailed`, and `TaskRemoved` are observability
+/// only and never decide slot state.
 pub(crate) struct Controller {
     /// Static controller configuration.
     config: ControllerConfig,
@@ -263,7 +259,8 @@ impl Controller {
 
     /// Runs the controller event loop.
     ///
-    /// The loop receives submissions from the intake channel and lifecycle events from the runtime bus.
+    /// The loop receives submissions, registry admission/completion results, and remaining
+    /// controller control events from the runtime bus.
     ///
     /// On shutdown, it closes the intake receiver, drains buffered submissions, and resolves pending watched submissions as `Rejected`.
     async fn run_inner(&self, token: CancellationToken) -> Result<(), ControllerError> {
@@ -276,31 +273,10 @@ impl Controller {
 
         let mut bus_rx = self.bus.subscribe();
         let mut admissions = JoinSet::new();
-        let mut recovery_at = None;
-        let recovery_timer = tokio::time::sleep(recovery::RECOVERY_DELAY);
-        tokio::pin!(recovery_timer);
+        let mut completions = JoinSet::new();
         loop {
             tokio::select! {
                 _ = token.cancelled() => break,
-
-                _ = &mut recovery_timer, if recovery_at.is_some() => {
-                    recovery_at = None;
-                    if !self.is_shutting_down()
-                        && let Some(next_recovery) = self
-                            .guarded(
-                                "recover_stale_slots",
-                                self.recover_stale_slots(&mut admissions),
-                            )
-                            .await
-                            .flatten()
-                        && let Some(deadline) = schedule_recovery(
-                            &mut recovery_at,
-                            next_recovery,
-                        )
-                    {
-                        recovery_timer.as_mut().reset(deadline);
-                    }
-                }
 
                 Some(sub) = rx.recv() => {
                     let _ = self
@@ -316,7 +292,11 @@ impl Controller {
                             let _ = self
                                 .guarded(
                                     "handle_admission_result",
-                                    self.handle_admission_result(result, &mut admissions),
+                                    self.handle_admission_result(
+                                        result,
+                                        &mut admissions,
+                                        &mut completions,
+                                    ),
                                 )
                                 .await;
                         }
@@ -330,32 +310,37 @@ impl Controller {
                         None => {}
                     }
                 }
+                result = completions.join_next(), if !completions.is_empty() => {
+                    match result {
+                        Some(Ok(result)) => {
+                            let _ = self
+                                .guarded(
+                                    "handle_completion_result",
+                                    self.handle_completion_result(result, &mut admissions),
+                                )
+                                .await;
+                        }
+                        Some(Err(error)) => {
+                            self.bus.publish(
+                                Event::new(EventKind::ControllerRejected)
+                                    .with_task("controller")
+                                    .with_reason(format!("completion_waiter_failed: {error}")),
+                            );
+                        }
+                        None => {}
+                    }
+                }
                 result = bus_rx.recv() => {
                     match result {
                         Ok(event) => {
-                            let shutdown_requested = event.kind == EventKind::ShutdownRequested;
                             let _ = self
                                 .guarded(
                                     "handle_event",
-                                    self.handle_event(event, &mut admissions),
+                                    self.handle_event(event),
                                 )
                                 .await;
-                            if shutdown_requested {
-                                recovery_at = None;
-                            }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if !self.is_shutting_down() {
-                                // Recovery may publish lifecycle events itself. Delay and coalesce
-                                // it so those events cannot start an immediate lag/recovery loop.
-                                if let Some(deadline) = schedule_recovery(
-                                    &mut recovery_at,
-                                    Instant::now() + recovery::RECOVERY_DELAY,
-                                ) {
-                                    recovery_timer.as_mut().reset(deadline);
-                                }
-                            }
-                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -552,13 +537,12 @@ impl Controller {
         }
     }
 
-    /// Routes runtime bus events that still affect controller slot state.
+    /// Routes runtime bus events that still affect queued submissions or shutdown state.
     ///
-    /// Registration events are observability only. Admission uses direct registry replies.
-    /// Events without a matching current slot owner are ignored as stale or unrelated.
-    async fn handle_event(&self, event: Arc<Event>, admissions: &mut JoinSet<AdmissionResult>) {
+    /// Task lifecycle events are observability only. Admission and terminal slot cleanup use
+    /// direct registry signals.
+    async fn handle_event(&self, event: Arc<Event>) {
         match event.kind {
-            EventKind::TaskRemoved => self.on_task_finished(&event, admissions).await,
             EventKind::TaskRemoveRequested => self.on_remove_requested(&event).await,
             EventKind::ShutdownRequested => {
                 self.shutting_down
@@ -612,6 +596,7 @@ impl Controller {
         &self,
         result: AdmissionResult,
         admissions: &mut JoinSet<AdmissionResult>,
+        completions: &mut JoinSet<CompletionResult>,
     ) {
         let AdmissionResult {
             id,
@@ -633,32 +618,35 @@ impl Controller {
         }
 
         match decision {
-            Ok(()) => match slot.status {
-                SlotStatus::Admitting { .. } => {
-                    slot.status = SlotStatus::Running {
-                        started_at: Instant::now(),
-                    };
-                    self.bus.publish(
-                        Event::new(EventKind::ControllerSlotTransition)
-                            .with_task(slot_name)
-                            .with_reason("admitting→running"),
-                    );
-                }
-                SlotStatus::Terminating { .. } => {
-                    let Some(sup) = self.supervisor.upgrade() else {
-                        return;
-                    };
-                    if let Err(error) = sup.try_remove(id).await {
+            Ok(completion) => {
+                Self::track_completion(completions, id, Arc::clone(&slot_name), completion);
+                match slot.status {
+                    SlotStatus::Admitting { .. } => {
+                        slot.status = SlotStatus::Running {
+                            started_at: Instant::now(),
+                        };
                         self.bus.publish(
-                            Event::new(EventKind::ControllerRejected)
+                            Event::new(EventKind::ControllerSlotTransition)
                                 .with_task(slot_name)
-                                .with_id(id)
-                                .with_reason(format!("remove_failed: {error}")),
+                                .with_reason("admitting→running"),
                         );
                     }
+                    SlotStatus::Terminating { .. } => {
+                        let Some(sup) = self.supervisor.upgrade() else {
+                            return;
+                        };
+                        if let Err(error) = sup.remove(id).await {
+                            self.bus.publish(
+                                Event::new(EventKind::ControllerRejected)
+                                    .with_task(slot_name)
+                                    .with_id(id)
+                                    .with_reason(format!("remove_failed: {error}")),
+                            );
+                        }
+                    }
+                    SlotStatus::Idle | SlotStatus::Running { .. } => {}
                 }
-                SlotStatus::Idle | SlotStatus::Running { .. } => {}
-            },
+            }
             Err(_) => {
                 self.running.remove(&id);
                 slot.running_id = None;
@@ -678,19 +666,26 @@ impl Controller {
         }
     }
 
-    /// Handles `TaskRemoved` for the current slot owner.
+    /// Applies one reliable terminal registry cleanup signal.
     ///
-    /// Correlation by `TaskId` makes stale or duplicate removals harmless no-ops.
-    async fn on_task_finished(&self, event: &Event, admissions: &mut JoinSet<AdmissionResult>) {
-        let Some(id) = event.id else {
+    /// Correlation by slot and [`TaskId`] makes stale or duplicate completions harmless no-ops.
+    async fn handle_completion_result(
+        &self,
+        result: CompletionResult,
+        admissions: &mut JoinSet<AdmissionResult>,
+    ) {
+        let Some(indexed_slot) = self.running.get(&result.id).map(|entry| entry.clone()) else {
             return;
         };
-        self.free_and_advance(id, admissions).await;
+        if indexed_slot.as_ref() != result.slot_name.as_ref() {
+            return;
+        }
+        self.free_and_advance(result.id, admissions).await;
     }
 
-    /// Frees a slot after `TaskRemoved`.
+    /// Frees a slot after terminal registry cleanup is confirmed.
     ///
-    /// The event id must match the current slot owner.
+    /// The completed id must match the current slot owner.
     /// If it does, the slot is reset to `Idle` and, unless shutdown is active, the next queued submission is started.
     async fn free_and_advance(&self, id: TaskId, admissions: &mut JoinSet<AdmissionResult>) {
         let Some(sup) = self.supervisor.upgrade() else {
@@ -734,13 +729,13 @@ impl Controller {
     ) -> Result<(), RuntimeError> {
         let done = self.watchers.remove(&id).map(|(_, tx)| tx);
         match sup.add_task_with_id_watched(id, task_spec, done) {
-            Ok(reply) => {
+            Ok((reply, completion)) => {
                 slot.status = SlotStatus::Admitting {
                     since: Instant::now(),
                 };
                 slot.running_id = Some(id);
                 self.running.insert(id, Arc::clone(slot_name));
-                Self::track_admission(admissions, id, Arc::clone(slot_name), reply);
+                Self::track_admission(admissions, id, Arc::clone(slot_name), reply, completion);
                 Ok(())
             }
             Err((e, done)) => {
@@ -758,10 +753,12 @@ impl Controller {
         id: TaskId,
         slot_name: Arc<str>,
         reply: AddReplyRx,
+        completion: RemovalCompletion,
     ) {
         admissions.spawn(async move {
             let decision = match reply.await {
-                Ok(decision) => decision,
+                Ok(Ok(())) => Ok(completion),
+                Ok(Err(error)) => Err(error),
                 Err(_) => Err(RuntimeError::ShuttingDown),
             };
             AdmissionResult {
@@ -769,6 +766,19 @@ impl Controller {
                 slot_name,
                 decision,
             }
+        });
+    }
+
+    /// Tracks one accepted task until terminal registry cleanup is committed.
+    fn track_completion(
+        completions: &mut JoinSet<CompletionResult>,
+        id: TaskId,
+        slot_name: Arc<str>,
+        completion: RemovalCompletion,
+    ) {
+        completions.spawn(async move {
+            completion.wait().await;
+            CompletionResult { id, slot_name }
         });
     }
 
@@ -891,6 +901,7 @@ mod tests {
     use crate::Supervisor;
     use crate::TaskContext;
     use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef, TaskSpec};
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     fn make_spec(name: &str) -> TaskSpec {
@@ -1015,10 +1026,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_events_do_not_decide_admission() {
+    async fn lifecycle_events_do_not_decide_slot_state() {
         let bus = Bus::new(64);
         let ctrl = make_controller(ControllerConfig::default(), bus);
-        let mut admissions = JoinSet::new();
         let id = TaskId::next();
 
         let slot_arc = ctrl.get_or_create_slot("t");
@@ -1031,16 +1041,51 @@ mod tests {
         }
         ctrl.running.insert(id, Arc::from("t"));
 
-        for kind in [EventKind::TaskAdded, EventKind::TaskAddFailed] {
+        for kind in [
+            EventKind::TaskAdded,
+            EventKind::TaskAddFailed,
+            EventKind::TaskRemoved,
+        ] {
             let event = Arc::new(Event::new(kind).with_task("t").with_id(id));
-            ctrl.handle_event(event, &mut admissions).await;
+            ctrl.handle_event(event).await;
         }
 
         let slot = slot_arc.lock().await;
         assert!(
             matches!(slot.status, SlotStatus::Admitting { .. }),
-            "TaskAdded and TaskAddFailed must remain observability-only"
+            "task lifecycle events must remain observability-only"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_completion_does_not_free_current_owner() {
+        let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+        let current_id = TaskId::next();
+        let stale_id = TaskId::next();
+        let slot_arc = ctrl.get_or_create_slot("s");
+        {
+            let mut slot = slot_arc.lock().await;
+            slot.status = SlotStatus::Running {
+                started_at: Instant::now(),
+            };
+            slot.running_id = Some(current_id);
+        }
+        ctrl.running.insert(current_id, Arc::from("s"));
+
+        let mut admissions = JoinSet::new();
+        ctrl.handle_completion_result(
+            CompletionResult {
+                id: stale_id,
+                slot_name: Arc::from("s"),
+            },
+            &mut admissions,
+        )
+        .await;
+
+        let slot = slot_arc.lock().await;
+        assert_eq!(slot.running_id, Some(current_id));
+        assert!(matches!(slot.status, SlotStatus::Running { .. }));
+        assert!(ctrl.running.contains_key(&current_id));
     }
 
     #[tokio::test]
@@ -1142,48 +1187,12 @@ mod tests {
         let _ = handle.shutdown().await;
     }
 
-    fn long_ago() -> Instant {
-        Instant::now()
-            .checked_sub(Duration::from_secs(60))
-            .expect("test host uptime must exceed one minute")
-    }
-
     fn waiting_spec(name: &'static str) -> TaskSpec {
         let task: TaskRef = TaskFn::arc(name, |ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });
         TaskSpec::restartable(task)
-    }
-
-    fn insert_occupied_slot(
-        ctrl: &Controller,
-        name: &str,
-        id: TaskId,
-        status: SlotStatus,
-    ) -> Arc<Mutex<SlotState>> {
-        let slot_name: Arc<str> = Arc::from(name);
-        let slot = Arc::new(Mutex::new(SlotState {
-            status,
-            running_id: Some(id),
-            queue: std::collections::VecDeque::new(),
-        }));
-        ctrl.slots.insert(Arc::clone(&slot_name), Arc::clone(&slot));
-        ctrl.running.insert(id, slot_name);
-        slot
-    }
-
-    async fn wait_for_slot_status(
-        slot: &Arc<Mutex<SlotState>>,
-        expected: impl Fn(SlotStatus) -> bool,
-    ) -> bool {
-        for _ in 0..100 {
-            if expected(slot.lock().await.status) {
-                return true;
-            }
-            tokio::task::yield_now().await;
-        }
-        false
     }
 
     async fn start_controller_loop(
@@ -1217,14 +1226,6 @@ mod tests {
             .expect("controller loop must stop after cancellation")
             .expect("controller loop task must not panic")
             .expect("controller loop must exit cleanly");
-    }
-
-    async fn induce_lag(bus: &Bus) {
-        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed-a"));
-        bus.publish(Event::new(EventKind::TaskStarting).with_task("lag-seed-b"));
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1274,7 +1275,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn replace_is_processed_while_registry_reply_is_pending() {
         let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-        // Keep TaskRemoved off the controller bus; reliable slot completion is the next issue.
+        // Keep TaskRemoved off the controller bus; the reliable completion must advance Replace.
         let controller_bus = Bus::new(64);
         let ctrl = Controller::new(ControllerConfig::default(), sup.core(), controller_bus);
         let token = CancellationToken::new();
@@ -1324,16 +1325,117 @@ mod tests {
             .expect("the registry must resolve the owner outcome");
         assert!(matches!(outcome, TaskOutcome::Canceled));
 
-        let slot = ctrl
-            .slots
-            .get("s")
-            .map(|entry| entry.clone())
-            .expect("completion still waits on TaskRemoved in this issue");
-        let slot = slot.lock().await;
-        assert!(matches!(slot.status, SlotStatus::Terminating { .. }));
-        assert_eq!(slot.running_id, Some(first_id));
-        assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(replacement_id));
-        drop(slot);
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                let Some(slot) = ctrl.slots.get("s").map(|entry| entry.clone()) else {
+                    return false;
+                };
+                let slot = slot.lock().await;
+                slot.running_id == Some(replacement_id)
+                    && matches!(slot.status, SlotStatus::Running { .. })
+            })
+            .await,
+            "the replacement must start from reliable completion without TaskRemoved"
+        );
+
+        stop_controller_loop(token, runner).await;
+        let _ = handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reliable_completion_reuses_task_name_without_task_removed() {
+        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let handle = sup.serve();
+        // Registry lifecycle events cannot reach this controller.
+        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));
+        let token = CancellationToken::new();
+        let runner = start_controller_loop(&ctrl, &token).await;
+
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let (release, released) = oneshot::channel();
+        let released = Arc::new(StdMutex::new(Some(released)));
+        let first_log = Arc::clone(&log);
+        let first_release = Arc::clone(&released);
+        let first: TaskRef = TaskFn::arc("same-runtime-name", move |_ctx: TaskContext| {
+            let released = first_release
+                .lock()
+                .expect("release lock poisoned")
+                .take()
+                .expect("the first task runs once");
+            let log = Arc::clone(&first_log);
+            async move {
+                let _ = released.await;
+                log.lock().expect("log lock poisoned").push("first");
+                Ok(())
+            }
+        });
+        let second_log = Arc::clone(&log);
+        let second: TaskRef = TaskFn::arc("same-runtime-name", move |_ctx: TaskContext| {
+            let log = Arc::clone(&second_log);
+            async move {
+                log.lock().expect("log lock poisoned").push("second");
+                Ok(())
+            }
+        });
+
+        let (first_id, first_outcome) = ctrl
+            .handle()
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(first)).with_slot("s"))
+            .await
+            .expect("the first submission must enter controller intake");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                let Some(slot) = ctrl.slots.get("s").map(|entry| entry.clone()) else {
+                    return false;
+                };
+                let slot = slot.lock().await;
+                slot.running_id == Some(first_id)
+                    && matches!(slot.status, SlotStatus::Running { .. })
+            })
+            .await,
+            "the first task must own the slot before queueing the second"
+        );
+
+        let (second_id, second_outcome) = ctrl
+            .handle()
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(second)).with_slot("s"))
+            .await
+            .expect("the second submission must enter controller intake");
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                let Some(slot) = ctrl.slots.get("s").map(|entry| entry.clone()) else {
+                    return false;
+                };
+                slot.lock().await.queue.front().map(|(id, _)| *id) == Some(second_id)
+            })
+            .await,
+            "the second task must wait behind the first"
+        );
+
+        release.send(()).expect("the first task is waiting");
+        let first_outcome = tokio::time::timeout(Duration::from_secs(2), first_outcome)
+            .await
+            .expect("the first outcome must arrive")
+            .expect("the registry must send the first outcome");
+        let second_outcome = tokio::time::timeout(Duration::from_secs(2), second_outcome)
+            .await
+            .expect("reliable completion must start the queued task")
+            .expect("the registry must send the second outcome");
+        assert!(matches!(first_outcome, TaskOutcome::Completed));
+        assert!(matches!(second_outcome, TaskOutcome::Completed));
+        assert_eq!(
+            log.lock().expect("log lock poisoned").as_slice(),
+            ["first", "second"]
+        );
+        assert!(
+            poll_until(Duration::from_secs(2), || async {
+                ctrl.slots.get("s").is_none()
+                    && !ctrl.running.contains_key(&first_id)
+                    && !ctrl.running.contains_key(&second_id)
+            })
+            .await,
+            "the empty slot must be collected after the second completion"
+        );
 
         stop_controller_loop(token, runner).await;
         let _ = handle.shutdown().await;
@@ -1400,6 +1502,7 @@ mod tests {
         ctrl.watchers.insert(accepted_id, accepted_done);
 
         let mut admissions = JoinSet::new();
+        let mut completions = JoinSet::new();
         {
             let mut slot = slot_arc.lock().await;
             slot.queue
@@ -1415,7 +1518,8 @@ mod tests {
                 .expect("registry admission reply must arrive")
                 .expect("one admission must be in flight")
                 .expect("admission waiter must not fail");
-            ctrl.handle_admission_result(result, &mut admissions).await;
+            ctrl.handle_admission_result(result, &mut admissions, &mut completions)
+                .await;
         }
 
         let duplicate_outcome = duplicate_outcome
@@ -1438,120 +1542,6 @@ mod tests {
         let _ = handle.shutdown().await;
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn repeated_lag_keeps_first_deadline_and_rearms_young_slots() {
-        let bus = Bus::new(1);
-        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
-
-        let first = insert_occupied_slot(
-            &ctrl,
-            "first",
-            TaskId::next(),
-            SlotStatus::Terminating {
-                cancelled_at: Instant::now(),
-            },
-        );
-        let token = CancellationToken::new();
-        let runner = start_controller_loop(&ctrl, &token).await;
-
-        induce_lag(&bus).await;
-
-        tokio::time::advance(Duration::from_secs(4)).await;
-        assert!(
-            matches!(first.lock().await.status, SlotStatus::Terminating { .. }),
-            "recovery must not run before the safety delay"
-        );
-
-        let original_cancel = Instant::now()
-            .checked_sub(Duration::from_secs(4))
-            .expect("paused clock must support a four-second lookback");
-        let second = insert_occupied_slot(
-            &ctrl,
-            "second",
-            TaskId::next(),
-            SlotStatus::Terminating {
-                cancelled_at: original_cancel,
-            },
-        );
-        let late = insert_occupied_slot(
-            &ctrl,
-            "late",
-            TaskId::next(),
-            SlotStatus::Terminating {
-                cancelled_at: Instant::now(),
-            },
-        );
-        induce_lag(&bus).await;
-        assert!(
-            matches!(second.lock().await.status, SlotStatus::Terminating { .. }),
-            "repeated lag must not run stale-slot recovery immediately"
-        );
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(
-            wait_for_slot_status(&first, |status| matches!(status, SlotStatus::Idle)).await
-                && wait_for_slot_status(&second, |status| matches!(status, SlotStatus::Idle)).await,
-            "repeated lag must keep the first recovery deadline"
-        );
-        assert!(
-            matches!(late.lock().await.status, SlotStatus::Terminating { .. }),
-            "a newer slot must not be recovered before its safety delay"
-        );
-
-        tokio::time::advance(Duration::from_secs(4)).await;
-        assert!(
-            wait_for_slot_status(&late, |status| matches!(status, SlotStatus::Idle)).await,
-            "a newer slot must schedule its own delayed recovery"
-        );
-        stop_controller_loop(token, runner).await;
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn shutdown_request_cancels_pending_lag_recovery() {
-        let bus = Bus::new(1);
-        let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus.clone());
-
-        let target = insert_occupied_slot(
-            &ctrl,
-            "target",
-            TaskId::next(),
-            SlotStatus::Terminating {
-                cancelled_at: Instant::now(),
-            },
-        );
-        let token = CancellationToken::new();
-        let runner = start_controller_loop(&ctrl, &token).await;
-
-        induce_lag(&bus).await;
-        bus.publish(Event::new(EventKind::ShutdownRequested));
-
-        let mut shutdown_observed = false;
-        for _ in 0..100 {
-            if ctrl.is_shutting_down() {
-                shutdown_observed = true;
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        tokio::time::advance(recovery::RECOVERY_DELAY + Duration::from_secs(1)).await;
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        let target_unchanged = matches!(target.lock().await.status, SlotStatus::Terminating { .. });
-
-        stop_controller_loop(token, runner).await;
-        assert!(
-            shutdown_observed,
-            "controller must observe shutdown request"
-        );
-        assert!(
-            target_unchanged,
-            "pending recovery must not run after shutdown is requested"
-        );
-    }
-
     async fn sup_with_live_task() -> (Arc<Supervisor>, crate::core::SupervisorHandle, TaskId) {
         let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
         let handle = sup.serve();
@@ -1564,68 +1554,6 @@ mod tests {
             .await
             .expect("task should register");
         (sup, handle, id)
-    }
-
-    #[tokio::test]
-    async fn lag_recovery_does_not_decide_admitting_slot() {
-        let (sup, handle, id) = sup_with_live_task().await;
-        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
-
-        ctrl.slots.insert(
-            Arc::from("s"),
-            Arc::new(Mutex::new(SlotState {
-                status: SlotStatus::Admitting { since: long_ago() },
-                running_id: Some(id),
-                queue: std::collections::VecDeque::new(),
-            })),
-        );
-        ctrl.running.insert(id, Arc::from("s"));
-
-        let mut admissions = JoinSet::new();
-        let _ = ctrl.recover_stale_slots(&mut admissions).await;
-
-        let slot_arc = ctrl.slots.get("s").map(|e| e.clone()).expect("slot exists");
-        let slot = slot_arc.lock().await;
-        assert!(
-            matches!(slot.status, SlotStatus::Admitting { .. }),
-            "only the direct registry reply may decide an Admitting slot, got {:?}",
-            slot.status
-        );
-
-        drop(slot);
-        let _ = handle.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn recover_reissues_removal_for_terminating_slot_with_alive_task() {
-        let (sup, handle, id) = sup_with_live_task().await;
-        let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
-
-        ctrl.slots.insert(
-            Arc::from("s"),
-            Arc::new(Mutex::new(SlotState {
-                status: SlotStatus::Terminating {
-                    cancelled_at: long_ago(),
-                },
-                running_id: Some(id),
-                queue: std::collections::VecDeque::new(),
-            })),
-        );
-        ctrl.running.insert(id, Arc::from("s"));
-
-        let mut admissions = JoinSet::new();
-        let _ = ctrl.recover_stale_slots(&mut admissions).await;
-
-        let removed = poll_until(Duration::from_secs(2), || async {
-            !sup.core().contains_id(id).await
-        })
-        .await;
-        assert!(
-            removed,
-            "recovery must re-issue the deferred removal for a Terminating slot"
-        );
-
-        let _ = handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -1651,17 +1579,13 @@ mod tests {
         );
         ctrl.running.insert(id, Arc::from("s"));
         let mut admissions = JoinSet::new();
-        ctrl.handle_event(
-            Arc::new(Event::new(EventKind::ShutdownRequested)),
-            &mut admissions,
-        )
-        .await;
-        ctrl.handle_event(
-            Arc::new(
-                Event::new(EventKind::TaskRemoved)
-                    .with_task("occupant")
-                    .with_id(id),
-            ),
+        ctrl.handle_event(Arc::new(Event::new(EventKind::ShutdownRequested)))
+            .await;
+        ctrl.handle_completion_result(
+            CompletionResult {
+                id,
+                slot_name: Arc::from("s"),
+            },
             &mut admissions,
         )
         .await;

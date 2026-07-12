@@ -49,16 +49,16 @@
 //!   submit
 //!   │
 //!   ▼
-//! Admitting ── Add reply Ok ──► Running ── TaskRemoved ──► Idle or next queued task
+//! Admitting ── Add reply Ok ──► Running ── registry completion ──► Idle or next queued task
 //!   └── Add reply Err ────────► Idle or next queued task
 //!
 //! Running + Replace
-//!   └── request remove ──► Terminating ── TaskRemoved ──► next queued task
+//!   └── request remove ──► Terminating ── registry completion ──► next queued task
 //! ```
 //!
-//! The controller starts the next queued task only after `TaskRemoved`.
-//! This avoids racing the registry while the previous task is still being deregistered.
-//! Registration events remain available for observability, but they do not decide admission.
+//! The controller starts the next queued task only after reliable registry completion.
+//! At that point the previous actor is joined and its registry id and task name are released.
+//! Lifecycle events remain available for observability, but they do not decide slot state.
 //!
 //! ## Public Surface
 //!
@@ -82,7 +82,7 @@
 //! - Queued submissions are not handed to the runtime until they become the slot owner.
 //! - `Queue` is FIFO.
 //! - `Replace` is latest-wins for the next queued submission.
-//! - Slot advancement is gated on `TaskRemoved`.
+//! - Slot advancement is gated on reliable terminal registry cleanup.
 
 mod view;
 pub use view::{ControllerSnapshot, SlotStatusKind, SlotView};

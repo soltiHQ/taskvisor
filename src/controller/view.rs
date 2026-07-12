@@ -27,7 +27,7 @@ pub enum SlotStatusKind {
     Running,
     /// The current slot owner is being retired.
     ///
-    /// The controller is waiting for the runtime to publish `TaskRemoved`.
+    /// The controller is waiting for reliable terminal registry cleanup.
     Terminating,
 }
 

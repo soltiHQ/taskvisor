@@ -31,6 +31,7 @@
 //!
 //! ```text
 //! Add(id, spec)
+//!   -> create shared terminal completion
 //!   -> spawn actor
 //!   -> insert id/name indexes
 //!   -> reply registered
@@ -38,7 +39,7 @@
 //!
 //! Remove(id)
 //!   -> change Registered to Removing
-//!   -> create shared terminal completion
+//!   -> reuse shared terminal completion
 //!   -> cancel actor token
 //!   -> reply claimed
 //!   -> join actor
@@ -53,7 +54,7 @@
 //!
 //! Actor completion(id)
 //!   -> change Registered to Removing
-//!   -> create shared terminal completion
+//!   -> reuse shared terminal completion
 //!   -> join actor
 //!   -> release id/name indexes
 //!   -> publish TaskRemoved
@@ -64,7 +65,7 @@
 //!
 //! - Watched tasks resolve their `TaskOutcome` when the actor join is reported.
 //! - Add/remove command replies report registry decisions, not terminal task outcomes.
-//! - Cancel callers share a lossless completion signal owned by the registry.
+//! - Cancel callers and controller slots share a lossless completion signal owned by the registry.
 //! - A fence reply means every earlier management command has finished processing.
 //! - A static AddBatch validates every label before it starts any task body.
 //! - AddBatch either registers every item or leaves registry state unchanged.
@@ -157,6 +158,7 @@ pub(crate) enum RegistryCommand {
         id: TaskId,
         spec: TaskSpec,
         outcome: Option<OutcomeTx>,
+        completion: Option<RemovalCompletion>,
         reply: oneshot::Sender<AddReply>,
     },
     /// Validate and register every static-run task as one operation.
@@ -201,22 +203,23 @@ struct Handle {
     join: JoinHandle<ActorExitReason>,
     cancel: CancellationToken,
     done: Option<OutcomeTx>,
+    completion: RemovalCompletion,
 }
 
-/// Shared terminal signal for all callers waiting on one removal.
-#[derive(Clone)]
-struct RemovalCompletion {
+/// Shared terminal signal for callers waiting until registry cleanup is committed.
+#[derive(Clone, Debug)]
+pub(crate) struct RemovalCompletion {
     token: CancellationToken,
 }
 
 impl RemovalCompletion {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             token: CancellationToken::new(),
         }
     }
 
-    async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         self.token.cancelled().await;
     }
 
@@ -566,11 +569,12 @@ impl Registry {
                 id,
                 spec,
                 outcome,
+                completion,
                 reply,
             } => {
                 self.guarded(
                     "registry",
-                    self.spawn_and_register(id, spec, outcome, reply),
+                    self.spawn_and_register(id, spec, outcome, completion, reply),
                 )
                 .await;
             }
@@ -651,7 +655,7 @@ impl Registry {
     }
 
     /// Returns true if `id` is registered or removing.
-    #[cfg(any(test, feature = "controller"))]
+    #[cfg(test)]
     pub async fn contains(&self, id: TaskId) -> bool {
         self.state.read().await.tasks.contains_key(&id)
     }
@@ -761,6 +765,7 @@ impl Registry {
         label: Arc<str>,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
+        completion: Option<RemovalCompletion>,
         start: Option<watch::Receiver<bool>>,
     ) -> Entry {
         let task_token = self.runtime_token.child_token();
@@ -801,6 +806,7 @@ impl Registry {
                 join: join_handle,
                 cancel: task_token,
                 done,
+                completion: completion.unwrap_or_else(RemovalCompletion::new),
             }),
         }
     }
@@ -854,6 +860,7 @@ impl Registry {
                 Arc::clone(&label),
                 item.spec,
                 None,
+                None,
                 Some(start_rx.clone()),
             );
             st.tasks.insert(id, entry);
@@ -883,6 +890,7 @@ impl Registry {
         id: TaskId,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
+        completion: Option<RemovalCompletion>,
         reply: oneshot::Sender<AddReply>,
     ) {
         let label: Arc<str> = Arc::from(spec.task().name());
@@ -907,7 +915,7 @@ impl Registry {
             return;
         }
 
-        let entry = self.spawn_entry(id, Arc::clone(&label), spec, done, None);
+        let entry = self.spawn_entry(id, Arc::clone(&label), spec, done, completion, None);
         st.tasks.insert(id, entry);
         st.by_label.insert(label.clone(), id);
         drop(st);
@@ -1093,7 +1101,10 @@ impl Registry {
             return None;
         }
 
-        let completion = RemovalCompletion::new();
+        let completion = match &entry.state {
+            EntryState::Registered(handle) => handle.completion.clone(),
+            EntryState::Removing { .. } => unreachable!("a removing entry was checked above"),
+        };
         let EntryState::Registered(handle) = std::mem::replace(
             &mut entry.state,
             EntryState::Removing {
@@ -1215,11 +1226,13 @@ impl Registry {
             }
         }
         pending_joins.dec(id);
-        state_completion.complete();
-        removal_completion.complete();
-
         let is_empty = st.tasks.is_empty();
         drop(st);
+
+        // Wake completion waiters only after id and label membership is removed and the
+        // registry state lock is released. A controller may safely admit the next task now.
+        state_completion.complete();
+        removal_completion.complete();
         if is_empty {
             empty_notify.notify_waiters();
         }
@@ -1425,6 +1438,7 @@ mod tests {
             id,
             spec,
             outcome,
+            completion: None,
             reply,
         })
         .expect("registry command channel must stay open");
@@ -2450,6 +2464,7 @@ mod tests {
                     join,
                     cancel: CancellationToken::new(),
                     done: Some(done),
+                    completion: RemovalCompletion::new(),
                 }),
             },
         );
@@ -2670,6 +2685,7 @@ mod tests {
             id,
             spec: TaskSpec::restartable(task),
             outcome: Some(done_tx),
+            completion: None,
             reply: reply_tx,
         })
         .expect("channel is open before shutdown");
