@@ -51,7 +51,7 @@ async fn add_storm_unique_names_all_register_then_drain_to_empty() {
         let mut rjoins = Vec::new();
         for id in ids {
             let h = handle.clone();
-            rjoins.push(tokio::spawn(async move { h.remove(id) }));
+            rjoins.push(tokio::spawn(async move { h.remove(id).await }));
         }
         for j in rjoins {
             let _ = j.await;
@@ -197,7 +197,7 @@ async fn interleaved_add_and_remove_drains_to_empty() {
                     .add(TaskSpec::restartable(make_coop(&format!("t-{i}"))))
                     .await
                     .expect("add");
-                let _ = h.remove(id);
+                let _ = h.remove(id).await;
                 id
             }));
         }
@@ -206,7 +206,7 @@ async fn interleaved_add_and_remove_drains_to_empty() {
             ids.push(j.await.unwrap());
         }
         for id in ids {
-            let _ = handle.remove(id);
+            let _ = handle.remove(id).await;
         }
         assert!(
             poll_until(Duration::from_secs(15), || async {
@@ -217,6 +217,62 @@ async fn interleaved_add_and_remove_drains_to_empty() {
         );
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_remove_same_id_has_exactly_one_claim() {
+    let handle = served(5, 0);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let task_started = Arc::clone(&started);
+    let task_release = Arc::clone(&release);
+    let task: TaskRef = TaskFn::arc("remove-race", move |_ctx: TaskContext| {
+        let started = Arc::clone(&task_started);
+        let release = Arc::clone(&task_release);
+        async move {
+            started.notify_one();
+            release.notified().await;
+            Ok(())
+        }
+    });
+    let id = handle
+        .add(TaskSpec::restartable(task))
+        .await
+        .expect("register remove-race");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("remove-race must start");
+
+    const N: usize = 32;
+    let mut joins = Vec::with_capacity(N);
+    for _ in 0..N {
+        let handle = handle.clone();
+        joins.push(tokio::spawn(async move {
+            handle
+                .remove(id)
+                .await
+                .expect("Remove must receive a reply")
+        }));
+    }
+
+    let mut claimed = 0;
+    for join in joins {
+        if join.await.expect("Remove caller must not panic") {
+            claimed += 1;
+        }
+    }
+    assert_eq!(claimed, 1, "exactly one Remove may claim the task");
+    assert_eq!(handle.list().await, vec![(id, Arc::from("remove-race"))]);
+
+    release.notify_one();
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle.list().await.is_empty()
+        })
+        .await,
+        "terminal cleanup must remove the retained entry"
+    );
+    let _ = handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

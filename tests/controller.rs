@@ -135,7 +135,10 @@ async fn submit_and_watch_resolves_rejected_when_removed_from_queue() {
             })
             .await
         );
-        handle.remove(victim_id).expect("remove accepted");
+        assert!(
+            !handle.remove(victim_id).await.expect("remove accepted"),
+            "a controller-queued task is not registered yet"
+        );
 
         match waiter.wait().await.expect("waiter errored") {
             TaskOutcome::Rejected { reason } => {
@@ -265,7 +268,10 @@ async fn remove_of_queued_submission_purges_it_before_start() {
             "queued submission must be confirmed before removal"
         );
 
-        handle.remove(victim_id).expect("remove accepted");
+        assert!(
+            !handle.remove(victim_id).await.expect("remove accepted"),
+            "a controller-queued task is not registered yet"
+        );
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 collector

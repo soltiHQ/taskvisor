@@ -283,7 +283,7 @@ async fn force_aborted_outcome_for_noncooperative_task() {
         .await
         .expect("add_and_watch should succeed");
 
-    handle.remove(id).expect("remove should be accepted");
+    assert!(handle.remove(id).await.expect("remove should be accepted"));
 
     let outcome = with_timeout(5, waiter.wait())
         .await

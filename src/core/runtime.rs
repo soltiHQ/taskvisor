@@ -138,14 +138,14 @@ impl SupervisorCore {
         })
     }
 
-    /// Returns true once shutdown has started and new task admission is closed.
+    /// Returns true once shutdown has started and management admission is closed.
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
     }
 
     /// Marks the runtime as shutting down.
     ///
-    /// This is idempotent and closes the admission gate for future adds.
+    /// This is idempotent and closes the admission gate for future commands.
     fn mark_shutting_down(&self) {
         self.shutting_down.store(true, Ordering::Release);
     }
@@ -292,28 +292,103 @@ impl SupervisorCore {
         (id, reply_rx)
     }
 
-    /// Queues a remove command by runtime identity.
-    ///
-    /// This is fire-and-forget.
-    /// `Ok(())` means the command was sent, not that the task existed or has already stopped.
-    pub(crate) fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
+    /// Removes a task after queue capacity and the registry claim decision.
+    pub(crate) async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_remove_wait(id, None).await?;
+        Self::await_remove_reply(reply).await
+    }
+
+    /// Tries to remove a task without waiting for command queue capacity.
+    pub(crate) async fn try_remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_remove(id, None)?;
-        drop(reply);
-        Ok(())
+        Self::await_remove_reply(reply).await
+    }
+
+    /// Removes the task that owns `label` at the registry ordering point.
+    pub(crate) async fn remove_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_remove_by_label_wait(label).await?;
+        Self::await_remove_reply(reply).await
+    }
+
+    /// Resolves one authoritative registry Remove reply.
+    async fn await_remove_reply(reply: RemoveReplyRx) -> Result<bool, RuntimeError> {
+        match reply.await {
+            Ok(result) => result,
+            Err(_) => Err(RuntimeError::ShuttingDown),
+        }
     }
 
     /// Publishes one remove request, queues its command, and returns the authoritative reply.
-    ///
-    /// This is fail-fast while the public management API remains synchronous.
     fn enqueue_remove(
         &self,
         id: TaskId,
         reason: Option<&'static str>,
     ) -> Result<RemoveReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
         let permit = self.cmd_tx.try_reserve().map_err(|error| match error {
             mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
             mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
         })?;
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        }
+        Ok(self.commit_remove(permit, id, reason))
+    }
+
+    /// Waits for bounded queue capacity, then queues one Remove command.
+    async fn enqueue_remove_wait(
+        &self,
+        id: TaskId,
+        reason: Option<&'static str>,
+    ) -> Result<RemoveReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self
+            .cmd_tx
+            .reserve()
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        }
+        Ok(self.commit_remove(permit, id, reason))
+    }
+
+    /// Waits for queue capacity, then sends one atomic label Remove command.
+    async fn enqueue_remove_by_label_wait(
+        &self,
+        label: Arc<str>,
+    ) -> Result<RemoveReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self
+            .cmd_tx
+            .reserve()
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        if self.is_shutting_down() {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        }
+
+        let (reply, reply_rx) = oneshot::channel();
+        permit.send(RegistryCommand::RemoveByLabel { label, reply });
+        Ok(reply_rx)
+    }
+
+    /// Publishes one identity request and makes its reserved command visible.
+    fn commit_remove(
+        &self,
+        permit: mpsc::Permit<'_, RegistryCommand>,
+        id: TaskId,
+        reason: Option<&'static str>,
+    ) -> RemoveReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         let mut event = Event::new(EventKind::TaskRemoveRequested).with_id(id);
         if let Some(reason) = reason {
@@ -321,7 +396,7 @@ impl SupervisorCore {
         }
         self.bus.publish(event);
         permit.send(RegistryCommand::Remove { id, reply });
-        Ok(reply_rx)
+        reply_rx
     }
 
     /// Returns registered tasks as `(id, label)` pairs from the registry.
@@ -909,6 +984,154 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn confirmed_remove_waits_for_capacity_and_registry_reply() {
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+        let filler_id = TaskId::next();
+        let filler_reply = core
+            .enqueue_remove(filler_id, None)
+            .expect("the filler must occupy the only queue slot");
+
+        let remove_id = TaskId::next();
+        let mut remove = Box::pin(core.remove(remove_id));
+        assert_pending_once(remove.as_mut()).await;
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(remove_id) || event.kind != EventKind::TaskRemoveRequested,
+                "a backpressured Remove is not visible before queue admission"
+            );
+        }
+
+        core.start();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), filler_reply)
+                .await
+                .expect("filler reply must resolve"),
+            Ok(Ok(false))
+        ));
+        assert!(
+            !timeout(Duration::from_secs(2), remove)
+                .await
+                .expect("Remove must wake after capacity is released")
+                .expect("the registry must reply for an unknown id")
+        );
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event.id == Some(remove_id) && event.kind == EventKind::TaskRemoveRequested
+        }));
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn try_remove_waits_for_registry_decision_after_admission() {
+        let core = core(SupervisorConfig::default());
+        let id = TaskId::next();
+        let mut remove = Box::pin(core.try_remove(id));
+        assert_pending_once(remove.as_mut()).await;
+
+        core.start();
+        assert!(
+            !timeout(Duration::from_secs(2), remove)
+                .await
+                .expect("try_remove must wait for registry processing")
+                .expect("an admitted try_remove must receive a reply")
+        );
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remove_by_label_orders_after_an_already_queued_add() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let core = core(SupervisorConfig::default());
+        let mut events = core.bus.subscribe();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("ordered-label", move |_ctx: TaskContext| {
+            let release = Arc::clone(&task_release);
+            async move {
+                release.notified().await;
+                Ok(())
+            }
+        });
+        let id = TaskId::next();
+        let (_, add_reply) = core
+            .enqueue_add_task(id, TaskSpec::restartable(task), None)
+            .expect("the Add command must enter the queue first");
+
+        let mut remove = Box::pin(core.remove_by_label(Arc::from("ordered-label")));
+        assert_pending_once(remove.as_mut()).await;
+        core.start();
+
+        assert!(matches!(
+            timeout(Duration::from_secs(2), add_reply)
+                .await
+                .expect("Add reply must resolve"),
+            Ok(Ok(()))
+        ));
+        assert!(
+            timeout(Duration::from_secs(2), remove)
+                .await
+                .expect("label Remove must resolve")
+                .expect("label Remove must receive a registry reply"),
+            "the label lookup must happen after the queued Add is committed"
+        );
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event.kind == EventKind::TaskRemoveRequested
+                && event.id == Some(id)
+                && event.task.as_deref() == Some("ordered-label")
+        }));
+
+        release.notify_one();
+        timeout(Duration::from_secs(2), core.registry.wait_until_empty())
+            .await
+            .expect("the removed task must finish");
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backpressured_remove_returns_shutting_down_without_request_event() {
+        let cfg = SupervisorConfig {
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the only queue slot");
+        let remove_id = TaskId::next();
+        let mut remove = Box::pin(core.remove(remove_id));
+        assert_pending_once(remove.as_mut()).await;
+
+        core.runtime_token.cancel();
+        core.start();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), remove)
+                .await
+                .expect("closing the queue must wake Remove"),
+            Err(RuntimeError::ShuttingDown)
+        ));
+        let _ = timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("the buffered filler must still resolve");
+        core.registry.join_listener().await;
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(remove_id) || event.kind != EventKind::TaskRemoveRequested,
+                "a Remove rejected before enqueue must not publish TaskRemoveRequested"
+            );
+        }
+
+        let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn backpressured_add_returns_shutting_down_when_queue_closes() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1135,7 +1358,7 @@ mod tests {
 
         let rejected_remove_id = TaskId::next();
         assert!(matches!(
-            core.remove(rejected_remove_id),
+            core.try_remove(rejected_remove_id).await,
             Err(RuntimeError::CommandQueueFull)
         ));
         while let Ok(event) = events.try_recv() {
@@ -1220,7 +1443,7 @@ mod tests {
 
         let remove_id = TaskId::next();
         assert!(matches!(
-            core.remove(remove_id),
+            core.remove(remove_id).await,
             Err(RuntimeError::ShuttingDown)
         ));
         while let Ok(event) = events.try_recv() {
@@ -1357,7 +1580,7 @@ mod tests {
         let mut lagged_rx = core.subscribe_bus();
         let mut observer = core.subscribe_bus();
 
-        core.remove(id).expect("remove should be accepted");
+        assert!(core.remove(id).await.expect("remove should be accepted"));
 
         let observed = timeout(Duration::from_secs(2), async {
             loop {
