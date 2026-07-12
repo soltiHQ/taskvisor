@@ -56,6 +56,8 @@
 //! ## Rules
 //!
 //! - New task admission closes once shutdown begins.
+//! - Shutdown waits for a registry fence before it starts task drain.
+//! - Commands committed before the admission gate closes are processed before that fence.
 //! - Registry membership is keyed by `TaskId`.
 //! - `run()` is single-shot. A second call returns `RuntimeError::AlreadyRunning`.
 //! - `snapshot` and `is_alive` are best-effort views from the alive tracker.
@@ -100,6 +102,7 @@ pub(crate) struct SupervisorCore {
     started: AtomicBool,
     running: AtomicBool,
     shutting_down: AtomicBool,
+    admission_gate: std::sync::Mutex<()>,
     cmd_tx: mpsc::Sender<RegistryCommand>,
     subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -136,6 +139,7 @@ impl SupervisorCore {
             started: AtomicBool::new(false),
             running: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
+            admission_gate: std::sync::Mutex::new(()),
             cmd_tx,
             subscriber_handle: std::sync::Mutex::new(None),
         })
@@ -148,9 +152,37 @@ impl SupervisorCore {
 
     /// Marks the runtime as shutting down.
     ///
-    /// This is idempotent and closes the admission gate for future commands.
+    /// The gate lock waits for every command that already passed its final
+    /// admission check to become visible in the registry queue.
     fn mark_shutting_down(&self) {
+        let _gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.shutting_down.store(true, Ordering::Release);
+    }
+
+    /// Holds the admission gate across a command's final check and queue commit.
+    fn command_admission(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        let gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.is_shutting_down() {
+            None
+        } else {
+            Some(gate)
+        }
+    }
+
+    /// Closes command admission and waits until the registry reaches that ordering point.
+    ///
+    /// Every command committed before the gate closes is ahead of this fence.
+    /// Backpressured callers re-check the gate after receiving capacity and are
+    /// rejected instead of appearing behind the fence.
+    async fn close_admission_and_fence_registry(&self) -> Result<(), RuntimeError> {
+        self.mark_shutting_down();
+        self.registry.fence().await
     }
 
     /// Adds a task and waits for the registry registration decision.
@@ -231,6 +263,7 @@ impl SupervisorCore {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
+        let label: Arc<str> = Arc::from(spec.task().name());
         let permit = match self.cmd_tx.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(())) => {
@@ -240,11 +273,11 @@ impl SupervisorCore {
                 return Err((RuntimeError::ShuttingDown, done));
             }
         };
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
-        }
-        Ok(self.commit_add(permit, id, spec, done))
+        };
+        Ok(self.commit_add(permit, id, label, spec, done))
     }
 
     /// Waits for bounded queue capacity, then queues one Add command.
@@ -257,15 +290,16 @@ impl SupervisorCore {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
+        let label: Arc<str> = Arc::from(spec.task().name());
         let permit = match self.cmd_tx.reserve().await {
             Ok(permit) => permit,
             Err(_) => return Err((RuntimeError::ShuttingDown, done)),
         };
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
-        }
-        Ok(self.commit_add(permit, id, spec, done))
+        };
+        Ok(self.commit_add(permit, id, label, spec, done))
     }
 
     /// Publishes the request event and makes an already-reserved Add visible.
@@ -276,10 +310,10 @@ impl SupervisorCore {
         &self,
         permit: mpsc::Permit<'_, RegistryCommand>,
         id: TaskId,
+        label: Arc<str>,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
     ) -> (TaskId, AddReplyRx) {
-        let label: Arc<str> = Arc::from(spec.task().name());
         let (reply, reply_rx) = oneshot::channel();
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
@@ -334,10 +368,10 @@ impl SupervisorCore {
             mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
             mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
         })?;
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err(RuntimeError::ShuttingDown);
-        }
+        };
         Ok(self.commit_remove(permit, id, reason))
     }
 
@@ -355,10 +389,10 @@ impl SupervisorCore {
             .reserve()
             .await
             .map_err(|_| RuntimeError::ShuttingDown)?;
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err(RuntimeError::ShuttingDown);
-        }
+        };
         Ok(self.commit_remove(permit, id, reason))
     }
 
@@ -375,10 +409,10 @@ impl SupervisorCore {
             .reserve()
             .await
             .map_err(|_| RuntimeError::ShuttingDown)?;
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err(RuntimeError::ShuttingDown);
-        }
+        };
 
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::RemoveByLabel { label, reply });
@@ -411,10 +445,10 @@ impl SupervisorCore {
             mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
             mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
         })?;
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err(RuntimeError::ShuttingDown);
-        }
+        };
 
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::Cancel { id, reply });
@@ -430,10 +464,10 @@ impl SupervisorCore {
             mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
             mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
         })?;
-        if self.is_shutting_down() {
+        let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err(RuntimeError::ShuttingDown);
-        }
+        };
 
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::CancelByLabel { label, reply });
@@ -728,19 +762,8 @@ impl SupervisorCore {
     async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
         let res = tokio::select! {
             sig = crate::core::shutdown::wait_for_shutdown_signal() => self.on_shutdown_signal(sig).await,
-            _ = self.registry.wait_until_empty() => {
-                let stuck = self.registry.wait_joins_within(self.cfg.grace).await;
-                if stuck.is_empty() {
-                    self.bus
-                        .publish(Event::new(EventKind::AllStoppedWithinGrace));
-                    Ok(())
-                } else {
-                    self.bus.publish(Event::new(EventKind::GraceExceeded));
-                    Err(RuntimeError::GraceExceeded { grace: self.cfg.grace, stuck })
-                }
-            }
+            _ = self.registry.wait_until_empty() => self.drain_with_grace().await,
         };
-        self.mark_shutting_down();
         self.runtime_token.cancel();
         self.registry.join_listener().await;
         self.join_subscriber_listener().await;
@@ -758,16 +781,21 @@ impl SupervisorCore {
                 self.bus.publish(Event::new(EventKind::ShutdownRequested));
                 self.drain_with_grace().await
             }
-            Err(e) => Err(RuntimeError::SignalSetupFailed { source: e }),
+            Err(e) => {
+                let _ = self.close_admission_and_fence_registry().await;
+                Err(RuntimeError::SignalSetupFailed { source: e })
+            }
         }
     }
 
     /// Cancels tasks and waits for them within the configured grace window.
     ///
-    /// This drains registered tasks first, then waits for detached join reporters using the remaining grace.
+    /// Admission closes first. The registry processes every command accepted
+    /// before that point, then this drains registered tasks and waits for
+    /// detached join reporters using the remaining grace.
     /// Tasks/joiners that do not finish are returned as `GraceExceeded` stuck labels.
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
-        self.mark_shutting_down();
+        self.close_admission_and_fence_registry().await?;
         let grace = self.cfg.grace;
         let deadline = tokio::time::Instant::now() + grace;
         let mut stuck = self.registry.cancel_all_within(grace).await;
@@ -972,6 +1000,124 @@ mod tests {
         );
 
         let _ = core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_fence_processes_committed_add_before_drain() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            grace: Duration::from_secs(1),
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let accepted_id = TaskId::next();
+        let accepted: TaskRef =
+            TaskFn::arc("accepted-before-shutdown", |ctx: TaskContext| async move {
+                ctx.cancelled().await;
+                Err(TaskError::Canceled)
+            });
+        let (outcome, outcome_rx) = oneshot::channel();
+        let (_, add_reply) = core
+            .enqueue_add_task(accepted_id, TaskSpec::restartable(accepted), Some(outcome))
+            .expect("the Add command must be committed before shutdown starts");
+
+        let mut shutdown = Box::pin(core.shutdown());
+        assert_pending_once(shutdown.as_mut()).await;
+        assert!(core.is_shutting_down());
+
+        let late_runs = Arc::new(AtomicUsize::new(0));
+        let late_runs_by_task = Arc::clone(&late_runs);
+        let late: TaskRef = TaskFn::arc("rejected-after-shutdown", move |_ctx: TaskContext| {
+            late_runs_by_task.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        });
+        assert!(matches!(
+            core.add_task(TaskSpec::once(late)).await,
+            Err(RuntimeError::ShuttingDown)
+        ));
+
+        core.start();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), add_reply)
+                .await
+                .expect("the accepted Add must receive its registry reply"),
+            Ok(Ok(()))
+        ));
+        timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown must pass the fence and finish")
+            .expect("the accepted cooperative task must drain cleanly");
+        timeout(Duration::from_secs(2), outcome_rx)
+            .await
+            .expect("the accepted watched task must receive a terminal outcome")
+            .expect("the registry must keep the watched outcome sender");
+
+        assert!(!core.contains_id(accepted_id).await);
+        assert_eq!(late_runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unpolled_backpressured_add_does_not_block_shutdown_fence() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let cfg = SupervisorConfig {
+            grace: Duration::from_secs(1),
+            registry_queue_capacity: 1,
+            ..Default::default()
+        };
+        let core = core(cfg);
+        let mut events = core.bus.subscribe();
+        let filler_reply = core
+            .enqueue_remove(TaskId::next(), None)
+            .expect("the filler must occupy the command queue");
+
+        let rejected_id = TaskId::next();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_by_task = Arc::clone(&runs);
+        let rejected: TaskRef =
+            TaskFn::arc("backpressured-at-shutdown", move |_ctx: TaskContext| {
+                runs_by_task.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+        let mut add =
+            Box::pin(core.enqueue_add_task_wait(rejected_id, TaskSpec::once(rejected), None));
+        assert_pending_once(add.as_mut()).await;
+
+        let mut shutdown = Box::pin(core.shutdown());
+        assert_pending_once(shutdown.as_mut()).await;
+        assert!(core.is_shutting_down());
+
+        core.start();
+        timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("the control fence must not wait for the backpressured Add")
+            .expect("an empty registry must shut down cleanly");
+        assert!(matches!(
+            timeout(Duration::from_secs(2), filler_reply)
+                .await
+                .expect("the filler must receive its registry reply"),
+            Ok(Ok(false))
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(2), add)
+                .await
+                .expect("the backpressured Add must wake after admission closes"),
+            Err((RuntimeError::ShuttingDown, None))
+        ));
+
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                event.id != Some(rejected_id) || event.kind != EventKind::TaskAddRequested,
+                "an Add rejected behind the admission gate must stay silent"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1591,6 +1737,7 @@ mod tests {
     #[tokio::test]
     async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
         let core = core(SupervisorConfig::default());
+        core.start();
         let mut rx = core.bus.subscribe();
 
         let err = std::io::Error::other("signal registration failed");
@@ -1616,6 +1763,7 @@ mod tests {
     #[tokio::test]
     async fn real_signal_publishes_shutdown_requested() {
         let core = core(SupervisorConfig::default());
+        core.start();
         let mut rx = core.bus.subscribe();
 
         let out = core.on_shutdown_signal(Ok(())).await;

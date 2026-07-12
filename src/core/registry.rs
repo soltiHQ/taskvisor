@@ -12,11 +12,13 @@
 //!
 //! ```text
 //! Management plane:
-//!   SupervisorCore                 Registry
-//!        |                            |
-//!        |-- command (bounded mpsc) ->|
-//!        |                            |-- update registry state
-//!        |<-- reply (oneshot) --------|
+//!   SupervisorCore                  Registry
+//!        |                             |
+//!        |-- command (bounded mpsc) -->|
+//!        |                             |-- update registry state
+//!        |<-- reply (oneshot) ---------|
+//!        |-- fence (control channel) ->|  drain committed commands
+//!        |<-- fence reply -------------|
 //!
 //! Completion plane:
 //!   TaskActor -> completion mpsc -> registry cleanup
@@ -63,6 +65,7 @@
 //! - Watched tasks resolve their `TaskOutcome` when the actor join is reported.
 //! - Add/remove command replies report registry decisions, not terminal task outcomes.
 //! - Cancel callers share a lossless completion signal owned by the registry.
+//! - A fence reply means every earlier management command has finished processing.
 //! - Cleanup is idempotent. Duplicate or stale completion signals become no-ops.
 //! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
 //! - Task name is a label and a duplicate-name admission gate; reserved while the task is `Registered` or `Removing`.
@@ -166,6 +169,12 @@ pub(crate) enum RegistryCommand {
         label: Arc<str>,
         reply: oneshot::Sender<CancelReply>,
     },
+}
+
+/// Reliable control messages that must not wait for management queue capacity.
+enum RegistryControl {
+    /// Confirms that every command committed before admission closed has been processed.
+    Fence { reply: oneshot::Sender<()> },
 }
 
 /// Registry-owned actor handle for one registered task.
@@ -381,6 +390,8 @@ pub(crate) struct Registry {
     grace: Duration,
     empty_notify: Arc<Notify>,
     cmd_rx: std::sync::Mutex<Option<mpsc::Receiver<RegistryCommand>>>,
+    control_tx: mpsc::UnboundedSender<RegistryControl>,
+    control_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<RegistryControl>>>,
     completion_tx: mpsc::UnboundedSender<TaskId>,
     completion_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<TaskId>>>,
     pending_joins: Arc<PendingJoins>,
@@ -397,6 +408,7 @@ impl Registry {
         cmd_rx: mpsc::Receiver<RegistryCommand>,
     ) -> Arc<Self> {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             state: Arc::new(RwLock::new(Inner::default())),
             bus,
@@ -405,6 +417,8 @@ impl Registry {
             grace,
             empty_notify: Arc::new(Notify::new()),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
+            control_tx,
+            control_rx: std::sync::Mutex::new(Some(control_rx)),
             completion_tx,
             completion_rx: std::sync::Mutex::new(Some(completion_rx)),
             pending_joins: Arc::new(PendingJoins::default()),
@@ -438,14 +452,28 @@ impl Registry {
         }
     }
 
+    /// Waits until every management command committed before this call has been processed.
+    ///
+    /// The control channel is independent of bounded management queue capacity.
+    pub(crate) async fn fence(&self) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.control_tx
+            .send(RegistryControl::Fence { reply })
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)
+    }
+
     /// Starts the registry listener task.
     ///
     /// The listener consumes receivers stored during construction.
     /// It listens to:
     /// - management commands from `cmd_rx`,
+    /// - shutdown fences from the independent control channel,
     /// - actor identity signals from the reliable completion channel.
     ///
-    /// On runtime shutdown, it closes the command receiver, drains already buffered commands, cancels remaining actors with zero extra grace, and waits for all join reporters to finish.
+    /// On runtime shutdown, it closes the command receiver, drains commands that
+    /// are already buffered without waiting for uncommitted reservations, cancels
+    /// remaining actors with zero extra grace, and waits for join reporters.
     pub fn spawn_listener(self: Arc<Self>) {
         let mut cmd_rx = self
             .cmd_rx
@@ -455,6 +483,12 @@ impl Registry {
             .expect("spawn_listener called exactly once");
         let mut completion_rx = self
             .completion_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("spawn_listener called exactly once");
+        let mut control_rx = self
+            .control_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
@@ -475,23 +509,13 @@ impl Registry {
                         None => break,
                     },
 
+                    control = control_rx.recv() => match control {
+                        Some(control) => me.handle_control(control, &mut cmd_rx).await,
+                        None => break,
+                    },
+
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(RegistryCommand::Add { id, spec, outcome, reply }) => {
-                            me.guarded("registry", me.spawn_and_register(id, spec, outcome, reply))
-                            .await;
-                        }
-                        Some(RegistryCommand::Remove { id, reply }) => {
-                            me.guarded("registry", me.remove_task(id, reply)).await;
-                        }
-                        Some(RegistryCommand::RemoveByLabel { label, reply }) => {
-                            me.guarded("registry", me.remove_task_by_label(label, reply)).await;
-                        }
-                        Some(RegistryCommand::Cancel { id, reply }) => {
-                            me.guarded("registry", me.cancel_task(id, reply)).await;
-                        }
-                        Some(RegistryCommand::CancelByLabel { label, reply }) => {
-                            me.guarded("registry", me.cancel_task_by_label(label, reply)).await;
-                        }
+                        Some(command) => me.handle_command(command).await,
                         None => break,
                     }
                 }
@@ -499,32 +523,12 @@ impl Registry {
 
             cmd_rx.close();
             completion_rx.close();
-            while let Some(cmd) = cmd_rx.recv().await {
-                match cmd {
-                    RegistryCommand::Add {
-                        id,
-                        spec,
-                        outcome,
-                        reply,
-                    } => {
-                        me.guarded("registry", me.spawn_and_register(id, spec, outcome, reply))
-                            .await;
-                    }
-                    RegistryCommand::Remove { id, reply } => {
-                        me.guarded("registry", me.remove_task(id, reply)).await;
-                    }
-                    RegistryCommand::RemoveByLabel { label, reply } => {
-                        me.guarded("registry", me.remove_task_by_label(label, reply))
-                            .await;
-                    }
-                    RegistryCommand::Cancel { id, reply } => {
-                        me.guarded("registry", me.cancel_task(id, reply)).await;
-                    }
-                    RegistryCommand::CancelByLabel { label, reply } => {
-                        me.guarded("registry", me.cancel_task_by_label(label, reply))
-                            .await;
-                    }
-                }
+            control_rx.close();
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                me.handle_command(cmd).await;
+            }
+            while let Ok(control) = control_rx.try_recv() {
+                me.handle_control(control, &mut cmd_rx).await;
             }
             me.cancel_all_within(Duration::ZERO).await;
             me.pending_joins.wait_drained().await;
@@ -534,6 +538,54 @@ impl Registry {
             .listener_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// Processes one management command to its direct registry decision.
+    async fn handle_command(&self, command: RegistryCommand) {
+        match command {
+            RegistryCommand::Add {
+                id,
+                spec,
+                outcome,
+                reply,
+            } => {
+                self.guarded(
+                    "registry",
+                    self.spawn_and_register(id, spec, outcome, reply),
+                )
+                .await;
+            }
+            RegistryCommand::Remove { id, reply } => {
+                self.guarded("registry", self.remove_task(id, reply)).await;
+            }
+            RegistryCommand::RemoveByLabel { label, reply } => {
+                self.guarded("registry", self.remove_task_by_label(label, reply))
+                    .await;
+            }
+            RegistryCommand::Cancel { id, reply } => {
+                self.guarded("registry", self.cancel_task(id, reply)).await;
+            }
+            RegistryCommand::CancelByLabel { label, reply } => {
+                self.guarded("registry", self.cancel_task_by_label(label, reply))
+                    .await;
+            }
+        }
+    }
+
+    /// Drains commands already visible at the admission ordering point, then replies.
+    async fn handle_control(
+        &self,
+        control: RegistryControl,
+        cmd_rx: &mut mpsc::Receiver<RegistryCommand>,
+    ) {
+        match control {
+            RegistryControl::Fence { reply } => {
+                while let Ok(command) = cmd_rx.try_recv() {
+                    self.handle_command(command).await;
+                }
+                let _ = reply.send(());
+            }
+        }
     }
 
     /// Waits for the registry listener task to finish.
