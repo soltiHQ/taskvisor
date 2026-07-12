@@ -283,7 +283,10 @@ async fn force_aborted_outcome_for_noncooperative_task() {
         .await
         .expect("add_and_watch should succeed");
 
-    assert!(handle.remove(id).await.expect("remove should be accepted"));
+    assert!(
+        handle.cancel(id).await.expect("cancel should be accepted"),
+        "plain cancel must wait through registry force-abort without a caller timeout"
+    );
 
     let outcome = with_timeout(5, waiter.wait())
         .await

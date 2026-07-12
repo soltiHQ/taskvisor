@@ -17,7 +17,7 @@
 //! | File             | Role                                      |
 //! |------------------|-------------------------------------------|
 //! | `runtime.rs`     | Owns Bus, Registry, subscribers, shutdown |
-//! | `registry.rs`    | Owns active task actors and add/remove    |
+//! | `registry.rs`    | Owns active task actors and lifecycle ops |
 //! | `actor.rs`       | Runs one task with restart/backoff policy |
 //! | `runner.rs`      | Executes one task attempt                 |
 //! | `alive.rs`       | Best-effort live-task snapshot            |
@@ -36,12 +36,13 @@
 //!   runtime components ──broadcast──► subscriber_listener ──► Subscribe impls
 //!
 //! Completion plane:
-//!   Registry ──oneshot──► TaskWaiter
+//!   Registry ──oneshot outcome──► TaskWaiter
+//!            └─shared terminal──► cancel callers
 //! ```
 //!
-//! The management plane uses an mpsc command channel. Add/remove commands are not delivered through the lossy event bus.
+//! The management plane uses an mpsc command channel. Add, remove, and cancel commands are not delivered through the lossy event bus.
 //! The event plane is best-effort and used for logs, metrics, snapshots, and subscriber integrations. Slow consumers can lag and miss events.
-//! The completion plane is used by `add_and_watch` and `submit_and_watch`. It is the authoritative final result for one task run.
+//! The completion plane provides watched task outcomes and shared terminal completion for cancellation callers.
 //!
 //! ## Main Flow
 //!

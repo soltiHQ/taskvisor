@@ -314,7 +314,7 @@ async fn cancel_storm_by_id_returns_true_and_drains() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn double_cancel_same_id_concurrent_at_most_one_true() {
+async fn concurrent_cancel_same_id_returns_exactly_one_true() {
     let handle = served(5, 0);
     const K: usize = 16;
     with_timeout(20, async {
@@ -336,9 +336,9 @@ async fn double_cancel_same_id_concurrent_at_most_one_true() {
                 trues += 1;
             }
         }
-        assert!(
-            trues >= 1,
-            "at least one concurrent cancel must observe the task"
+        assert_eq!(
+            trues, 1,
+            "exactly one concurrent cancel must claim the task"
         );
         assert!(
             poll_until(Duration::from_secs(5), || async {

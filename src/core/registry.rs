@@ -36,23 +36,33 @@
 //!
 //! Remove(id)
 //!   -> change Registered to Removing
+//!   -> create shared terminal completion
 //!   -> cancel actor token
 //!   -> reply claimed
 //!   -> join actor
 //!   -> release id/name indexes
 //!   -> publish TaskRemoved
+//!   -> resolve terminal completion
+//!
+//! Cancel(id or label)
+//!   -> claim Registered or join Removing
+//!   -> reply with the shared terminal completion
+//!   -> wait until registry cleanup is finished
 //!
 //! Actor completion(id)
 //!   -> change Registered to Removing
+//!   -> create shared terminal completion
 //!   -> join actor
 //!   -> release id/name indexes
 //!   -> publish TaskRemoved
+//!   -> resolve terminal completion
 //! ```
 //!
 //! ## Rules
 //!
 //! - Watched tasks resolve their `TaskOutcome` when the actor join is reported.
-//! - Command replies report registry decisions, not terminal task outcomes.
+//! - Add/remove command replies report registry decisions, not terminal task outcomes.
+//! - Cancel callers share a lossless completion signal owned by the registry.
 //! - Cleanup is idempotent. Duplicate or stale completion signals become no-ops.
 //! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
 //! - Task name is a label and a duplicate-name admission gate; reserved while the task is `Registered` or `Removing`.
@@ -93,6 +103,36 @@ pub(crate) type RemoveReply = Result<bool, RuntimeError>;
 /// Receiver for an authoritative registry remove result.
 pub(crate) type RemoveReplyRx = oneshot::Receiver<RemoveReply>;
 
+/// Registry decision returned to one cancellation caller.
+///
+/// `claimed` is true only for the caller that changed `Registered` to `Removing`.
+/// Every caller that observes the same removal waits on the same terminal completion.
+pub(crate) struct CancelDecision {
+    pub(crate) id: TaskId,
+    pub(crate) claimed: bool,
+    completion: RemovalCompletion,
+}
+
+impl CancelDecision {
+    /// Waits until the actor is joined or force-aborted and terminal cleanup is committed.
+    pub(crate) async fn wait(&self) {
+        self.completion.wait().await;
+    }
+
+    /// Returns true when terminal cleanup has already been committed.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.completion.is_complete()
+    }
+}
+
+/// Authoritative result of one registry cancel command.
+///
+/// `Ok(None)` means the task was unknown or already terminated.
+pub(crate) type CancelReply = Result<Option<CancelDecision>, RuntimeError>;
+
+/// Receiver for an authoritative registry cancel decision.
+pub(crate) type CancelReplyRx = oneshot::Receiver<CancelReply>;
+
 /// Command sent to the registry over the management channel.
 pub(crate) enum RegistryCommand {
     /// Register a task under a pre-minted runtime identity.
@@ -116,6 +156,16 @@ pub(crate) enum RegistryCommand {
         label: Arc<str>,
         reply: oneshot::Sender<RemoveReply>,
     },
+    /// Claim or join cancellation by runtime identity.
+    Cancel {
+        id: TaskId,
+        reply: oneshot::Sender<CancelReply>,
+    },
+    /// Resolve a label and claim or join its cancellation atomically.
+    CancelByLabel {
+        label: Arc<str>,
+        reply: oneshot::Sender<CancelReply>,
+    },
 }
 
 /// Registry-owned actor handle for one registered task.
@@ -125,12 +175,38 @@ struct Handle {
     done: Option<OutcomeTx>,
 }
 
+/// Shared terminal signal for all callers waiting on one removal.
+#[derive(Clone)]
+struct RemovalCompletion {
+    token: CancellationToken,
+}
+
+impl RemovalCompletion {
+    fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+        }
+    }
+
+    async fn wait(&self) {
+        self.token.cancelled().await;
+    }
+
+    fn is_complete(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    fn complete(&self) {
+        self.token.cancel();
+    }
+}
+
 /// Lifecycle phase of one authoritative registry entry.
 enum EntryState {
     /// The actor can still be claimed by remove, completion, or shutdown.
     Registered(Handle),
     /// One owner has the actor handle and is waiting for its terminal join.
-    Removing,
+    Removing { completion: RemovalCompletion },
 }
 
 /// Authoritative membership record kept until terminal join cleanup finishes.
@@ -143,6 +219,20 @@ struct Entry {
 enum JoinCompletion {
     Joined(Result<ActorExitReason, JoinError>),
     ForceAborted,
+}
+
+/// Data needed to commit one actor's terminal registry cleanup.
+struct RemovalReport {
+    id: TaskId,
+    outcome: Option<OutcomeTx>,
+    join: JoinCompletion,
+    completion: RemovalCompletion,
+}
+
+/// Registry-side work selected for one cancel command.
+struct CancelAction {
+    decision: CancelDecision,
+    handle: Option<Handle>,
 }
 
 /// Sends one completion signal when an actor task returns, panics, or is aborted.
@@ -225,6 +315,7 @@ impl PendingJoins {
     }
 
     /// Returns `true` if a join for `id` is still in flight.
+    #[cfg(test)]
     fn contains(&self, id: TaskId) -> bool {
         self.inner
             .lock()
@@ -261,6 +352,8 @@ impl PendingJoins {
     async fn wait_drained(&self) {
         loop {
             let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.is_empty() {
                 return;
             }
@@ -317,16 +410,6 @@ impl Registry {
             pending_joins: Arc::new(PendingJoins::default()),
             listener_handle: std::sync::Mutex::new(None),
         })
-    }
-
-    /// Returns true when `id` has no registry entry and no join in flight.
-    ///
-    /// Used as a fallback when a `TaskRemoved` event may have been missed because of broadcast lag.
-    pub async fn is_terminated(&self, id: TaskId) -> bool {
-        if self.state.read().await.tasks.contains_key(&id) {
-            return false;
-        }
-        !self.pending_joins.contains(id)
     }
 
     /// Waits for detached join reporters to finish.
@@ -403,6 +486,12 @@ impl Registry {
                         Some(RegistryCommand::RemoveByLabel { label, reply }) => {
                             me.guarded("registry", me.remove_task_by_label(label, reply)).await;
                         }
+                        Some(RegistryCommand::Cancel { id, reply }) => {
+                            me.guarded("registry", me.cancel_task(id, reply)).await;
+                        }
+                        Some(RegistryCommand::CancelByLabel { label, reply }) => {
+                            me.guarded("registry", me.cancel_task_by_label(label, reply)).await;
+                        }
                         None => break,
                     }
                 }
@@ -426,6 +515,13 @@ impl Registry {
                     }
                     RegistryCommand::RemoveByLabel { label, reply } => {
                         me.guarded("registry", me.remove_task_by_label(label, reply))
+                            .await;
+                    }
+                    RegistryCommand::Cancel { id, reply } => {
+                        me.guarded("registry", me.cancel_task(id, reply)).await;
+                    }
+                    RegistryCommand::CancelByLabel { label, reply } => {
+                        me.guarded("registry", me.cancel_task_by_label(label, reply))
                             .await;
                     }
                 }
@@ -485,6 +581,7 @@ impl Registry {
     }
 
     /// Resolves a label to the identity currently holding it (if any).
+    #[cfg(test)]
     pub async fn id_for_label(&self, name: &str) -> Option<TaskId> {
         self.state.read().await.by_label.get(name).copied()
     }
@@ -506,24 +603,24 @@ impl Registry {
     /// Returns labels of tasks that were force-aborted.
     pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
-        let handles: Vec<(TaskId, Arc<str>, Handle)> = {
+        let handles: Vec<(TaskId, Arc<str>, Handle, RemovalCompletion)> = {
             let mut st = self.state.write().await;
             let ids: Vec<TaskId> = st.tasks.keys().copied().collect();
             ids.into_iter()
                 .filter_map(|id| {
                     Self::claim_registered(&mut st, &self.pending_joins, id)
-                        .map(|(label, handle)| (id, label, handle))
+                        .map(|(label, handle, completion)| (id, label, handle, completion))
                 })
                 .collect()
         };
-        for (_, _, h) in &handles {
+        for (_, _, h, _) in &handles {
             h.cancel.cancel();
         }
 
         let deadline = tokio::time::Instant::now() + grace;
         let mut stuck = Vec::new();
 
-        for (id, label, h) in handles {
+        for (id, label, h, removal_completion) in handles {
             let mut join = h.join;
             match tokio::time::timeout_at(deadline, &mut join).await {
                 Ok(res) => {
@@ -532,9 +629,12 @@ impl Registry {
                         &self.empty_notify,
                         &self.pending_joins,
                         &self.bus,
-                        id,
-                        h.done,
-                        JoinCompletion::Joined(res),
+                        RemovalReport {
+                            id,
+                            outcome: h.done,
+                            join: JoinCompletion::Joined(res),
+                            completion: removal_completion,
+                        },
                     )
                     .await;
                 }
@@ -547,9 +647,12 @@ impl Registry {
                         &self.empty_notify,
                         &self.pending_joins,
                         &self.bus,
-                        id,
-                        h.done,
-                        JoinCompletion::ForceAborted,
+                        RemovalReport {
+                            id,
+                            outcome: h.done,
+                            join: JoinCompletion::ForceAborted,
+                            completion: removal_completion,
+                        },
                     )
                     .await;
                 }
@@ -657,10 +760,10 @@ impl Registry {
     ///
     /// If the task is unknown or cleanup already owns it, replies `Ok(false)` without publishing a terminal event.
     async fn remove_task(&self, id: TaskId, reply: oneshot::Sender<RemoveReply>) {
-        if let Some((_label, handle)) = self.claim_task(id).await {
+        if let Some((_label, handle, completion)) = self.claim_task(id).await {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
         } else {
             let _ = reply.send(Ok(false));
         }
@@ -685,15 +788,112 @@ impl Registry {
                     .with_id(id),
             );
             Self::claim_registered(&mut st, &self.pending_joins, id)
-                .map(|(_entry_label, handle)| (id, handle))
+                .map(|(_entry_label, handle, completion)| (id, handle, completion))
         };
 
-        if let Some((id, handle)) = claimed {
+        if let Some((id, handle, completion)) = claimed {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
         } else {
             let _ = reply.send(Ok(false));
+        }
+    }
+
+    /// Claims or joins cancellation by identity and returns a shared terminal decision.
+    async fn cancel_task(&self, id: TaskId, reply: oneshot::Sender<CancelReply>) {
+        let action = {
+            let mut st = self.state.write().await;
+            if !st.tasks.contains_key(&id) {
+                None
+            } else {
+                self.bus.publish(
+                    Event::new(EventKind::TaskRemoveRequested)
+                        .with_id(id)
+                        .with_reason("manual_cancel"),
+                );
+                Self::cancel_action(&mut st, &self.pending_joins, id)
+            }
+        };
+        self.resolve_cancel_action(action, reply);
+    }
+
+    /// Resolves a label and claims or joins cancellation under the same state lock.
+    async fn cancel_task_by_label(&self, label: Arc<str>, reply: oneshot::Sender<CancelReply>) {
+        let action = {
+            let mut st = self.state.write().await;
+            let Some(id) = st.by_label.get(label.as_ref()).copied() else {
+                drop(st);
+                let _ = reply.send(Ok(None));
+                return;
+            };
+
+            self.bus.publish(
+                Event::new(EventKind::TaskRemoveRequested)
+                    .with_task(label)
+                    .with_id(id)
+                    .with_reason("manual_cancel"),
+            );
+            Self::cancel_action(&mut st, &self.pending_joins, id)
+        };
+        self.resolve_cancel_action(action, reply);
+    }
+
+    /// Selects one cancel action while registry state is locked.
+    fn cancel_action(
+        st: &mut Inner,
+        pending_joins: &PendingJoins,
+        id: TaskId,
+    ) -> Option<CancelAction> {
+        let existing_completion = {
+            let entry = st.tasks.get(&id)?;
+            match &entry.state {
+                EntryState::Registered(_) => None,
+                EntryState::Removing { completion } => Some(completion.clone()),
+            }
+        };
+        if let Some(completion) = existing_completion {
+            return Some(CancelAction {
+                decision: CancelDecision {
+                    id,
+                    claimed: false,
+                    completion,
+                },
+                handle: None,
+            });
+        }
+
+        let (_label, handle, completion) = Self::claim_registered(st, pending_joins, id)
+            .expect("a registered entry must be claimable while state is locked");
+        Some(CancelAction {
+            decision: CancelDecision {
+                id,
+                claimed: true,
+                completion,
+            },
+            handle: Some(handle),
+        })
+    }
+
+    /// Sends one cancel decision and starts the join owner when this command claimed it.
+    fn resolve_cancel_action(
+        &self,
+        action: Option<CancelAction>,
+        reply: oneshot::Sender<CancelReply>,
+    ) {
+        let Some(CancelAction { decision, handle }) = action else {
+            let _ = reply.send(Ok(None));
+            return;
+        };
+
+        if let Some(handle) = handle {
+            handle.cancel.cancel();
+            let completion = decision.completion.clone();
+            let id = decision.id;
+            let _ = reply.send(Ok(Some(decision)));
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
+        } else {
+            let _ = reply.send(Ok(Some(decision)));
         }
     }
 
@@ -702,8 +902,8 @@ impl Registry {
     /// Called after the actor's reliable completion signal is received.
     /// Duplicate or stale completion signals are no-ops.
     async fn cleanup_task(&self, id: TaskId) {
-        if let Some((_label, handle)) = self.claim_task(id).await {
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);
+        if let Some((_label, handle, completion)) = self.claim_task(id).await {
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
         }
     }
 
@@ -711,7 +911,7 @@ impl Registry {
     ///
     /// The winning caller gets the only actor handle.
     /// Identity and label indexes stay in the registry until that caller finishes the join.
-    async fn claim_task(&self, id: TaskId) -> Option<(Arc<str>, Handle)> {
+    async fn claim_task(&self, id: TaskId) -> Option<(Arc<str>, Handle, RemovalCompletion)> {
         let mut st = self.state.write().await;
         Self::claim_registered(&mut st, &self.pending_joins, id)
     }
@@ -721,21 +921,25 @@ impl Registry {
         st: &mut Inner,
         pending_joins: &PendingJoins,
         id: TaskId,
-    ) -> Option<(Arc<str>, Handle)> {
+    ) -> Option<(Arc<str>, Handle, RemovalCompletion)> {
         let entry = st.tasks.get_mut(&id)?;
-        if matches!(&entry.state, EntryState::Removing) {
+        if matches!(&entry.state, EntryState::Removing { .. }) {
             return None;
         }
 
-        let EntryState::Registered(handle) =
-            std::mem::replace(&mut entry.state, EntryState::Removing)
-        else {
+        let completion = RemovalCompletion::new();
+        let EntryState::Registered(handle) = std::mem::replace(
+            &mut entry.state,
+            EntryState::Removing {
+                completion: completion.clone(),
+            },
+        ) else {
             unreachable!("a removing entry was checked above")
         };
         let label = Arc::clone(&entry.label);
         pending_joins.inc(id);
         pending_joins.label(id, Arc::clone(&label));
-        Some((label, handle))
+        Some((label, handle, completion))
     }
 
     /// Joins an actor in a detached task and reports its final result.
@@ -750,6 +954,7 @@ impl Registry {
         join: JoinHandle<ActorExitReason>,
         force_after: Option<Duration>,
         done: Option<OutcomeTx>,
+        removal_completion: RemovalCompletion,
     ) {
         let bus = self.bus.clone();
         let state = Arc::clone(&self.state);
@@ -769,7 +974,19 @@ impl Registry {
                 None => JoinCompletion::Joined(join.await),
             };
 
-            Self::finish_removal(&state, &empty_notify, &pending, &bus, id, done, completion).await;
+            Self::finish_removal(
+                &state,
+                &empty_notify,
+                &pending,
+                &bus,
+                RemovalReport {
+                    id,
+                    outcome: done,
+                    join: completion,
+                    completion: removal_completion,
+                },
+            )
+            .await;
         });
     }
 
@@ -781,18 +998,23 @@ impl Registry {
         empty_notify: &Notify,
         pending_joins: &PendingJoins,
         bus: &Bus,
-        id: TaskId,
-        done: Option<OutcomeTx>,
-        completion: JoinCompletion,
+        report: RemovalReport,
     ) {
+        let RemovalReport {
+            id,
+            outcome,
+            join,
+            completion: removal_completion,
+        } = report;
         let mut st = state.write().await;
         let is_removing = st
             .tasks
             .get(&id)
-            .is_some_and(|entry| matches!(&entry.state, EntryState::Removing));
+            .is_some_and(|entry| matches!(&entry.state, EntryState::Removing { .. }));
         if !is_removing {
             drop(st);
             pending_joins.dec(id);
+            removal_completion.complete();
             return;
         }
 
@@ -800,16 +1022,22 @@ impl Registry {
             .tasks
             .remove(&id)
             .expect("the removing entry was checked above");
+        let EntryState::Removing {
+            completion: state_completion,
+        } = entry.state
+        else {
+            unreachable!("the removing entry was checked above")
+        };
         if st.by_label.get(entry.label.as_ref()) == Some(&id) {
             st.by_label.remove(entry.label.as_ref());
         }
 
-        match completion {
+        match join {
             JoinCompletion::Joined(res) => {
-                Self::report_join(bus, id, &entry.label, res, done);
+                Self::report_join(bus, id, &entry.label, res, outcome);
             }
             JoinCompletion::ForceAborted => {
-                if let Some(done) = done {
+                if let Some(done) = outcome {
                     let _ = done.send(TaskOutcome::ForceAborted);
                 }
                 bus.publish(
@@ -821,6 +1049,8 @@ impl Registry {
             }
         }
         pending_joins.dec(id);
+        state_completion.complete();
+        removal_completion.complete();
 
         let is_empty = st.tasks.is_empty();
         drop(st);
@@ -936,13 +1166,16 @@ mod tests {
         let registry = registry();
         let id = TaskId::next();
         let label: Arc<str> = Arc::from("empty-waiters");
+        let completion = RemovalCompletion::new();
         let mut state = registry.state.write().await;
         state.by_label.insert(Arc::clone(&label), id);
         state.tasks.insert(
             id,
             Entry {
                 label: Arc::clone(&label),
-                state: EntryState::Removing,
+                state: EntryState::Removing {
+                    completion: completion.clone(),
+                },
             },
         );
         registry.pending_joins.inc(id);
@@ -976,9 +1209,12 @@ mod tests {
             &registry.empty_notify,
             &registry.pending_joins,
             &registry.bus,
-            id,
-            None,
-            JoinCompletion::Joined(Ok(ActorExitReason::Completed)),
+            RemovalReport {
+                id,
+                outcome: None,
+                join: JoinCompletion::Joined(Ok(ActorExitReason::Completed)),
+                completion,
+            },
         )
         .await;
 
@@ -1032,6 +1268,13 @@ mod tests {
     fn send_remove(tx: &mpsc::Sender<RegistryCommand>, id: TaskId) -> RemoveReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         tx.try_send(RegistryCommand::Remove { id, reply })
+            .expect("registry command channel must stay open");
+        reply_rx
+    }
+
+    fn send_cancel(tx: &mpsc::Sender<RegistryCommand>, id: TaskId) -> CancelReplyRx {
+        let (reply, reply_rx) = oneshot::channel();
+        tx.try_send(RegistryCommand::Cancel { id, reply })
             .expect("registry command channel must stay open");
         reply_rx
     }
@@ -1231,7 +1474,23 @@ mod tests {
             "a second remove cannot claim the same task"
         );
 
+        let joined_cancel = receive_reply(send_cancel(&tx, id), "joined cancel reply")
+            .await
+            .expect("the cancel command must succeed")
+            .expect("the removing task must expose its completion");
+        assert!(
+            !joined_cancel.claimed,
+            "cancel must join an existing Remove instead of claiming again"
+        );
+        assert!(
+            !joined_cancel.is_complete(),
+            "joining cancellation cannot complete before the actor join"
+        );
+
         release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), joined_cancel.wait())
+            .await
+            .expect("joined cancellation must finish with the Remove owner");
         tokio::time::timeout(
             Duration::from_secs(2),
             registry.pending_joins.wait_drained(),
@@ -1240,6 +1499,85 @@ mod tests {
         .expect("the released task must finish its join");
         assert!(!registry.contains(id).await);
         assert_eq!(registry.id_for_label("remove-once").await, None);
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_cancel_commands_share_one_terminal_completion() {
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(5));
+        let mut events = bus.subscribe();
+        let cancellation_seen = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("shared-cancel", move |ctx: TaskContext| {
+            let seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&task_release);
+            async move {
+                ctx.cancelled().await;
+                seen.notify_one();
+                release.notified().await;
+                Err(TaskError::Canceled)
+            }
+        });
+        let id = TaskId::next();
+        assert!(
+            receive_reply(
+                send_add(&tx, id, TaskSpec::restartable(task), None),
+                "shared cancel add reply",
+            )
+            .await
+            .is_ok()
+        );
+        while events.try_recv().is_ok() {}
+
+        const CALLERS: usize = 8;
+        let replies: Vec<_> = (0..CALLERS).map(|_| send_cancel(&tx, id)).collect();
+        let mut decisions = Vec::with_capacity(CALLERS);
+        for reply in replies {
+            decisions.push(
+                receive_reply(reply, "concurrent cancel reply")
+                    .await
+                    .expect("cancel command must succeed")
+                    .expect("the task must still be removing"),
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("the task must observe one cancellation");
+
+        assert_eq!(
+            decisions.iter().filter(|decision| decision.claimed).count(),
+            1,
+            "exactly one cancellation command may claim the task"
+        );
+        assert!(decisions.iter().all(|decision| !decision.is_complete()));
+        assert!(registry.contains(id).await);
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.id != Some(id) || event.kind != EventKind::TaskRemoved),
+            "terminal cleanup cannot happen before the task is released"
+        );
+
+        release.notify_one();
+        for decision in &decisions {
+            tokio::time::timeout(Duration::from_secs(2), decision.wait())
+                .await
+                .expect("all cancel callers must share terminal completion");
+        }
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("terminal cleanup must remove the task");
+        let removed = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
+            .count();
+        assert_eq!(
+            removed, 1,
+            "shared cancellation must publish one terminal event"
+        );
+
         stop_registry(&registry, &token).await;
     }
 
@@ -1805,7 +2143,7 @@ mod tests {
             }
         });
         let id = TaskId::next();
-        let (done, done_rx) = oneshot::channel();
+        let (done, mut done_rx) = oneshot::channel();
         assert!(
             receive_reply(
                 send_add(&tx, id, TaskSpec::once(task), Some(done)),
@@ -1841,6 +2179,15 @@ mod tests {
             receive_reply(send_remove(&tx, id), "completion-first remove reply").await,
             Ok(false)
         ));
+        let joined_cancel = receive_reply(send_cancel(&tx, id), "completion-first cancel reply")
+            .await
+            .expect("the cancel command must succeed")
+            .expect("the completion-owned removal must still exist");
+        assert!(
+            !joined_cancel.claimed,
+            "cancel must join the completion-plane owner"
+        );
+        assert!(!joined_cancel.is_complete());
         assert!(
             std::iter::from_fn(|| events.try_recv().ok())
                 .all(|event| event.id != Some(id) || event.kind != EventKind::TaskRemoved),
@@ -1848,10 +2195,13 @@ mod tests {
         );
 
         release.notify_one();
-        assert!(matches!(
-            receive_reply(done_rx, "completion-first outcome").await,
-            TaskOutcome::Completed
-        ));
+        tokio::time::timeout(Duration::from_secs(2), joined_cancel.wait())
+            .await
+            .expect("cancel must finish with the completion-plane owner");
+        assert!(
+            matches!(done_rx.try_recv(), Ok(TaskOutcome::Completed)),
+            "watched outcome must be ready before terminal completion is signalled"
+        );
         tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
             .await
             .expect("completion-owned join must finish registry cleanup");
