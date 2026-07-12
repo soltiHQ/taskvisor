@@ -43,7 +43,7 @@
 //!
 //! - `sup.serve()`: starts listeners, returns a handle. Non-blocking.
 //! - `handle.add(spec).await`: register a new task dynamically, returns its `TaskId`.
-//! - `handle.remove(id)`: cancel and deregister by identity (or `remove_by_label(name)`).
+//! - `handle.remove(id).await`: claim removal by identity (or `remove_by_label(name).await`).
 //! - `handle.cancel(id)`: cancel and wait for confirmation (or `cancel_by_label(name)`).
 //! - `handle.list()`: snapshot of active `(TaskId, name)` pairs.
 //! - `handle.is_alive(name)`: check if a specific task is running.
@@ -111,7 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Remove worker-a
     println!("\nRemoving worker-a...");
-    handle.remove(id_a)?;
+    let removed = handle.remove(id_a).await?;
+    println!("worker-a removal claimed: {removed}");
     tokio::time::sleep(Duration::from_millis(200)).await;
     println!("Active: {:?}", handle.list().await);
 

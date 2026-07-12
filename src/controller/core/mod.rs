@@ -411,7 +411,7 @@ impl Controller {
             }
             (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
                 if let Some(rid) = slot.running_id
-                    && let Err(e) = sup.remove(rid)
+                    && let Err(e) = sup.try_remove(rid).await
                 {
                     let reason = format!("remove_failed: {e}");
                     self.bus.publish(
@@ -595,7 +595,7 @@ impl Controller {
             }
             SlotStatus::Terminating { .. } => {
                 if let Some(rid) = slot.running_id
-                    && let Err(e) = sup.remove(rid)
+                    && let Err(e) = sup.try_remove(rid).await
                 {
                     self.bus.publish(
                         Event::new(EventKind::ControllerRejected)

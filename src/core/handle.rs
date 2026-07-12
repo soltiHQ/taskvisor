@@ -161,45 +161,54 @@ impl SupervisorHandle {
 
     /// Removes a task by identity.
     ///
-    /// This is fire-and-forget.
-    /// It reserves command queue capacity, publishes `TaskRemoveRequested`, queues a remove command, and returns.
+    /// This waits for command queue capacity and then for the direct registry reply.
+    /// `Ok(true)` means this call claimed the task, changed it to `Removing`, and sent cancellation.
+    /// `Ok(false)` means the task was unknown, already removing, or already terminated.
     ///
-    /// `Ok(())` does not mean the task existed or has already stopped.
-    /// Unknown ids are handled by the registry as no-op removals.
+    /// This does not wait for terminal task cleanup.
+    /// Use [`cancel`](Self::cancel) when the call must return after termination.
     ///
-    /// Use [`cancel`](Self::cancel) when you need to wait for `TaskRemoved`, or [`remove_by_label`](Self::remove_by_label) when you only have a task name.
+    /// Dropping this future after its command was queued does not roll the Remove back.
+    /// The registry may still claim and remove the task.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.core.remove(id).await
+    }
+
+    /// Tries to remove a task without waiting for command queue capacity.
+    ///
+    /// When queue admission succeeds, this still waits for the direct registry reply.
+    /// Its boolean result has the same meaning as [`remove`](Self::remove).
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub fn remove(&self, id: TaskId) -> Result<(), RuntimeError> {
-        self.core.remove(id)
+    pub async fn try_remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.core.try_remove(id).await
     }
 
     /// Removes the task currently holding `name`.
     ///
-    /// Returns `Ok(true)` when a task with this label was found and the remove command was queued.
-    /// Returns `Ok(false)` when no registered task currently has this label.
+    /// Label lookup and the `Registered` to `Removing` transition happen in one registry operation.
+    /// `Ok(true)` means this call claimed the label owner and sent cancellation.
+    /// `Ok(false)` means there was no registered owner to claim.
+    /// This does not wait for terminal task cleanup.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        match self.core.id_for_label(name).await {
-            Some(id) => {
-                self.core.remove(id)?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        self.core.remove_by_label(Arc::from(name)).await
     }
 
     /// Returns registered tasks as `(id, label)` pairs.
     ///
     /// The list comes from the registry and is sorted by [`TaskId`].
-    /// It includes registered tasks in any lifecycle state, including starting, running, and stopping.
+    /// It includes both `Registered` and `Removing` tasks.
     ///
     /// See [`snapshot`](Self::snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {

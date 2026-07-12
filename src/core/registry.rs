@@ -104,9 +104,16 @@ pub(crate) enum RegistryCommand {
     },
     /// Remove a task by runtime identity.
     ///
-    /// The public caller publishes `TaskRemoveRequested` before sending this.
+    /// The identity caller publishes `TaskRemoveRequested` before sending this.
     Remove {
         id: TaskId,
+        reply: oneshot::Sender<RemoveReply>,
+    },
+    /// Resolve a label and claim its current owner in one registry operation.
+    ///
+    /// The registry publishes `TaskRemoveRequested` with the resolved identity before it attempts the state transition.
+    RemoveByLabel {
+        label: Arc<str>,
         reply: oneshot::Sender<RemoveReply>,
     },
 }
@@ -393,6 +400,9 @@ impl Registry {
                         Some(RegistryCommand::Remove { id, reply }) => {
                             me.guarded("registry", me.remove_task(id, reply)).await;
                         }
+                        Some(RegistryCommand::RemoveByLabel { label, reply }) => {
+                            me.guarded("registry", me.remove_task_by_label(label, reply)).await;
+                        }
                         None => break,
                     }
                 }
@@ -413,6 +423,10 @@ impl Registry {
                     }
                     RegistryCommand::Remove { id, reply } => {
                         me.guarded("registry", me.remove_task(id, reply)).await;
+                    }
+                    RegistryCommand::RemoveByLabel { label, reply } => {
+                        me.guarded("registry", me.remove_task_by_label(label, reply))
+                            .await;
                     }
                 }
             }
@@ -644,6 +658,37 @@ impl Registry {
     /// If the task is unknown or cleanup already owns it, replies `Ok(false)` without publishing a terminal event.
     async fn remove_task(&self, id: TaskId, reply: oneshot::Sender<RemoveReply>) {
         if let Some((_label, handle)) = self.claim_task(id).await {
+            handle.cancel.cancel();
+            let _ = reply.send(Ok(true));
+            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);
+        } else {
+            let _ = reply.send(Ok(false));
+        }
+    }
+
+    /// Resolves one label and claims its current owner under the same state lock.
+    ///
+    /// A missing label returns `Ok(false)` without a request event.
+    /// An owner that is already `Removing` keeps its request event but also returns `Ok(false)`.
+    async fn remove_task_by_label(&self, label: Arc<str>, reply: oneshot::Sender<RemoveReply>) {
+        let claimed = {
+            let mut st = self.state.write().await;
+            let Some(id) = st.by_label.get(label.as_ref()).copied() else {
+                drop(st);
+                let _ = reply.send(Ok(false));
+                return;
+            };
+
+            self.bus.publish(
+                Event::new(EventKind::TaskRemoveRequested)
+                    .with_task(Arc::clone(&label))
+                    .with_id(id),
+            );
+            Self::claim_registered(&mut st, &self.pending_joins, id)
+                .map(|(_entry_label, handle)| (id, handle))
+        };
+
+        if let Some((id, handle)) = claimed {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
             self.spawn_join_report(id, handle.join, Some(self.grace), handle.done);

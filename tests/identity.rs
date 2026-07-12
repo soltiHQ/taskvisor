@@ -165,22 +165,22 @@ async fn remove_by_id_removes_only_that_id() {
             .await
             .expect("add b");
 
-        handle.remove(id_a).expect("remove a");
+        assert!(handle.remove(id_a).await.expect("remove a"));
 
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 let list = handle.list().await;
-                list.len() == 1 && list[0].0 == id_b && !handle.is_alive("a").await
+                list.len() == 1
+                    && list[0].0 == id_b
+                    && !handle.is_alive("a").await
+                    && collector
+                        .by_id(id_a)
+                        .iter()
+                        .any(|event| event.kind == EventKind::TaskRemoved)
             })
             .await
         );
         assert!(handle.is_alive("b").await);
-        assert!(
-            collector
-                .by_id(id_a)
-                .iter()
-                .any(|e| e.kind == EventKind::TaskRemoved)
-        );
         let _ = handle.shutdown().await;
     })
     .await;
@@ -196,7 +196,8 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
             .expect("add keep");
         let stale = stale_id(&handle).await;
 
-        handle.remove(stale).expect("remove stale ok");
+        assert!(!handle.remove(stale).await.expect("remove stale ok"));
+        assert!(!handle.try_remove(stale).await.expect("try_remove stale ok"));
         handle
             .add(TaskSpec::restartable(make_coop("remove-unknown-barrier")))
             .await
@@ -219,24 +220,43 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
 async fn remove_by_label_returns_true_then_false() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
-        let _ = handle
-            .add(TaskSpec::restartable(make_coop("svc")))
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_started = Arc::clone(&started);
+        let task_release = Arc::clone(&release);
+        let task: TaskRef = TaskFn::arc("svc", move |_ctx: TaskContext| {
+            let started = Arc::clone(&task_started);
+            let release = Arc::clone(&task_release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(())
+            }
+        });
+        let id = handle
+            .add(TaskSpec::restartable(task))
             .await
             .expect("add svc");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("svc must start before removal");
 
         assert!(handle.remove_by_label("svc").await.expect("remove1"));
+        assert!(!handle.remove_by_label("svc").await.expect("remove2"));
+        assert_eq!(handle.list().await, vec![(id, Arc::from("svc"))]);
+
+        release.notify_one();
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 !handle.list().await.iter().any(|(_, l)| &**l == "svc")
             })
             .await
         );
-        assert!(!handle.remove_by_label("svc").await.expect("remove2"));
         assert!(
             !handle
                 .remove_by_label("never-existed")
                 .await
-                .expect("remove3")
+                .expect("remove unknown label")
         );
         let _ = handle.shutdown().await;
     })
@@ -368,7 +388,7 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
             .await
             .expect("add stuck-runner");
 
-        handle.remove(id).expect("remove");
+        assert!(handle.remove(id).await.expect("remove"));
 
         assert!(
             poll_until(Duration::from_secs(3), || async {
@@ -412,7 +432,7 @@ async fn list_reflects_registered_set_sorted_by_id() {
         assert_eq!(labels, HashSet::from(["x", "y", "z"]));
         assert!(ids.contains(&id_x) && ids.contains(&id_y) && ids.contains(&id_z));
 
-        handle.remove(id_y).expect("remove y");
+        assert!(handle.remove(id_y).await.expect("remove y"));
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 let l = handle.list().await;
