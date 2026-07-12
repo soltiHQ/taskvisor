@@ -7,7 +7,7 @@
 
 > Task supervisor for Tokio with backoff, graceful shutdown, and lifecycle events.
 
-You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff, stops everything cleanly on shutdown, and reports every step through typed events.
+You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff, stops everything cleanly on shutdown, and emits typed lifecycle events for observability.
 
 ## The loop you stop writing
 
@@ -40,11 +40,11 @@ sup.run(vec![TaskSpec::restartable(worker)]).await?;
 
 ```toml
 [dependencies]
-taskvisor = "0.4"
+taskvisor = "0.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
-A worker that polls every 5 seconds and stops cleanly on Ctrl+C. If it returns an error, taskvisor restarts it:
+A worker that polls every 5 seconds and stops cleanly on Ctrl+C. If it returns a retryable error, taskvisor restarts it:
 
 ```rust,no_run
 use std::time::Duration;
@@ -137,10 +137,10 @@ In the output, `actor` means taskvisor's internal per-task runner, not an actor-
 
 Restart and backoff are the baseline. Taskvisor also gives you:
 
-- **A final answer per task.** Await one result: done, failed, or canceled. Delivered even when events are dropped under load.
-- **Typed lifecycle events.** Every start, failure, and retry goes to an event bus. A `tracing` bridge is built in.
+- **A final answer for watched tasks.** Await one result: done, failed, or canceled. Delivered even when events are dropped under load.
+- **Typed lifecycle events.** Lifecycle transitions are emitted to a best-effort event bus. A `tracing` bridge is built in.
 - **Admission control.** Tasks can share a named slot. A rule decides what happens when the slot is busy: queue, replace, or drop the new task.
-- **Restart policies per task.** Never, on failure, always, or periodic.
+- **Task modes and restart policies.** Run once, on failure, always, or periodically.
 - **Backoff with jitter.** Exponential or constant, with a cap and a floor.
 - **Limits.** Per-attempt timeout, retry budget, global concurrency cap.
 
@@ -153,7 +153,7 @@ Your existing `async fn` is the unit of supervision.
 ## When to use taskvisor
 
 Use it when you have **resident background tasks** that must stay up for the life of the process: queue consumers, pollers, sync loops, connection keepers, periodic jobs.
-Taskvisor restarts them on failure and reports every step as an event. You can add, remove, and await tasks at runtime.
+Taskvisor restarts them on failure and emits lifecycle events for observability. You can add, remove, and await tasks at runtime.
 
 **Not the right tool if:**
 
@@ -176,8 +176,8 @@ Taskvisor restarts them on failure and reports every step as an event. You can a
 let handle = sup.serve();
 
 let id = handle.add(spec).await?;                 // registry accepted this TaskId
-handle.cancel(id).await?;                         // cancel by identity
-handle.cancel_by_label("task-name").await?;       // ...or by label
+handle.cancel(id).await?;                         // cancel by identity and wait for cleanup
+// Alternative: handle.cancel_by_label("task-name").await?;
 let tasks = handle.list().await;                  // Vec<(TaskId, name)>
 
 handle.shutdown().await?;
@@ -211,8 +211,9 @@ Return these from your task to control what happens next:
 Long-running tasks must observe cancellation through their `TaskContext`:
 
 ```rust,ignore
-// Pattern 1: wrap every await (recommended)
-ctx.run_until_cancelled(do_work()).await?;
+// Pattern 1: wrap fallible work (recommended)
+let work_result = ctx.run_until_cancelled(do_work()).await?;
+work_result?;
 
 // Pattern 2: select! for manual control
 tokio::select! {
@@ -236,7 +237,7 @@ let backoff = BackoffPolicy::exponential(Duration::from_millis(200))
 ```
 
 Jitter spreads retries in time. It prevents many tasks from retrying at the same moment.
-`JitterPolicy::Equal` keeps each delay within `[base/2, base]` and is the recommended default.
+`JitterPolicy::Equal` keeps each delay within `[base/2, base]` and is the recommended choice for most services.
 
 ### Run a periodic task
 
@@ -264,8 +265,7 @@ use taskvisor::{Supervisor, SupervisorConfig};
 let sup = Supervisor::builder(SupervisorConfig::default())
     .with_grace(Duration::from_secs(30))                      // task shutdown grace period (default 60s)
     .with_subscriber_shutdown_timeout(Duration::from_secs(5)) // shared subscriber drain timeout
-    .with_timeout(Duration::from_secs(5))                     // default per-attempt timeout (default: none)
-    .with_max_retries(10)                                     // default retry limit (default: unlimited)
+    .with_registry_queue_capacity(256)                        // bounded management queue (default 1024)
     .with_max_concurrent(4)                                   // global concurrency limit (default: unlimited)
     .build();
 ```
@@ -341,7 +341,7 @@ You submit tasks to named slots. A policy decides what happens when a slot is bu
 
 | Policy          | Behavior                                               | Use case               |
 |-----------------|--------------------------------------------------------|------------------------|
-| `Queue`         | FIFO queue. New task waits until the current one ends. | Job queue              |
+| `Queue`         | Bounded FIFO queue. Extra submissions are rejected.    | Job queue              |
 | `Replace`       | Cancels the running task, starts the new one.          | Search-as-you-type     |
 | `DropIfRunning` | Rejects the submission if the slot is busy.            | "One deploy at a time" |
 
@@ -351,7 +351,7 @@ let sup = Supervisor::builder(cfg)
     .build();
 let handle = sup.serve();
 
-// Await the admission outcome. A submission that is never admitted
+// Await the final task outcome. A submission that is never admitted
 // resolves to TaskOutcome::Rejected.
 let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
 let outcome = waiter.wait().await?;
@@ -396,7 +396,7 @@ Add `--features tracing` or `--features controller` where the table notes it.
 Run the benchmarks on your own hardware:
 
 ```bash
-cargo bench                                          # all suites
+cargo bench                                          # default-feature suites
 cargo bench --bench lifecycle                        # task lifecycle overhead
 cargo bench --bench controller --features controller # admission control
 ```
@@ -412,7 +412,7 @@ cargo bench --bench controller --features controller # admission control
 | `test-util`          | Test helpers: `TaskContext::detached()`, `TaskId::for_tests()`, and more              |
 
 ```toml
-taskvisor = { version = "0.4", features = ["controller", "tracing"] }
+taskvisor = { version = "0.5", features = ["controller", "tracing"] }
 ```
 
 ## Contributing
