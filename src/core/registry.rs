@@ -66,6 +66,8 @@
 //! - Add/remove command replies report registry decisions, not terminal task outcomes.
 //! - Cancel callers share a lossless completion signal owned by the registry.
 //! - A fence reply means every earlier management command has finished processing.
+//! - A static AddBatch validates every label before it starts any task body.
+//! - AddBatch either registers every item or leaves registry state unchanged.
 //! - Cleanup is idempotent. Duplicate or stale completion signals become no-ops.
 //! - The registry does not clean up on `TaskStopped` or `TaskFailed`.
 //! - Task name is a label and a duplicate-name admission gate; reserved while the task is `Registered` or `Removing`.
@@ -74,9 +76,14 @@
 //! - `TaskRemoved` means the registry has finished cleanup for that identity.
 //! - `TaskId` is the canonical identity.
 
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
-use tokio::sync::{Notify, RwLock, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -91,11 +98,18 @@ use crate::tasks::TaskSpec;
 /// Sender used to resolve a watched task with its final [`TaskOutcome`].
 pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
 
-/// Authoritative result of one registry add command.
+/// Authoritative result of one single-task or batch registry add command.
 pub(crate) type AddReply = Result<(), RuntimeError>;
 
 /// Receiver for an authoritative registry add result.
 pub(crate) type AddReplyRx = oneshot::Receiver<AddReply>;
+
+/// One task owned by the atomic static-run registration command.
+pub(crate) struct AddBatchItem {
+    pub(crate) id: TaskId,
+    pub(crate) label: Arc<str>,
+    pub(crate) spec: TaskSpec,
+}
 
 /// Authoritative result of one registry remove command.
 ///
@@ -143,6 +157,11 @@ pub(crate) enum RegistryCommand {
         id: TaskId,
         spec: TaskSpec,
         outcome: Option<OutcomeTx>,
+        reply: oneshot::Sender<AddReply>,
+    },
+    /// Validate and register every static-run task as one operation.
+    AddBatch {
+        items: Vec<AddBatchItem>,
         reply: oneshot::Sender<AddReply>,
     },
     /// Remove a task by runtime identity.
@@ -555,6 +574,10 @@ impl Registry {
                 )
                 .await;
             }
+            RegistryCommand::AddBatch { items, reply } => {
+                self.guarded("registry", self.spawn_and_register_batch(items, reply))
+                    .await;
+            }
             RegistryCommand::Remove { id, reply } => {
                 self.guarded("registry", self.remove_task(id, reply)).await;
             }
@@ -628,6 +651,7 @@ impl Registry {
     }
 
     /// Returns true if `id` is registered or removing.
+    #[cfg(any(test, feature = "controller"))]
     pub async fn contains(&self, id: TaskId) -> bool {
         self.state.read().await.tasks.contains_key(&id)
     }
@@ -730,6 +754,125 @@ impl Registry {
         })
     }
 
+    /// Spawns one registered actor, optionally held behind a batch start gate.
+    fn spawn_entry(
+        &self,
+        id: TaskId,
+        label: Arc<str>,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+        start: Option<watch::Receiver<bool>>,
+    ) -> Entry {
+        let task_token = self.runtime_token.child_token();
+
+        let actor = TaskActor::new(
+            self.bus.clone(),
+            Arc::clone(&label),
+            spec.task().clone(),
+            TaskActorParams {
+                restart: spec.restart(),
+                backoff: spec.backoff(),
+                timeout: spec.timeout(),
+                max_retries: spec.max_retries(),
+            },
+            self.semaphore.clone(),
+            id,
+        );
+
+        let task_token_clone = task_token.clone();
+        let actor_future = async move {
+            if let Some(mut start) = start {
+                loop {
+                    if *start.borrow_and_update() {
+                        break;
+                    }
+                    if start.changed().await.is_err() {
+                        return ActorExitReason::Canceled;
+                    }
+                }
+            }
+            actor.run(task_token_clone).await
+        };
+        let join_handle = Self::spawn_tracked_actor(id, self.completion_tx.clone(), actor_future);
+
+        Entry {
+            label,
+            state: EntryState::Registered(Handle {
+                join: join_handle,
+                cancel: task_token,
+                done,
+            }),
+        }
+    }
+
+    /// Validates and registers a complete static task batch without partial start.
+    async fn spawn_and_register_batch(
+        &self,
+        items: Vec<AddBatchItem>,
+        reply: oneshot::Sender<AddReply>,
+    ) {
+        let mut st = self.state.write().await;
+        let mut seen = HashSet::with_capacity(items.len());
+        let mut conflicting_ids = HashSet::new();
+        let mut first_conflict = None;
+
+        for item in &items {
+            let conflicts_with_registry = st.by_label.contains_key(&item.label);
+            let repeats_in_batch = !seen.insert(Arc::clone(&item.label));
+            if conflicts_with_registry || repeats_in_batch {
+                first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
+                conflicting_ids.insert(item.id);
+            }
+        }
+
+        if let Some(name) = first_conflict {
+            drop(st);
+            for item in items {
+                let reason = if conflicting_ids.contains(&item.id) {
+                    reasons::ALREADY_EXISTS
+                } else {
+                    reasons::BATCH_REJECTED
+                };
+                self.bus.publish(
+                    Event::new(EventKind::TaskAddFailed)
+                        .with_task(item.label)
+                        .with_id(item.id)
+                        .with_reason(reason),
+                );
+            }
+            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name }));
+            return;
+        }
+
+        let (start_tx, start_rx) = watch::channel(false);
+        let mut accepted = Vec::with_capacity(items.len());
+        for item in items {
+            let id = item.id;
+            let label = item.label;
+            let entry = self.spawn_entry(
+                id,
+                Arc::clone(&label),
+                item.spec,
+                None,
+                Some(start_rx.clone()),
+            );
+            st.tasks.insert(id, entry);
+            st.by_label.insert(Arc::clone(&label), id);
+            accepted.push((id, label));
+        }
+        drop(st);
+
+        for (id, label) in accepted {
+            self.bus.publish(
+                Event::new(EventKind::TaskAdded)
+                    .with_task(label)
+                    .with_id(id),
+            );
+        }
+        let _ = reply.send(Ok(()));
+        start_tx.send_replace(true);
+    }
+
     /// Spawns an actor and registers it under `id`.
     ///
     /// Duplicate task names are rejected.
@@ -764,37 +907,8 @@ impl Registry {
             return;
         }
 
-        let task_token = self.runtime_token.child_token();
-
-        let actor = TaskActor::new(
-            self.bus.clone(),
-            label.clone(),
-            spec.task().clone(),
-            TaskActorParams {
-                restart: spec.restart(),
-                backoff: spec.backoff(),
-                timeout: spec.timeout(),
-                max_retries: spec.max_retries(),
-            },
-            self.semaphore.clone(),
-            id,
-        );
-
-        let task_token_clone = task_token.clone();
-        let join_handle =
-            Self::spawn_tracked_actor(id, self.completion_tx.clone(), actor.run(task_token_clone));
-
-        st.tasks.insert(
-            id,
-            Entry {
-                label: Arc::clone(&label),
-                state: EntryState::Registered(Handle {
-                    join: join_handle,
-                    cancel: task_token,
-                    done,
-                }),
-            },
-        );
+        let entry = self.spawn_entry(id, Arc::clone(&label), spec, done, None);
+        st.tasks.insert(id, entry);
         st.by_label.insert(label.clone(), id);
         drop(st);
 
@@ -1317,6 +1431,21 @@ mod tests {
         reply_rx
     }
 
+    fn batch_item(id: TaskId, spec: TaskSpec) -> AddBatchItem {
+        AddBatchItem {
+            id,
+            label: Arc::from(spec.task().name()),
+            spec,
+        }
+    }
+
+    fn send_batch(tx: &mpsc::Sender<RegistryCommand>, items: Vec<AddBatchItem>) -> AddReplyRx {
+        let (reply, reply_rx) = oneshot::channel();
+        tx.try_send(RegistryCommand::AddBatch { items, reply })
+            .expect("registry command channel must stay open");
+        reply_rx
+    }
+
     fn send_remove(tx: &mpsc::Sender<RegistryCommand>, id: TaskId) -> RemoveReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         tx.try_send(RegistryCommand::Remove { id, reply })
@@ -1396,6 +1525,249 @@ mod tests {
             "event lag must not change the authoritative add result"
         );
 
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_reply_commits_every_task_as_one_registry_decision() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let mut expected = Vec::new();
+        let mut items = Vec::new();
+        for label in ["batch-a", "batch-b", "batch-c"] {
+            let id = TaskId::next();
+            let task: TaskRef = TaskFn::arc(label, |ctx: TaskContext| async move {
+                ctx.cancelled().await;
+                Ok(())
+            });
+            expected.push((id, Arc::from(label)));
+            items.push(batch_item(id, TaskSpec::restartable(task)));
+        }
+        expected.sort_by_key(|(id, _)| *id);
+
+        let result = receive_reply(send_batch(&tx, items), "batch add reply").await;
+        assert!(result.is_ok(), "unique batch must be accepted: {result:?}");
+        assert_eq!(registry.list().await, expected);
+
+        let added: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.kind == EventKind::TaskAdded)
+            .collect();
+        assert_eq!(added.len(), 3);
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_batch_reply_still_starts_after_all_added_events() {
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let (body_tx, mut body_rx) = mpsc::unbounded_channel();
+        let mut items = Vec::new();
+        for label in ["dropped-batch-a", "dropped-batch-b"] {
+            let id = TaskId::next();
+            let body_tx = body_tx.clone();
+            let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+                let _ = body_tx.send(id);
+                async { Ok(()) }
+            });
+            items.push(batch_item(id, TaskSpec::once(task)));
+        }
+        drop(body_tx);
+
+        let reply = send_batch(&tx, items);
+        drop(reply);
+        let first = receive_completion(&mut body_rx, "first batch body").await;
+        let second = receive_completion(&mut body_rx, "second batch body").await;
+        assert_ne!(first, second);
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("both one-shot batch tasks must finish");
+
+        let observed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let added: Vec<_> = observed
+            .iter()
+            .filter(|event| event.kind == EventKind::TaskAdded)
+            .collect();
+        let starting: Vec<_> = observed
+            .iter()
+            .filter(|event| event.kind == EventKind::TaskStarting)
+            .collect();
+        assert_eq!(added.len(), 2);
+        assert_eq!(starting.len(), 2);
+        let last_added = added.iter().map(|event| event.seq).max().unwrap();
+        let first_starting = starting.iter().map(|event| event.seq).min().unwrap();
+        assert!(
+            last_added < first_starting,
+            "the batch start gate must keep bodies behind all TaskAdded events"
+        );
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_inside_batch_rejects_every_item_without_starting_bodies() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskFn, TaskRef};
+
+        let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let mut events = bus.subscribe();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut items = Vec::new();
+        let mut ids = Vec::new();
+        for label in ["unique", "duplicate", "duplicate"] {
+            let runs = Arc::clone(&runs);
+            let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            let id = TaskId::next();
+            ids.push(id);
+            items.push(batch_item(id, TaskSpec::once(task)));
+        }
+
+        let result = receive_reply(send_batch(&tx, items), "duplicate batch reply").await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::TaskAlreadyExists { ref name }) if name.as_ref() == "duplicate"
+            ),
+            "the first conflicting input label must reject the batch: {result:?}"
+        );
+        assert!(registry.list().await.is_empty());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        let observed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| event.kind == EventKind::TaskAdded)
+                .count(),
+            0
+        );
+        let failed: Vec<_> = observed
+            .into_iter()
+            .filter(|event| event.kind == EventKind::TaskAddFailed)
+            .collect();
+        assert_eq!(failed.len(), 3);
+        assert_eq!(failed[0].id, Some(ids[0]));
+        assert_eq!(failed[0].reason.as_deref(), Some(reasons::BATCH_REJECTED));
+        assert_eq!(failed[1].id, Some(ids[1]));
+        assert_eq!(failed[1].reason.as_deref(), Some(reasons::BATCH_REJECTED));
+        assert_eq!(failed[2].id, Some(ids[2]));
+        assert_eq!(failed[2].reason.as_deref(), Some(reasons::ALREADY_EXISTS));
+
+        stop_registry(&registry, &token).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_conflict_with_registered_or_removing_label_starts_no_new_body() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+
+        let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
+        let started = Arc::new(Notify::new());
+        let cancellation_seen = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let started_by_task = Arc::clone(&started);
+        let seen_by_task = Arc::clone(&cancellation_seen);
+        let release_by_task = Arc::clone(&release);
+        let existing: TaskRef = TaskFn::arc("reserved-batch-name", move |ctx: TaskContext| {
+            let started = Arc::clone(&started_by_task);
+            let cancellation_seen = Arc::clone(&seen_by_task);
+            let release = Arc::clone(&release_by_task);
+            async move {
+                started.notify_one();
+                ctx.cancelled().await;
+                cancellation_seen.notify_one();
+                release.notified().await;
+                Err(TaskError::Canceled)
+            }
+        });
+        let existing_id = TaskId::next();
+        assert!(
+            receive_reply(
+                send_add(&tx, existing_id, TaskSpec::restartable(existing), None,),
+                "existing add reply",
+            )
+            .await
+            .is_ok()
+        );
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the existing task body must start before removal");
+
+        let candidate_runs = Arc::new(AtomicUsize::new(0));
+        let make_candidate = |label: &'static str| {
+            let runs = Arc::clone(&candidate_runs);
+            let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            batch_item(TaskId::next(), TaskSpec::once(task))
+        };
+
+        let registered_result = receive_reply(
+            send_batch(
+                &tx,
+                vec![
+                    make_candidate("registered-peer"),
+                    make_candidate("reserved-batch-name"),
+                ],
+            ),
+            "registered conflict batch",
+        )
+        .await;
+        assert!(matches!(
+            registered_result,
+            Err(RuntimeError::TaskAlreadyExists { name })
+                if name.as_ref() == "reserved-batch-name"
+        ));
+        assert_eq!(candidate_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            registry.list().await,
+            vec![(existing_id, Arc::from("reserved-batch-name"))]
+        );
+
+        assert!(matches!(
+            receive_reply(send_remove(&tx, existing_id), "existing remove reply").await,
+            Ok(true)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+            .await
+            .expect("the existing task must enter Removing");
+
+        let removing_result = receive_reply(
+            send_batch(
+                &tx,
+                vec![
+                    make_candidate("removing-peer"),
+                    make_candidate("reserved-batch-name"),
+                ],
+            ),
+            "removing conflict batch",
+        )
+        .await;
+        assert!(matches!(
+            removing_result,
+            Err(RuntimeError::TaskAlreadyExists { name })
+                if name.as_ref() == "reserved-batch-name"
+        ));
+        assert_eq!(candidate_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            registry.list().await,
+            vec![(existing_id, Arc::from("reserved-batch-name"))]
+        );
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
+            .await
+            .expect("the existing removing task must finish");
         stop_registry(&registry, &token).await;
     }
 

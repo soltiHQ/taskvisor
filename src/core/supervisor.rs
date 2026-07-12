@@ -142,13 +142,18 @@ impl Supervisor {
     /// Runs a fixed task set until natural completion or OS shutdown signal.
     ///
     /// This is static mode.
-    /// It starts the runtime, submits the provided tasks, and waits until all tasks complete or a shutdown signal is received.
+    /// It validates and registers the provided tasks as one atomic batch, then waits until all tasks complete or a shutdown signal is received.
+    /// If one task name conflicts, no task from the batch starts.
+    ///
+    /// A rejected batch does not stop tasks that were already registered through [`serve`](Self::serve).
+    /// The runtime stays open for dynamic management, but `run` remains single-shot and cannot be called again.
     ///
     /// `run` is single-shot for one supervisor instance.
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
+    /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
     /// - [`RuntimeError::SignalSetupFailed`] when OS signal handlers cannot be installed.
     /// - [`RuntimeError::AlreadyRunning`] when `run` is called a second time.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {

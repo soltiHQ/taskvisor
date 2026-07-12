@@ -51,8 +51,8 @@
 //! Supervisor::run(tasks)
 //!   ├─ start subscriber listener
 //!   ├─ start registry listener
-//!   ├─ send initial Add commands
-//!   ├─ wait until initial tasks are accepted/rejected
+//!   ├─ send one initial AddBatch command
+//!   ├─ wait for the direct registry decision
 //!   └─ wait for OS shutdown signal or natural completion
 //!
 //! Supervisor::serve()
