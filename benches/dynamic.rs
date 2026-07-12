@@ -6,8 +6,8 @@
 //!
 //! | Benchmark       | Description                                              |
 //! |-----------------|----------------------------------------------------------|
-//! | `add`           | `handle.add(spec)` — time to submit one task.            |
-//! | `add_remove`    | `handle.add(spec)` + `handle.cancel(name)` round-trip.   |
+//! | `add`           | `handle.add(spec).await` — registry acceptance latency.  |
+//! | `add_remove`    | `handle.add(spec).await` + cancel round-trip.            |
 //! | `list`          | `handle.list()` with N tasks already running.            |
 //! | `churn/N`       | Add N tasks, then shut down — measures cleanup at scale. |
 //!
@@ -81,17 +81,14 @@ fn bench_add(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let rt = rt_fn();
                 rt.block_on(async {
-                    let mut cfg = bench_config();
-                    cfg.registry_queue_capacity =
-                        usize::try_from(iters).unwrap_or(usize::MAX).max(1);
-                    let sup = Supervisor::new(cfg, vec![]);
+                    let sup = Supervisor::new(bench_config(), vec![]);
                     let handle = sup.serve();
 
                     let mut total = Duration::ZERO;
                     for i in 0..iters {
                         let spec = instant_task(&format!("a-{i}"));
                         let start = std::time::Instant::now();
-                        handle.add(spec).unwrap();
+                        handle.add(spec).await.unwrap();
                         total += start.elapsed();
                     }
 
@@ -119,14 +116,13 @@ fn bench_add_cancel(c: &mut Criterion) {
                     let sup = Supervisor::new(bench_config(), vec![]);
                     let handle = sup.serve();
 
-                    let wait = Duration::from_secs(5);
                     let mut total = Duration::ZERO;
                     for i in 0..iters {
                         let name = format!("ac-{i}");
                         let spec = worker_task(&name);
 
                         let start = std::time::Instant::now();
-                        let id = handle.add_and_wait(spec, wait).await.unwrap();
+                        let id = handle.add(spec).await.unwrap();
                         let _ = handle.cancel(id).await;
                         total += start.elapsed();
                     }
@@ -158,12 +154,8 @@ fn bench_list(c: &mut Criterion) {
                             let sup = Supervisor::new(bench_config(), vec![]);
                             let handle = sup.serve();
 
-                            let wait = Duration::from_secs(5);
                             for i in 0..n {
-                                handle
-                                    .add_and_wait(worker_task(&format!("w-{i}")), wait)
-                                    .await
-                                    .unwrap();
+                                handle.add(worker_task(&format!("w-{i}"))).await.unwrap();
                             }
 
                             let mut total = Duration::ZERO;
@@ -201,13 +193,9 @@ fn bench_churn(c: &mut Criterion) {
                             let sup = Supervisor::new(bench_config(), vec![]);
                             let handle = sup.serve();
 
-                            let wait = Duration::from_secs(5);
                             let start = std::time::Instant::now();
                             for i in 0..n {
-                                handle
-                                    .add_and_wait(worker_task(&format!("ch-{i}")), wait)
-                                    .await
-                                    .unwrap();
+                                handle.add(worker_task(&format!("ch-{i}"))).await.unwrap();
                             }
                             let _ = handle.shutdown().await;
                             start.elapsed()

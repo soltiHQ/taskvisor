@@ -23,7 +23,7 @@
 //! - Three demos: Queue (sequential), Replace (latest-wins), DropIfRunning (reject-while-busy).
 //! - `handle.submit(ControllerSpec::queue(spec))`: submit to a slot.
 //!
-//! ## How it differs from `handle.add()`
+//! ## How it differs from `handle.add(...).await`
 //!
 //! `add` registers a task directly in the registry: no slot, no admission policy.
 //! `submit` goes through the controller, which manages the slot lifecycle and decides whether to accept, queue, or reject.

@@ -19,7 +19,7 @@
 //!
 //! ## What this shows
 //!
-//! - `handle.add_and_watch(spec, timeout)`: register a task and get `(TaskId, TaskWaiter)`.
+//! - `handle.add_and_watch(spec)`: register a task and get `(TaskId, TaskWaiter)`.
 //! - `waiter.wait().await`: block until the task terminates, returning a `TaskOutcome`.
 //! - The three outcomes you will most often see:
 //!   - [`TaskOutcome::Completed`] - a one-shot job that succeeded.
@@ -62,8 +62,6 @@ use std::time::Duration;
 
 use taskvisor::prelude::*;
 
-const ADD_TIMEOUT: Duration = Duration::from_secs(1);
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
@@ -75,9 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     });
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(job), ADD_TIMEOUT)
-        .await?;
+    let (_id, waiter) = handle.add_and_watch(TaskSpec::once(job)).await?;
     println!("  import -> {:?}\n", waiter.wait().await?);
 
     // 2) A task that always fails, with a bounded retry budget -> Failed.
@@ -95,13 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = TaskSpec::restartable(flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(20)))
         .with_max_retries(NonZeroU32::new(2).unwrap());
-    match handle
-        .add_and_watch(spec, ADD_TIMEOUT)
-        .await?
-        .1
-        .wait()
-        .await?
-    {
+    match handle.add_and_watch(spec).await?.1.wait().await? {
         TaskOutcome::Failed {
             reason, exit_code, ..
         } => {
@@ -116,9 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ctx.cancelled().await;
         Ok(())
     });
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(worker), ADD_TIMEOUT)
-        .await?;
+    let (id, waiter) = handle.add_and_watch(TaskSpec::restartable(worker)).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     println!("  cancelling worker...");
     handle.cancel(id).await?;

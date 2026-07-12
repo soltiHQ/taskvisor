@@ -244,7 +244,6 @@ impl TaskOutcome {
 /// ## Example
 ///
 /// ```rust,no_run
-/// # use std::time::Duration;
 /// # use taskvisor::prelude::*;
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
@@ -254,7 +253,7 @@ impl TaskOutcome {
 /// });
 ///
 /// let (id, waiter) = handle
-///     .add_and_watch(TaskSpec::once(job), Duration::from_secs(1))
+///     .add_and_watch(TaskSpec::once(job))
 ///     .await?;
 ///
 /// match waiter.wait().await? {

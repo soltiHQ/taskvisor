@@ -43,7 +43,7 @@ use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 /// let handle = supervisor.serve();
 ///
-/// // handle.add(...)?;
+/// // handle.add(...).await?;
 /// // handle.cancel(id).await?;
 /// // handle.shutdown().await?;
 /// # Ok(()) }
@@ -184,7 +184,7 @@ mod tests {
             Ok(())
         });
         handle
-            .add_and_wait(TaskSpec::once(stubborn), Duration::from_secs(1))
+            .add(TaskSpec::once(stubborn))
             .await
             .expect("task should register");
 
@@ -217,7 +217,7 @@ mod tests {
             Ok(())
         });
         handle
-            .add_and_wait(TaskSpec::restartable(good), Duration::from_secs(1))
+            .add(TaskSpec::restartable(good))
             .await
             .expect("task should register");
 
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_and_wait_duplicate_name_returns_already_exists() {
+    async fn add_duplicate_name_returns_already_exists() {
         let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
         let handle = sup.serve();
 
@@ -242,13 +242,11 @@ mod tests {
             })
         };
         handle
-            .add_and_wait(TaskSpec::restartable(make()), Duration::from_secs(1))
+            .add(TaskSpec::restartable(make()))
             .await
             .expect("first add should succeed");
 
-        let res = handle
-            .add_and_wait(TaskSpec::restartable(make()), Duration::from_secs(1))
-            .await;
+        let res = handle.add(TaskSpec::restartable(make())).await;
         assert!(
             matches!(res, Err(RuntimeError::TaskAlreadyExists { .. })),
             "duplicate add must return TaskAlreadyExists, got {res:?}"
@@ -267,7 +265,7 @@ mod tests {
             Ok(())
         });
         let id = handle
-            .add_and_wait(TaskSpec::restartable(t), Duration::from_secs(1))
+            .add(TaskSpec::restartable(t))
             .await
             .expect("add should succeed");
 

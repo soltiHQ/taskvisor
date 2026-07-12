@@ -8,8 +8,6 @@ use std::time::Duration;
 use common::*;
 use taskvisor::prelude::*;
 
-const ADD_TIMEOUT: Duration = Duration::from_secs(1);
-
 fn supervisor() -> (std::sync::Arc<Supervisor>, SupervisorHandle) {
     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = sup.serve();
@@ -29,7 +27,7 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(2).unwrap());
     let (id, waiter) = handle
-        .add_and_watch(spec, ADD_TIMEOUT)
+        .add_and_watch(spec)
         .await
         .expect("add_and_watch should succeed");
 
@@ -74,7 +72,7 @@ async fn completed_outcome_for_successful_once_task() {
     let (_sup, handle) = supervisor();
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once(make_ok_once("ok")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::once(make_ok_once("ok")))
         .await
         .expect("add_and_watch should succeed");
     assert_eq!(waiter.id(), id);
@@ -96,7 +94,7 @@ async fn failed_outcome_carries_reason_and_exit_code() {
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(2).unwrap());
     let (_id, waiter) = handle
-        .add_and_watch(spec, ADD_TIMEOUT)
+        .add_and_watch(spec)
         .await
         .expect("add_and_watch should succeed");
 
@@ -124,10 +122,7 @@ async fn fatal_outcome_for_fatal_error() {
     let (_sup, handle) = supervisor();
 
     let (_id, waiter) = handle
-        .add_and_watch(
-            TaskSpec::restartable(make_fatal("doomed", Some(137))),
-            ADD_TIMEOUT,
-        )
+        .add_and_watch(TaskSpec::restartable(make_fatal("doomed", Some(137))))
         .await
         .expect("add_and_watch should succeed");
 
@@ -155,7 +150,7 @@ async fn failed_outcome_after_task_panic_with_never_policy() {
     let (_sup, handle) = supervisor();
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(make_panic("kaboom")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::once(make_panic("kaboom")))
         .await
         .expect("add_and_watch should succeed");
 
@@ -183,7 +178,7 @@ async fn spurious_canceled_return_resolves_canceled_outcome() {
         Err(TaskError::Canceled)
     });
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(liar), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::restartable(liar))
         .await
         .expect("add_and_watch should succeed");
 
@@ -212,7 +207,7 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
         Ok(())
     });
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(stubborn), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::once(stubborn))
         .await
         .expect("add_and_watch should succeed");
 
@@ -236,7 +231,7 @@ async fn waiter_stays_pending_across_periodic_reruns() {
             interval: Some(Duration::from_millis(20)),
         });
     let (id, waiter) = handle
-        .add_and_watch(spec, ADD_TIMEOUT)
+        .add_and_watch(spec)
         .await
         .expect("add_and_watch should succeed");
 
@@ -255,7 +250,7 @@ async fn cancelled_outcome_when_task_is_cancelled() {
     let (_sup, handle) = supervisor();
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("coop")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::restartable(make_coop("coop")))
         .await
         .expect("add_and_watch should succeed");
 
@@ -284,7 +279,7 @@ async fn force_aborted_outcome_for_noncooperative_task() {
         Ok(())
     });
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once(stubborn), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::once(stubborn))
         .await
         .expect("add_and_watch should succeed");
 
@@ -303,12 +298,12 @@ async fn duplicate_name_returns_already_exists_not_a_waiter() {
     let (_sup, handle) = supervisor();
 
     let first = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("dup")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::restartable(make_coop("dup")))
         .await;
     assert!(first.is_ok(), "first add must succeed");
 
     let second = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("dup")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::restartable(make_coop("dup")))
         .await;
     assert!(
         matches!(second, Err(RuntimeError::TaskAlreadyExists { .. })),
@@ -323,7 +318,7 @@ async fn shutdown_resolves_pending_waiters() {
     let (_sup, handle) = supervisor();
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("worker")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::restartable(make_coop("worker")))
         .await
         .expect("add_and_watch should succeed");
 
@@ -347,7 +342,7 @@ async fn dropping_waiter_does_not_affect_task() {
     let (_sup, handle) = supervisor();
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("ignored")), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::restartable(make_coop("ignored")))
         .await
         .expect("add_and_watch should succeed");
     drop(waiter);
@@ -379,7 +374,7 @@ async fn outcome_is_delivered_even_under_bus_lag() {
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(5).unwrap());
     let (_id, waiter) = handle
-        .add_and_watch(spec, ADD_TIMEOUT)
+        .add_and_watch(spec)
         .await
         .expect("add_and_watch should succeed");
 
@@ -406,7 +401,7 @@ async fn task_error_source_survives_end_to_end_to_the_outcome() {
     });
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(task), ADD_TIMEOUT)
+        .add_and_watch(TaskSpec::once(task))
         .await
         .expect("add_and_watch should succeed");
 

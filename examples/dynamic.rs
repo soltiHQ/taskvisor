@@ -42,7 +42,7 @@
 //! ## What this shows
 //!
 //! - `sup.serve()`: starts listeners, returns a handle. Non-blocking.
-//! - `handle.add(spec)`: register a new task dynamically, returns its `TaskId`.
+//! - `handle.add(spec).await`: register a new task dynamically, returns its `TaskId`.
 //! - `handle.remove(id)`: cancel and deregister by identity (or `remove_by_label(name)`).
 //! - `handle.cancel(id)`: cancel and wait for confirmation (or `cancel_by_label(name)`).
 //! - `handle.list()`: snapshot of active `(TaskId, name)` pairs.
@@ -103,8 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add workers dynamically
     println!("Adding worker-a and worker-b...");
-    let id_a = handle.add(make_worker("worker-a"))?;
-    let id_b = handle.add(make_worker("worker-b"))?;
+    let id_a = handle.add(make_worker("worker-a")).await?;
+    let id_b = handle.add(make_worker("worker-b")).await?;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     println!("Active: {:?}", handle.list().await);
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add worker-c
     println!("\nAdding worker-c...");
-    handle.add(make_worker("worker-c"))?;
+    handle.add(make_worker("worker-c")).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Cancel worker-b

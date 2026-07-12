@@ -174,12 +174,9 @@ async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
 
     with_timeout(10, async {
         let id = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("coop-ok")),
-                Duration::from_secs(1),
-            )
+            .add(TaskSpec::restartable(make_coop("coop-ok")))
             .await
-            .expect("add_and_wait ok");
+            .expect("add ok");
 
         assert!(handle.cancel(id).await.expect("cancel ok"));
 
@@ -223,9 +220,9 @@ async fn cancellation_returning_canceled_error_yields_task_canceled() {
 
     with_timeout(10, async {
         let id = handle
-            .add_and_wait(TaskSpec::restartable(task), Duration::from_secs(1))
+            .add(TaskSpec::restartable(task))
             .await
-            .expect("add_and_wait ok");
+            .expect("add ok");
 
         assert!(handle.cancel(id).await.expect("cancel ok"));
 

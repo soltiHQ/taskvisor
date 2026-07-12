@@ -30,6 +30,7 @@ async fn add_storm_unique_names_all_register_then_drain_to_empty() {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
                 h.add(TaskSpec::restartable(make_coop(&format!("w-{i}"))))
+                    .await
                     .expect("add")
             }));
         }
@@ -80,12 +81,20 @@ async fn add_storm_duplicate_name_exactly_one_registers() {
         for _ in 0..N {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add(TaskSpec::restartable(make_coop("dup"))).expect("add")
+                h.add(TaskSpec::restartable(make_coop("dup"))).await
             }));
         }
+        let mut accepted = 0;
+        let mut rejected = 0;
         for j in joins {
-            let _ = j.await.unwrap();
+            match j.await.unwrap() {
+                Ok(_) => accepted += 1,
+                Err(RuntimeError::TaskAlreadyExists { .. }) => rejected += 1,
+                Err(other) => panic!("unexpected add error: {other:?}"),
+            }
         }
+        assert_eq!(accepted, 1);
+        assert_eq!(rejected, N - 1);
 
         assert!(
             poll_until(Duration::from_secs(10), || async {
@@ -119,12 +128,9 @@ async fn distinct_ids_minted_concurrently_are_unique() {
         for i in 0..N {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add_and_wait(
-                    TaskSpec::restartable(make_coop(&format!("task-{i}"))),
-                    Duration::from_secs(5),
-                )
-                .await
-                .expect("add_and_wait")
+                h.add(TaskSpec::restartable(make_coop(&format!("task-{i}"))))
+                    .await
+                    .expect("add")
             }));
         }
         let mut ids = HashSet::new();
@@ -152,11 +158,7 @@ async fn same_name_concurrent_adds_only_one_survives() {
         for _ in 0..K {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add_and_wait(
-                    TaskSpec::restartable(make_coop("contended")),
-                    Duration::from_secs(5),
-                )
-                .await
+                h.add(TaskSpec::restartable(make_coop("contended"))).await
             }));
         }
         let mut ok = 0;
@@ -193,6 +195,7 @@ async fn interleaved_add_and_remove_drains_to_empty() {
             joins.push(tokio::spawn(async move {
                 let id = h
                     .add(TaskSpec::restartable(make_coop(&format!("t-{i}"))))
+                    .await
                     .expect("add");
                 let _ = h.remove(id);
                 id
@@ -225,10 +228,7 @@ async fn cancel_storm_by_id_returns_true_and_drains() {
         for i in 0..N {
             ids.push(
                 handle
-                    .add_and_wait(
-                        TaskSpec::restartable(make_coop(&format!("c-{i}"))),
-                        Duration::from_secs(2),
-                    )
+                    .add(TaskSpec::restartable(make_coop(&format!("c-{i}"))))
                     .await
                     .expect("register"),
             );
@@ -263,10 +263,7 @@ async fn double_cancel_same_id_concurrent_at_most_one_true() {
     const K: usize = 16;
     with_timeout(20, async {
         let id = handle
-            .add_and_wait(
-                TaskSpec::restartable(make_coop("one")),
-                Duration::from_secs(2),
-            )
+            .add(TaskSpec::restartable(make_coop("one")))
             .await
             .expect("register");
 
@@ -307,6 +304,7 @@ async fn rapid_short_lived_once_tasks_alive_tracker_converges_empty() {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
                 h.add(TaskSpec::once(make_ok_once(&format!("o-{i}"))))
+                    .await
                     .expect("add")
             }));
         }
@@ -332,6 +330,7 @@ async fn add_storm_with_concurrency_limit_bound_respected_no_deadlock() {
         for i in 0..N {
             handle
                 .add(TaskSpec::restartable(make_coop(&format!("lim-{i}"))))
+                .await
                 .expect("add");
         }
         assert!(
@@ -359,11 +358,28 @@ async fn add_then_immediate_shutdown_storm_returns_within_grace() {
     let handle = served(5, 0);
     const N: usize = 150;
     with_timeout(20, async {
-        let h = handle.clone();
+        let mut adds = Vec::with_capacity(N);
         for i in 0..N {
-            let _ = h.add(TaskSpec::restartable(make_coop(&format!("s-{i}"))));
+            let h = handle.clone();
+            adds.push(tokio::spawn(async move {
+                h.add(TaskSpec::restartable(make_coop(&format!("s-{i}"))))
+                    .await
+            }));
         }
-        match with_timeout(10, handle.shutdown()).await {
+        let (shutdown, add_results) = tokio::join!(with_timeout(10, handle.shutdown()), async {
+            let mut results = Vec::with_capacity(N);
+            for add in adds {
+                results.push(add.await.expect("add task must not panic"));
+            }
+            results
+        });
+        for result in add_results {
+            assert!(
+                result.is_ok() || matches!(result, Err(RuntimeError::ShuttingDown)),
+                "concurrent add must be accepted or rejected by shutdown: {result:?}"
+            );
+        }
+        match shutdown {
             Ok(()) => {}
             Err(RuntimeError::GraceExceeded { .. }) => {}
             other => panic!("shutdown must return Ok or GraceExceeded, got {other:?}"),
