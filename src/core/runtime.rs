@@ -58,6 +58,9 @@
 //! - New task admission closes once shutdown begins.
 //! - Shutdown waits for a registry fence before it starts task drain.
 //! - Commands committed before the admission gate closes are processed before that fence.
+//! - Explicit, signal, and natural shutdown paths join one detached operation.
+//! - Every shutdown waiter receives the same cached result after full cleanup.
+//! - The first shutdown trigger controls the result and request events.
 //! - Registry membership is keyed by `TaskId`.
 //! - `run()` is single-shot. A second call returns `RuntimeError::AlreadyRunning`.
 //! - `snapshot` and `is_alive` are best-effort views from the alive tracker.
@@ -66,7 +69,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::{
-    sync::{broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot, watch},
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
@@ -87,6 +90,113 @@ use crate::{
     tasks::TaskSpec,
 };
 
+/// Coordinates one cancellation-safe shutdown operation for every caller.
+struct ShutdownCoordinator {
+    started: CancellationToken,
+    operation: std::sync::Mutex<Option<Arc<ShutdownOperation>>>,
+}
+
+impl ShutdownCoordinator {
+    fn new() -> Self {
+        Self {
+            started: CancellationToken::new(),
+            operation: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// Shared, cached result of one detached shutdown owner.
+struct ShutdownOperation {
+    outcome: watch::Receiver<Option<ShutdownOutcome>>,
+}
+
+impl ShutdownOperation {
+    async fn wait(&self) -> ShutdownOutcome {
+        let mut outcome = self.outcome.clone();
+        loop {
+            if let Some(outcome) = outcome.borrow_and_update().clone() {
+                return outcome;
+            }
+            if outcome.changed().await.is_err() {
+                return ShutdownOutcome::ShuttingDown;
+            }
+        }
+    }
+}
+
+/// Keeps a custom I/O error and its source chain alive for repeated delivery.
+#[derive(Debug)]
+struct SharedIoError(Arc<std::io::Error>);
+
+impl std::fmt::Display for SharedIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0.as_ref(), f)
+    }
+}
+
+impl std::error::Error for SharedIoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        if let Some(source) = self.0.get_ref() {
+            Some(source)
+        } else {
+            Some(self.0.as_ref())
+        }
+    }
+}
+
+/// Cloneable internal result materialized into one owned public error per caller.
+#[derive(Clone)]
+enum ShutdownOutcome {
+    Completed,
+    GraceExceeded {
+        grace: Duration,
+        stuck: Vec<Arc<str>>,
+    },
+    SignalSetupFailed {
+        source: Arc<std::io::Error>,
+    },
+    ShuttingDown,
+}
+
+impl ShutdownOutcome {
+    fn from_drain_result(result: Result<(), RuntimeError>) -> Self {
+        match result {
+            Ok(()) => Self::Completed,
+            Err(RuntimeError::GraceExceeded { grace, stuck }) => {
+                Self::GraceExceeded { grace, stuck }
+            }
+            Err(_) => Self::ShuttingDown,
+        }
+    }
+
+    fn into_result(self) -> Result<(), RuntimeError> {
+        match self {
+            Self::Completed => Ok(()),
+            Self::GraceExceeded { grace, stuck } => {
+                Err(RuntimeError::GraceExceeded { grace, stuck })
+            }
+            Self::SignalSetupFailed { source } => {
+                let source = if let Some(code) = source.raw_os_error() {
+                    std::io::Error::from_raw_os_error(code)
+                } else {
+                    std::io::Error::new(source.kind(), SharedIoError(source))
+                };
+                Err(RuntimeError::SignalSetupFailed { source })
+            }
+            Self::ShuttingDown => Err(RuntimeError::ShuttingDown),
+        }
+    }
+}
+
+/// Cause that wins ownership of the shared shutdown operation.
+enum ShutdownTrigger {
+    Requested,
+    Natural,
+    SignalSetupFailed(Arc<std::io::Error>),
+    #[cfg(test)]
+    PanicForTest,
+}
+
 /// Runtime implementation behind the public [`Supervisor`](super::supervisor::Supervisor).
 ///
 /// This type is controller-agnostic.
@@ -102,6 +212,7 @@ pub(crate) struct SupervisorCore {
     started: AtomicBool,
     running: AtomicBool,
     shutting_down: AtomicBool,
+    shutdown: ShutdownCoordinator,
     admission_gate: std::sync::Mutex<()>,
     cmd_tx: mpsc::Sender<RegistryCommand>,
     subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -139,6 +250,7 @@ impl SupervisorCore {
             started: AtomicBool::new(false),
             running: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
+            shutdown: ShutdownCoordinator::new(),
             admission_gate: std::sync::Mutex::new(()),
             cmd_tx,
             subscriber_handle: std::sync::Mutex::new(None),
@@ -183,6 +295,63 @@ impl SupervisorCore {
     async fn close_admission_and_fence_registry(&self) -> Result<(), RuntimeError> {
         self.mark_shutting_down();
         self.registry.fence().await
+    }
+
+    /// Returns the shared operation, starting one detached shutdown owner if needed.
+    fn begin_shutdown(self: &Arc<Self>, trigger: ShutdownTrigger) -> Arc<ShutdownOperation> {
+        let mut operation = self
+            .shutdown
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(operation) = operation.as_ref() {
+            return Arc::clone(operation);
+        }
+
+        let (outcome_tx, outcome_rx) = watch::channel(None);
+        let shared = Arc::new(ShutdownOperation {
+            outcome: outcome_rx,
+        });
+
+        self.mark_shutting_down();
+        *operation = Some(Arc::clone(&shared));
+        self.shutdown.started.cancel();
+        drop(operation);
+
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            let outcome =
+                match crate::core::panic_guard::guarded(core.perform_shutdown(trigger)).await {
+                    Ok(outcome) => outcome,
+                    Err(panic) => {
+                        core.report_shutdown_panic("owner", panic);
+                        let _ = core.finish_shutdown_cleanup().await;
+                        ShutdownOutcome::ShuttingDown
+                    }
+                };
+            outcome_tx.send_replace(Some(outcome));
+        });
+
+        shared
+    }
+
+    /// Starts or joins the shared shutdown operation.
+    async fn join_shutdown(self: &Arc<Self>, trigger: ShutdownTrigger) -> Result<(), RuntimeError> {
+        self.begin_shutdown(trigger).wait().await.into_result()
+    }
+
+    /// Waits for an operation already started by another runtime entry point.
+    async fn wait_started_shutdown(&self) -> Result<(), RuntimeError> {
+        self.shutdown.started.cancelled().await;
+        let operation = self
+            .shutdown
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .cloned()
+            .expect("started shutdown must publish its shared operation");
+        operation.wait().await.into_result()
     }
 
     /// Adds a task and waits for the registry registration decision.
@@ -513,9 +682,12 @@ impl SupervisorCore {
     /// completion.
     ///
     /// Single-shot: a second or concurrent call returns [`RuntimeError::AlreadyRunning`].
-    pub(crate) async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
+    pub(crate) async fn run(self: &Arc<Self>, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         if self.running.swap(true, Ordering::AcqRel) {
             return Err(RuntimeError::AlreadyRunning);
+        }
+        if self.is_shutting_down() {
+            return self.wait_started_shutdown().await;
         }
         self.start();
 
@@ -523,14 +695,25 @@ impl SupervisorCore {
             let mut rx = self.bus.subscribe();
             let mut pending_ids = Vec::with_capacity(tasks.len());
             for spec in tasks {
-                let (id, reply) = self
-                    .enqueue_add_task_wait(TaskId::next(), spec, None)
-                    .await
-                    .map_err(|(error, _done)| error)?;
+                let queued = self.enqueue_add_task_wait(TaskId::next(), spec, None).await;
+                let (id, reply) = match queued {
+                    Ok(queued) => queued,
+                    Err((RuntimeError::ShuttingDown, _))
+                        if self.shutdown.started.is_cancelled() =>
+                    {
+                        return self.wait_started_shutdown().await;
+                    }
+                    Err((error, _)) => return Err(error),
+                };
                 drop(reply);
                 pending_ids.push(id);
             }
-            self.wait_tasks_registered(&mut rx, &pending_ids).await;
+            tokio::select! {
+                _ = self.shutdown.started.cancelled() => {
+                    return self.wait_started_shutdown().await;
+                }
+                _ = self.wait_tasks_registered(&mut rx, &pending_ids) => {}
+            }
         }
         self.drive_shutdown().await
     }
@@ -578,16 +761,77 @@ impl SupervisorCore {
 
     /// Initiates explicit graceful shutdown.
     ///
-    /// Publishes `ShutdownRequested`, drains tasks with grace, cancels the runtime token, joins internal listeners,
-    /// and closes subscriber workers within their configured timeout.
-    pub(crate) async fn shutdown(&self) -> Result<(), RuntimeError> {
-        self.bus.publish(Event::new(EventKind::ShutdownRequested));
-        let res = self.drain_with_grace().await;
+    /// Starts or joins one cancellation-safe shutdown operation.
+    pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), RuntimeError> {
+        self.join_shutdown(ShutdownTrigger::Requested).await
+    }
+
+    /// Resolves the trigger-specific part of shutdown before common cleanup.
+    async fn resolve_shutdown(&self, trigger: ShutdownTrigger) -> ShutdownOutcome {
+        match trigger {
+            ShutdownTrigger::Requested => {
+                self.bus.publish(Event::new(EventKind::ShutdownRequested));
+                ShutdownOutcome::from_drain_result(self.drain_with_grace().await)
+            }
+            ShutdownTrigger::Natural => {
+                ShutdownOutcome::from_drain_result(self.drain_with_grace().await)
+            }
+            ShutdownTrigger::SignalSetupFailed(source) => {
+                let _ = self.close_admission_and_fence_registry().await;
+                ShutdownOutcome::SignalSetupFailed { source }
+            }
+            #[cfg(test)]
+            ShutdownTrigger::PanicForTest => panic!("injected shutdown panic"),
+        }
+    }
+
+    /// Owns trigger handling and the mandatory cleanup tail.
+    async fn perform_shutdown(&self, trigger: ShutdownTrigger) -> ShutdownOutcome {
+        let outcome = match crate::core::panic_guard::guarded(self.resolve_shutdown(trigger)).await
+        {
+            Ok(outcome) => outcome,
+            Err(panic) => {
+                self.report_shutdown_panic("drain", panic);
+                ShutdownOutcome::ShuttingDown
+            }
+        };
+
+        if self.finish_shutdown_cleanup().await {
+            outcome
+        } else {
+            ShutdownOutcome::ShuttingDown
+        }
+    }
+
+    /// Cancels runtime listeners and closes subscribers, attempting every phase.
+    async fn finish_shutdown_cleanup(&self) -> bool {
+        let mut clean = true;
+
         self.runtime_token.cancel();
-        self.registry.join_listener().await;
-        self.join_subscriber_listener().await;
-        self.subs.close().await;
-        res
+
+        if let Err(panic) = crate::core::panic_guard::guarded(self.registry.join_listener()).await {
+            self.report_shutdown_panic("registry cleanup", panic);
+            clean = false;
+        }
+        if let Err(panic) = crate::core::panic_guard::guarded(self.join_subscriber_listener()).await
+        {
+            self.report_shutdown_panic("subscriber listener cleanup", panic);
+            clean = false;
+        }
+        if let Err(panic) = crate::core::panic_guard::guarded(self.subs.close()).await {
+            self.report_shutdown_panic("subscriber worker cleanup", panic);
+            clean = false;
+        }
+
+        clean
+    }
+
+    /// Reports an internal shutdown panic without interrupting later cleanup phases.
+    fn report_shutdown_panic(&self, phase: &str, panic: String) {
+        self.bus.publish(Event::subscriber_panicked(
+            "shutdown_owner",
+            format!("{phase} panic: {panic}"),
+        ));
     }
 
     /// Returns a best-effort sorted list of task names currently marked alive.
@@ -746,7 +990,11 @@ impl SupervisorCore {
 
     /// Awaits the subscriber listener.
     async fn join_subscriber_listener(&self) {
-        let handle = self.subscriber_handle.lock().unwrap().take();
+        let handle = self
+            .subscriber_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
@@ -759,31 +1007,27 @@ impl SupervisorCore {
     /// - natural completion when the registry becomes empty.
     ///
     /// Both paths join registry/subscriber listeners and close subscribers before returning.
-    async fn drive_shutdown(&self) -> Result<(), RuntimeError> {
-        let res = tokio::select! {
+    async fn drive_shutdown(self: &Arc<Self>) -> Result<(), RuntimeError> {
+        tokio::select! {
+            _ = self.shutdown.started.cancelled() => self.wait_started_shutdown().await,
             sig = crate::core::shutdown::wait_for_shutdown_signal() => self.on_shutdown_signal(sig).await,
-            _ = self.registry.wait_until_empty() => self.drain_with_grace().await,
-        };
-        self.runtime_token.cancel();
-        self.registry.join_listener().await;
-        self.join_subscriber_listener().await;
-        self.subs.close().await;
-        res
+            _ = self.registry.wait_until_empty() => self.join_shutdown(ShutdownTrigger::Natural).await,
+        }
     }
 
     /// Handles the result of OS shutdown-signal setup/waiting.
     ///
     /// A real signal publishes `ShutdownRequested` and starts graceful drain.
     /// Signal setup errors are returned as [`RuntimeError::SignalSetupFailed`] and are not treated as shutdown requests.
-    async fn on_shutdown_signal(&self, res: std::io::Result<()>) -> Result<(), RuntimeError> {
+    async fn on_shutdown_signal(
+        self: &Arc<Self>,
+        res: std::io::Result<()>,
+    ) -> Result<(), RuntimeError> {
         match res {
-            Ok(()) => {
-                self.bus.publish(Event::new(EventKind::ShutdownRequested));
-                self.drain_with_grace().await
-            }
-            Err(e) => {
-                let _ = self.close_admission_and_fence_registry().await;
-                Err(RuntimeError::SignalSetupFailed { source: e })
+            Ok(()) => self.join_shutdown(ShutdownTrigger::Requested).await,
+            Err(source) => {
+                self.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(source)))
+                    .await
             }
         }
     }
@@ -797,9 +1041,10 @@ impl SupervisorCore {
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         self.close_admission_and_fence_registry().await?;
         let grace = self.cfg.grace;
-        let deadline = tokio::time::Instant::now() + grace;
-        let mut stuck = self.registry.cancel_all_within(grace).await;
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let effective_grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
+        let started = tokio::time::Instant::now();
+        let mut stuck = self.registry.cancel_all_within(effective_grace).await;
+        let remaining = effective_grace.saturating_sub(started.elapsed());
         stuck.extend(self.registry.wait_joins_within(remaining).await);
         if stuck.is_empty() {
             self.bus
@@ -971,6 +1216,42 @@ mod tests {
         assert!(
             matches!(second, Err(RuntimeError::AlreadyRunning)),
             "second run() must return AlreadyRunning, got {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_panic_still_runs_cleanup_before_caching_result() {
+        let (recorder, seen) = RecordingSub::new();
+        let core = core_with_subs(SupervisorConfig::default(), vec![recorder]);
+        core.start();
+
+        let result = core.join_shutdown(ShutdownTrigger::PanicForTest).await;
+        assert!(
+            matches!(result, Err(RuntimeError::ShuttingDown)),
+            "a shutdown panic must become the shared fallback result: {result:?}"
+        );
+        assert!(core.runtime_token.is_cancelled());
+        assert!(
+            core.subscriber_handle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none(),
+            "the subscriber listener must be joined before publishing the result"
+        );
+
+        let delivered_before_probe = seen.lock().unwrap().len();
+        core.subs.emit_arc(Arc::new(
+            Event::new(EventKind::TaskStarting).with_task("closed-probe"),
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            delivered_before_probe,
+            "subscriber channels must be closed before publishing the result"
+        );
+        assert!(
+            matches!(core.shutdown().await, Err(RuntimeError::ShuttingDown)),
+            "late callers must receive the cached fallback result"
         );
     }
 
@@ -1758,6 +2039,73 @@ mod tests {
             !saw_shutdown,
             "a signal-setup error must NOT masquerade as a shutdown request"
         );
+    }
+
+    #[tokio::test]
+    async fn signal_setup_error_keeps_custom_source_for_late_callers() {
+        #[derive(Debug)]
+        struct Marker;
+
+        impl std::fmt::Display for Marker {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("custom signal marker")
+            }
+        }
+
+        impl std::error::Error for Marker {}
+
+        fn signal_source(result: Result<(), RuntimeError>) -> std::io::Error {
+            match result {
+                Err(RuntimeError::SignalSetupFailed { source }) => source,
+                other => panic!("expected SignalSetupFailed, got {other:?}"),
+            }
+        }
+
+        fn contains_marker(error: &(dyn std::error::Error + 'static)) -> bool {
+            let mut current = Some(error);
+            while let Some(error) = current {
+                if error.downcast_ref::<Marker>().is_some() {
+                    return true;
+                }
+                current = error.source();
+            }
+            false
+        }
+
+        let core = core(SupervisorConfig::default());
+        core.start();
+        let original = std::io::Error::new(std::io::ErrorKind::PermissionDenied, Marker);
+
+        let first = signal_source(core.on_shutdown_signal(Err(original)).await);
+        let late = signal_source(core.shutdown().await);
+
+        for source in [&first, &late] {
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(source.to_string(), "custom signal marker");
+            assert!(
+                contains_marker(source),
+                "the original custom source must remain in the error chain"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_setup_error_keeps_raw_os_code_for_late_callers() {
+        fn signal_source(result: Result<(), RuntimeError>) -> std::io::Error {
+            match result {
+                Err(RuntimeError::SignalSetupFailed { source }) => source,
+                other => panic!("expected SignalSetupFailed, got {other:?}"),
+            }
+        }
+
+        let core = core(SupervisorConfig::default());
+        core.start();
+        let original = std::io::Error::from_raw_os_error(2);
+
+        let first = signal_source(core.on_shutdown_signal(Err(original)).await);
+        let late = signal_source(core.shutdown().await);
+        assert_eq!(first.raw_os_error(), Some(2));
+        assert_eq!(late.raw_os_error(), Some(2));
     }
 
     #[tokio::test]

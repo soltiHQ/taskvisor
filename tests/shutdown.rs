@@ -2,7 +2,10 @@
 
 mod common;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use common::*;
@@ -14,6 +17,34 @@ fn make_stubborn(name: &str) -> TaskRef {
         tokio::time::sleep(Duration::from_secs(30)).await;
         Ok(())
     })
+}
+
+fn make_gated_cancel(
+    name: &str,
+    started: Arc<tokio::sync::Notify>,
+    cancellation_seen: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+) -> TaskRef {
+    TaskFn::arc(name, move |ctx: TaskContext| {
+        let started = Arc::clone(&started);
+        let cancellation_seen = Arc::clone(&cancellation_seen);
+        let release = Arc::clone(&release);
+        async move {
+            started.notify_one();
+            ctx.cancelled().await;
+            cancellation_seen.notify_one();
+            release.notified().await;
+            Err(TaskError::Canceled)
+        }
+    })
+}
+
+async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
+    std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("future completed before the expected ordering point"),
+    })
+    .await;
 }
 
 #[derive(Default)]
@@ -254,6 +285,297 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
         requested.seq < all_stopped.seq,
         "ShutdownRequested must precede AllStopped"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_shutdown_waiters_share_clean_result() {
+    let (handle, collector) = served(Duration::from_secs(5));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let id = handle
+        .add(TaskSpec::restartable(make_gated_cancel(
+            "shared-clean",
+            Arc::clone(&started),
+            Arc::clone(&cancellation_seen),
+            Arc::clone(&release),
+        )))
+        .await
+        .expect("the gated task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the gated task must start");
+
+    let late = handle.clone();
+    let mut first = Box::pin(handle.clone().shutdown());
+    let mut second = Box::pin(handle.shutdown());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            result = &mut first => panic!("first shutdown returned before task release: {result:?}"),
+            result = &mut second => panic!("second shutdown returned before task release: {result:?}"),
+            _ = cancellation_seen.notified() => {}
+        }
+    })
+    .await
+    .expect("the shared owner must cancel the task");
+    assert_pending_once(first.as_mut()).await;
+    assert_pending_once(second.as_mut()).await;
+
+    release.notify_one();
+    let (first_result, second_result) = tokio::join!(first, second);
+    assert!(first_result.is_ok(), "first result: {first_result:?}");
+    assert!(second_result.is_ok(), "second result: {second_result:?}");
+    assert!(
+        late.shutdown().await.is_ok(),
+        "a late caller must receive the cached clean result"
+    );
+
+    assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 1);
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+    assert_eq!(
+        collector
+            .by_id(id)
+            .into_iter()
+            .filter(|event| event.kind == EventKind::TaskRemoved)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_shutdown_waiters_share_subscriber_drain() {
+    let (subscriber, gate) = blocking_subscriber();
+    let watchdog = spawn_callback_watchdog(Arc::clone(&gate));
+    let supervisor = Supervisor::builder(SupervisorConfig {
+        grace: Duration::from_secs(5),
+        ..Default::default()
+    })
+    .with_subscriber_shutdown_timeout(Duration::from_secs(5))
+    .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
+    .build();
+    let handle = supervisor.serve();
+    handle
+        .add(TaskSpec::restartable(make_coop("shared-subscriber-drain")))
+        .await
+        .expect("the cooperative task must register");
+    assert!(
+        wait_for_callback(&gate, |state| state.entered).await,
+        "the blocking callback must start"
+    );
+
+    let mut first = Box::pin(handle.clone().shutdown());
+    let mut second = Box::pin(handle.shutdown());
+    assert_pending_once(first.as_mut()).await;
+    assert_pending_once(second.as_mut()).await;
+
+    release_callback(&gate);
+    let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("both callers must finish after subscriber drain");
+    assert!(first_result.is_ok(), "first result: {first_result:?}");
+    assert!(second_result.is_ok(), "second result: {second_result:?}");
+    assert!(
+        wait_for_callback(&gate, |state| state.finished).await,
+        "the callback must finish before the shared result is returned"
+    );
+
+    watchdog.join().expect("watchdog thread must not panic");
+    assert!(
+        !gate
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .watchdog_fired,
+        "the test must beat its safety watchdog"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_shutdown_waiters_share_grace_exceeded() {
+    let grace = Duration::from_millis(50);
+    let (handle, collector) = served(grace);
+    handle
+        .add(TaskSpec::once(make_stubborn("shared-stuck-a")))
+        .await
+        .expect("first stubborn task must register");
+    handle
+        .add(TaskSpec::once(make_stubborn("shared-stuck-b")))
+        .await
+        .expect("second stubborn task must register");
+
+    let late = handle.clone();
+    let first = handle.clone();
+    let second = handle;
+    let (first_result, second_result) = with_timeout(5, async move {
+        tokio::join!(first.shutdown(), second.shutdown())
+    })
+    .await;
+
+    let (first_grace, first_stuck) = match first_result {
+        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        other => panic!("first caller must receive GraceExceeded, got {other:?}"),
+    };
+    let (second_grace, second_stuck) = match second_result {
+        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        other => panic!("second caller must receive GraceExceeded, got {other:?}"),
+    };
+    assert_eq!(first_grace, grace);
+    assert_eq!(second_grace, grace);
+    assert_eq!(first_stuck, second_stuck, "callers need the same snapshot");
+    let (late_grace, late_stuck) = match late.shutdown().await {
+        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        other => panic!("late caller must receive GraceExceeded, got {other:?}"),
+    };
+    assert_eq!(late_grace, grace);
+    assert_eq!(
+        late_stuck, first_stuck,
+        "late caller needs the cached snapshot"
+    );
+
+    let mut names: Vec<_> = first_stuck.iter().map(|name| name.as_ref()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["shared-stuck-a", "shared-stuck-b"]);
+    assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
+    assert_eq!(collector.count(EventKind::GraceExceeded), 1);
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_first_shutdown_waiter_does_not_cancel_owner() {
+    let (handle, collector) = served(Duration::from_secs(5));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    handle
+        .add(TaskSpec::restartable(make_gated_cancel(
+            "dropped-shutdown-waiter",
+            Arc::clone(&started),
+            Arc::clone(&cancellation_seen),
+            Arc::clone(&release),
+        )))
+        .await
+        .expect("the gated task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the gated task must start");
+
+    let first_handle = handle.clone();
+    let first_waiter = tokio::spawn(async move { first_handle.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+        .await
+        .expect("the detached owner must start task cancellation");
+    first_waiter.abort();
+    let _ = first_waiter.await;
+
+    let mut second = Box::pin(handle.shutdown());
+    assert_pending_once(second.as_mut()).await;
+    release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .expect("the second waiter must observe owner completion");
+    assert!(result.is_ok(), "joined shutdown result: {result:?}");
+    assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 1);
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_and_handle_shutdown_share_one_operation() {
+    let collector = EventCollector::new();
+    let supervisor = Supervisor::builder(SupervisorConfig {
+        grace: Duration::from_secs(5),
+        ..Default::default()
+    })
+    .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
+    .build();
+    let handle = supervisor.serve();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let task = make_gated_cancel(
+        "run-shutdown-owner",
+        Arc::clone(&started),
+        Arc::clone(&cancellation_seen),
+        Arc::clone(&release),
+    );
+
+    let run_supervisor = Arc::clone(&supervisor);
+    let run =
+        tokio::spawn(async move { run_supervisor.run(vec![TaskSpec::restartable(task)]).await });
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the static task must start");
+
+    let mut shutdown = Box::pin(handle.shutdown());
+    tokio::select! {
+        result = &mut shutdown => panic!("shutdown returned before task release: {result:?}"),
+        _ = cancellation_seen.notified() => {}
+    }
+    release.notify_one();
+
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(2), shutdown)
+        .await
+        .expect("handle shutdown must finish");
+    let run_result = tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .expect("run must join shared shutdown")
+        .expect("run task must not panic");
+    assert!(shutdown_result.is_ok(), "shutdown: {shutdown_result:?}");
+    assert!(run_result.is_ok(), "run: {run_result:?}");
+    assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 1);
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_joins_shutdown_that_started_first() {
+    let collector = EventCollector::new();
+    let supervisor = Supervisor::builder(SupervisorConfig {
+        grace: Duration::from_secs(5),
+        ..Default::default()
+    })
+    .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
+    .build();
+    let handle = supervisor.serve();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    handle
+        .add(TaskSpec::restartable(make_gated_cancel(
+            "shutdown-before-run",
+            Arc::clone(&started),
+            Arc::clone(&cancellation_seen),
+            Arc::clone(&release),
+        )))
+        .await
+        .expect("the gated task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the gated task must start");
+
+    let mut shutdown = Box::pin(handle.shutdown());
+    tokio::select! {
+        result = &mut shutdown => panic!("shutdown returned before task release: {result:?}"),
+        _ = cancellation_seen.notified() => {}
+    }
+
+    let mut run = Box::pin(supervisor.run(vec![]));
+    assert_pending_once(run.as_mut()).await;
+    release.notify_one();
+    let (shutdown_result, run_result) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(shutdown, run)
+    })
+    .await
+    .expect("run and shutdown must finish together");
+
+    assert!(shutdown_result.is_ok(), "shutdown: {shutdown_result:?}");
+    assert!(run_result.is_ok(), "run: {run_result:?}");
+    assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
+    assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 1);
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
