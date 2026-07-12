@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // restartable() already uses the default backoff (100ms, constant).
+    // restartable() uses exponential backoff from 200ms to 30s with equal jitter.
     let spec = TaskSpec::restartable(flaky);
 
     let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as _];

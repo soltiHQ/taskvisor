@@ -90,17 +90,22 @@ pub struct BackoffPolicy {
 const DEFAULT_MAX: Duration = Duration::from_secs(30);
 
 impl Default for BackoffPolicy {
-    /// Returns a strategy with:
-    /// - `factor = 1.0` (constant delay);
-    /// - `first = 100ms`;
+    /// Returns the production default retry strategy:
+    /// - `factor = 2.0` (exponential delay);
+    /// - `first = 200ms`;
     /// - `max = 30s`;
+    /// - `jitter = Equal` (each delay stays in `[base / 2, base]`);
     /// - `floor = 0` (no user floor; the implicit 1ms non-zero-base safety floor still applies).
+    ///
+    /// The first actual delay is therefore in `[100ms, 200ms]`. It is never
+    /// faster than the pre-0.6 constant `100ms` default, while repeated failures
+    /// back off and spread retries across time.
     fn default() -> Self {
         Self {
-            first: Duration::from_millis(100),
+            first: Duration::from_millis(200),
             max: DEFAULT_MAX,
-            jitter: JitterPolicy::None,
-            factor: 1.0,
+            jitter: JitterPolicy::Equal,
+            factor: 2.0,
             floor: Duration::ZERO,
         }
     }
@@ -310,6 +315,32 @@ mod tests {
             factor,
             jitter,
             floor: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn default_is_exponential_with_equal_jitter() {
+        let p = BackoffPolicy::default();
+
+        assert_eq!(p.first(), Duration::from_millis(200));
+        assert_eq!(p.max(), Duration::from_secs(30));
+        assert_eq!(p.factor(), 2.0);
+        assert_eq!(p.jitter(), JitterPolicy::Equal);
+        assert_eq!(p.floor(), Duration::ZERO);
+
+        for (attempt, lower, upper) in [
+            (0, 100, 200),
+            (1, 200, 400),
+            (2, 400, 800),
+            (20, 15_000, 30_000),
+        ] {
+            for _ in 0..100 {
+                let delay = p.next(attempt);
+                assert!(
+                    delay >= Duration::from_millis(lower) && delay <= Duration::from_millis(upper),
+                    "attempt {attempt}: {delay:?} outside [{lower}ms, {upper}ms]"
+                );
+            }
         }
     }
 

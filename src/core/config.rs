@@ -148,7 +148,7 @@ impl Default for SupervisorConfig {
     /// - `bus_capacity = 1024`
     /// - `registry_queue_capacity = 1024`
     /// - `restart = RestartPolicy::OnFailure`
-    /// - `backoff = BackoffPolicy::default()`
+    /// - `backoff = exponential from 200ms to 30s with equal jitter`
     /// - `timeout = None`
     /// - `max_retries = None`
     fn default() -> Self {
@@ -170,11 +170,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_has_no_concurrency_limit_or_timeout() {
+    fn default_contract_is_explicit_and_safe() {
         let cfg = SupervisorConfig::default();
+        assert_eq!(cfg.grace, Duration::from_secs(60));
         assert_eq!(cfg.max_concurrent, None, "default is unlimited concurrency");
-        assert_eq!(cfg.timeout, None, "default has no per-task timeout");
+        assert_eq!(cfg.bus_capacity, 1024);
         assert_eq!(cfg.registry_queue_capacity, 1024);
+        assert!(matches!(cfg.restart, RestartPolicy::OnFailure));
+        assert_eq!(cfg.backoff.first(), Duration::from_millis(200));
+        assert_eq!(cfg.backoff.factor(), 2.0);
+        assert_eq!(cfg.backoff.max(), Duration::from_secs(30));
+        assert_eq!(cfg.backoff.jitter(), crate::JitterPolicy::Equal);
+        assert_eq!(cfg.backoff.floor(), Duration::ZERO);
+        assert_eq!(cfg.timeout, None, "default has no per-task timeout");
+        assert_eq!(cfg.max_retries, None, "default retries are unlimited");
     }
 
     #[test]
@@ -230,5 +239,9 @@ mod tests {
             Some(Duration::from_secs(3)),
             "task_spec must bridge timeout from config into the spec"
         );
+        assert!(matches!(spec.restart(), RestartPolicy::OnFailure));
+        assert_eq!(spec.backoff().first(), Duration::from_millis(200));
+        assert_eq!(spec.backoff().factor(), 2.0);
+        assert_eq!(spec.backoff().jitter(), crate::JitterPolicy::Equal);
     }
 }

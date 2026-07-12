@@ -238,6 +238,9 @@ let backoff = BackoffPolicy::exponential(Duration::from_millis(200))
 
 Jitter spreads retries in time. It prevents many tasks from retrying at the same moment.
 `JitterPolicy::Equal` keeps each delay within `[base/2, base]` and is the recommended choice for most services.
+This is also the default backoff used by `TaskSpec::restartable` and by failed
+attempts of `TaskSpec::periodic`. Use `BackoffPolicy::constant(Duration::from_millis(100))`
+when you need the pre-0.6 retry timing.
 
 ### Run a periodic task
 

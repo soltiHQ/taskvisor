@@ -314,10 +314,10 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
         handle.add(spec).await.expect("add ok");
         assert!(
             poll_until(Duration::from_secs(5), || async {
-                counter.load(Ordering::SeqCst) >= 5
+                counter.load(Ordering::SeqCst) >= 5 && collector.count(EventKind::TaskStarting) >= 5
             })
             .await,
-            "immediate-restart loop should re-run at least 5 times"
+            "immediate-restart loop and its observable start events should reach 5 runs"
         );
         assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
         assert!(collector.count(EventKind::TaskStarting) >= 5);
@@ -356,9 +356,10 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
         assert!(
             poll_until(Duration::from_secs(5), || async {
                 counter.load(Ordering::SeqCst) >= 3
+                    && collector.count(EventKind::BackoffScheduled) >= 2
             })
             .await,
-            "periodic task should re-run at least 3 times"
+            "periodic task and its observable backoff events should reach 3 runs"
         );
         let backoffs = collector.find_all(EventKind::BackoffScheduled);
         assert!(backoffs.len() >= 2, "expected >=2 success-driven backoffs");
@@ -408,9 +409,14 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
         assert!(
             poll_until(Duration::from_secs(5), || async {
                 n.load(Ordering::SeqCst) >= 6
+                    && collector.count(EventKind::TaskFailed) >= 1
+                    && collector
+                        .find_all(EventKind::BackoffScheduled)
+                        .into_iter()
+                        .any(|event| event.backoff_source == Some(BackoffSource::Failure))
             })
             .await,
-            "task should keep restarting on success despite max_retries=1"
+            "task and its first failure events should settle before assertions"
         );
         assert_eq!(collector.count(EventKind::TaskFailed), 1);
         let failure_backoffs = collector

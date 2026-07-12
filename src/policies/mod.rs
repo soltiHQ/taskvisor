@@ -24,10 +24,10 @@
 //! ## Defaults
 //!
 //! - [`RestartPolicy::OnFailure`] - restart only after retryable failures.
-//! - [`BackoffPolicy::default()`] - constant `100ms` retry delay, capped at `30s`.
-//! - [`JitterPolicy::None`] - no random delay by default.
+//! - [`BackoffPolicy::default()`] - exponential retry delay starting at `200ms`, capped at `30s`, with equal jitter.
+//! - [`JitterPolicy::default()`] - no jitter when the jitter policy is constructed on its own.
 //!
-//! For balanced retry spreading, use [`JitterPolicy::Equal`].
+//! The default backoff selects [`JitterPolicy::Equal`] explicitly. Named backoff constructors remain deterministic until jitter is added with [`BackoffPolicy::with_jitter`].
 
 mod backoff;
 pub use backoff::{BackoffError, BackoffPolicy};

@@ -262,6 +262,26 @@ mod tests {
             None,
             "periodic must not limit retries by default"
         );
+        assert_eq!(spec.backoff().first(), Duration::from_millis(200));
+        assert_eq!(spec.backoff().factor(), 2.0);
+        assert_eq!(spec.backoff().jitter(), crate::JitterPolicy::Equal);
+    }
+
+    #[test]
+    fn named_constructors_use_safe_backoff_defaults() {
+        let once = TaskSpec::once(task("once"));
+        let restartable = TaskSpec::restartable(task("restartable"));
+
+        assert!(matches!(once.restart(), RestartPolicy::Never));
+        assert!(matches!(restartable.restart(), RestartPolicy::OnFailure));
+        for spec in [once, restartable] {
+            assert_eq!(spec.backoff().first(), Duration::from_millis(200));
+            assert_eq!(spec.backoff().factor(), 2.0);
+            assert_eq!(spec.backoff().max(), Duration::from_secs(30));
+            assert_eq!(spec.backoff().jitter(), crate::JitterPolicy::Equal);
+            assert_eq!(spec.timeout(), None);
+            assert_eq!(spec.max_retries(), None);
+        }
     }
 
     #[test]

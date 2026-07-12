@@ -59,7 +59,11 @@ pub enum JitterPolicy {
 }
 
 impl Default for JitterPolicy {
-    /// Returns [`JitterPolicy::None`] as default (backwards compatible).
+    /// Returns [`JitterPolicy::None`].
+    ///
+    /// [`BackoffPolicy::default`](crate::BackoffPolicy::default) selects
+    /// [`JitterPolicy::Equal`] explicitly; constructing a jitter policy on its
+    /// own remains deterministic.
     fn default() -> Self {
         JitterPolicy::None
     }
