@@ -266,8 +266,8 @@ pub enum EventKind {
     /// Sets:
     /// - `task`: slot name
     /// - `id`: the rejected submission's [`TaskId`], when the rejection concerns a specific submission.
-    ///    Absent for slot- or loop-level diagnostics that have no submission behind
-    ///    them (e.g. a failed deferred removal or the controller loop exiting).
+    ///   Absent for slot- or loop-level diagnostics that have no submission behind
+    ///   them (e.g. a failed deferred removal or the controller loop exiting).
     /// - `reason`: rejection reason ("queue_full", "add_failed: ...", "superseded_by_replace", "controller_shutting_down", etc)
     ControllerRejected,
 
