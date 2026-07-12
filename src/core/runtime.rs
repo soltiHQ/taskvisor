@@ -330,6 +330,7 @@ impl SupervisorCore {
     }
 
     /// Returns true if `id` is currently registered.
+    #[cfg(any(test, feature = "controller"))]
     pub(crate) async fn contains_id(&self, id: TaskId) -> bool {
         self.registry.contains(id).await
     }
