@@ -11,12 +11,13 @@
 //!
 //! ## Flow
 //!
-//! [`TaskSpec`](crate::TaskSpec) stores one [`RestartPolicy`] and one [`BackoffPolicy`].
+//! [`TaskDefaults`](crate::TaskDefaults) provides the supervisor-wide policies.
+//! A [`TaskSpec`](crate::TaskSpec) may inherit them or provide explicit overrides.
 //! [`BackoffPolicy`] stores the [`JitterPolicy`] used for retry delays.
 //!
 //! ```text
 //! RestartPolicy ─┐
-//!                ├──► TaskSpec ──► Supervisor
+//!                ├──► TaskDefaults / TaskSpec ──► Supervisor
 //! BackoffPolicy ─┘
 //!      └── JitterPolicy
 //! ```

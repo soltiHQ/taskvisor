@@ -74,7 +74,8 @@ pub enum BackoffError {
 ///
 /// # Also
 ///
-/// - [`TaskSpec`](crate::TaskSpec) - wires restart + backoff + timeout together
+/// - [`TaskSpec`](crate::TaskSpec) - inherits or overrides task execution settings
+/// - [`TaskDefaults`](crate::TaskDefaults) - supervisor-wide task settings
 /// - [`RestartPolicy`](crate::RestartPolicy) - whether to restart at all
 /// - [`JitterPolicy`] - randomization applied to computed delay
 #[derive(Clone, Copy, Debug)]

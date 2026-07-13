@@ -83,7 +83,7 @@ use crate::core::{
     },
 };
 use crate::{
-    core::SupervisorConfig,
+    core::{SupervisorConfig, TaskDefaults},
     error::RuntimeError,
     events::{Bus, Event, EventKind},
     identity::TaskId,
@@ -94,6 +94,7 @@ use crate::{
 /// Coordinates one cancellation-safe shutdown operation for every caller.
 struct ShutdownCoordinator {
     started: CancellationToken,
+    operation_installed: AtomicBool,
     operation: std::sync::Mutex<Option<Arc<ShutdownOperation>>>,
 }
 
@@ -101,6 +102,7 @@ impl ShutdownCoordinator {
     fn new() -> Self {
         Self {
             started: CancellationToken::new(),
+            operation_installed: AtomicBool::new(false),
             operation: std::sync::Mutex::new(None),
         }
     }
@@ -204,13 +206,14 @@ enum ShutdownTrigger {
 /// With the `controller` feature, it keeps only a weak lifecycle link so the shared shutdown
 /// operation can join the optional controller before subscriber cleanup finishes.
 pub(crate) struct SupervisorCore {
-    cfg: SupervisorConfig,
+    settings: CoreSettings,
     pub(super) bus: Bus,
     subs: Arc<SubscriberSet>,
     alive: Arc<AliveTracker>,
     registry: Arc<Registry>,
     runtime_token: CancellationToken,
     started: AtomicBool,
+    startup_gate: std::sync::Mutex<()>,
     running: AtomicBool,
     shutting_down: AtomicBool,
     shutdown: ShutdownCoordinator,
@@ -221,10 +224,26 @@ pub(crate) struct SupervisorCore {
     subscriber_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Immutable configuration bundle shared by runtime components.
+pub(crate) struct CoreSettings {
+    runtime: SupervisorConfig,
+    task_defaults: TaskDefaults,
+}
+
+impl CoreSettings {
+    pub(crate) fn new(runtime: SupervisorConfig, task_defaults: TaskDefaults) -> Self {
+        Self {
+            runtime,
+            task_defaults,
+        }
+    }
+}
+
 impl std::fmt::Debug for SupervisorCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SupervisorCore")
-            .field("cfg", &self.cfg)
+            .field("runtime", &self.settings.runtime)
+            .field("task_defaults", &self.settings.task_defaults)
             .field("started", &self.started.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -235,7 +254,7 @@ impl SupervisorCore {
     ///
     /// Used by the builder after all runtime components have been wired.
     pub(crate) fn new_internal(
-        cfg: SupervisorConfig,
+        settings: CoreSettings,
         bus: Bus,
         subs: Arc<SubscriberSet>,
         alive: Arc<AliveTracker>,
@@ -244,13 +263,14 @@ impl SupervisorCore {
         cmd_tx: mpsc::Sender<RegistryCommand>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            cfg,
+            settings,
             bus,
             subs,
             alive,
             registry,
             runtime_token,
             started: AtomicBool::new(false),
+            startup_gate: std::sync::Mutex::new(()),
             running: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             shutdown: ShutdownCoordinator::new(),
@@ -265,6 +285,33 @@ impl SupervisorCore {
     /// Returns true once shutdown has started and management admission is closed.
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Returns immutable runtime settings.
+    pub(crate) fn runtime_config(&self) -> &SupervisorConfig {
+        &self.settings.runtime
+    }
+
+    /// Returns immutable task defaults used at registry admission.
+    pub(crate) fn task_defaults(&self) -> &TaskDefaults {
+        &self.settings.task_defaults
+    }
+
+    /// Performs the non-blocking last-owner safety shutdown.
+    ///
+    /// This path cannot await graceful cleanup or report its result. When no
+    /// explicit shutdown operation exists, it closes command admission, stops
+    /// controller intake, and cancels runtime listeners. An already-started
+    /// detached graceful shutdown keeps ownership of cleanup and is not
+    /// overridden by this fallback.
+    pub(crate) fn abandon(&self) {
+        if self.shutdown.operation_installed.load(Ordering::Acquire) {
+            return;
+        }
+
+        self.mark_shutting_down();
+        self.shutdown.started.cancel();
+        self.runtime_token.cancel();
     }
 
     /// Returns the reliable signal that fires when the shared shutdown operation starts.
@@ -335,6 +382,9 @@ impl SupervisorCore {
 
         self.mark_shutting_down();
         *operation = Some(Arc::clone(&shared));
+        self.shutdown
+            .operation_installed
+            .store(true, Ordering::Release);
         if matches!(&trigger, ShutdownTrigger::Requested) {
             self.bus.publish(Event::new(EventKind::ShutdownRequested));
         }
@@ -743,13 +793,27 @@ impl SupervisorCore {
     /// - the subscriber listener,
     /// - the registry listener.
     ///
-    /// Safe to call more than once. Later calls are no-ops.
+    /// Safe to call more than once. Concurrent callers wait for the first
+    /// startup to install every listener before they return.
     pub(crate) fn start(&self) {
-        if self.started.swap(true, Ordering::AcqRel) {
+        if self.started.load(Ordering::Acquire) {
             return;
         }
+
+        let _startup = self
+            .startup_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.started.load(Ordering::Acquire) {
+            return;
+        }
+
+        tokio::runtime::Handle::try_current()
+            .expect("Supervisor::serve requires an active Tokio runtime");
+        self.subs.start();
         self.subscriber_listener();
         self.registry.clone().spawn_listener();
+        self.started.store(true, Ordering::Release);
     }
 
     /// Runs a static task set until OS shutdown signal or natural completion.
@@ -857,14 +921,21 @@ impl SupervisorCore {
 
         self.runtime_token.cancel();
 
-        if let Err(panic) = crate::core::panic_guard::guarded(self.registry.join_listener()).await {
-            self.report_shutdown_panic("registry cleanup", panic);
-            clean = false;
+        match crate::core::panic_guard::guarded(self.registry.join_listener()).await {
+            Ok(true) => {}
+            Ok(false) => clean = false,
+            Err(panic) => {
+                self.report_shutdown_panic("registry cleanup", panic);
+                clean = false;
+            }
         }
-        if let Err(panic) = crate::core::panic_guard::guarded(self.join_subscriber_listener()).await
-        {
-            self.report_shutdown_panic("subscriber listener cleanup", panic);
-            clean = false;
+        match crate::core::panic_guard::guarded(self.join_subscriber_listener()).await {
+            Ok(true) => {}
+            Ok(false) => clean = false,
+            Err(panic) => {
+                self.report_shutdown_panic("subscriber listener cleanup", panic);
+                clean = false;
+            }
         }
         if let Err(panic) = crate::core::panic_guard::guarded(self.subs.close()).await {
             self.report_shutdown_panic("subscriber worker cleanup", panic);
@@ -1037,14 +1108,40 @@ impl SupervisorCore {
     }
 
     /// Awaits the subscriber listener.
-    async fn join_subscriber_listener(&self) {
+    ///
+    /// Returns `false` when Tokio reports that the listener did not join cleanly.
+    async fn join_subscriber_listener(&self) -> bool {
         let handle = self
             .subscriber_handle
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
-        if let Some(handle) = handle {
-            let _ = handle.await;
+        let Some(handle) = handle else {
+            return true;
+        };
+
+        match handle.await {
+            Ok(()) => true,
+            Err(error) => {
+                self.subs.emit_arc(Arc::new(Event::subscriber_panicked(
+                    "subscriber_listener",
+                    format!("listener join failed: {error}"),
+                )));
+                false
+            }
+        }
+    }
+
+    /// Aborts the subscriber listener so shutdown join-failure handling can be tested.
+    #[cfg(test)]
+    fn abort_subscriber_listener_for_test(&self) {
+        if let Some(handle) = self
+            .subscriber_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            handle.abort();
         }
     }
 
@@ -1088,7 +1185,7 @@ impl SupervisorCore {
     /// Tasks/joiners that do not finish are returned as `GraceExceeded` stuck labels.
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         self.close_admission_and_fence_registry().await?;
-        let grace = self.cfg.grace;
+        let grace = self.settings.runtime.grace();
         let effective_grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
         let started = tokio::time::Instant::now();
         let mut stuck = self.registry.cancel_all_within(effective_grace).await;
@@ -1109,7 +1206,7 @@ impl SupervisorCore {
 mod tests {
     use super::*;
     use crate::subscribers::Subscribe;
-    use std::{future::Future, pin::Pin, sync::Mutex, task::Poll};
+    use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Mutex, task::Poll};
 
     struct RecordingSub {
         seen: Arc<Mutex<Vec<Event>>>,
@@ -1145,13 +1242,29 @@ mod tests {
         cfg: SupervisorConfig,
         subs: Vec<Arc<dyn crate::subscribers::Subscribe>>,
     ) -> Arc<SupervisorCore> {
-        let bus = Bus::new(cfg.bus_capacity_clamped());
+        let task_defaults = TaskDefaults::default();
+        let bus = Bus::new(cfg.bus_capacity().get());
         let subs = Arc::new(SubscriberSet::new(subs, bus.clone()));
         let token = CancellationToken::new();
-        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.registry_queue_capacity_clamped());
-        let registry = Registry::new(bus.clone(), token.clone(), None, cfg.grace, cmd_rx);
+        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.registry_queue_capacity().get());
+        let registry = Registry::new(
+            bus.clone(),
+            token.clone(),
+            None,
+            cfg.grace(),
+            task_defaults.clone(),
+            cmd_rx,
+        );
         let alive = Arc::new(AliveTracker::new());
-        SupervisorCore::new_internal(cfg, bus, subs, alive, registry, token, cmd_tx)
+        SupervisorCore::new_internal(
+            CoreSettings::new(cfg, task_defaults),
+            bus,
+            subs,
+            alive,
+            registry,
+            token,
+            cmd_tx,
+        )
     }
 
     async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
@@ -1166,10 +1279,7 @@ mod tests {
     async fn subscriber_listener_reports_bus_lag_as_overflow() {
         let (recorder, seen) = RecordingSub::new();
 
-        let cfg = SupervisorConfig {
-            bus_capacity: 2,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default().with_bus_capacity(NonZeroUsize::new(2).unwrap());
         let core = core_with_subs(cfg, vec![recorder]);
         core.start();
 
@@ -1210,6 +1320,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let set = Arc::new(SubscriberSet::new(vec![recorder], bus.clone()));
         let alive = AliveTracker::new();
+        set.start();
 
         for i in 0..5 {
             bus.publish(Event::new(EventKind::TaskStarting).with_task(format!("t{i}")));
@@ -1225,6 +1336,62 @@ mod tests {
                 .any(|e| e.kind == EventKind::TaskStarting && e.task.as_deref() == Some("t4")),
             "newest retained event must reach subscribers despite a lag gap"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_start_waiters_return_only_after_runtime_is_ready() {
+        let core = core(SupervisorConfig::default());
+        let startup = core
+            .startup_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime = tokio::runtime::Handle::current();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+
+        for _ in 0..2 {
+            let core = Arc::clone(&core);
+            let runtime = runtime.clone();
+            let ready = ready_tx.clone();
+            let done = done_tx.clone();
+            threads.push(std::thread::spawn(move || {
+                let _runtime = runtime.enter();
+                ready.send(()).expect("test receiver is alive");
+                core.start();
+                done.send(()).expect("test receiver is alive");
+            }));
+        }
+        drop(ready_tx);
+        drop(done_tx);
+
+        for _ in 0..2 {
+            ready_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("both start callers must reach the readiness gate");
+        }
+        assert!(!core.started.load(Ordering::Acquire));
+        assert!(done_rx.try_recv().is_err());
+
+        drop(startup);
+        for _ in 0..2 {
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("both start callers must return after startup completes");
+        }
+        for thread in threads {
+            thread.join().expect("start caller must not panic");
+        }
+
+        assert!(core.started.load(Ordering::Acquire));
+        assert!(
+            core.subscriber_handle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some(),
+            "ready state must include an installed subscriber listener"
+        );
+        core.shutdown().await.expect("ready runtime must shut down");
     }
 
     #[tokio::test]
@@ -1304,6 +1471,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_join_failure_marks_shutdown_unclean() {
+        let core = core(SupervisorConfig::default());
+        core.start();
+        core.registry.abort_listener_for_test();
+        tokio::task::yield_now().await;
+
+        let result = timeout(Duration::from_secs(2), core.shutdown())
+            .await
+            .expect("shutdown must not hang after a registry listener failure");
+        assert!(
+            matches!(result, Err(RuntimeError::ShuttingDown)),
+            "a failed registry join must not be cached as clean: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscriber_listener_join_failure_marks_shutdown_unclean() {
+        let core = core(SupervisorConfig::default());
+        core.start();
+        core.abort_subscriber_listener_for_test();
+        tokio::task::yield_now().await;
+
+        let result = timeout(Duration::from_secs(2), core.shutdown())
+            .await
+            .expect("shutdown must not hang after a subscriber listener failure");
+        assert!(
+            matches!(result, Err(RuntimeError::ShuttingDown)),
+            "a failed subscriber listener join must not be cached as clean: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn add_is_rejected_once_shutting_down() {
         use crate::{TaskContext, TaskFn, TaskRef};
 
@@ -1337,11 +1536,9 @@ mod tests {
 
         use crate::{TaskContext, TaskError, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            grace: Duration::from_secs(1),
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default()
+            .with_grace(Duration::from_secs(1))
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let accepted_id = TaskId::next();
         let accepted: TaskRef =
@@ -1393,11 +1590,9 @@ mod tests {
     async fn shutdown_fence_processes_whole_committed_batch_before_drain() {
         use crate::{TaskContext, TaskError, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            grace: Duration::from_secs(1),
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default()
+            .with_grace(Duration::from_secs(1))
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
         let mut ids = Vec::new();
@@ -1529,11 +1724,9 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            grace: Duration::from_secs(1),
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default()
+            .with_grace(Duration::from_secs(1))
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
         let filler_reply = core
@@ -1597,11 +1790,9 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            grace: Duration::from_secs(1),
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default()
+            .with_grace(Duration::from_secs(1))
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
         let filler_reply = core
@@ -1655,10 +1846,8 @@ mod tests {
     async fn confirmed_add_waits_for_capacity_and_registry_reply() {
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let filler_reply = core
             .enqueue_remove(TaskId::next(), None)
@@ -1690,10 +1879,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn confirmed_remove_waits_for_capacity_and_registry_reply() {
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
         let filler_id = TaskId::next();
@@ -1844,10 +2031,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn backpressured_remove_returns_shutting_down_without_request_event() {
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
         let filler_reply = core
@@ -1885,10 +2070,8 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let filler_reply = core
             .enqueue_remove(TaskId::next(), None)
@@ -1927,10 +2110,8 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
         let filler_reply = core
@@ -1993,10 +2174,8 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let filler_reply = core
             .enqueue_remove(TaskId::next(), None)
@@ -2061,10 +2240,8 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskOutcome, TaskRef};
 
-        let cfg = SupervisorConfig {
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg =
+            SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut events = core.bus.subscribe();
 
@@ -2163,11 +2340,9 @@ mod tests {
 
         use crate::{TaskContext, TaskFn, TaskRef};
 
-        let cfg = SupervisorConfig {
-            bus_capacity: 1,
-            registry_queue_capacity: 1,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default()
+            .with_bus_capacity(NonZeroUsize::new(1).unwrap())
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         let mut stale_events = core.bus.subscribe();
         for index in 0..4 {
@@ -2422,10 +2597,7 @@ mod tests {
         use crate::{TaskContext, TaskFn, TaskRef};
         use tokio::sync::broadcast::error::TryRecvError;
 
-        let cfg = SupervisorConfig {
-            bus_capacity: 1,
-            ..Default::default()
-        };
+        let cfg = SupervisorConfig::default().with_bus_capacity(NonZeroUsize::new(1).unwrap());
         let core = core(cfg);
         core.start();
 

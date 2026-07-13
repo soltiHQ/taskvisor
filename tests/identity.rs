@@ -12,10 +12,9 @@ use taskvisor::prelude::*;
 fn served_with_collector(grace_secs: u64) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(grace_secs),
-        ..Default::default()
-    })
+    let sup = Supervisor::builder(
+        SupervisorConfig::default().with_grace(Duration::from_secs(grace_secs)),
+    )
     .with_subscribers(subs)
     .build();
     (sup.serve(), collector)
@@ -407,12 +406,10 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
 async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_millis(300),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(300)))
+            .with_subscribers(subs)
+            .build();
     let handle = sup.serve();
 
     with_timeout(10, async {

@@ -238,9 +238,10 @@ let backoff = BackoffPolicy::exponential(Duration::from_millis(200))
 
 Jitter spreads retries in time. It prevents many tasks from retrying at the same moment.
 `JitterPolicy::Equal` keeps each delay within `[base/2, base]` and is the recommended choice for most services.
-This is also the default backoff used by `TaskSpec::restartable` and by failed
-attempts of `TaskSpec::periodic`. Use `BackoffPolicy::constant(Duration::from_millis(100))`
-when you need the pre-0.6 retry timing.
+This is the backoff in `TaskDefaults::default()`. `TaskSpec::restartable` and
+failed attempts of `TaskSpec::periodic` inherit the backoff from the supervisor
+that admits them. Use `BackoffPolicy::constant(Duration::from_millis(100))` when
+you need the pre-0.6 retry timing.
 
 ### Run a periodic task
 
@@ -262,16 +263,29 @@ let spec = TaskSpec::restartable(task)
 ### Configure the supervisor
 
 ```rust,no_run
+use std::num::NonZeroUsize;
 use std::time::Duration;
-use taskvisor::{Supervisor, SupervisorConfig};
+use taskvisor::{Supervisor, SupervisorConfig, TaskDefaults};
 
-let sup = Supervisor::builder(SupervisorConfig::default())
-    .with_grace(Duration::from_secs(30))                      // task shutdown grace period (default 60s)
-    .with_subscriber_shutdown_timeout(Duration::from_secs(5)) // shared subscriber drain timeout
-    .with_registry_queue_capacity(256)                        // bounded management queue (default 1024)
-    .with_max_concurrent(4)                                   // global concurrency limit (default: unlimited)
+let runtime = SupervisorConfig::default()
+    .with_grace(Duration::from_secs(30))
+    .with_subscriber_shutdown_timeout(Duration::from_secs(5))
+    .with_registry_queue_capacity(NonZeroUsize::new(256).unwrap())
+    .with_max_concurrent(NonZeroUsize::new(4));
+let task_defaults = TaskDefaults::default()
+    .with_timeout(Some(Duration::from_secs(10)));
+
+let sup = Supervisor::builder(runtime)
+    .with_task_defaults(task_defaults)
     .build();
 ```
+
+`SupervisorConfig` contains only runtime-wide limits and shutdown settings.
+`TaskDefaults` contains restart, backoff, timeout, and retry defaults. Named
+`TaskSpec` constructors inherit the task settings they do not override.
+Configuration fields are private; typed capacities make zero-sized runtime
+queues impossible. `build()` is inert and safe outside a Tokio runtime. `run()`
+and `serve()` start the runtime workers.
 
 ### Graceful shutdown on Ctrl+C
 
@@ -283,6 +297,11 @@ At that deadline queued events are dropped; a callback already running on Tokio'
 Tokio runtime shutdown may still wait for that running callback.
 Subscriber cleanup is best-effort, so reaching its timeout does not replace the task shutdown result.
 The outcome is reported either way.
+
+`handle.shutdown().await` is the graceful, joined shutdown path. Dropping one
+`Supervisor` or handle clone does not stop the runtime while another public
+owner exists. Dropping the last public owner is a non-blocking safety net: it
+closes admission and sends cancellation, but it cannot return a cleanup result.
 
 ### Run CPU-heavy work without blocking Tokio
 

@@ -3,7 +3,9 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use crate::{policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef};
+use crate::{
+    core::TaskDefaults, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
+};
 
 /// Converts `Some(Duration::ZERO)` to `None`.
 #[inline]
@@ -13,14 +15,11 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 
 /// Describes how a [`Task`](crate::Task) should run.
 ///
-/// A `TaskSpec` combines:
-/// - optional timeout,
-/// - the task itself,
-/// - restart policy,
-/// - backoff policy,
-/// - retry limit.
+/// A `TaskSpec` combines a task with explicit settings and settings inherited
+/// from [`TaskDefaults`].
 ///
 /// Use:
+/// - [`from_defaults`](Self::from_defaults) when all execution settings should come from the supervisor.
 /// - [`restartable`](Self::restartable) for tasks that restart after failure.
 /// - [`periodic`](Self::periodic) for tasks that repeat on a fixed interval.
 /// - [`new`](Self::new) when you want to set all main options directly.
@@ -29,7 +28,7 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// ## Creating a spec
 /// ```rust
 /// use taskvisor::TaskContext;
-/// use taskvisor::{TaskSpec, TaskFn, SupervisorConfig, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
+/// use taskvisor::{TaskSpec, TaskFn, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
 /// use std::num::NonZeroU32;
 /// use std::time::Duration;
 ///
@@ -45,9 +44,8 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 ///     .with_timeout(Some(Duration::from_secs(30)))
 ///     .with_max_retries(NonZeroU32::new(5).unwrap());
 ///
-/// // Inherit from global config:
-/// let cfg = SupervisorConfig::default();
-/// let spec = cfg.task_spec(task);
+/// // Named constructors inherit settings that they do not set:
+/// let spec = TaskSpec::restartable(task);
 /// ```
 ///
 /// ## Also
@@ -57,13 +55,47 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 #[derive(Clone)]
 #[must_use]
 pub struct TaskSpec {
-    timeout: Option<Duration>,
-    restart: RestartPolicy,
-    backoff: BackoffPolicy,
+    restart: Override<RestartPolicy>,
+    backoff: Override<BackoffPolicy>,
+    timeout: Override<Option<Duration>>,
+    max_retries: Override<Option<NonZeroU32>>,
 
     task: TaskRef,
+}
 
+#[derive(Clone, Copy, Debug)]
+enum Override<T> {
+    Inherit,
+    Set(T),
+}
+
+impl<T: Copy> Override<T> {
+    #[inline]
+    fn value(self) -> Option<T> {
+        match self {
+            Self::Inherit => None,
+            Self::Set(value) => Some(value),
+        }
+    }
+
+    #[inline]
+    fn resolve(self, default: T) -> T {
+        match self {
+            Self::Inherit => default,
+            Self::Set(value) => value,
+        }
+    }
+}
+
+/// A task specification after all inherited settings have been applied.
+#[derive(Clone)]
+#[must_use]
+pub(crate) struct ResolvedTaskSpec {
+    restart: RestartPolicy,
+    backoff: BackoffPolicy,
+    timeout: Option<Duration>,
     max_retries: Option<NonZeroU32>,
+    task: TaskRef,
 }
 
 impl std::fmt::Debug for TaskSpec {
@@ -78,15 +110,42 @@ impl std::fmt::Debug for TaskSpec {
     }
 }
 
+impl std::fmt::Debug for ResolvedTaskSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedTaskSpec")
+            .field("restart", &self.restart)
+            .field("backoff", &self.backoff)
+            .field("timeout", &self.timeout)
+            .field("task", &self.task.name())
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
+}
+
 impl TaskSpec {
+    /// Creates a task specification that inherits every execution setting.
+    ///
+    /// The admitting supervisor resolves restart, backoff, timeout, and retry
+    /// limit from its [`TaskDefaults`]. Any later `with_*` call overrides one
+    /// inherited value.
+    pub fn from_defaults(task: TaskRef) -> Self {
+        Self {
+            restart: Override::Inherit,
+            backoff: Override::Inherit,
+            timeout: Override::Inherit,
+            max_retries: Override::Inherit,
+            task,
+        }
+    }
+
     /// Creates a spec with explicit restart, backoff, and timeout settings.
     ///
     /// Prefer the named constructors for common cases:
     /// [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
     ///
     /// A `Some(Duration::ZERO)` timeout is stored as `None` (no timeout).
-    /// The retry limit starts unlimited.
-    /// Change it with [`with_max_retries`](Self::with_max_retries).
+    /// The retry limit is explicitly set to unlimited. Change it with
+    /// [`with_max_retries`](Self::with_max_retries).
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
@@ -94,12 +153,11 @@ impl TaskSpec {
         timeout: Option<Duration>,
     ) -> Self {
         Self {
-            restart,
-            backoff,
+            restart: Override::Set(restart),
+            backoff: Override::Set(backoff),
+            timeout: Override::Set(normalize_timeout(timeout)),
+            max_retries: Override::Set(None),
             task,
-
-            max_retries: None,
-            timeout: normalize_timeout(timeout),
         }
     }
 
@@ -108,39 +166,36 @@ impl TaskSpec {
     /// The task runs a single attempt.
     /// It does not restart, even after a failure.
     ///
-    /// There is no timeout by default.
-    /// Add one with [`with_timeout`](Self::with_timeout).
+    /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
+    /// Override them with the matching `with_*` methods.
     pub fn once(task: TaskRef) -> Self {
         Self {
-            backoff: BackoffPolicy::default(),
-            restart: RestartPolicy::Never,
-            max_retries: None,
-            timeout: None,
+            restart: Override::Set(RestartPolicy::Never),
+            backoff: Override::Inherit,
+            timeout: Override::Inherit,
+            max_retries: Override::Inherit,
             task,
         }
     }
 
     /// Restartable: restart on failure, stop on success.
     ///
-    /// On failure the task restarts after the default [`BackoffPolicy`] delay.
-    /// Retries are unlimited by default.
-    /// Limit them with [`with_max_retries`](Self::with_max_retries).
+    /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
+    /// Override them with the matching `with_*` methods.
     pub fn restartable(task: TaskRef) -> Self {
         Self {
-            restart: RestartPolicy::OnFailure,
-            backoff: BackoffPolicy::default(),
-            timeout: None,
-
+            restart: Override::Set(RestartPolicy::OnFailure),
+            backoff: Override::Inherit,
+            timeout: Override::Inherit,
+            max_retries: Override::Inherit,
             task,
-
-            max_retries: None,
         }
     }
 
     /// Periodic: run, wait `every`, run again. Forever.
     ///
     /// The task restarts after both success and failure.
-    /// On failure the default [`BackoffPolicy`] delay applies first.
+    /// On failure the inherited backoff delay applies first.
     /// A zero `every` means restart immediately.
     ///
     /// The interval starts after the task completes.
@@ -160,15 +215,13 @@ impl TaskSpec {
     /// ```
     pub fn periodic(task: TaskRef, every: Duration) -> Self {
         Self {
-            restart: RestartPolicy::Always {
+            restart: Override::Set(RestartPolicy::Always {
                 interval: Some(every).filter(|d| !d.is_zero()),
-            },
-            backoff: BackoffPolicy::default(),
-            timeout: None,
-
+            }),
+            backoff: Override::Inherit,
+            timeout: Override::Inherit,
+            max_retries: Override::Inherit,
             task,
-
-            max_retries: None,
         }
     }
 
@@ -182,33 +235,45 @@ impl TaskSpec {
         self.task.name()
     }
 
-    /// Returns the restart policy.
-    pub fn restart(&self) -> RestartPolicy {
-        self.restart
+    /// Returns the explicit restart policy, or `None` when it is inherited.
+    #[must_use]
+    pub fn restart_override(&self) -> Option<RestartPolicy> {
+        self.restart.value()
     }
 
-    /// Returns the backoff policy.
-    pub fn backoff(&self) -> BackoffPolicy {
-        self.backoff
+    /// Returns the explicit backoff policy, or `None` when it is inherited.
+    #[must_use]
+    pub fn backoff_override(&self) -> Option<BackoffPolicy> {
+        self.backoff.value()
     }
 
-    /// Returns the timeout, if configured.
-    pub fn timeout(&self) -> Option<Duration> {
-        self.timeout
+    /// Returns the explicit timeout override.
+    ///
+    /// - `None` means inherit the default.
+    /// - `Some(None)` means explicitly disable the timeout.
+    /// - `Some(Some(duration))` means use that timeout.
+    #[must_use]
+    pub fn timeout_override(&self) -> Option<Option<Duration>> {
+        self.timeout.value()
     }
 
-    /// Returns the failure-retry limit (`None` = unlimited).
-    pub fn max_retries(&self) -> Option<NonZeroU32> {
-        self.max_retries
+    /// Returns the explicit failure-retry limit override.
+    ///
+    /// - `None` means inherit the default.
+    /// - `Some(None)` means explicitly allow unlimited failure retries.
+    /// - `Some(Some(limit))` means use that retry limit.
+    #[must_use]
+    pub fn max_retries_override(&self) -> Option<Option<NonZeroU32>> {
+        self.max_retries.value()
     }
 
     /// Builder: sets the timeout.
     ///
     /// - Stored `Some(d)` is always a positive duration.
     /// - `Some(Duration::ZERO)` is normalized to `None`.
-    /// - `None` means no timeout.
+    /// - `None` means explicitly disable an inherited timeout.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = normalize_timeout(timeout);
+        self.timeout = Override::Set(normalize_timeout(timeout));
         self
     }
 
@@ -216,7 +281,7 @@ impl TaskSpec {
     ///
     /// Backoff controls the delay before a failed attempt restarts.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
-        self.backoff = backoff;
+        self.backoff = Override::Set(backoff);
         self
     }
 
@@ -224,64 +289,132 @@ impl TaskSpec {
     ///
     /// Restart controls whether the task runs again after it exits.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
-        self.restart = restart;
+        self.restart = Override::Set(restart);
         self
     }
 
     /// Builder: set the failure-retry limit (`None` = unlimited).
     ///
-    /// Accepts a `NonZeroU32` (a limit) or an `Option<NonZeroU32>` (`None` = unlimited).
+    /// Accepts a `NonZeroU32` (a limit) or an `Option<NonZeroU32>`.
+    /// `None` explicitly disables an inherited retry limit.
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
-        self.max_retries = max_retries.into();
+        self.max_retries = Override::Set(max_retries.into());
         self
+    }
+
+    /// Applies inherited task defaults and returns a concrete specification.
+    pub(crate) fn resolve(self, defaults: &TaskDefaults) -> ResolvedTaskSpec {
+        ResolvedTaskSpec {
+            restart: self.restart.resolve(defaults.restart()),
+            backoff: self.backoff.resolve(defaults.backoff()),
+            timeout: self.timeout.resolve(defaults.timeout()),
+            max_retries: self.max_retries.resolve(defaults.max_retries()),
+            task: self.task,
+        }
+    }
+}
+
+impl ResolvedTaskSpec {
+    /// Returns the task handle.
+    pub(crate) fn task(&self) -> &TaskRef {
+        &self.task
+    }
+
+    /// Returns the task name.
+    #[cfg(test)]
+    pub(crate) fn name(&self) -> &str {
+        self.task.name()
+    }
+
+    /// Returns the resolved restart policy.
+    pub(crate) fn restart(&self) -> RestartPolicy {
+        self.restart
+    }
+
+    /// Returns the resolved backoff policy.
+    pub(crate) fn backoff(&self) -> BackoffPolicy {
+        self.backoff
+    }
+
+    /// Returns the resolved attempt timeout.
+    pub(crate) fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Returns the resolved failure-retry limit.
+    pub(crate) fn max_retries(&self) -> Option<NonZeroU32> {
+        self.max_retries
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaskContext, TaskFn};
+    use crate::{JitterPolicy, TaskContext, TaskFn};
 
     fn task(name: &str) -> TaskRef {
         TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) })
     }
 
     #[test]
-    fn periodic_sets_always_restart_with_interval() {
+    fn named_constructors_set_restart_and_inherit_other_settings() {
+        let inherited = TaskSpec::from_defaults(task("inherited"));
+        assert!(inherited.restart_override().is_none());
+        assert!(inherited.backoff_override().is_none());
+        assert!(inherited.timeout_override().is_none());
+        assert!(inherited.max_retries_override().is_none());
+
+        let once = TaskSpec::once(task("once"));
+        assert!(matches!(
+            once.restart_override(),
+            Some(RestartPolicy::Never)
+        ));
+        assert!(once.backoff_override().is_none());
+        assert!(once.timeout_override().is_none());
+        assert!(once.max_retries_override().is_none());
+
+        let restartable = TaskSpec::restartable(task("restartable"));
+        assert!(matches!(
+            restartable.restart_override(),
+            Some(RestartPolicy::OnFailure)
+        ));
+        assert!(restartable.backoff_override().is_none());
+        assert!(restartable.timeout_override().is_none());
+        assert!(restartable.max_retries_override().is_none());
+
         let every = Duration::from_secs(30);
         let spec = TaskSpec::periodic(task("tick"), every);
-
         assert!(
-            matches!(spec.restart(), RestartPolicy::Always { interval: Some(d) } if d == every),
+            matches!(spec.restart_override(), Some(RestartPolicy::Always { interval: Some(d) }) if d == every),
             "periodic must set RestartPolicy::Always with the given interval, got {:?}",
-            spec.restart()
+            spec.restart_override()
         );
-        assert_eq!(spec.timeout(), None, "periodic must not set a timeout");
-        assert_eq!(
-            spec.max_retries(),
-            None,
-            "periodic must not limit retries by default"
-        );
-        assert_eq!(spec.backoff().first(), Duration::from_millis(200));
-        assert_eq!(spec.backoff().factor(), 2.0);
-        assert_eq!(spec.backoff().jitter(), crate::JitterPolicy::Equal);
+        assert!(spec.backoff_override().is_none());
+        assert!(spec.timeout_override().is_none());
+        assert!(spec.max_retries_override().is_none());
     }
 
     #[test]
-    fn named_constructors_use_safe_backoff_defaults() {
-        let once = TaskSpec::once(task("once"));
-        let restartable = TaskSpec::restartable(task("restartable"));
+    fn new_marks_every_setting_as_explicit() {
+        let backoff = BackoffPolicy::constant(Duration::from_secs(2));
+        let timeout = Duration::from_secs(7);
+        let spec = TaskSpec::new(
+            task("explicit"),
+            RestartPolicy::Never,
+            backoff,
+            Some(timeout),
+        );
 
-        assert!(matches!(once.restart(), RestartPolicy::Never));
-        assert!(matches!(restartable.restart(), RestartPolicy::OnFailure));
-        for spec in [once, restartable] {
-            assert_eq!(spec.backoff().first(), Duration::from_millis(200));
-            assert_eq!(spec.backoff().factor(), 2.0);
-            assert_eq!(spec.backoff().max(), Duration::from_secs(30));
-            assert_eq!(spec.backoff().jitter(), crate::JitterPolicy::Equal);
-            assert_eq!(spec.timeout(), None);
-            assert_eq!(spec.max_retries(), None);
-        }
+        assert!(matches!(
+            spec.restart_override(),
+            Some(RestartPolicy::Never)
+        ));
+        assert_eq!(
+            spec.backoff_override().map(|policy| policy.first()),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(spec.timeout_override(), Some(Some(timeout)));
+        assert_eq!(spec.max_retries_override(), Some(None));
     }
 
     #[test]
@@ -289,18 +422,82 @@ mod tests {
         let spec = TaskSpec::periodic(task("tick"), Duration::ZERO);
 
         assert!(
-            matches!(spec.restart(), RestartPolicy::Always { interval: None }),
+            matches!(
+                spec.restart_override(),
+                Some(RestartPolicy::Always { interval: None })
+            ),
             "a zero interval must normalize to None (immediate restart), got {:?}",
-            spec.restart()
+            spec.restart_override()
         );
     }
 
     #[test]
-    fn zero_timeout_normalizes_to_none() {
+    fn explicit_none_disables_inherited_optional_settings() {
+        let retries = NonZeroU32::new(4).unwrap();
+        let defaults = TaskDefaults::default()
+            .with_timeout(Some(Duration::from_secs(9)))
+            .with_max_retries(retries);
+        let spec = TaskSpec::restartable(task("disabled"))
+            .with_timeout(None)
+            .with_max_retries(None);
+
+        assert_eq!(spec.timeout_override(), Some(None));
+        assert_eq!(spec.max_retries_override(), Some(None));
+
+        let resolved = spec.resolve(&defaults);
+        assert_eq!(resolved.timeout(), None);
+        assert_eq!(resolved.max_retries(), None);
+    }
+
+    #[test]
+    fn resolve_applies_defaults_only_to_inherited_settings() {
+        let retries = NonZeroU32::new(6).unwrap();
+        let defaults = TaskDefaults::default()
+            .with_restart(RestartPolicy::Never)
+            .with_backoff(BackoffPolicy::constant(Duration::from_secs(3)))
+            .with_timeout(Some(Duration::from_secs(12)))
+            .with_max_retries(retries);
+        let spec = TaskSpec::restartable(task("worker"));
+
+        let resolved = spec.resolve(&defaults);
+
+        assert_eq!(resolved.name(), "worker");
+        assert_eq!(resolved.task().name(), "worker");
+        assert!(matches!(resolved.restart(), RestartPolicy::OnFailure));
+        assert_eq!(resolved.backoff().first(), Duration::from_secs(3));
+        assert_eq!(resolved.backoff().jitter(), JitterPolicy::None);
+        assert_eq!(resolved.timeout(), Some(Duration::from_secs(12)));
+        assert_eq!(resolved.max_retries(), Some(retries));
+    }
+
+    #[test]
+    fn new_does_not_inherit_task_defaults() {
+        let defaults = TaskDefaults::default()
+            .with_restart(RestartPolicy::OnFailure)
+            .with_backoff(BackoffPolicy::constant(Duration::from_secs(8)))
+            .with_timeout(Some(Duration::from_secs(9)))
+            .with_max_retries(NonZeroU32::new(3).unwrap());
+        let spec = TaskSpec::new(
+            task("explicit"),
+            RestartPolicy::Never,
+            BackoffPolicy::constant(Duration::from_secs(1)),
+            None,
+        );
+
+        let resolved = spec.resolve(&defaults);
+
+        assert!(matches!(resolved.restart(), RestartPolicy::Never));
+        assert_eq!(resolved.backoff().first(), Duration::from_secs(1));
+        assert_eq!(resolved.timeout(), None);
+        assert_eq!(resolved.max_retries(), None);
+    }
+
+    #[test]
+    fn zero_timeout_is_an_explicit_disabled_override() {
         let via_builder = TaskSpec::once(task("z")).with_timeout(Some(Duration::ZERO));
         assert_eq!(
-            via_builder.timeout(),
-            None,
+            via_builder.timeout_override(),
+            Some(None),
             "with_timeout(Some(ZERO)) must normalize to None"
         );
 
@@ -311,15 +508,15 @@ mod tests {
             Some(Duration::ZERO),
         );
         assert_eq!(
-            via_new.timeout(),
-            None,
+            via_new.timeout_override(),
+            Some(None),
             "new(.., Some(ZERO)) must normalize to None"
         );
 
         let positive = TaskSpec::once(task("p")).with_timeout(Some(Duration::from_secs(1)));
         assert_eq!(
-            positive.timeout(),
-            Some(Duration::from_secs(1)),
+            positive.timeout_override(),
+            Some(Some(Duration::from_secs(1))),
             "a positive timeout must be preserved"
         );
     }

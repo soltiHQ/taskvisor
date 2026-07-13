@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,13 +13,10 @@ use taskvisor::{ControllerConfig, ControllerError, ControllerSpec, SlotStatusKin
 fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .with_controller(cfg)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+        .with_subscribers(subs)
+        .with_controller(cfg)
+        .build();
     (sup.serve(), collector)
 }
 
@@ -716,10 +714,7 @@ async fn slot_freed_and_reusable_after_task_completes() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn queue_full_rejects_with_controller_rejected_event() {
-    let (handle, collector) = served_controller(ControllerConfig {
-        queue_capacity: 1024,
-        max_slot_queue: 1,
-    });
+    let (handle, collector) = served_controller(ControllerConfig::default().with_max_slot_queue(1));
     with_timeout(10, async {
         let running = TaskSpec::restartable(make_coop("r"));
         handle
@@ -761,10 +756,9 @@ async fn queue_full_rejects_with_controller_rejected_event() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn try_submit_full_when_queue_capacity_saturated() {
-    let (handle, _c) = served_controller(ControllerConfig {
-        queue_capacity: 1,
-        max_slot_queue: 100,
-    });
+    let (handle, _c) = served_controller(
+        ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(1).unwrap()),
+    );
     with_timeout(10, async {
         let mut saw_full = false;
         for i in 0..256u32 {
@@ -788,10 +782,8 @@ async fn try_submit_full_when_queue_capacity_saturated() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn controller_snapshot_reports_running_slot_and_queue_depth() {
-    let (handle, _collector) = served_controller(ControllerConfig {
-        queue_capacity: 16,
-        max_slot_queue: 4,
-    });
+    let (handle, _collector) =
+        served_controller(ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 4));
 
     with_timeout(10, async {
         handle

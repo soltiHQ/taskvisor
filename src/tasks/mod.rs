@@ -7,7 +7,7 @@
 //! | [`Task`]          | Trait for user work                                 |
 //! | [`TaskFn`]        | Closure-based [`Task`]                              |
 //! | [`TaskRef`]       | Shared task handle: `Arc<dyn Task>`                 |
-//! | [`TaskSpec`]      | Run config: restart, backoff, timeout, retry limit  |
+//! | [`TaskSpec`]      | Explicit and inherited task execution settings     |
 //! | [`BoxTaskFuture`] | Future returned by [`Task::spawn`]                  |
 //!
 //! ## Creating A Task
@@ -17,7 +17,8 @@
 //!
 //! ## Data Flow
 //!
-//! Both paths create a [`TaskRef`]. Wrap it in a [`TaskSpec`] to choose restart policy, backoff, timeout, and retry limit.
+//! Both paths create a [`TaskRef`]. Wrap it in a [`TaskSpec`] to choose a restart
+//! policy and override any settings inherited from [`TaskDefaults`](crate::TaskDefaults).
 //!
 //! ```text
 //! TaskFn::arc(name, closure) ─┐
@@ -36,9 +37,11 @@
 //!
 //! let once = TaskSpec::once(task.clone());
 //! let restartable = TaskSpec::restartable(task.clone());
+//! let inherited = TaskSpec::from_defaults(task);
 //! ```
 //!
-//! Use [`SupervisorConfig::task_spec`](crate::SupervisorConfig::task_spec) when you want a task to inherit supervisor defaults.
+//! Named `TaskSpec` constructors inherit the settings they do not set. The
+//! supervisor applies its [`TaskDefaults`](crate::TaskDefaults) when it admits a task.
 
 mod task;
 pub use task::{BoxTaskFuture, Task, TaskRef};

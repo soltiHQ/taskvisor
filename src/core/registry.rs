@@ -88,6 +88,7 @@ use tokio::sync::{Notify, RwLock, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::TaskDefaults;
 use crate::core::actor::{ActorExitReason, TaskActor, TaskActorParams};
 use crate::core::outcome::TaskOutcome;
 use crate::error::RuntimeError;
@@ -410,6 +411,7 @@ pub(crate) struct Registry {
     runtime_token: CancellationToken,
     semaphore: Option<Arc<Semaphore>>,
     grace: Duration,
+    task_defaults: TaskDefaults,
     empty_notify: Arc<Notify>,
     cmd_rx: std::sync::Mutex<Option<mpsc::Receiver<RegistryCommand>>>,
     control_tx: mpsc::UnboundedSender<RegistryControl>,
@@ -427,6 +429,7 @@ impl Registry {
         runtime_token: CancellationToken,
         semaphore: Option<Arc<Semaphore>>,
         grace: Duration,
+        task_defaults: TaskDefaults,
         cmd_rx: mpsc::Receiver<RegistryCommand>,
     ) -> Arc<Self> {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
@@ -437,6 +440,7 @@ impl Registry {
             runtime_token,
             semaphore,
             grace,
+            task_defaults,
             empty_notify: Arc::new(Notify::new()),
             cmd_rx: std::sync::Mutex::new(Some(cmd_rx)),
             control_tx,
@@ -619,14 +623,39 @@ impl Registry {
     ///
     /// Safe to call after shutdown has started.
     /// If the listener was never started, this is a no-op.
-    pub async fn join_listener(&self) {
+    /// Returns `false` when Tokio reports that the listener did not join cleanly.
+    pub async fn join_listener(&self) -> bool {
         let handle = self
             .listener_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if let Some(handle) = handle {
-            let _ = handle.await;
+        let Some(handle) = handle else {
+            return true;
+        };
+
+        match handle.await {
+            Ok(()) => true,
+            Err(error) => {
+                self.bus.publish(Event::subscriber_panicked(
+                    "registry",
+                    format!("listener join failed: {error}"),
+                ));
+                false
+            }
+        }
+    }
+
+    /// Aborts the listener so shutdown join-failure handling can be tested.
+    #[cfg(test)]
+    pub(crate) fn abort_listener_for_test(&self) {
+        if let Some(handle) = self
+            .listener_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            handle.abort();
         }
     }
 
@@ -769,6 +798,7 @@ impl Registry {
         start: Option<watch::Receiver<bool>>,
     ) -> Entry {
         let task_token = self.runtime_token.child_token();
+        let spec = spec.resolve(&self.task_defaults);
 
         let actor = TaskActor::new(
             self.bus.clone(),
@@ -1335,7 +1365,14 @@ mod tests {
         let bus = Bus::new(64);
         let token = CancellationToken::new();
         let (_tx, rx) = mpsc::channel(64);
-        Registry::new(bus, token, None, Duration::from_secs(5), rx)
+        Registry::new(
+            bus,
+            token,
+            None,
+            Duration::from_secs(5),
+            TaskDefaults::default(),
+            rx,
+        )
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1422,7 +1459,14 @@ mod tests {
         let bus = Bus::new(bus_capacity);
         let token = CancellationToken::new();
         let (tx, rx) = mpsc::channel(64);
-        let registry = Registry::new(bus.clone(), token.clone(), None, grace, rx);
+        let registry = Registry::new(
+            bus.clone(),
+            token.clone(),
+            None,
+            grace,
+            TaskDefaults::default(),
+            rx,
+        );
         registry.clone().spawn_listener();
         (registry, bus, token, tx)
     }
@@ -2672,7 +2716,14 @@ mod tests {
         let bus = Bus::new(64);
         let token = CancellationToken::new();
         let (tx, rx) = mpsc::channel(1);
-        let reg = Registry::new(bus, token.clone(), None, Duration::from_millis(50), rx);
+        let reg = Registry::new(
+            bus,
+            token.clone(),
+            None,
+            Duration::from_millis(50),
+            TaskDefaults::default(),
+            rx,
+        );
 
         let task: TaskRef = TaskFn::arc("buffered", |ctx: TaskContext| async move {
             ctx.cancelled().await;

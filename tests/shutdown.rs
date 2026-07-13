@@ -146,12 +146,9 @@ async fn wait_for_callback(
 fn served(grace: Duration) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace,
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(grace))
+        .with_subscribers(subs)
+        .build();
     (sup.serve(), collector)
 }
 
@@ -347,13 +344,11 @@ async fn concurrent_shutdown_waiters_share_clean_result() {
 async fn concurrent_shutdown_waiters_share_subscriber_drain() {
     let (subscriber, gate) = blocking_subscriber();
     let watchdog = spawn_callback_watchdog(Arc::clone(&gate));
-    let supervisor = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscriber_shutdown_timeout(Duration::from_secs(5))
-    .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
-    .build();
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscriber_shutdown_timeout(Duration::from_secs(5))
+            .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
+            .build();
     let handle = supervisor.serve();
     handle
         .add(TaskSpec::restartable(make_coop("shared-subscriber-drain")))
@@ -483,14 +478,63 @@ async fn dropping_first_shutdown_waiter_does_not_cancel_owner() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_cleanup() {
+    let (handle, collector) = served(Duration::from_secs(5));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (_, waiter) = handle
+        .add_and_watch(TaskSpec::restartable(make_gated_cancel(
+            "only-dropped-shutdown-waiter",
+            Arc::clone(&started),
+            Arc::clone(&cancellation_seen),
+            Arc::clone(&release),
+        )))
+        .await
+        .expect("the gated task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the gated task must start");
+
+    let shutdown_waiter = tokio::spawn(async move { handle.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+        .await
+        .expect("the detached owner must start task cancellation");
+    shutdown_waiter.abort();
+    let _ = shutdown_waiter.await;
+
+    let mut outcome = Box::pin(waiter.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut outcome)
+            .await
+            .is_err(),
+        "last-owner Drop must not replace an active graceful shutdown with zero-grace cleanup"
+    );
+
+    release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), outcome)
+        .await
+        .expect("the detached graceful owner must finish")
+        .expect("the watched task must keep its terminal outcome");
+    assert!(matches!(outcome, TaskOutcome::Canceled));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while collector.count(EventKind::AllStoppedWithinGrace) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached cleanup must publish its graceful result");
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn run_and_handle_shutdown_share_one_operation() {
     let collector = EventCollector::new();
-    let supervisor = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
-    .build();
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
+            .build();
     let handle = supervisor.serve();
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
@@ -533,12 +577,10 @@ async fn run_and_handle_shutdown_share_one_operation() {
 #[tokio::test(flavor = "current_thread")]
 async fn run_joins_shutdown_that_started_first() {
     let collector = EventCollector::new();
-    let supervisor = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
-    .build();
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
+            .build();
     let handle = supervisor.serve();
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
@@ -600,7 +642,7 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_empty_registry_returns_ok_all_stopped() {
-    let (handle, collector) = served(SupervisorConfig::default().grace);
+    let (handle, collector) = served(SupervisorConfig::default().grace());
 
     with_timeout(5, handle.shutdown())
         .await

@@ -11,11 +11,11 @@ use common::*;
 use taskvisor::prelude::*;
 
 fn served(grace_secs: u64, max_concurrent: usize) -> SupervisorHandle {
-    Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(grace_secs),
-        max_concurrent: NonZeroUsize::new(max_concurrent),
-        ..Default::default()
-    })
+    Supervisor::builder(
+        SupervisorConfig::default()
+            .with_grace(Duration::from_secs(grace_secs))
+            .with_max_concurrent(NonZeroUsize::new(max_concurrent)),
+    )
     .build()
     .serve()
 }
@@ -449,13 +449,11 @@ async fn add_then_immediate_shutdown_storm_returns_within_grace() {
 async fn controller_many_distinct_slots_all_settle() {
     use taskvisor::{ControllerConfig, ControllerSpec};
 
-    let handle = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_controller(ControllerConfig::default())
-    .build()
-    .serve();
+    let handle =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_controller(ControllerConfig::default())
+            .build()
+            .serve();
     const S: usize = 128;
     with_timeout(40, async {
         let mut joins = Vec::new();
@@ -490,13 +488,11 @@ async fn controller_many_distinct_slots_all_settle() {
 async fn controller_replace_storm_single_slot_one_alive() {
     use taskvisor::{ControllerConfig, ControllerSpec};
 
-    let handle = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_controller(ControllerConfig::default())
-    .build()
-    .serve();
+    let handle =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_controller(ControllerConfig::default())
+            .build()
+            .serve();
     const K: usize = 50;
     with_timeout(40, async {
         let mut joins = Vec::new();
@@ -542,14 +538,12 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
 
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let handle = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .with_controller(ControllerConfig::default())
-    .build()
-    .serve();
+    let handle =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscribers(subs)
+            .with_controller(ControllerConfig::default())
+            .build()
+            .serve();
     const K: usize = 40;
     with_timeout(30, async {
         let mut joins = Vec::new();

@@ -164,12 +164,9 @@ async fn task_returning_canceled_without_cancellation_is_reaped() {
 async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+        .with_subscribers(subs)
+        .build();
     let handle = sup.serve();
 
     with_timeout(10, async {
@@ -205,12 +202,9 @@ async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
 async fn cancellation_returning_canceled_error_yields_task_canceled() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+        .with_subscribers(subs)
+        .build();
     let handle = sup.serve();
 
     let task = TaskFn::arc("cancel-err", |ctx: TaskContext| async move {

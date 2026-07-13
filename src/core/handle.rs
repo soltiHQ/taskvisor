@@ -14,7 +14,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crate::core::SupervisorCore;
+use crate::core::{RuntimeOwner, SupervisorCore};
 use crate::error::RuntimeError;
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
@@ -25,6 +25,9 @@ use super::outcome::TaskWaiter;
 ///
 /// A handle is created by [`Supervisor::serve`](crate::Supervisor::serve).
 /// It can be cloned and shared between tasks.
+/// Dropping one clone does not stop the runtime. Dropping the final public
+/// supervisor/handle owner sends non-blocking best-effort cancellation; call
+/// [`shutdown`](Self::shutdown) to wait for graceful cleanup and receive its result.
 ///
 /// ## Example
 ///
@@ -58,7 +61,7 @@ use super::outcome::TaskWaiter;
 /// ```
 #[derive(Clone)]
 pub struct SupervisorHandle {
-    core: Arc<SupervisorCore>,
+    owner: Arc<RuntimeOwner>,
 
     #[cfg(feature = "controller")]
     controller: Option<Arc<crate::controller::Controller>>,
@@ -67,19 +70,23 @@ pub struct SupervisorHandle {
 impl std::fmt::Debug for SupervisorHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SupervisorHandle")
-            .field("core", &self.core)
+            .field("core", self.owner.core())
             .finish_non_exhaustive()
     }
 }
 
 impl SupervisorHandle {
     /// Creates a new handle over an already-started runtime core.
-    pub(crate) fn new(core: Arc<SupervisorCore>) -> Self {
+    pub(crate) fn new(owner: Arc<RuntimeOwner>) -> Self {
         Self {
-            core,
+            owner,
             #[cfg(feature = "controller")]
             controller: None,
         }
+    }
+
+    fn core(&self) -> &Arc<SupervisorCore> {
+        self.owner.core()
     }
 
     /// Attaches the optional controller to this handle.
@@ -106,7 +113,7 @@ impl SupervisorHandle {
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
     pub async fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        self.core.add_task(spec).await
+        self.core().add_task(spec).await
     }
 
     /// Tries to add a task without waiting for command queue capacity.
@@ -120,7 +127,7 @@ impl SupervisorHandle {
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
     pub async fn try_add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
-        self.core.try_add_task(spec).await
+        self.core().try_add_task(spec).await
     }
 
     /// Adds a task and returns a [`TaskWaiter`] after registry acceptance.
@@ -156,7 +163,7 @@ impl SupervisorHandle {
         &self,
         spec: TaskSpec,
     ) -> Result<(TaskId, TaskWaiter), RuntimeError> {
-        let (id, done_rx) = self.core.add_task_watched(spec).await?;
+        let (id, done_rx) = self.core().add_task_watched(spec).await?;
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
@@ -185,7 +192,7 @@ impl SupervisorHandle {
         if let Some(controller) = &self.controller {
             return controller.handle().remove(id).await;
         }
-        self.core.remove(id).await
+        self.core().remove(id).await
     }
 
     /// Tries to remove a task without waiting for command queue capacity.
@@ -204,7 +211,7 @@ impl SupervisorHandle {
         if let Some(controller) = &self.controller {
             return controller.handle().try_remove(id).await;
         }
-        self.core.try_remove(id).await
+        self.core().try_remove(id).await
     }
 
     /// Removes the task currently holding `name`.
@@ -219,7 +226,7 @@ impl SupervisorHandle {
     ///
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.core.remove_by_label(Arc::from(name)).await
+        self.core().remove_by_label(Arc::from(name)).await
     }
 
     /// Returns registered tasks as `(id, label)` pairs.
@@ -229,7 +236,7 @@ impl SupervisorHandle {
     ///
     /// See [`snapshot`](Self::snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
-        self.core.list_tasks().await
+        self.core().list_tasks().await
     }
 
     /// Returns task names currently marked alive.
@@ -239,7 +246,7 @@ impl SupervisorHandle {
     ///
     /// See [`list`](Self::list) for the authoritative registry view of registered tasks.
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
-        self.core.snapshot().await
+        self.core().snapshot().await
     }
 
     /// Returns true if any task run with this name is currently marked alive.
@@ -247,7 +254,17 @@ impl SupervisorHandle {
     /// This is a best-effort label query from the alive tracker.
     /// It does not check task identity.
     pub async fn is_alive(&self, name: &str) -> bool {
-        self.core.is_alive(name).await
+        self.core().is_alive(name).await
+    }
+
+    /// Returns the immutable runtime configuration.
+    pub fn runtime_config(&self) -> &crate::SupervisorConfig {
+        self.core().runtime_config()
+    }
+
+    /// Returns the immutable task defaults applied during registry admission.
+    pub fn task_defaults(&self) -> &crate::TaskDefaults {
+        self.core().task_defaults()
     }
 
     /// Cancels queued or registered work by identity.
@@ -276,7 +293,7 @@ impl SupervisorHandle {
         if let Some(controller) = &self.controller {
             return controller.handle().cancel(id).await;
         }
-        self.core.cancel(id).await
+        self.core().cancel(id).await
     }
 
     /// Cancels the task currently holding `name`.
@@ -287,7 +304,7 @@ impl SupervisorHandle {
     /// Queued controller submissions are not registered label owners; cancel them by their
     /// returned [`TaskId`].
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.core.cancel_by_label(Arc::from(name)).await
+        self.core().cancel_by_label(Arc::from(name)).await
     }
 
     /// Cancels a task with an explicit confirmation window.
@@ -317,7 +334,7 @@ impl SupervisorHandle {
         if let Some(controller) = &self.controller {
             return controller.handle().cancel_with_timeout(id, wait_for).await;
         }
-        self.core.cancel_with_timeout(id, wait_for).await
+        self.core().cancel_with_timeout(id, wait_for).await
     }
 
     /// Initiates graceful shutdown of the supervisor runtime.
@@ -329,7 +346,7 @@ impl SupervisorHandle {
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
-        self.core.shutdown().await
+        self.core().shutdown().await
     }
 
     /// Submits a task to the controller and returns its pre-minted [`TaskId`].

@@ -195,10 +195,7 @@ async fn spurious_canceled_return_resolves_canceled_outcome() {
 
 #[tokio::test]
 async fn shutdown_drain_force_aborts_stubborn_watched_task() {
-    let cfg = SupervisorConfig {
-        grace: Duration::from_millis(150),
-        ..Default::default()
-    };
+    let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(150));
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
@@ -267,10 +264,7 @@ async fn cancelled_outcome_when_task_is_cancelled() {
 
 #[tokio::test]
 async fn force_aborted_outcome_for_noncooperative_task() {
-    let cfg = SupervisorConfig {
-        grace: Duration::from_millis(100),
-        ..Default::default()
-    };
+    let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(100));
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
@@ -366,10 +360,8 @@ async fn dropping_waiter_does_not_affect_task() {
 
 #[tokio::test]
 async fn outcome_is_delivered_even_under_bus_lag() {
-    let cfg = SupervisorConfig {
-        bus_capacity: 2,
-        ..Default::default()
-    };
+    let cfg =
+        SupervisorConfig::default().with_bus_capacity(std::num::NonZeroUsize::new(2).unwrap());
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 

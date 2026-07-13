@@ -17,7 +17,7 @@
 //! - **`BackoffPolicy::exponential`** preset: delays 200ms, 400ms, 800ms, … capped at 5s.
 //! - **`max_retries(3)`**: the task gives up after 3 failure-driven retries.
 //!   Success-driven restarts (like `always-on`) don't count toward max_retries.
-//! - **`SupervisorConfig::grace`**: how long the supervisor waits for tasks to stop during shutdown.
+//! - **`SupervisorConfig::grace()`**: how long the supervisor waits for tasks to stop during shutdown.
 //!   Here set to 5 seconds.
 //! - The `always-on` task runs indefinitely because `RestartPolicy::Always` never stops.
 //!   The supervisor only exits when it receives Ctrl+C (which triggers `drive_shutdown`: cancel all, wait the grace period, then exit).
@@ -105,10 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_max_retries(NonZeroU32::new(3).unwrap()),
     ];
 
-    let cfg = SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..SupervisorConfig::default()
-    };
+    let cfg = SupervisorConfig::default().with_grace(Duration::from_secs(5));
     let sup = Supervisor::new(cfg, vec![]);
     sup.run(specs).await?;
 

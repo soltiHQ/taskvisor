@@ -25,7 +25,8 @@
 /// # Also
 ///
 /// - [`BackoffPolicy`](crate::BackoffPolicy) - retry delays after failures
-/// - [`TaskSpec`](crate::TaskSpec) - stores restart, backoff, timeout, and retry limit
+/// - [`TaskSpec`](crate::TaskSpec) - inherits or overrides task execution settings
+/// - [`TaskDefaults`](crate::TaskDefaults) - supervisor-wide task settings
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum RestartPolicy {

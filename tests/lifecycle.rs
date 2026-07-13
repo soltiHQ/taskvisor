@@ -291,12 +291,9 @@ async fn unlimited_retries_eventual_success_no_max_retries_reason() {
 async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(2),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(2)))
+        .with_subscribers(subs)
+        .build();
     let handle = sup.serve();
 
     let counter = Arc::new(AtomicU32::new(0));
@@ -330,12 +327,9 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
 async fn always_interval_some_emits_success_source_backoff_between_runs() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(2),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(2)))
+        .with_subscribers(subs)
+        .build();
     let handle = sup.serve();
 
     let counter = Arc::new(AtomicU32::new(0));
@@ -378,12 +372,9 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
 async fn success_driven_restart_does_not_consume_failure_retry_budget() {
     let collector = EventCollector::new();
     let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(2),
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
+    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(2)))
+        .with_subscribers(subs)
+        .build();
     let handle = sup.serve();
 
     let n = Arc::new(AtomicU32::new(0));

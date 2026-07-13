@@ -4,13 +4,14 @@
 //!
 //! Public API:
 //!
-//! | File            | Role                                      |
-//! |-----------------|-------------------------------------------|
-//! | `supervisor.rs` | Public facade and composition root        |
-//! | `handle.rs`     | Dynamic task management API               |
-//! | `config.rs`     | Runtime defaults and limits               |
-//! | `outcome.rs`    | Guaranteed task completion results        |
-//! | `builder.rs`    | Runtime construction                      |
+//! | File               | Role                                      |
+//! |--------------------|-------------------------------------------|
+//! | `supervisor.rs`    | Public facade and composition root        |
+//! | `handle.rs`        | Dynamic task management API               |
+//! | `config.rs`        | Runtime defaults and limits               |
+//! | `task_defaults.rs` | Default task execution settings           |
+//! | `outcome.rs`       | Guaranteed task completion results        |
+//! | `builder.rs`       | Runtime construction                      |
 //!
 //! Internal runtime:
 //!
@@ -90,13 +91,19 @@ mod builder;
 pub use builder::SupervisorBuilder;
 
 mod config;
-pub use config::SupervisorConfig;
+pub use config::{ConfigError, SupervisorConfig};
+
+mod task_defaults;
+pub use task_defaults::TaskDefaults;
 
 mod handle;
 pub use handle::SupervisorHandle;
 
 mod supervisor;
 pub use supervisor::Supervisor;
+
+mod owner;
+pub(crate) use owner::RuntimeOwner;
 
 pub(crate) mod panic_guard;
 

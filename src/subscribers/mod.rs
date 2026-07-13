@@ -33,7 +33,7 @@ mod subscriber_set;
 mod embedded;
 
 pub use subscriber::Subscribe;
-pub(crate) use subscriber_set::{DEFAULT_SHUTDOWN_TIMEOUT, SubscriberSet};
+pub(crate) use subscriber_set::SubscriberSet;
 
 #[cfg(feature = "logging")]
 pub use embedded::LogWriter;

@@ -74,11 +74,9 @@ const N_TASKS: usize = 100;
 const SUB_NAMES: [&str; 8] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"];
 
 fn bench_config() -> SupervisorConfig {
-    SupervisorConfig {
-        bus_capacity: 16384,
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    }
+    SupervisorConfig::default()
+        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
+        .with_grace(Duration::from_secs(5))
 }
 
 fn instant_task(name: &str) -> TaskSpec {

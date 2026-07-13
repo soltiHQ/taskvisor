@@ -53,7 +53,7 @@
 //! | Area     | Types                                                      |
 //! |----------|------------------------------------------------------------|
 //! | Tasks    | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]        |
-//! | Runtime  | [`Supervisor`], [`SupervisorHandle`], [`SupervisorConfig`] |
+//! | Runtime  | [`Supervisor`], [`SupervisorHandle`], [`SupervisorConfig`], [`TaskDefaults`] |
 //! | Outcomes | [`TaskWaiter`], [`TaskOutcome`]                            |
 //! | Policies | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]     |
 //! | Events   | [`Event`], [`EventKind`], [`Subscribe`]                    |
@@ -129,7 +129,8 @@ pub mod reasons;
 
 pub mod core;
 pub use core::{
-    Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskOutcome, TaskWaiter,
+    ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
+    TaskOutcome, TaskWaiter,
 };
 
 pub mod tasks;

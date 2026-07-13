@@ -23,6 +23,7 @@
 //! cargo bench --bench controller --features controller
 //! ```
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -106,11 +107,9 @@ const RUNTIMES: [(&str, RtFactory); 2] = [
 ];
 
 fn bench_config() -> SupervisorConfig {
-    SupervisorConfig {
-        bus_capacity: 16384,
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    }
+    SupervisorConfig::default()
+        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
+        .with_grace(Duration::from_secs(5))
 }
 
 fn instant_task(name: &str) -> TaskSpec {
@@ -276,10 +275,12 @@ fn bench_submit_hotpath(c: &mut Criterion) {
                         let rt = rt_fn();
                         total += rt.block_on(async {
                             let sup = Supervisor::builder(bench_config())
-                                .with_controller(ControllerConfig {
-                                    queue_capacity: count.max(1024),
-                                    ..ControllerConfig::default()
-                                })
+                                .with_controller(
+                                    ControllerConfig::default().with_queue_capacity(
+                                        NonZeroUsize::new(count.max(1024))
+                                            .expect("benchmark queue capacity is non-zero"),
+                                    ),
+                                )
                                 .build();
                             let handle = sup.serve();
                             let template = instant_task("slot-h");

@@ -382,9 +382,8 @@ impl Controller {
     /// Creates a controller and its bounded ordered command channel.
     ///
     /// The controller is inert until [`run`](Self::run) is called.
-    /// `queue_capacity = 0` is clamped to `1`.
     pub fn new(config: ControllerConfig, supervisor: &Arc<SupervisorCore>, bus: Bus) -> Arc<Self> {
-        let (tx, rx) = mpsc::channel(config.queue_capacity.max(1));
+        let (tx, rx) = mpsc::channel(config.queue_capacity().get());
         let shutdown_token = supervisor.shutdown_started_token();
 
         Arc::new(Self {
@@ -525,7 +524,7 @@ impl Controller {
         let mut completions = JoinSet::new();
         let mut removals = JoinSet::new();
         let mut identity_operations = JoinSet::new();
-        let identity_operation_limit = self.config.queue_capacity.max(1);
+        let identity_operation_limit = self.config.queue_capacity().get();
         let loop_result = crate::core::panic_guard::guarded(async {
             loop {
                 tokio::select! {
@@ -1244,12 +1243,12 @@ impl Controller {
     /// `slot_len` is the current pending queue depth and does not include the current slot owner.
     #[inline]
     fn reject_if_full(&self, slot_name: &str, id: TaskId, slot_len: usize) -> bool {
-        if slot_len >= self.config.max_slot_queue {
+        if slot_len >= self.config.max_slot_queue() {
             let reason = format!(
                 "{}: {}/{}",
                 crate::reasons::QUEUE_FULL,
                 slot_len,
-                self.config.max_slot_queue
+                self.config.max_slot_queue()
             );
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
@@ -1296,6 +1295,7 @@ mod tests {
     use crate::Supervisor;
     use crate::TaskContext;
     use crate::{BackoffPolicy, BoxTaskFuture, RestartPolicy, Task, TaskFn, TaskRef, TaskSpec};
+    use std::num::NonZeroUsize;
     use std::sync::{
         Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
@@ -1383,10 +1383,7 @@ mod tests {
     #[test]
     fn reject_if_full_returns_false_below_capacity() {
         let bus = Bus::new(64);
-        let config = ControllerConfig {
-            queue_capacity: 16,
-            max_slot_queue: 3,
-        };
+        let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 3);
         let ctrl = make_controller(config, bus);
         assert!(!ctrl.reject_if_full("slot", TaskId::next(), 0));
         assert!(!ctrl.reject_if_full("slot", TaskId::next(), 2));
@@ -1395,10 +1392,7 @@ mod tests {
     #[test]
     fn reject_if_full_returns_true_at_capacity() {
         let bus = Bus::new(64);
-        let config = ControllerConfig {
-            queue_capacity: 16,
-            max_slot_queue: 3,
-        };
+        let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 3);
         let ctrl = make_controller(config, bus);
         assert!(ctrl.reject_if_full("slot", TaskId::next(), 3));
         assert!(ctrl.reject_if_full("slot", TaskId::next(), 10));
@@ -1645,7 +1639,7 @@ mod tests {
     }
 
     fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
-        let (tx, rx) = mpsc::channel(config.queue_capacity.max(1));
+        let (tx, rx) = mpsc::channel(config.queue_capacity().get());
         Controller {
             config,
             supervisor: Weak::new(),
@@ -1680,20 +1674,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_queue_capacity_is_clamped_not_panicking() {
+    async fn minimum_queue_capacity_is_supported() {
         let sup = Supervisor::builder(crate::SupervisorConfig::default())
-            .with_controller(ControllerConfig {
-                queue_capacity: 0,
-                max_slot_queue: 1,
-            })
+            .with_controller(
+                ControllerConfig::default()
+                    .with_queue_capacity(NonZeroUsize::new(1).unwrap())
+                    .with_max_slot_queue(1),
+            )
             .build();
         let handle = sup.serve();
 
-        let task: TaskRef = TaskFn::arc("clamped", |_ctx: TaskContext| async { Ok(()) });
+        let task: TaskRef = TaskFn::arc("minimum-capacity", |_ctx: TaskContext| async { Ok(()) });
         handle
             .submit(ControllerSpec::queue(TaskSpec::once(task)))
             .await
-            .expect("submission must work with capacity clamped to 1");
+            .expect("submission must work with the minimum non-zero capacity");
 
         let _ = handle.shutdown().await;
     }
@@ -1748,7 +1743,7 @@ mod tests {
         ctrl.run();
         ctrl.run();
 
-        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
             .with_controller(Some(Arc::clone(&ctrl)));
         let slot = ctrl.get_or_create_slot("blocked-shutdown-slot");
         let slot_guard = slot.lock().await;
@@ -1762,7 +1757,7 @@ mod tests {
             .expect("the blocking submission must enter the controller queue");
         assert!(
             poll_until(Duration::from_secs(2), || async {
-                ctrl.tx.capacity() == ctrl.config.queue_capacity.max(1)
+                ctrl.tx.capacity() == ctrl.config.queue_capacity().get()
             })
             .await,
             "the controller must receive the command and block on the held slot lock"
@@ -1785,7 +1780,7 @@ mod tests {
         let identity = tokio::spawn(async move { identity_handle.cancel(TaskId::next()).await });
         assert!(
             poll_until(Duration::from_secs(2), || async {
-                ctrl.tx.capacity() == ctrl.config.queue_capacity.max(1) - 3
+                ctrl.tx.capacity() == ctrl.config.queue_capacity().get() - 3
             })
             .await,
             "all later commands must remain buffered before shutdown"
@@ -1882,7 +1877,7 @@ mod tests {
             .expect("the blocking submission must enter controller intake");
         assert!(
             poll_until(Duration::from_secs(2), || async {
-                ctrl.tx.capacity() == ctrl.config.queue_capacity.max(1)
+                ctrl.tx.capacity() == ctrl.config.queue_capacity().get()
             })
             .await,
             "the controller must block on the held slot before natural shutdown"
@@ -1922,7 +1917,7 @@ mod tests {
             .expect("the direct task must register");
 
         let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
-        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
             .with_controller(Some(Arc::clone(&ctrl)));
 
         let mut cancel = Box::pin(handle.cancel(id));
@@ -1937,7 +1932,7 @@ mod tests {
 
         assert_eq!(
             ctrl.tx.capacity(),
-            ControllerConfig::default().queue_capacity - 1,
+            ControllerConfig::default().queue_capacity().get() - 1,
             "the cancel command must be accepted before its caller is dropped"
         );
 
@@ -1964,14 +1959,11 @@ mod tests {
         let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
         let runtime_handle = sup.serve();
         let ctrl = Controller::new(
-            ControllerConfig {
-                queue_capacity: 1,
-                ..Default::default()
-            },
+            ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(1).unwrap()),
             sup.core(),
             Bus::new(64),
         );
-        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
             .with_controller(Some(Arc::clone(&ctrl)));
 
         ctrl.handle()
@@ -1994,10 +1986,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn try_remove_propagates_full_registry_queue_after_controller_admission() {
         let sup = Supervisor::new(
-            crate::SupervisorConfig {
-                registry_queue_capacity: 1,
-                ..Default::default()
-            },
+            crate::SupervisorConfig::default()
+                .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
             vec![],
         );
         let filler_id = TaskId::next();
@@ -2008,7 +1998,7 @@ mod tests {
         assert_eq!(sup.core().registry_command_capacity(), 0);
 
         let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
-        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
             .with_controller(Some(Arc::clone(&ctrl)));
         let token = CancellationToken::new();
         let runner = start_controller_loop(&ctrl, &token).await;
@@ -2029,10 +2019,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn identity_operation_limit_preserves_command_backpressure() {
         let sup = Supervisor::new(
-            crate::SupervisorConfig {
-                grace: Duration::from_secs(2),
-                ..Default::default()
-            },
+            crate::SupervisorConfig::default().with_grace(Duration::from_secs(2)),
             vec![],
         );
         let runtime_handle = sup.serve();
@@ -2073,14 +2060,11 @@ mod tests {
         );
 
         let ctrl = Controller::new(
-            ControllerConfig {
-                queue_capacity: 1,
-                ..Default::default()
-            },
+            ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(1).unwrap()),
             sup.core(),
             Bus::new(64),
         );
-        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
             .with_controller(Some(Arc::clone(&ctrl)));
         let token = CancellationToken::new();
         let runner = start_controller_loop(&ctrl, &token).await;
@@ -2262,10 +2246,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn replace_stays_responsive_under_registry_backpressure() {
         let sup = Supervisor::new(
-            crate::SupervisorConfig {
-                registry_queue_capacity: 1,
-                ..Default::default()
-            },
+            crate::SupervisorConfig::default()
+                .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
             vec![],
         );
         let runtime_handle = sup.serve();
@@ -2374,7 +2356,7 @@ mod tests {
         let runtime_handle = sup.serve();
         // Runtime lifecycle and removal events cannot reach this controller.
         let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));
-        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.core()))
+        let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
             .with_controller(Some(Arc::clone(&ctrl)));
         let token = CancellationToken::new();
         let runner = start_controller_loop(&ctrl, &token).await;

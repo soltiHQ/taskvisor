@@ -1,238 +1,212 @@
-//! # Supervisor builder.
+//! Builder for a stopped [`Supervisor`](crate::Supervisor).
 //!
-//! Builds a [`Supervisor`](crate::Supervisor) from [`SupervisorConfig`] and optional runtime extensions.
-//!
-//! ## Example
+//! Construction is runtime-independent: [`build`](SupervisorBuilder::build)
+//! does not spawn Tokio tasks. Workers start later in `run()` or `serve()`.
 //!
 //! ```rust
+//! use std::num::NonZeroUsize;
 //! use std::time::Duration;
-//! use taskvisor::{BackoffPolicy, SupervisorBuilder, SupervisorConfig};
+//! use taskvisor::{SupervisorBuilder, SupervisorConfig, TaskDefaults};
 //!
-//! let supervisor = SupervisorBuilder::new(SupervisorConfig::default())
+//! let runtime = SupervisorConfig::default()
 //!     .with_grace(Duration::from_secs(30))
-//!     .with_subscriber_shutdown_timeout(Duration::from_secs(5))
-//!     .with_timeout(Duration::from_secs(5))
-//!     .with_max_retries(10)
-//!     .with_max_concurrent(4)
-//!     .with_backoff(BackoffPolicy::exponential(Duration::from_millis(100)))
+//!     .with_max_concurrent(NonZeroUsize::new(4));
+//! let tasks = TaskDefaults::default().with_timeout(Some(Duration::from_secs(5)));
+//!
+//! let supervisor = SupervisorBuilder::new(runtime)
+//!     .with_task_defaults(tasks)
 //!     .build();
 //! ```
 
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::{sync, sync::mpsc};
 
 use super::{
-    alive::AliveTracker, registry::Registry, runtime::SupervisorCore, supervisor::Supervisor,
+    alive::AliveTracker,
+    registry::Registry,
+    runtime::{CoreSettings, SupervisorCore},
+    supervisor::Supervisor,
 };
 use crate::{
-    core::SupervisorConfig,
+    core::{ConfigError, SupervisorConfig, TaskDefaults},
     events::Bus,
-    policies::{BackoffPolicy, RestartPolicy},
-    subscribers::{DEFAULT_SHUTDOWN_TIMEOUT, Subscribe, SubscriberSet},
+    subscribers::{Subscribe, SubscriberSet},
 };
 
 /// Builder for constructing a [`Supervisor`](crate::Supervisor).
 ///
-/// Use this when you need to customize runtime config, subscribers, or optional feature-backed components before starting the supervisor.
-///
-/// The produced supervisor is not started yet.
-/// Calling `build` only creates the runtime graph and stores the pieces that will be used later by `Supervisor::run` or `Supervisor::serve`.
-///
-/// # Also
-///
-/// - [`Supervisor`](crate::Supervisor) - runtime facade produced by this builder
-/// - [`SupervisorConfig`] - runtime defaults and limits
-/// - [`Subscribe`](crate::Subscribe) - event subscriber trait
+/// Runtime settings and task defaults are separate inputs. The produced
+/// supervisor is inert until [`Supervisor::run`](crate::Supervisor::run) or
+/// [`Supervisor::serve`](crate::Supervisor::serve) starts it.
 pub struct SupervisorBuilder {
-    cfg: SupervisorConfig,
+    runtime: SupervisorConfig,
+    task_defaults: TaskDefaults,
     subscribers: Vec<Arc<dyn Subscribe>>,
-    subscriber_shutdown_timeout: Duration,
 
     #[cfg(feature = "controller")]
     controller_config: Option<crate::controller::ControllerConfig>,
 }
 
 impl SupervisorBuilder {
-    /// Creates a new builder with the given runtime configuration.
-    ///
-    /// Start from [`SupervisorConfig::default`] and adjust single values with the `with_*` setters below.
-    pub fn new(cfg: SupervisorConfig) -> Self {
+    /// Creates a builder with the provided runtime settings and
+    /// [`TaskDefaults::default`] for task execution.
+    pub fn new(runtime: SupervisorConfig) -> Self {
         Self {
-            cfg,
+            runtime,
+            task_defaults: TaskDefaults::default(),
             subscribers: Vec::new(),
-            subscriber_shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
 
             #[cfg(feature = "controller")]
             controller_config: None,
         }
     }
 
-    /// Builder: sets the graceful-shutdown wait time.
-    ///
-    /// During shutdown the supervisor waits up to `grace` for tasks to stop.
-    /// `Duration::ZERO` means no graceful wait.
+    /// Replaces all runtime settings.
+    #[must_use]
+    pub fn with_runtime_config(mut self, runtime: SupervisorConfig) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    /// Replaces all task defaults.
+    #[must_use]
+    pub fn with_task_defaults(mut self, task_defaults: TaskDefaults) -> Self {
+        self.task_defaults = task_defaults;
+        self
+    }
+
+    /// Sets the graceful task-shutdown window.
+    #[must_use]
     pub fn with_grace(mut self, grace: Duration) -> Self {
-        self.cfg.grace = grace;
+        self.runtime = self.runtime.with_grace(grace);
         self
     }
 
-    /// Sets the shared timeout for draining subscriber queues during shutdown.
-    ///
-    /// The default is five seconds.
-    /// `Duration::ZERO` closes the queues and aborts their async workers without waiting for queued events.
-    /// A callback already running on Tokio's blocking pool cannot be aborted and may finish later.
-    /// Tokio runtime shutdown may still wait for that running blocking callback.
-    /// Reaching this best-effort cleanup timeout does not produce a [`RuntimeError`](crate::RuntimeError).
+    /// Sets the shared subscriber-drain timeout.
+    #[must_use]
     pub fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
-        self.subscriber_shutdown_timeout = timeout;
+        self.runtime = self.runtime.with_subscriber_shutdown_timeout(timeout);
         self
     }
 
-    /// Builder: sets the default timeout for one task attempt.
-    ///
-    /// A zero duration means no timeout.
-    /// Tasks created outside [`SupervisorConfig::task_spec`] keep their own timeout.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.cfg.timeout = Some(timeout).filter(|d| !d.is_zero());
+    /// Sets or clears the global task-attempt concurrency limit.
+    #[must_use]
+    pub fn with_max_concurrent(mut self, max_concurrent: Option<NonZeroUsize>) -> Self {
+        self.runtime = self.runtime.with_max_concurrent(max_concurrent);
         self
     }
 
-    /// Builder: sets the default failure-retry limit.
+    /// Convenience setter that validates a raw concurrency limit.
     ///
-    /// The default is unlimited retries.
-    /// Call this only when you want a limit.
-    ///
-    /// Use [`RestartPolicy::Never`] to stop a task after its first failure.
-    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
-        assert!(
-            max_retries > 0,
-            "with_max_retries(0) is invalid: zero retries cannot be represented; \
-             use RestartPolicy::Never to stop after the first failure"
-        );
-        self.cfg.max_retries = NonZeroU32::new(max_retries);
+    /// # Errors
+    /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero.
+    pub fn try_with_max_concurrent(mut self, max_concurrent: usize) -> Result<Self, ConfigError> {
+        self.runtime = self.runtime.try_with_max_concurrent(max_concurrent)?;
+        Ok(self)
+    }
+
+    /// Sets the non-zero runtime event-bus capacity.
+    #[must_use]
+    pub fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
+        self.runtime = self.runtime.with_bus_capacity(bus_capacity);
         self
     }
 
-    /// Builder: sets the global limit for concurrently running task attempts.
+    /// Convenience setter that validates a raw event-bus capacity.
     ///
-    /// The default is unlimited concurrency.
-    /// Call this only when you want a limit.
-    ///
-    /// With zero permits no task could ever run.
-    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
-        assert!(
-            max_concurrent > 0,
-            "with_max_concurrent(0) is invalid: no task could ever run; \
-             omit the call for unlimited concurrency"
-        );
-        self.cfg.max_concurrent = NonZeroUsize::new(max_concurrent);
+    /// # Errors
+    /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero.
+    pub fn try_with_bus_capacity(mut self, bus_capacity: usize) -> Result<Self, ConfigError> {
+        self.runtime = self.runtime.try_with_bus_capacity(bus_capacity)?;
+        Ok(self)
+    }
+
+    /// Sets the non-zero registry management-queue capacity.
+    #[must_use]
+    pub fn with_registry_queue_capacity(mut self, registry_queue_capacity: NonZeroUsize) -> Self {
+        self.runtime = self
+            .runtime
+            .with_registry_queue_capacity(registry_queue_capacity);
         self
     }
 
-    /// Builder: sets the event bus capacity.
+    /// Convenience setter that validates a raw registry queue capacity.
     ///
-    /// The effective capacity is at least `1`.
-    /// Slow subscribers that fall behind by more than this may skip older events.
-    pub fn with_bus_capacity(mut self, bus_capacity: usize) -> Self {
-        self.cfg.bus_capacity = bus_capacity;
-        self
+    /// # Errors
+    /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero.
+    pub fn try_with_registry_queue_capacity(
+        mut self,
+        registry_queue_capacity: usize,
+    ) -> Result<Self, ConfigError> {
+        self.runtime = self
+            .runtime
+            .try_with_registry_queue_capacity(registry_queue_capacity)?;
+        Ok(self)
     }
 
-    /// Builder: sets the registry management command queue capacity.
-    ///
-    /// The effective capacity is at least `1`.
-    /// Management methods that do not wait for capacity fail fast when the queue is full.
-    pub fn with_registry_queue_capacity(mut self, registry_queue_capacity: usize) -> Self {
-        self.cfg.registry_queue_capacity = registry_queue_capacity;
-        self
-    }
-
-    /// Builder: sets the default restart policy for tasks created through [`SupervisorConfig::task_spec`].
-    ///
-    /// Restart controls whether a task runs again after it exits.
-    pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
-        self.cfg.restart = restart;
-        self
-    }
-
-    /// Builder: sets the default backoff policy for retryable failures.
-    ///
-    /// Backoff controls the delay before a failed attempt restarts.
-    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
-        self.cfg.backoff = backoff;
-        self
-    }
-
-    /// Sets event subscribers for runtime observability.
-    ///
-    /// Each subscriber gets its own bounded queue and worker task.
-    /// The workers are created during [`build`](Self::build), and events are delivered after the supervisor starts its runtime listener.
-    ///
-    /// Passing a new list replaces any subscribers previously set on this builder.
+    /// Replaces event subscribers used for runtime observability.
+    #[must_use]
     pub fn with_subscribers(mut self, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         self.subscribers = subscribers;
         self
     }
 
-    /// Enables the controller with the given configuration.
-    ///
-    /// The controller adds slot-based task admission on top of the core supervisor.
-    /// It can queue, replace, or drop submissions depending on the configured slot policy.
-    ///
-    /// Available only with the `controller` feature.
+    /// Enables slot-based controller admission.
     #[cfg(feature = "controller")]
+    #[must_use]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
         self
     }
 
-    /// Builds the supervisor.
+    /// Builds an inert supervisor.
     ///
-    /// This consumes the builder and creates all runtime components.
-    ///
-    /// The supervisor is returned in a stopped state.
-    /// Task execution starts when the caller runs or serves the supervisor.
+    /// This method is safe outside a Tokio runtime. It allocates channels and
+    /// stores subscribers, but does not spawn listeners, subscriber workers, or
+    /// controller tasks.
+    #[must_use]
     pub fn build(self) -> Arc<Supervisor> {
-        let bus = Bus::new(self.cfg.bus_capacity_clamped());
+        let bus = Bus::new(self.runtime.bus_capacity().get());
         let subs = Arc::new(SubscriberSet::new_with_shutdown_timeout(
             self.subscribers,
             bus.clone(),
-            self.subscriber_shutdown_timeout,
+            self.runtime.subscriber_shutdown_timeout(),
         ));
         let runtime_token = tokio_util::sync::CancellationToken::new();
 
         let semaphore = self
-            .cfg
-            .max_concurrent
-            .map(|n| Arc::new(sync::Semaphore::new(n.get())));
+            .runtime
+            .max_concurrent()
+            .map(|limit| Arc::new(sync::Semaphore::new(limit.get())));
 
-        let (cmd_tx, cmd_rx) = mpsc::channel(self.cfg.registry_queue_capacity_clamped());
+        let (cmd_tx, cmd_rx) = mpsc::channel(self.runtime.registry_queue_capacity().get());
         let registry = Registry::new(
             bus.clone(),
             runtime_token.clone(),
             semaphore,
-            self.cfg.grace,
+            self.runtime.grace(),
+            self.task_defaults.clone(),
             cmd_rx,
         );
         let alive = Arc::new(AliveTracker::new());
 
         let core = SupervisorCore::new_internal(
-            self.cfg,
+            CoreSettings::new(self.runtime, self.task_defaults),
             bus.clone(),
             subs,
             alive,
             registry,
-            runtime_token.clone(),
+            runtime_token,
             cmd_tx,
         );
 
         #[cfg(feature = "controller")]
         let controller = self
             .controller_config
-            .map(|ctrl_cfg| crate::controller::Controller::new(ctrl_cfg, &core, bus.clone()));
+            .map(|config| crate::controller::Controller::new(config, &core, bus.clone()));
 
         #[cfg(feature = "controller")]
         if let Some(controller) = &controller {
@@ -250,70 +224,74 @@ impl SupervisorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policies::{BackoffPolicy, RestartPolicy};
-    use std::time::Duration;
+    use crate::{BackoffPolicy, RestartPolicy};
+    use std::num::NonZeroU32;
 
     #[test]
-    fn default_subscriber_shutdown_timeout_is_five_seconds() {
-        let builder = SupervisorBuilder::new(SupervisorConfig::default());
-        assert_eq!(builder.subscriber_shutdown_timeout, Duration::from_secs(5));
-    }
-
-    #[test]
-    fn setters_override_config_fields() {
-        let backoff = BackoffPolicy::exponential(Duration::from_millis(200));
-        let b = SupervisorBuilder::new(SupervisorConfig::default())
+    fn builder_keeps_runtime_and_task_defaults_separate() {
+        let runtime = SupervisorConfig::default()
             .with_grace(Duration::from_secs(30))
             .with_subscriber_shutdown_timeout(Duration::from_secs(2))
-            .with_timeout(Duration::from_secs(5))
-            .with_max_retries(10)
-            .with_max_concurrent(4)
-            .with_bus_capacity(2048)
-            .with_registry_queue_capacity(256)
+            .with_max_concurrent(NonZeroUsize::new(4))
+            .with_bus_capacity(NonZeroUsize::new(2048).unwrap())
+            .with_registry_queue_capacity(NonZeroUsize::new(256).unwrap());
+        let task_defaults = TaskDefaults::default()
             .with_restart(RestartPolicy::Never)
-            .with_backoff(backoff);
+            .with_backoff(BackoffPolicy::constant(Duration::from_millis(50)))
+            .with_timeout(Some(Duration::from_secs(5)))
+            .with_max_retries(NonZeroU32::new(10));
 
-        assert_eq!(b.cfg.grace, Duration::from_secs(30));
-        assert_eq!(b.subscriber_shutdown_timeout, Duration::from_secs(2));
-        assert_eq!(b.cfg.timeout, Some(Duration::from_secs(5)));
-        assert_eq!(b.cfg.max_retries.map(|n| n.get()), Some(10));
-        assert_eq!(b.cfg.max_concurrent.map(|n| n.get()), Some(4));
-        assert_eq!(b.cfg.bus_capacity, 2048);
-        assert_eq!(b.cfg.registry_queue_capacity, 256);
-        assert!(
-            matches!(b.cfg.restart, RestartPolicy::Never),
-            "with_restart must store the given policy"
+        let builder =
+            SupervisorBuilder::new(runtime.clone()).with_task_defaults(task_defaults.clone());
+
+        assert_eq!(builder.runtime.grace(), runtime.grace());
+        assert_eq!(
+            builder.runtime.subscriber_shutdown_timeout(),
+            runtime.subscriber_shutdown_timeout()
+        );
+        assert_eq!(builder.runtime.max_concurrent(), runtime.max_concurrent());
+        assert_eq!(builder.runtime.bus_capacity(), runtime.bus_capacity());
+        assert_eq!(
+            builder.runtime.registry_queue_capacity(),
+            runtime.registry_queue_capacity()
+        );
+        assert!(matches!(
+            builder.task_defaults.restart(),
+            RestartPolicy::Never
+        ));
+        assert_eq!(
+            builder.task_defaults.backoff().first(),
+            Duration::from_millis(50)
         );
         assert_eq!(
-            b.cfg.backoff.factor(),
-            2.0,
-            "with_backoff must store the given policy"
+            builder.task_defaults.timeout(),
+            Some(Duration::from_secs(5))
         );
-    }
-
-    #[test]
-    fn with_timeout_zero_means_no_timeout() {
-        let b = SupervisorBuilder::new(SupervisorConfig {
-            timeout: Some(Duration::from_secs(5)),
-            ..Default::default()
-        })
-        .with_timeout(Duration::ZERO);
-
         assert_eq!(
-            b.cfg.timeout, None,
-            "a zero timeout must normalize to None (no timeout)"
+            builder.task_defaults.max_retries().map(NonZeroU32::get),
+            Some(10)
         );
     }
 
     #[test]
-    #[should_panic(expected = "with_max_retries(0)")]
-    fn with_max_retries_zero_panics() {
-        let _ = SupervisorBuilder::new(SupervisorConfig::default()).with_max_retries(0);
-    }
-
-    #[test]
-    #[should_panic(expected = "with_max_concurrent(0)")]
-    fn with_max_concurrent_zero_panics() {
-        let _ = SupervisorBuilder::new(SupervisorConfig::default()).with_max_concurrent(0);
+    fn raw_zero_values_return_errors_instead_of_panicking() {
+        assert!(matches!(
+            SupervisorBuilder::new(SupervisorConfig::default()).try_with_max_concurrent(0),
+            Err(ConfigError::Zero {
+                field: "max_concurrent"
+            })
+        ));
+        assert!(matches!(
+            SupervisorBuilder::new(SupervisorConfig::default()).try_with_bus_capacity(0),
+            Err(ConfigError::Zero {
+                field: "bus_capacity"
+            })
+        ));
+        assert!(matches!(
+            SupervisorBuilder::new(SupervisorConfig::default()).try_with_registry_queue_capacity(0),
+            Err(ConfigError::Zero {
+                field: "registry_queue_capacity"
+            })
+        ));
     }
 }
