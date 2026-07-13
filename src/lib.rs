@@ -14,14 +14,14 @@
 //!
 //! ```text
 //! TaskFn or impl Task
-//!          v
-//!       TaskSpec  -- fills missing values from --> TaskDefaults
-//!          v
+//!          ▼
+//!       TaskSpec  ── fills missing values from ──► TaskDefaults
+//!          ▼
 //!      Supervisor
-//!       |       |
-//!       |       +-- best-effort events --> Subscribe
-//!       |
-//!       +-- watched final result --------> TaskWaiter
+//!       │       │
+//!       │       └── best-effort events ──► Subscribe
+//!       │
+//!       └── watched final result ────────► TaskWaiter
 //! ```
 //!
 //! ## Choose a Mode
@@ -40,9 +40,9 @@
 //!
 //! ```text
 //! register
-//!    v
-//! attempt 1 -- failure --> backoff --> attempt 2 -- success --> finish
-//!                                                       v
+//!    ▼
+//! attempt 1 ── failure ──► backoff ──► attempt 2 ── success ──► finish
+//!                                                       ▼
 //!                                                 TaskOutcome
 //! ```
 //!

@@ -273,6 +273,10 @@ impl SupervisorHandle {
     /// Compatibility alias for [`alive_snapshot`](Self::alive_snapshot).
     ///
     /// Prefer `alive_snapshot` in new code. It makes the best-effort behavior clearer and avoids confusion with [`list`](Self::list).
+    #[deprecated(
+        since = "0.6.0",
+        note = "renamed to alive_snapshot; scheduled for removal at the next breaking release"
+    )]
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         self.alive_snapshot().await
     }
@@ -407,7 +411,7 @@ impl SupervisorHandle {
     ///
     /// Controller ordering, queue admission, and the registry claim are outside `wait_for`.
     /// The timer covers only the final wait for registered task cleanup.
-    /// Queued controller work is removed directly, so this timer does not apply to that path.
+    /// Queued controller work is removed directly. This timer does not apply to that path.
     ///
     /// A timeout stops this caller's wait.
     /// It does not undo cancellation or change the supervisor grace period.
@@ -467,6 +471,8 @@ impl SupervisorHandle {
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
     /// - [`RuntimeError::SignalSetupFailed`] if a concurrent static `run` call started shutdown after signal setup failed.
     /// - [`RuntimeError::ShuttingDown`] when shared runtime cleanup cannot finish normally.
+    #[doc(alias = "graceful shutdown")]
+    #[doc(alias = "graceful stop")]
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
         self.core().shutdown().await
     }
@@ -573,7 +579,7 @@ impl SupervisorHandle {
 
     /// Returns a best-effort rolling snapshot of controller slots.
     ///
-    /// Slots are copied one at a time, so concurrent changes can appear in only part of one snapshot.
+    /// Slots are copied one at a time. Concurrent changes can appear in only part of one snapshot.
     /// The value can also become stale as soon as this method returns.
     /// It is `None` when this supervisor was built without a controller.
     ///

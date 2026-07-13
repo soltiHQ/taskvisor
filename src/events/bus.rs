@@ -7,11 +7,11 @@
 //!
 //! ```text
 //! Supervisor / registry / task runners
-//!                  v
+//!                  ▼
 //!          bounded broadcast bus
-//!                  v
+//!                  ▼
 //!          subscriber listener
-//!                  v
+//!                  ▼
 //!        per-subscriber queues
 //! ```
 //!

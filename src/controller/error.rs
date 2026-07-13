@@ -2,6 +2,9 @@
 
 use thiserror::Error;
 
+/// Errors returned by controller configuration, startup, and submission operations.
+///
+/// Match with a wildcard arm because this enum is non-exhaustive.
 #[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {

@@ -2,18 +2,18 @@
 //!
 //! One supervisor can manage tasks with different lifecycles:
 //!
-//! | Task | Policy | Behavior |
-//! |------|--------|----------|
-//! | `one-shot` | never restart | run once |
-//! | `resilient` | restart on failure | fail twice, then succeed |
-//! | `always-on` | always restart | wait 500 ms after each successful run |
+//! | Task        | Policy             | Behavior                              |
+//! |-------------|--------------------|---------------------------------------|
+//! | `one-shot`  | never restart      | run once                              |
+//! | `resilient` | restart on failure | fail twice, then succeed              |
+//! | `always-on` | always restart     | wait 500 ms after each successful run |
 //!
-//! The resilient task uses exponential backoff and a retry budget. Only
-//! failure-driven restarts consume that budget. The supervisor also has a
-//! five-second grace period for shutdown.
+//! The resilient task uses exponential backoff and a retry budget.
+//! Only failure-driven restarts consume that budget.
+//! The supervisor also has a five-second grace period for shutdown.
 //!
-//! These task bodies are short, so they do not use `TaskContext`. A resident
-//! loop should observe cancellation as shown in `worker.rs`.
+//! These task bodies are short. They do not use `TaskContext`.
+//! A resident loop should observe cancellation as shown in `worker.rs`.
 //!
 //! Run with `cargo run --example multiple`, then press Ctrl+C.
 

@@ -1,13 +1,13 @@
 //! # Custom event subscriber
 //!
-//! This example implements `Subscribe` and counts lifecycle events with
-//! atomics. Each subscriber has its own bounded queue:
+//! This example implements `Subscribe` and counts lifecycle events with atomics.
+//! Each subscriber has its own bounded queue:
 //!
 //! ```text
 //! supervisor events
-//!       |
-//!       +--> bounded queue --> worker --> blocking pool --> on_event(metrics)
-//!       +--> bounded queue --> worker --> blocking pool --> on_event(other)
+//!       │
+//!       ├──► bounded queue ──► worker ──► blocking pool ──► on_event(metrics)
+//!       └──► bounded queue ──► worker ──► blocking pool ──► on_event(other)
 //! ```
 //!
 //! A slow subscriber does not block event producers, but its queue can overflow

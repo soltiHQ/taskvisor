@@ -1,14 +1,15 @@
 //! # Queue consumer: reconnect after failure
 //!
-//! This example models a long-lived broker consumer. An in-process channel
-//! stands in for Kafka, Redis, SQS, or another client.
+//! This example models a long-lived broker consumer.
+//! An in-process channel stands in for Kafka, Redis, SQS, or another client.
 //!
-//! One task attempt represents one connection session. A connection error
-//! returns `TaskError::fail`, so the supervisor starts a new session after
-//! exponential backoff and jitter. A clean return stops the `OnFailure` task.
+//! One task attempt represents one connection session.
+//! A connection error returns `TaskError::fail`.
+//! The supervisor starts a new session after exponential backoff and jitter.
+//! A clean return stops the `OnFailure` task.
 //!
-//! The receive operation uses `TaskContext::run_until_cancelled`. This lets the
-//! consumer stop while it is waiting for the next message.
+//! The receive operation uses `TaskContext::run_until_cancelled`.
+//! This lets the consumer stop while it is waiting for the next message.
 //!
 //! Run with `cargo run --example queue_consumer`.
 
@@ -66,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Reconnect policy: 100ms, 200ms, 400ms, ... capped at 5s, with jitter.
+    // Reconnect policy: base delays of 100ms, 200ms, 400ms, ... capped at 5s, with jitter.
     let spec = TaskSpec::restartable(consumer).with_backoff(
         BackoffPolicy::exponential(Duration::from_millis(100))
             .with_max(Duration::from_secs(5))

@@ -1,8 +1,8 @@
 //! # Dynamic task management
 //!
 //! Use `Supervisor::serve` when long-lived tasks are discovered at runtime.
-//! Examples include tenant workers, plugins, and connections that own a
-//! resident background loop. Taskvisor is not a per-request job executor.
+//! Examples include tenant workers, plugins, and connections that own a resident background loop.
+//! Taskvisor is not a per-request job executor.
 //!
 //! This example shows how to:
 //!
@@ -12,8 +12,7 @@
 //! - shut down the supervisor explicitly.
 //!
 //! `Supervisor::run` is the simpler choice when all tasks are known at startup.
-//! It waits for the supervisor to finish. `serve` returns a handle immediately,
-//! so the caller owns the shutdown flow.
+//! It waits for the supervisor to finish.
 //!
 //! Run with `cargo run --example dynamic`.
 
@@ -62,7 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nRemoving worker-a...");
     let removed = handle.remove(id_a).await?;
     println!("worker-a removal claimed: {removed}");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Join the same removal before reading authoritative registry state.
+    // This returns false because remove() already claimed the stop (or cleanup finished first).
+    let second_claim = handle.cancel(id_a).await?;
+    println!("worker-a second cancellation claimed: {second_claim}");
     println!("Active: {:?}", handle.list().await);
 
     // Add worker-c

@@ -1,8 +1,7 @@
 //! # Controller queue limits
 //!
 //! [`ControllerConfig`] controls controller buffering:
-//! - `queue_capacity` limits the ordered command channel.
-//!   The same value separately caps remove/cancel operations that did not find queued work and are waiting on the runtime registry;
+//! - `queue_capacity` limits the ordered command channel. The same value separately caps remove/cancel operations that did not find queued work and are waiting on the runtime registry;
 //! - `max_slot_queue` controls whether a new `Queue` submission may join a busy slot's pending queue.
 //!
 //! The limits apply at different boundaries:

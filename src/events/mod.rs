@@ -16,8 +16,8 @@
 //!
 //! ```text
 //! runtime action
-//!      +-- best-effort --> event bus --> subscriber queue --> Subscribe
-//!      `-- reliable terminal result -----------------------> TaskWaiter
+//!      ├── best-effort ──► event bus ──► subscriber queue ──► Subscribe
+//!      └── reliable terminal result ────────────────────────► TaskWaiter
 //! ```
 //!
 //! Use events for observation.

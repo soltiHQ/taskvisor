@@ -4,8 +4,7 @@
 //! It may have one current owner and a deque of pending submissions.
 //! `Queue` submissions keep FIFO order; `Replace` may supersede the head.
 //!
-//! `SlotPhase` owns the current `TaskId` in every occupied phase;
-//! an idle slot cannot retain an owner and an occupied slot cannot exist without one.
+//! `SlotPhase` owns the current `TaskId` in every occupied phase; an idle slot cannot retain an owner and an occupied slot cannot exist without one.
 //! Transition methods reject stale identities without mutating the current owner.
 
 use std::collections::VecDeque;
@@ -63,7 +62,7 @@ pub(super) enum ReplaceAction {
     WaitForAdmission,
     /// Replacement was already recorded; removal is pending or already requested.
     AlreadyRequested,
-    /// The slot was idle, so replacement policy does not apply.
+    /// The slot was idle. Replacement policy does not apply.
     Idle,
 }
 

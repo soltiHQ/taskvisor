@@ -58,7 +58,7 @@ use crate::policies::jitter::JitterPolicy;
 /// Error returned when backoff settings are invalid.
 ///
 /// Match with a wildcard arm because this enum is non-exhaustive.
-/// Its data-carrying variants are also non-exhaustive, so include `..` when matching their payloads.
+/// Its data-carrying variants are also non-exhaustive. Include `..` when matching their payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 #[non_exhaustive]
 pub enum BackoffError {
@@ -87,6 +87,7 @@ pub enum BackoffError {
 /// - [`TaskDefaults`](crate::TaskDefaults) - supervisor-wide task settings
 /// - [`RestartPolicy`](crate::RestartPolicy) - whether to restart at all
 /// - [`JitterPolicy`] - randomization applied to computed delay
+#[doc(alias = "retry delay")]
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffPolicy {
     jitter: JitterPolicy,
@@ -105,7 +106,7 @@ impl Default for BackoffPolicy {
     /// - exponential growth with `factor = 2.0`;
     /// - `first = 200ms`;
     /// - `max = 30s`;
-    /// - equal jitter, so each result is in `[base / 2, base]`;
+    /// - equal jitter. Each result is in `[base / 2, base]`;
     /// - no user floor. The `1ms` safety floor still applies to a non-zero base.
     ///
     /// The first actual delay is in `[100ms, 200ms]`.

@@ -7,16 +7,16 @@
 //!
 //! ```text
 //! attempt returns
-//!      |
-//!      +-- Ok(()) --------------------> RestartPolicy
-//!      |                                  |-- stop
-//!      |                                  `-- wait for Always.interval, then run again
-//!      |
-//!      +-- Fail / Timeout ------------> RestartPolicy
-//!      |                                  |-- stop
-//!      |                                  `-- BackoffPolicy -> wait -> run again
-//!      |
-//!      `-- Fatal / Canceled -----------> stop
+//!      │
+//!      ├── Ok(()) ────────────────► RestartPolicy
+//!      │                              ├── stop
+//!      │                              └── wait for Always.interval, then run again
+//!      │
+//!      ├── Fail / Timeout ────────► RestartPolicy
+//!      │                              ├── stop
+//!      │                              └── BackoffPolicy ──► wait ──► run again
+//!      │
+//!      └── Fatal / Canceled ──────► stop
 //! ```
 //!
 //! A [`TaskSpec`](crate::TaskSpec) can set these values for one task.

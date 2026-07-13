@@ -1,19 +1,18 @@
 //! # Outcomes: wait for the final result
 //!
-//! `add_and_watch` returns a `TaskWaiter`. The waiter resolves after the task
-//! entry has stopped, including all restarts allowed by its policy.
+//! `add_and_watch` returns a `TaskWaiter`.
+//! The waiter resolves after the task entry has stopped, including all restarts allowed by its policy.
 //!
 //! Taskvisor has two result paths:
 //!
-//! | Path | Use | Delivery |
-//! |------|-----|----------|
-//! | lifecycle events | logs, metrics, live progress | bounded and best-effort |
-//! | `TaskOutcome` | final business decision | dedicated terminal channel |
+//! | Path             | Use                          | Delivery                   |
+//! |------------------|------------------------------|----------------------------|
+//! | lifecycle events | logs, metrics, live progress | bounded and best-effort    |
+//! | `TaskOutcome`    | final business decision      | dedicated terminal channel |
 //!
-//! This example handles successful, failed, and canceled tasks. Other outcomes
-//! cover fatal errors, force-abort, actor panic, and controller rejection.
-//! `TaskWaiter::wait` can still return an error if the runtime closes the
-//! terminal channel unexpectedly.
+//! This example handles successful, failed, and canceled tasks.
+//! Other outcomes cover fatal errors, force-abort, actor panic, and controller rejection.
+//! `TaskWaiter::wait` can still return an error if the runtime closes the terminal channel unexpectedly.
 //!
 //! Run with `cargo run --example outcomes`.
 
@@ -66,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Canceled ===");
     let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
         ctx.cancelled().await;
-        Ok(())
+        Err(TaskError::Canceled)
     });
     let (id, waiter) = handle.add_and_watch(TaskSpec::restartable(worker)).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;

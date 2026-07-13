@@ -8,9 +8,9 @@
 //! - an admitted task resolves to its final runtime outcome;
 //! - a task that never starts resolves to `TaskOutcome::Rejected` with a reason.
 //!
-//! This example shows both paths and reads a live controller snapshot. Use the
-//! waiter when rejection affects application logic. Events are best-effort and
-//! are better suited to logs and metrics.
+//! This example shows both paths and reads a live controller snapshot.
+//! Use the waiter when rejection affects application logic.
+//! Events are best-effort and are better suited to logs and metrics.
 //!
 //! Run with
 //! `cargo run --example admission --features controller`.
@@ -20,16 +20,32 @@ compile_error!(
     "This example requires the `controller` feature: cargo run --example admission --features controller"
 );
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use taskvisor::ControllerSpec;
 use taskvisor::prelude::*;
+use tokio::sync::Notify;
 
 /// A job that runs for `dur`, observing cancellation.
 fn job(name: &'static str, dur: Duration) -> TaskSpec {
     let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
         ctx.run_until_cancelled(tokio::time::sleep(dur)).await?;
         Ok(())
+    });
+    TaskSpec::once(task)
+}
+
+/// A job that reports when its body starts, then waits for an explicit release.
+fn gated_job(name: &'static str, started: Arc<Notify>, release: Arc<Notify>) -> TaskSpec {
+    let task: TaskRef = TaskFn::arc(name, move |ctx| {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        async move {
+            started.notify_one();
+            ctx.run_until_cancelled(release.notified()).await?;
+            Ok(())
+        }
     });
     TaskSpec::once(task)
 }
@@ -46,13 +62,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1) The slot is idle: this submission is admitted and starts running.
     //    Every submission below uses .with_slot("deploy"): they contend for one slot.
     println!("1) submit deploy-v1 (Queue) to the idle slot");
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
     let (_id, v1) = handle
         .submit_and_watch(
-            ControllerSpec::queue(job("deploy-v1", Duration::from_millis(200))).with_slot("deploy"),
+            ControllerSpec::queue(gated_job(
+                "deploy-v1",
+                Arc::clone(&started),
+                Arc::clone(&release),
+            ))
+            .with_slot("deploy"),
         )
         .await?;
-    // Give it a moment to actually occupy the slot.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The task body, rather than a timer, confirms that registry admission completed.
+    started.notified().await;
     println!("    deploy-v1 admitted, now running\n");
 
     // Pull the controller's live state directly: no parsing of bus events.
@@ -86,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3) The admitted task still finishes normally.
     println!("3) await the admitted task");
+    release.notify_one();
     println!("    deploy-v1 -> {:?}", v1.wait().await?);
 
     handle.shutdown().await?;

@@ -7,10 +7,10 @@
 //! ## Modes
 //!
 //! ```text
-//! static:   Supervisor::run(batch)  -> wait -> cleanup -> Result
-//! dynamic:  Supervisor::serve()     -> SupervisorHandle
-//!                                      | add / remove / cancel
-//!                                      + shutdown -> cleanup -> Result
+//! static:   Supervisor::run(batch) ──► wait ──► cleanup ──► Result
+//! dynamic:  Supervisor::serve() ─────► SupervisorHandle
+//!                                        ├── add / remove / cancel
+//!                                        └── shutdown ──► cleanup ──► Result
 //! ```
 //!
 //! [`run`](Supervisor::run) is for a known initial batch.
@@ -136,6 +136,10 @@ impl Supervisor {
     ///
     /// `run` can be called only once for a supervisor.
     /// A rejected batch does not stop tasks that were added earlier through [`serve`](Self::serve), but the `run` call is still used and cannot be retried.
+    ///
+    /// `Ok(())` means the supervisor lifecycle and cleanup completed successfully.
+    /// It does not mean that every managed task completed successfully.
+    /// Task failures, fatal errors, and panics remain task-level outcomes; use [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) when application logic needs a reliable outcome for one task.
     ///
     /// # Panics
     ///

@@ -44,6 +44,7 @@ use crate::subscribers::Subscribe;
 ///
 /// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
 /// - See [`Event`] and [`EventKind`] for event structure.
+#[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
 #[derive(Default)]
 pub struct LogWriter;
 

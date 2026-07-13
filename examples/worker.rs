@@ -1,12 +1,12 @@
 //! # Long-running worker with graceful shutdown
 //!
-//! This is the basic pattern for a task that runs until shutdown. Each blocking
-//! await is wrapped with `TaskContext::run_until_cancelled`, so cancellation can
-//! stop the worker without waiting for the operation to finish.
+//! This is the basic pattern for a task that runs until shutdown.
+//! Each potentially long await is wrapped with `TaskContext::run_until_cancelled`.
+//! Cancellation can then stop the worker without waiting for the operation to finish.
 //!
-//! Taskvisor first asks tasks to stop cooperatively. A task that does not observe
-//! cancellation may be force-aborted after the configured grace period. Observe
-//! the context so the task can release resources and finish cleanly.
+//! Taskvisor first asks tasks to stop cooperatively.
+//! A task that does not observe cancellation may be force-aborted after the configured grace period.
+//! Observe the context so the task can release resources and finish cleanly.
 //!
 //! `TaskSpec::restartable` uses `RestartPolicy::OnFailure`: failures restart the
 //! worker, while a clean return stops it. `TaskError::Canceled` is a clean stop.

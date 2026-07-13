@@ -220,6 +220,8 @@ impl TaskSpec {
     /// // Starts the next successful cycle 30 seconds after this one ends.
     /// let spec = TaskSpec::periodic(tick, Duration::from_secs(30));
     /// ```
+    #[doc(alias = "interval")]
+    #[doc(alias = "fixed delay")]
     pub fn periodic(task: TaskRef, every: Duration) -> Self {
         Self {
             restart: Override::Set(RestartPolicy::Always {
@@ -280,6 +282,8 @@ impl TaskSpec {
     ///
     /// Pass a `Duration` to enable it.
     /// Pass `None` or zero to disable it, including a timeout inherited from [`TaskDefaults`].
+    #[doc(alias = "watchdog")]
+    #[doc(alias = "attempt deadline")]
     pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
         self.timeout = Override::Set(normalize_timeout(timeout.into()));
         self
@@ -306,6 +310,8 @@ impl TaskSpec {
     /// Pass a [`NonZeroU32`] to set a limit.
     /// Pass `None` for unlimited retries, including when [`TaskDefaults`] has a limit.
     /// A success resets the count.
+    #[doc(alias = "retry limit")]
+    #[doc(alias = "retry budget")]
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
         self.max_retries = Override::Set(max_retries.into());
         self

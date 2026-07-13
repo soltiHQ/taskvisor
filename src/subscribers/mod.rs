@@ -6,12 +6,12 @@
 //!
 //! ```text
 //! runtime publishers
-//!       v
+//!       ▼
 //! bounded shared event bus          (may drop old events on lag)
-//!       v
+//!       ▼
 //! internal listener
-//!       +--> bounded queue A ------> blocking pool --> A.on_event()
-//!       `--> bounded queue B ------> blocking pool --> B.on_event()
+//!       ├──► bounded queue A ──────► blocking pool ──► A.on_event()
+//!       └──► bounded queue B ──────► blocking pool ──► B.on_event()
 //! ```
 //!
 //! Publishing never waits for subscriber code.
@@ -34,7 +34,6 @@
 mod subscriber;
 mod subscriber_set;
 
-#[cfg(any(feature = "logging", feature = "tracing"))]
 mod embedded;
 
 pub use subscriber::Subscribe;

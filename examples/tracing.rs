@@ -1,12 +1,10 @@
 //! # Send lifecycle events to `tracing`
 //!
-//! The optional `TracingBridge` sends structured supervisor events to the
-//! application's existing `tracing` pipeline. The normal formatter, filters,
-//! and output sinks continue to apply.
+//! The optional `TracingBridge` sends structured supervisor events to the application's existing `tracing` pipeline.
+//! The normal formatter, filters, and output sinks continue to apply.
 //!
-//! The example shows event levels, stable event labels, task fields, attempt
-//! numbers, reasons, and delays. Set `RUST_LOG=taskvisor=warn` to keep only
-//! warnings and errors.
+//! The example shows event levels, stable event labels, task fields, attempt numbers, reasons, and delays.
+//! Set `RUST_LOG=taskvisor=warn` to keep only warnings and errors.
 //!
 //! Run with `cargo run --example tracing --features tracing`.
 

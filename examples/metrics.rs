@@ -1,14 +1,13 @@
 //! # Metrics from lifecycle events
 //!
-//! This example implements `Subscribe` and maps each event to a Prometheus
-//! counter. `EventKind::as_label` provides stable, machine-readable values such
-//! as `task_failed` and `backoff_scheduled`.
+//! This example implements `Subscribe` and maps each event to a Prometheus counter.
+//! `EventKind::as_label` provides stable, machine-readable values such as `task_failed` and `backoff_scheduled`.
 //!
-//! A real service would expose the registry on its metrics endpoint. This
-//! example prints the Prometheus text format when it exits.
+//! A real service would expose the registry on its metrics endpoint.
+//! This example prints the Prometheus text format when it exits.
 //!
-//! The `task` label uses task names. Keep these names bounded and stable. Do not
-//! put request IDs, user IDs, or other unbounded values in metric labels.
+//! The `task` label uses task names. Keep these names bounded and stable.
+//! Do not put request IDs, user IDs, or other unbounded values in metric labels.
 //!
 //! Run with `cargo run --example metrics`.
 

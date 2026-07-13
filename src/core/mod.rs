@@ -21,7 +21,7 @@
 //!
 //! The registry is the source of truth for registered identities and names.
 //! Events are for observability and may be lost when consumers are slow.
-//! Alive snapshots are based on those events, so they can lag or miss state.
+//! Alive snapshots are based on those events. They can lag or miss state.
 //!
 //! ## When a Command Returns
 //!

@@ -14,8 +14,8 @@
 //! ## Flow
 //!
 //! ```text
-//! event --> [bounded queue] --> one queue worker --> blocking pool --> on_event
-//!                `-- full: drop event and try to report SubscriberOverflow
+//! event ──► [bounded queue] ──► one queue worker ──► blocking pool ──► on_event
+//!                └── full: drop event and try to report SubscriberOverflow
 //! ```
 //!
 //! ## Rules

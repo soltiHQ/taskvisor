@@ -11,15 +11,15 @@
 //! ```text
 //! Caller                         Runtime                         Task actor
 //!   │                               │                                │
-//!   │ add_and_watch(spec)           │                                │
-//!   ├──────────────────────────────►│ register and spawn             │
-//!   │                               ├───────────────────────────────►│
-//!   │◄──────────────────────────────┤ (TaskId, TaskWaiter)           │
+//!   ├── add_and_watch(spec) ───────►│                                │
+//!   │                               ├── register and spawn ─────────►│
+//!   │◄──── (TaskId, TaskWaiter) ────┤                                │
 //!   │                               │                                │ attempts / retries
-//!   │ await waiter.wait()           │◄───────────────────────────────┤ terminal signal
+//!   │ await waiter.wait()           │                                │
+//!   │                               │◄─────── terminal signal ───────┤
 //!   │                               │ join actor                     │
 //!   │                               │ remove TaskId and name         │
-//!   │◄──────────────────────────────┤ TaskOutcome (oneshot)          │
+//!   │◄──── TaskOutcome (oneshot) ───┤                                │
 //! ```
 //!
 //! With the `controller` feature, `submit_and_watch` can also return a waiter before slot admission.
@@ -51,7 +51,7 @@ use crate::identity::TaskId;
 ///
 /// This enum is non-exhaustive.
 /// Include a fallback arm when matching it.
-/// The data-carrying variants are also non-exhaustive, so match their fields with `..`.
+/// The data-carrying variants are also non-exhaustive. Match their fields with `..`.
 ///
 /// ## Outcome vs Events
 ///

@@ -1,13 +1,11 @@
 //! # CPU-bound work under supervision
 //!
-//! Heavy CPU work should not run on Tokio worker threads. This example sends
-//! the computation to Rayon and waits for its result through a one-shot channel.
-//! Taskvisor adds retries, backoff, and an awaitable final outcome around that
-//! bridge.
+//! Heavy CPU work should not run on Tokio worker threads.
+//! This example sends the computation to Rayon and waits for its result through a one-shot channel.
+//! Taskvisor adds retries, backoff, and an awaitable final outcome around that bridge.
 //!
-//! There is an important limit: canceling the async task drops the result
-//! receiver, but it does not stop a Rayon job already in progress. That job
-//! finishes in the CPU pool and its result is discarded.
+//! There is an important limit: canceling the async task drops the result receiver, but it does not stop a Rayon job already in progress.
+//! That job finishes in the CPU pool and its result is discarded.
 //!
 //! Run with `cargo run --example cpu_job`.
 

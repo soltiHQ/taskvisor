@@ -11,7 +11,7 @@ use crate::{
 /// A named task backed by an async closure.
 ///
 /// This is the simplest way to define a task.
-/// The supervisor calls the closure for every attempt, so each call creates a fresh future.
+/// The supervisor calls the closure for every attempt. Each call creates a fresh future.
 ///
 /// ## Long-Running Worker
 ///

@@ -38,6 +38,7 @@ use crate::subscribers::Subscribe;
 ///
 /// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
 /// - See [`EventKind::as_label`] for the stable `event` field values.
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 #[derive(Default)]
 pub struct TracingBridge;
 

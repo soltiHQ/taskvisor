@@ -43,9 +43,9 @@ use crate::{
 /// Runtime limits and task defaults are separate:
 ///
 /// ```text
-/// SupervisorConfig -- runtime limits ---+
-/// TaskDefaults ----- task defaults -----+--> SupervisorBuilder --> Supervisor
-/// subscribers ------ observability -----+
+/// SupervisorConfig ── runtime limits ──┐
+/// TaskDefaults ────── task defaults ───┼──► SupervisorBuilder ──► Supervisor
+/// subscribers ─────── observability ───┘
 /// ```
 ///
 /// The built supervisor stays stopped until `run` or `serve` starts it.
