@@ -87,6 +87,23 @@ async fn completed_outcome_for_successful_once_task() {
 }
 
 #[tokio::test]
+async fn try_add_and_watch_returns_the_same_public_waiter_contract() {
+    let (_sup, handle) = supervisor();
+
+    let (id, waiter) = handle
+        .try_add_and_watch(TaskSpec::once(make_ok_once("try-ok")))
+        .await
+        .expect("the management queue has capacity");
+    assert_eq!(waiter.id(), id);
+    assert!(matches!(
+        with_timeout(5, waiter.wait()).await,
+        Ok(TaskOutcome::Completed)
+    ));
+
+    let _ = handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn failed_outcome_carries_reason_and_exit_code() {
     let (_sup, handle) = supervisor();
 

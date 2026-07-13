@@ -12,7 +12,7 @@
 //!
 //! ## Formula
 //!
-//! For retry attempt `n` (`0` = first retry):
+//! For retry index `n` (`0` = delay before the first retry, after 1-based event attempt `1`):
 //!
 //! ```text
 //! base = min(first * factor^n, max)
@@ -32,14 +32,14 @@
 //! let backoff = BackoffPolicy::exponential(Duration::from_millis(100))
 //!     .with_max(Duration::from_secs(10));
 //!
-//! // Attempt 0 - uses 'first' (100ms)
-//! assert_eq!(backoff.next(0), Duration::from_millis(100));
+//! // Retry index 0 - uses 'first' (100ms)
+//! assert_eq!(backoff.delay_for_retry(0), Duration::from_millis(100));
 //!
-//! // Attempt 1 - first × factor^1 = 200ms
-//! assert_eq!(backoff.next(1), Duration::from_millis(200));
+//! // Retry index 1 - first × factor^1 = 200ms
+//! assert_eq!(backoff.delay_for_retry(1), Duration::from_millis(200));
 //!
-//! // Attempt 10 - 100ms × 2^10 = 102_400ms → capped at max=10s
-//! assert_eq!(backoff.next(10), Duration::from_secs(10));
+//! // Retry index 10 - 100ms × 2^10 = 102_400ms → capped at max=10s
+//! assert_eq!(backoff.delay_for_retry(10), Duration::from_secs(10));
 //! ```
 //!
 //! Named constructors: [`constant`](BackoffPolicy::constant) and [`exponential`](BackoffPolicy::exponential).
@@ -52,14 +52,19 @@ use thiserror::Error;
 use crate::policies::jitter::JitterPolicy;
 
 /// Error returned by [`BackoffPolicy::new`] when parameters violate the policy invariants.
+///
+/// Match with a wildcard arm because this enum is non-exhaustive. Its data-carrying
+/// variants are also non-exhaustive, so include `..` when matching their payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 #[non_exhaustive]
 pub enum BackoffError {
     /// `factor` was not finite or was below `1.0` (a backoff factor must not shrink delays).
     #[error("backoff factor must be finite and >= 1.0, got {0}")]
+    #[non_exhaustive]
     InvalidFactor(f64),
     /// `first` exceeded `max` (the initial delay cannot be larger than the cap).
     #[error("backoff first delay {first:?} exceeds max {max:?}")]
+    #[non_exhaustive]
     FirstExceedsMax {
         /// The offending initial delay.
         first: Duration,
@@ -120,7 +125,7 @@ impl BackoffPolicy {
     /// - [`BackoffError::FirstExceedsMax`] if `first > max`.
     ///
     /// The user delay floor defaults to `0`; set one with [`with_floor`](Self::with_floor).
-    /// (A separate implicit 1ms safety floor still applies to a non-zero base - see [`next`](Self::next).)
+    /// (A separate implicit 1ms safety floor still applies to a non-zero base - see [`delay_for_retry`](Self::delay_for_retry).)
     pub fn new(
         first: Duration,
         max: Duration,
@@ -153,8 +158,8 @@ impl BackoffPolicy {
     /// use taskvisor::BackoffPolicy;
     ///
     /// let backoff = BackoffPolicy::constant(Duration::from_millis(500));
-    /// assert_eq!(backoff.next(0), Duration::from_millis(500));
-    /// assert_eq!(backoff.next(9), Duration::from_millis(500));
+    /// assert_eq!(backoff.delay_for_retry(0), Duration::from_millis(500));
+    /// assert_eq!(backoff.delay_for_retry(9), Duration::from_millis(500));
     /// ```
     #[must_use]
     pub fn constant(delay: Duration) -> Self {
@@ -185,7 +190,7 @@ impl BackoffPolicy {
     ///
     /// // Base delays: 100ms, 200ms, 400ms, ... capped at 10s.
     /// // Equal jitter keeps each delay within [base/2, base].
-    /// assert!(backoff.next(0) <= Duration::from_millis(100));
+    /// assert!(backoff.delay_for_retry(0) <= Duration::from_millis(100));
     /// ```
     #[must_use]
     pub fn exponential(first: Duration) -> Self {
@@ -261,9 +266,12 @@ impl BackoffPolicy {
         self.floor
     }
 
-    /// Computes the delay for a retry attempt (`0` = first retry).
+    /// Computes the delay for a retry index (`0` = first retry after attempt 1).
     ///
-    /// The base delay is `first × factor^attempt`, capped at [`Self::max`].
+    /// Runtime event attempt numbers are 1-based; this retry index is 0-based.
+    /// For example, the delay after event attempt `1` uses `retry_index = 0`.
+    ///
+    /// The base delay is `first × factor^retry_index`, capped at [`Self::max`].
     /// Jitter is then applied.
     ///
     /// For [`JitterPolicy::None`], [`JitterPolicy::Full`], and [`JitterPolicy::Equal`], the jittered delay never exceeds the base.
@@ -274,17 +282,21 @@ impl BackoffPolicy {
     /// After jitter, the user floor from [`with_floor`](Self::with_floor) is applied.
     /// For a non-zero base, an extra `1ms` safety floor is also applied, capped at `max`, to avoid zero-delay hot loops.
     /// `first = 0` disables only this implicit safety floor.
-    pub fn next(&self, attempt: u32) -> Duration {
-        let max_secs = self.max.as_secs_f64();
-        let clamped_exp = attempt.min(i32::MAX as u32) as i32;
+    #[must_use]
+    pub fn delay_for_retry(&self, retry_index: u32) -> Duration {
+        let clamped_exp = retry_index.min(i32::MAX as u32) as i32;
         let unclamped_secs = self.first.as_secs_f64() * self.factor.powi(clamped_exp);
 
-        let base =
-            if !unclamped_secs.is_finite() || unclamped_secs < 0.0 || unclamped_secs > max_secs {
-                self.max
-            } else {
-                Duration::from_secs_f64(unclamped_secs)
-            };
+        // `Duration::MAX.as_secs_f64()` rounds up to a value that cannot be
+        // converted back to `Duration`. Keep the conversion fallible, then
+        // enforce the configured cap after conversion as well.
+        let base = if self.first.is_zero() {
+            Duration::ZERO
+        } else {
+            Duration::try_from_secs_f64(unclamped_secs)
+                .unwrap_or(self.max)
+                .min(self.max)
+        };
 
         let delay = match self.jitter {
             JitterPolicy::RandomizedBand => {
@@ -301,6 +313,15 @@ impl BackoffPolicy {
         } else {
             floored.max(MIN_NONZERO_DELAY.min(self.max))
         }
+    }
+
+    /// Compatibility alias for [`delay_for_retry`](Self::delay_for_retry).
+    ///
+    /// `retry_index` is 0-based: `0` computes the delay before the first retry.
+    #[inline]
+    #[must_use]
+    pub fn next(&self, retry_index: u32) -> Duration {
+        self.delay_for_retry(retry_index)
     }
 }
 
@@ -336,7 +357,7 @@ mod tests {
             (20, 15_000, 30_000),
         ] {
             for _ in 0..100 {
-                let delay = p.next(attempt);
+                let delay = p.delay_for_retry(attempt);
                 assert!(
                     delay >= Duration::from_millis(lower) && delay <= Duration::from_millis(upper),
                     "attempt {attempt}: {delay:?} outside [{lower}ms, {upper}ms]"
@@ -353,11 +374,20 @@ mod tests {
             2.0,
             JitterPolicy::None,
         );
-        assert_eq!(p.next(0), Duration::from_millis(100));
-        assert_eq!(p.next(1), Duration::from_millis(200));
-        assert_eq!(p.next(2), Duration::from_millis(400));
-        assert_eq!(p.next(3), Duration::from_millis(800));
-        assert_eq!(p.next(4), Duration::from_millis(1600));
+        assert_eq!(p.delay_for_retry(0), Duration::from_millis(100));
+        assert_eq!(p.delay_for_retry(1), Duration::from_millis(200));
+        assert_eq!(p.delay_for_retry(2), Duration::from_millis(400));
+        assert_eq!(p.delay_for_retry(3), Duration::from_millis(800));
+        assert_eq!(p.delay_for_retry(4), Duration::from_millis(1600));
+    }
+
+    #[test]
+    fn next_is_a_compatible_alias_for_delay_for_retry() {
+        let p = BackoffPolicy::exponential(Duration::from_millis(100));
+
+        for retry_index in [0, 1, 8, u32::MAX] {
+            assert_eq!(p.next(retry_index), p.delay_for_retry(retry_index));
+        }
     }
 
     #[test]
@@ -370,7 +400,7 @@ mod tests {
         );
         for attempt in 0..10 {
             assert_eq!(
-                p.next(attempt),
+                p.delay_for_retry(attempt),
                 Duration::from_millis(500),
                 "attempt {attempt}"
             );
@@ -385,7 +415,7 @@ mod tests {
             2.0,
             JitterPolicy::None,
         );
-        assert_eq!(p.next(0), Duration::from_secs(5));
+        assert_eq!(p.delay_for_retry(0), Duration::from_secs(5));
     }
 
     #[test]
@@ -396,8 +426,21 @@ mod tests {
             2.0,
             JitterPolicy::None,
         );
-        assert_eq!(p.next(100), Duration::from_secs(60));
-        assert_eq!(p.next(u32::MAX), Duration::from_secs(60));
+        assert_eq!(p.delay_for_retry(100), Duration::from_secs(60));
+        assert_eq!(p.delay_for_retry(u32::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn duration_max_randomized_band_does_not_panic() {
+        let p = BackoffPolicy::new(
+            Duration::MAX,
+            Duration::MAX,
+            1.0,
+            JitterPolicy::RandomizedBand,
+        )
+        .expect("Duration::MAX is a valid delay when max matches first");
+
+        assert_eq!(p.delay_for_retry(0), Duration::MAX);
     }
 
     #[test]
@@ -411,7 +454,7 @@ mod tests {
         for attempt in 5..15 {
             let base_ms = 100.0 * 2.0f64.powi(attempt as i32);
             assert!(
-                p.next(attempt) <= Duration::from_millis(base_ms as u64),
+                p.delay_for_retry(attempt) <= Duration::from_millis(base_ms as u64),
                 "attempt {attempt}: exceeds base {base_ms}ms"
             );
         }
@@ -427,7 +470,7 @@ mod tests {
         );
         for attempt in 0..15 {
             let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
-            let delay = p.next(attempt);
+            let delay = p.delay_for_retry(attempt);
             assert!(
                 delay >= Duration::from_millis((base_ms / 2.0) as u64),
                 "attempt {attempt}: below half of {base_ms}ms"
@@ -450,7 +493,7 @@ mod tests {
         let mut lo = Duration::from_secs(999);
         let mut hi = Duration::ZERO;
         for _ in 0..100 {
-            let delay = p.next(8);
+            let delay = p.delay_for_retry(8);
             lo = lo.min(delay);
             hi = hi.max(delay);
         }
@@ -475,7 +518,7 @@ mod tests {
         );
         for attempt in 0..10 {
             assert_eq!(
-                p.next(attempt),
+                p.delay_for_retry(attempt),
                 Duration::from_millis(500),
                 "attempt {attempt}: constant delay must not change"
             );
@@ -491,7 +534,7 @@ mod tests {
             "invariant first <= max must hold for any delay"
         );
         assert_eq!(
-            p.next(0),
+            p.delay_for_retry(0),
             Duration::from_secs(60),
             "a delay above the default cap must be preserved, not clamped"
         );
@@ -502,11 +545,11 @@ mod tests {
         let p = BackoffPolicy::exponential(Duration::from_millis(100));
 
         assert_eq!(p.factor(), 2.0, "exponential preset must use factor 2.0");
-        assert_eq!(p.next(0), Duration::from_millis(100));
-        assert_eq!(p.next(1), Duration::from_millis(200));
-        assert_eq!(p.next(2), Duration::from_millis(400));
+        assert_eq!(p.delay_for_retry(0), Duration::from_millis(100));
+        assert_eq!(p.delay_for_retry(1), Duration::from_millis(200));
+        assert_eq!(p.delay_for_retry(2), Duration::from_millis(400));
         assert_eq!(
-            p.next(20),
+            p.delay_for_retry(20),
             Duration::from_secs(30),
             "growth must cap at the default 30s max"
         );
@@ -520,7 +563,7 @@ mod tests {
             p.first() <= p.max(),
             "invariant first <= max must hold when first exceeds the default cap"
         );
-        assert_eq!(p.next(0), Duration::from_secs(60));
+        assert_eq!(p.delay_for_retry(0), Duration::from_secs(60));
     }
 
     #[test]
@@ -529,7 +572,7 @@ mod tests {
             BackoffPolicy::exponential(Duration::from_millis(100)).with_max(Duration::from_secs(1));
 
         assert_eq!(
-            p.next(10),
+            p.delay_for_retry(10),
             Duration::from_secs(1),
             "with_max must cap the grown delay"
         );
@@ -544,7 +587,7 @@ mod tests {
             Duration::from_secs(5),
             "with_max below first must lower first to max (invariant by construction)"
         );
-        assert_eq!(p.next(0), Duration::from_secs(5));
+        assert_eq!(p.delay_for_retry(0), Duration::from_secs(5));
     }
 
     #[test]
@@ -559,7 +602,7 @@ mod tests {
         );
         for attempt in 0..10 {
             assert!(
-                p.next(attempt) <= Duration::from_secs(1),
+                p.delay_for_retry(attempt) <= Duration::from_secs(1),
                 "attempt {attempt}: delay must never exceed the new max"
             );
         }
@@ -576,7 +619,7 @@ mod tests {
         );
         for attempt in 0..10 {
             let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
-            let delay = p.next(attempt);
+            let delay = p.delay_for_retry(attempt);
             assert!(
                 delay >= Duration::from_millis((base_ms / 2.0) as u64)
                     && delay <= Duration::from_millis(base_ms as u64),
@@ -624,7 +667,7 @@ mod tests {
             JitterPolicy::None,
         )
         .expect("valid");
-        assert_eq!(p.next(1), Duration::from_millis(200));
+        assert_eq!(p.delay_for_retry(1), Duration::from_millis(200));
     }
 
     #[test]
@@ -640,7 +683,7 @@ mod tests {
 
         for attempt in 0..12 {
             assert!(
-                p.next(attempt) >= Duration::from_millis(50),
+                p.delay_for_retry(attempt) >= Duration::from_millis(50),
                 "attempt {attempt}: below floor"
             );
         }
@@ -656,7 +699,7 @@ mod tests {
         )
         .expect("valid")
         .with_floor(Duration::from_secs(999));
-        assert!(p.next(0) <= Duration::from_secs(5));
+        assert!(p.delay_for_retry(0) <= Duration::from_secs(5));
     }
 
     #[test]
@@ -670,7 +713,7 @@ mod tests {
         .expect("valid");
         for attempt in 0..100 {
             assert!(
-                p.next(attempt) >= Duration::from_millis(1),
+                p.delay_for_retry(attempt) >= Duration::from_millis(1),
                 "non-zero sub-ms backoff must floor to >= 1ms (never a zero-delay hot-spin)"
             );
         }
@@ -681,19 +724,24 @@ mod tests {
         let p = BackoffPolicy::new(
             Duration::ZERO,
             Duration::from_secs(1),
-            1.0,
+            2.0,
             JitterPolicy::None,
         )
         .expect("valid");
         assert_eq!(
-            p.next(0),
+            p.delay_for_retry(0),
             Duration::ZERO,
             "an explicit zero `first` must stay zero (no implicit floor)"
+        );
+        assert_eq!(
+            p.delay_for_retry(u32::MAX),
+            Duration::ZERO,
+            "zero multiplied by an overflowing exponential factor is still zero"
         );
     }
 
     #[test]
-    fn next_never_exceeds_a_sub_ms_max() {
+    fn delay_for_retry_never_exceeds_a_sub_ms_max() {
         let p = BackoffPolicy::new(
             Duration::from_micros(500),
             Duration::from_micros(500),
@@ -703,8 +751,8 @@ mod tests {
         .expect("valid");
         for attempt in 0..100 {
             assert!(
-                p.next(attempt) <= Duration::from_micros(500),
-                "next() must never exceed max, even when max < 1ms"
+                p.delay_for_retry(attempt) <= Duration::from_micros(500),
+                "delay_for_retry() must never exceed max, even when max < 1ms"
             );
         }
     }

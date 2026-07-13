@@ -45,7 +45,7 @@ impl Controller {
             slots.push(SlotView {
                 slot: Arc::clone(&key),
                 status,
-                running: phase.owner_id(),
+                owner_id: phase.owner_id(),
                 queue_depth: slot.queue.len(),
                 status_for,
             });

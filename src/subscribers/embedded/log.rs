@@ -30,7 +30,7 @@
 //! let sup = Supervisor::new(SupervisorConfig::default(), subs);
 //! ```
 
-use crate::events::{BackoffSource, Event, EventKind};
+use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
 
 /// Event printer for stdout example.
@@ -57,7 +57,7 @@ impl Subscribe for LogWriter {
 
 impl LogWriter {
     fn print_event(&self, e: &Event) {
-        let head = format!("[{:03}] [{}]", e.seq % 1000, e.kind.as_label());
+        let head = event_head(e);
 
         fn fmt_ms(ms: Option<u32>) -> String {
             match ms {
@@ -119,11 +119,7 @@ impl LogWriter {
                 );
             }
             EventKind::BackoffScheduled => {
-                let src = match e.backoff_source {
-                    Some(BackoffSource::Success) => "success",
-                    Some(BackoffSource::Failure) => "failure",
-                    None => "unknown",
-                };
+                let src = e.backoff_source.map_or("unknown", |s| s.as_label());
                 println!(
                     "{head} task={} source={} delay={} after_attempt={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
@@ -177,5 +173,22 @@ impl LogWriter {
                 );
             }
         }
+    }
+}
+
+fn event_head(e: &Event) -> String {
+    format!("[{:03}] [{}]", e.seq, e.kind.as_label())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_head_keeps_the_full_sequence_number() {
+        let mut event = Event::new(EventKind::TaskStarting);
+        event.seq = 12_345;
+
+        assert_eq!(event_head(&event), "[12345] [task_starting]");
     }
 }

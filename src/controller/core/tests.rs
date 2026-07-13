@@ -584,6 +584,33 @@ async fn shutdown_finalizes_buffered_submission_as_rejected() {
 }
 
 #[tokio::test]
+async fn try_submit_and_watch_is_fail_fast_and_preserves_watched_outcome() {
+    let config = ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let ctrl = make_controller(config, Bus::new(64));
+
+    let task: TaskRef = TaskFn::arc("try-watched", |_ctx: TaskContext| async { Ok(()) });
+    let (_id, waiter) = ctrl
+        .handle()
+        .try_submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("s"))
+        .expect("the watched submission must occupy the only command slot");
+    assert!(matches!(
+        ctrl.handle().try_submit_and_watch(
+            ControllerSpec::queue(waiting_spec("try-watched-overflow")).with_slot("s")
+        ),
+        Err(ControllerError::Full)
+    ));
+
+    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    ctrl.finalize_pending_on_shutdown(&mut rx);
+    drop(rx);
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), waiter).await,
+        Ok(Ok(TaskOutcome::Rejected { .. }))
+    ));
+}
+
+#[tokio::test]
 async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
     let watched_id = TaskId::next();
@@ -1032,7 +1059,7 @@ async fn accepted_cancel_continues_after_caller_future_is_dropped() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn try_remove_reports_full_controller_command_queue() {
+async fn try_identity_operations_report_full_controller_command_queue() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let runtime_handle = sup.serve();
     let ctrl = Controller::new(
@@ -1051,6 +1078,16 @@ async fn try_remove_reports_full_controller_command_queue() {
         handle.try_remove(TaskId::next()).await,
         Err(RuntimeError::CommandQueueFull)
     ));
+    assert!(matches!(
+        handle.try_cancel(TaskId::next()).await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
+    assert!(matches!(
+        handle
+            .try_cancel_with_timeout(TaskId::next(), Duration::from_secs(1))
+            .await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx);
@@ -1059,7 +1096,7 @@ async fn try_remove_reports_full_controller_command_queue() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn try_remove_propagates_full_registry_queue_after_controller_admission() {
+async fn try_identity_operations_propagate_full_registry_queue_after_controller_admission() {
     let sup = Supervisor::new(
         crate::SupervisorConfig::default()
             .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
@@ -1087,6 +1124,16 @@ async fn try_remove_propagates_full_registry_queue_after_controller_admission() 
         0,
         "a rejected fallback must not consume or replace the queued registry command"
     );
+    assert!(matches!(
+        handle.try_cancel(TaskId::next()).await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
+    assert!(matches!(
+        handle
+            .try_cancel_with_timeout(TaskId::next(), Duration::from_secs(1))
+            .await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
 
     stop_controller_loop(token, runner).await;
 }
@@ -1489,6 +1536,33 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         matches!(try_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
     );
 
+    let try_cancel_ran = Arc::clone(&victim_ran);
+    let try_cancel_victim: TaskRef = TaskFn::arc("try-cancel-victim", move |_ctx: TaskContext| {
+        let ran = Arc::clone(&try_cancel_ran);
+        async move {
+            ran.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let (try_cancel_id, try_cancel_waiter) = handle
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(try_cancel_victim)).with_slot("s"))
+        .await
+        .expect("the try-cancel victim must enter the controller channel");
+    assert!(
+        handle
+            .try_cancel(try_cancel_id)
+            .await
+            .expect("the ordered controller channel has capacity"),
+        "try_cancel must claim queued controller work"
+    );
+    let try_cancel_outcome = try_cancel_waiter
+        .wait()
+        .await
+        .expect("the try_cancel waiter must resolve");
+    assert!(
+        matches!(try_cancel_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
+    );
+
     assert!(
         handle
             .cancel(owner_id)
@@ -1810,7 +1884,7 @@ async fn snapshot_reports_status_running_and_queue_depth() {
     let view = snap.slot("s").expect("slot 's' must be present");
     assert_eq!(view.status, SlotStatusKind::Running);
     assert_eq!(view.queue_depth, 1);
-    assert_eq!(view.running, Some(id));
+    assert_eq!(view.owner_id, Some(id));
 
     let _ = handle.shutdown().await;
 }
@@ -1921,7 +1995,7 @@ async fn snapshot_maps_every_internal_slot_phase_and_owner() {
     ] {
         let view = snap.slot(name).expect("the inserted slot must be visible");
         assert_eq!(view.status, status, "wrong public status for {name}");
-        assert_eq!(view.running, owner, "wrong phase-owned id for {name}");
+        assert_eq!(view.owner_id, owner, "wrong phase-owned id for {name}");
         assert_eq!(
             view.queue_depth, queue_depth,
             "wrong queue depth for {name}"

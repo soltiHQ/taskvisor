@@ -46,7 +46,9 @@
 //! ```
 //!
 //! Events are best-effort observability.
-//! If you need a guaranteed final result for one task, use [`SupervisorHandle::add_and_watch`] or, with the `controller` feature, `submit_and_watch`.
+//! If you need a guaranteed final disposition for watched work, use
+//! [`SupervisorHandle::add_and_watch`] (or its fail-fast `try_*` counterpart) or,
+//! with the `controller` feature, `submit_and_watch` / `try_submit_and_watch`.
 //!
 //! ## Main Types
 //!

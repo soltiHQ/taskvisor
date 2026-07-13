@@ -15,10 +15,11 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Errors produced by the supervisor runtime.
 ///
-/// These are orchestration errors: add, remove, shutdown, and run failures.
+/// These are orchestration errors: add, remove, cancel, shutdown, and run failures.
 /// They are separate from [`TaskError`], which is returned by task attempts.
 ///
-/// Match with a wildcard arm because this enum is non-exhaustive.
+/// Match with a wildcard arm because this enum is non-exhaustive. Data-carrying
+/// variants are also non-exhaustive, so include `..` when matching their fields.
 ///
 /// # Also
 ///
@@ -31,6 +32,7 @@ pub enum RuntimeError {
     ///
     /// Some tasks did not stop in time and had to be force-terminated.
     #[error("shutdown timeout {grace:?} exceeded; stuck: {stuck:?}; forcing termination")]
+    #[non_exhaustive]
     GraceExceeded {
         /// Configured shutdown grace duration.
         grace: Duration,
@@ -40,6 +42,7 @@ pub enum RuntimeError {
 
     /// A task with the same name is already registered or repeated in an atomic batch.
     #[error("task name '{name}' already exists")]
+    #[non_exhaustive]
     TaskAlreadyExists {
         /// Duplicate task name.
         name: Arc<str>,
@@ -52,8 +55,25 @@ pub enum RuntimeError {
     #[error("management command queue is full")]
     CommandQueueFull,
 
-    /// Timed out while waiting for registry terminal completion.
+    /// Timed out while waiting for task termination to reach registry terminal completion.
+    #[error("timeout waiting for task {id} termination after {timeout:?}")]
+    #[non_exhaustive]
+    TaskTerminationTimeout {
+        /// Task id whose terminal cleanup did not finish in time.
+        id: TaskId,
+        /// Wait duration before timing out.
+        timeout: Duration,
+    },
+
+    /// Compatibility spelling for [`TaskTerminationTimeout`](Self::TaskTerminationTimeout).
+    ///
+    /// The runtime no longer returns this variant. Match
+    /// [`TaskTerminationTimeout`](Self::TaskTerminationTimeout) for cancellation timeouts.
+    #[deprecated(
+        note = "renamed to TaskTerminationTimeout; this compatibility variant is never returned"
+    )]
     #[error("timeout waiting for task {id} removal after {timeout:?}")]
+    #[non_exhaustive]
     TaskRemoveTimeout {
         /// Task id whose terminal cleanup did not finish in time.
         id: TaskId,
@@ -66,6 +86,7 @@ pub enum RuntimeError {
     /// Signal-based shutdown is unavailable.
     /// The I/O error kind, message, and source chain are preserved for every caller that joins the shared shutdown operation.
     #[error("failed to install shutdown signal handlers: {source}")]
+    #[non_exhaustive]
     SignalSetupFailed {
         /// I/O error returned by signal registration.
         #[source]
@@ -93,6 +114,8 @@ impl RuntimeError {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::CommandQueueFull => "runtime_command_queue_full",
+            RuntimeError::TaskTerminationTimeout { .. } => "runtime_task_termination_timeout",
+            #[allow(deprecated)]
             RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
@@ -111,7 +134,8 @@ impl RuntimeError {
 /// - [`Timeout`](Self::Timeout) is retryable,
 /// - [`Fail`](Self::Fail) is retryable.
 ///
-/// Match with a wildcard arm because this enum is non-exhaustive.
+/// Match with a wildcard arm because this enum is non-exhaustive. Data-carrying
+/// variants are also non-exhaustive, so include `..` when matching their fields.
 ///
 /// # Also
 ///
@@ -122,6 +146,7 @@ impl RuntimeError {
 pub enum TaskError {
     /// The attempt exceeded its configured timeout.
     #[error("timed out after {timeout:?}")]
+    #[non_exhaustive]
     Timeout {
         /// Timeout duration that was exceeded.
         timeout: Duration,
@@ -170,6 +195,12 @@ pub enum TaskError {
 }
 
 impl TaskError {
+    /// Creates a retryable timeout error for the configured attempt limit.
+    #[must_use]
+    pub const fn timeout(timeout: Duration) -> Self {
+        TaskError::Timeout { timeout }
+    }
+
     /// Creates a retryable failure with no source error.
     pub fn fail(reason: impl Into<String>) -> Self {
         TaskError::Fail {
@@ -344,6 +375,20 @@ mod tests {
     }
 
     #[test]
+    fn task_termination_timeout_has_stable_label() {
+        let id = TaskId::next();
+        let error = RuntimeError::TaskTerminationTimeout {
+            id,
+            timeout: Duration::from_secs(1),
+        };
+        assert_eq!(error.as_label(), "runtime_task_termination_timeout");
+        assert_eq!(
+            error.to_string(),
+            format!("timeout waiting for task {id} termination after 1s")
+        );
+    }
+
+    #[test]
     fn exit_code_is_some_for_fail_with_code() {
         let e = TaskError::fail("x").with_exit_code(5);
         assert_eq!(e.exit_code(), Some(5));
@@ -366,14 +411,22 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_is_none_for_timeout_and_canceled() {
-        assert_eq!(
-            TaskError::Timeout {
-                timeout: Duration::from_secs(1),
-            }
-            .exit_code(),
-            None,
-        );
+    fn timeout_constructor_is_const_retryable_and_has_stable_label() {
+        const TIMEOUT: TaskError = TaskError::timeout(Duration::from_secs(1));
+
+        assert!(matches!(
+            &TIMEOUT,
+            TaskError::Timeout { timeout, .. } if *timeout == Duration::from_secs(1)
+        ));
+        assert_eq!(TIMEOUT.as_label(), "task_timeout");
+        assert_eq!(TIMEOUT.to_string(), "timed out after 1s");
+        assert!(TIMEOUT.is_retryable());
+        assert!(!TIMEOUT.is_fatal());
+        assert_eq!(TIMEOUT.exit_code(), None);
+    }
+
+    #[test]
+    fn exit_code_is_none_for_canceled() {
         assert_eq!(TaskError::Canceled.exit_code(), None);
     }
 

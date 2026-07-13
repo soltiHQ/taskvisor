@@ -16,6 +16,7 @@
 //! cargo bench --bench fanout
 //! ```
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,8 +66,8 @@ impl Subscribe for NoopSubscriber {
     fn name(&self) -> &'static str {
         self.id
     }
-    fn queue_capacity(&self) -> usize {
-        16384
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(16384).unwrap()
     }
 }
 
@@ -75,7 +76,7 @@ const SUB_NAMES: [&str; 8] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"];
 
 fn bench_config() -> SupervisorConfig {
     SupervisorConfig::default()
-        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
+        .with_bus_capacity(NonZeroUsize::new(16384).unwrap())
         .with_grace(Duration::from_secs(5))
 }
 

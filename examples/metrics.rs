@@ -36,6 +36,7 @@
 //! | [`tracing.rs`](tracing.rs)       | The same event stream in your logs           |
 //! | [`subscriber.rs`](subscriber.rs) | The `Subscribe` trait itself, step by step   |
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -60,8 +61,8 @@ impl Subscribe for PromSubscriber {
         "prometheus"
     }
 
-    fn queue_capacity(&self) -> usize {
-        2048
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(2048).unwrap()
     }
 }
 

@@ -484,7 +484,8 @@ async fn duplicate_static_batch_starts_no_task_body() {
     assert!(
         matches!(
             result,
-            Err(RuntimeError::TaskAlreadyExists { ref name }) if name.as_ref() == "duplicate"
+            Err(RuntimeError::TaskAlreadyExists { ref name, .. })
+                if name.as_ref() == "duplicate"
         ),
         "the duplicate label must reject the full batch: {result:?}"
     );

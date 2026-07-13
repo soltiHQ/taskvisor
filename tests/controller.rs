@@ -32,6 +32,24 @@ fn logging_once(name: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
     })
 }
 
+#[test]
+fn controller_spec_components_are_configured_through_accessors() {
+    let spec = ControllerSpec::queue(TaskSpec::once(make_ok_once("original")))
+        .with_slot("shared")
+        .with_admission(AdmissionPolicy::Replace)
+        .with_task_spec(TaskSpec::once(make_ok_once("replacement")));
+
+    assert_eq!(spec.admission(), AdmissionPolicy::Replace);
+    assert_eq!(spec.task_spec().name(), "replacement");
+    assert_eq!(spec.slot_override(), Some("shared"));
+    assert_eq!(spec.slot_name(), "shared");
+
+    let spec = spec.without_slot();
+    assert_eq!(spec.slot_override(), None);
+    assert_eq!(spec.slot_name(), "replacement");
+    assert_eq!(spec.into_task_spec().name(), "replacement");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn submit_and_watch_resolves_completed_for_admitted_task() {
     let (handle, _collector) = served_controller(ControllerConfig::default());
@@ -50,6 +68,24 @@ async fn submit_and_watch_resolves_completed_for_admitted_task() {
             matches!(outcome, TaskOutcome::Completed),
             "an admitted task that succeeds must resolve Completed, got {outcome:?}"
         );
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn try_submit_and_watch_returns_the_same_public_waiter_contract() {
+    let (handle, _collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        let (id, waiter) = handle
+            .try_submit_and_watch(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+                "try-watched-ok",
+            ))))
+            .expect("the controller queue has capacity");
+        assert_eq!(waiter.id(), id);
+        assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
 
         handle.shutdown().await.expect("shutdown ok");
     })
@@ -84,7 +120,7 @@ async fn submit_and_watch_resolves_rejected_on_drop_if_running() {
             .expect("submit_and_watch accepted into channel");
 
         match waiter.wait().await.expect("waiter errored") {
-            TaskOutcome::Rejected { reason } => {
+            TaskOutcome::Rejected { reason, .. } => {
                 assert!(
                     reason.contains("dropped"),
                     "rejection reason must explain why: {reason}"
@@ -137,7 +173,7 @@ async fn cancel_immediately_removes_a_watched_queued_submission() {
         );
 
         match waiter.wait().await.expect("waiter errored") {
-            TaskOutcome::Rejected { reason } => {
+            TaskOutcome::Rejected { reason, .. } => {
                 assert_eq!(&*reason, "removed_from_queue");
             }
             other => panic!("expected Rejected, got {other:?}"),
@@ -495,7 +531,7 @@ async fn replace_supersedes_running_latest_wins() {
 
         assert!(
             poll_until(Duration::from_secs(4), || async {
-                let snap = handle.snapshot().await;
+                let snap = handle.alive_snapshot().await;
                 snap.iter().any(|n| &**n == "run-2") && !snap.iter().any(|n| &**n == "run-1")
             })
             .await,
@@ -786,7 +822,7 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
         served_controller(ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 4));
 
     with_timeout(10, async {
-        handle
+        let occupant_id = handle
             .submit(
                 ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-snap")))
                     .with_slot("s"),
@@ -807,6 +843,7 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
             if let Some(snap) = handle.controller_snapshot().await
                 && let Some(view) = snap.slot("s")
                 && view.status == SlotStatusKind::Running
+                && view.owner_id == Some(occupant_id)
                 && view.queue_depth == 1
                 && snap.running_count() == 1
                 && snap.total_queued() == 1

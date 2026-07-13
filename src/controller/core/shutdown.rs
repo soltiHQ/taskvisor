@@ -35,7 +35,7 @@ impl Controller {
                     let mut event = Event::new(EventKind::ControllerRejected)
                         .with_id(sub.id)
                         .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN);
-                    if let Some(slot_name) = sub.spec.configured_slot() {
+                    if let Some(slot_name) = sub.spec.slot_override() {
                         event = event.with_task(slot_name.to_owned());
                     }
                     self.bus.publish(event);

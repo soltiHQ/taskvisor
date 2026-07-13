@@ -253,7 +253,7 @@ async fn last_owner_drop_rejects_queued_controller_work() {
 
     assert!(matches!(
         with_timeout(2, waiter.wait()).await,
-        Ok(TaskOutcome::Rejected { reason })
+        Ok(TaskOutcome::Rejected { reason, .. })
             if reason.as_ref() == taskvisor::reasons::CONTROLLER_SHUTTING_DOWN
     ));
 }

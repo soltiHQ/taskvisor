@@ -48,8 +48,8 @@ impl Subscribe for RecordingSub {
     fn name(&self) -> &str {
         "recorder"
     }
-    fn queue_capacity(&self) -> usize {
-        8192
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(8192).expect("the test subscriber queue is non-zero")
     }
 }
 
@@ -736,6 +736,152 @@ async fn confirmed_remove_waits_for_capacity_and_registry_reply() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn confirmed_remove_by_label_waits_for_capacity_and_registry_reply() {
+    let cfg =
+        SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let core = core(cfg);
+    let filler_reply = core
+        .enqueue_remove(TaskId::next(), None)
+        .expect("the filler must occupy the only queue slot");
+
+    let mut remove = Box::pin(core.remove_by_label(Arc::from("missing")));
+    assert_pending_once(remove.as_mut()).await;
+
+    core.start();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve"),
+        Ok(Ok(false))
+    ));
+    assert!(
+        !timeout(Duration::from_secs(2), remove)
+            .await
+            .expect("label Remove must wake after capacity is released")
+            .expect("the registry must reply for an unknown label")
+    );
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn confirmed_cancel_waits_for_capacity_and_registry_reply() {
+    let cfg =
+        SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let core = core(cfg);
+    let filler_reply = core
+        .enqueue_remove(TaskId::next(), None)
+        .expect("the filler must occupy the only queue slot");
+
+    let mut cancel = Box::pin(core.cancel(TaskId::next()));
+    assert_pending_once(cancel.as_mut()).await;
+
+    core.start();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve"),
+        Ok(Ok(false))
+    ));
+    assert!(
+        !timeout(Duration::from_secs(2), cancel)
+            .await
+            .expect("Cancel must wake after capacity is released")
+            .expect("the registry must reply for an unknown id")
+    );
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn confirmed_cancel_by_label_waits_for_capacity_and_registry_reply() {
+    let cfg =
+        SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let core = core(cfg);
+    let filler_reply = core
+        .enqueue_remove(TaskId::next(), None)
+        .expect("the filler must occupy the only queue slot");
+
+    let mut cancel = Box::pin(core.cancel_by_label(Arc::from("missing")));
+    assert_pending_once(cancel.as_mut()).await;
+
+    core.start();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve"),
+        Ok(Ok(false))
+    ));
+    assert!(
+        !timeout(Duration::from_secs(2), cancel)
+            .await
+            .expect("label Cancel must wake after capacity is released")
+            .expect("the registry must reply for an unknown label")
+    );
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn confirmed_cancel_timeout_starts_after_capacity_and_registry_decision() {
+    let cfg =
+        SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let core = core(cfg);
+    let filler_reply = core
+        .enqueue_remove(TaskId::next(), None)
+        .expect("the filler must occupy the only queue slot");
+
+    let mut cancel = Box::pin(core.cancel_with_timeout(TaskId::next(), Duration::ZERO));
+    assert_pending_once(cancel.as_mut()).await;
+
+    core.start();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve"),
+        Ok(Ok(false))
+    ));
+    assert!(
+        !timeout(Duration::from_secs(2), cancel)
+            .await
+            .expect("timed Cancel must wake after capacity is released")
+            .expect("an unknown id has no terminal completion to time out")
+    );
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn confirmed_cancel_by_label_timeout_starts_after_capacity_and_registry_decision() {
+    let cfg =
+        SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let core = core(cfg);
+    let filler_reply = core
+        .enqueue_remove(TaskId::next(), None)
+        .expect("the filler must occupy the only queue slot");
+
+    let mut cancel =
+        Box::pin(core.cancel_by_label_with_timeout(Arc::from("missing"), Duration::ZERO));
+    assert_pending_once(cancel.as_mut()).await;
+
+    core.start();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), filler_reply)
+            .await
+            .expect("filler reply must resolve"),
+        Ok(Ok(false))
+    ));
+    assert!(
+        !timeout(Duration::from_secs(2), cancel)
+            .await
+            .expect("timed label Cancel must wake after capacity is released")
+            .expect("an unknown label has no terminal completion to time out")
+    );
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn try_remove_waits_for_registry_decision_after_admission() {
     let core = core(SupervisorConfig::default());
     let id = TaskId::next();
@@ -750,6 +896,73 @@ async fn try_remove_waits_for_registry_decision_after_admission() {
             .expect("an admitted try_remove must receive a reply")
     );
 
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn try_remove_by_label_waits_for_registry_decision_after_admission() {
+    let core = core(SupervisorConfig::default());
+    let mut remove = Box::pin(core.try_remove_by_label(Arc::from("missing")));
+    assert_pending_once(remove.as_mut()).await;
+
+    core.start();
+    assert!(
+        !timeout(Duration::from_secs(2), remove)
+            .await
+            .expect("try_remove_by_label must wait for registry processing")
+            .expect("an admitted try_remove_by_label must receive a reply")
+    );
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn try_cancel_by_label_with_timeout_bounds_terminal_completion() {
+    use crate::{TaskContext, TaskFn, TaskRef};
+
+    let core = core(SupervisorConfig::default());
+    core.start();
+
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let seen_by_task = Arc::clone(&cancellation_seen);
+    let release_by_task = Arc::clone(&release);
+    let task: TaskRef = TaskFn::arc("timed-label", move |ctx: TaskContext| {
+        let seen = Arc::clone(&seen_by_task);
+        let release = Arc::clone(&release_by_task);
+        async move {
+            ctx.cancelled().await;
+            seen.notify_one();
+            release.notified().await;
+            Ok(())
+        }
+    });
+    let id = core
+        .add_task(TaskSpec::restartable(task))
+        .await
+        .expect("the task must be registered");
+
+    match core
+        .try_cancel_by_label_with_timeout(Arc::from("timed-label"), Duration::ZERO)
+        .await
+    {
+        Err(RuntimeError::TaskTerminationTimeout {
+            id: timed_id,
+            timeout,
+        }) => {
+            assert_eq!(timed_id, id);
+            assert_eq!(timeout, Duration::ZERO);
+        }
+        other => panic!("expected a terminal-completion timeout, got {other:?}"),
+    }
+    timeout(Duration::from_secs(2), cancellation_seen.notified())
+        .await
+        .expect("the timed-out caller must leave label cancellation running");
+
+    release.notify_one();
+    timeout(Duration::from_secs(2), core.registry.wait_until_empty())
+        .await
+        .expect("the task must finish after release");
     let _ = core.shutdown().await;
 }
 
@@ -986,6 +1199,28 @@ async fn try_add_waits_for_registry_decision_after_admission() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn try_add_watched_returns_waiter_after_registry_admission() {
+    use crate::{TaskContext, TaskFn, TaskOutcome, TaskRef};
+
+    let core = core(SupervisorConfig::default());
+    let task: TaskRef = TaskFn::arc("try-add-watched", |_ctx: TaskContext| async { Ok(()) });
+    let mut add = Box::pin(core.try_add_task_watched(TaskSpec::once(task)));
+    assert_pending_once(add.as_mut()).await;
+
+    core.start();
+    let (_id, outcome) = timeout(Duration::from_secs(2), add)
+        .await
+        .expect("try_add_and_watch must resolve after registry processing")
+        .expect("registry must accept the watched task");
+    assert!(matches!(
+        timeout(Duration::from_secs(2), outcome).await,
+        Ok(Ok(TaskOutcome::Completed))
+    ));
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn dropping_add_before_enqueue_rolls_back_admission() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1098,9 +1333,25 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
         );
     }
 
+    let watched_runs = Arc::clone(&runs);
+    let watched: TaskRef = TaskFn::arc("queue-full-watched-add", move |_ctx: TaskContext| {
+        watched_runs.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    assert!(matches!(
+        core.try_add_task_watched(TaskSpec::once(watched)).await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+
     let rejected_remove_id = TaskId::next();
     assert!(matches!(
         core.try_remove(rejected_remove_id).await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
+    assert!(matches!(
+        core.try_remove_by_label(Arc::from("queue-full-remove-label"))
+            .await,
         Err(RuntimeError::CommandQueueFull)
     ));
     while let Ok(event) = events.try_recv() {
@@ -1112,7 +1363,7 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
 
     let rejected_cancel_id = TaskId::next();
     assert!(matches!(
-        core.cancel(rejected_cancel_id).await,
+        core.try_cancel(rejected_cancel_id).await,
         Err(RuntimeError::CommandQueueFull)
     ));
     while let Ok(event) = events.try_recv() {
@@ -1121,6 +1372,25 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
             "a Cancel rejected before enqueue must not publish TaskRemoveRequested"
         );
     }
+
+    assert!(matches!(
+        core.try_cancel_by_label(Arc::from("queue-full-cancel-label"))
+            .await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
+    assert!(matches!(
+        core.try_cancel_with_timeout(TaskId::next(), Duration::from_secs(1))
+            .await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
+    assert!(matches!(
+        core.try_cancel_by_label_with_timeout(
+            Arc::from("queue-full-timed-cancel-label"),
+            Duration::from_secs(1),
+        )
+        .await,
+        Err(RuntimeError::CommandQueueFull)
+    ));
 
     core.start();
     assert!(matches!(

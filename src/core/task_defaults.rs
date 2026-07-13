@@ -71,15 +71,19 @@ impl TaskDefaults {
 
     /// Sets the default timeout for one task attempt.
     ///
-    /// `None` and `Some(Duration::ZERO)` both mean no default timeout.
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = normalize_timeout(timeout);
+    /// Accepts either a [`Duration`] or an `Option<Duration>`; pass either form
+    /// directly without calling `.into()`.
+    /// `None`, `Duration::ZERO`, and `Some(Duration::ZERO)` mean no default timeout.
+    pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.timeout = normalize_timeout(timeout.into());
         self
     }
 
     /// Sets the default failure-retry limit.
     ///
-    /// Pass `None` for unlimited failure retries.
+    /// Accepts either a [`NonZeroU32`] or an `Option<NonZeroU32>`; pass either
+    /// form directly without calling `.into()`. Pass `None` for unlimited
+    /// failure retries.
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
         self.max_retries = max_retries.into();
         self
@@ -141,7 +145,7 @@ mod tests {
         let defaults = TaskDefaults::default()
             .with_restart(RestartPolicy::Never)
             .with_backoff(backoff)
-            .with_timeout(Some(Duration::from_secs(10)))
+            .with_timeout(Duration::from_secs(10))
             .with_max_retries(retries);
 
         assert!(matches!(defaults.restart(), RestartPolicy::Never));
@@ -152,7 +156,18 @@ mod tests {
 
     #[test]
     fn zero_timeout_means_no_default_timeout() {
-        let defaults = TaskDefaults::default().with_timeout(Some(Duration::ZERO));
+        let direct = TaskDefaults::default().with_timeout(Duration::ZERO);
+        let optional = TaskDefaults::default().with_timeout(Some(Duration::ZERO));
+
+        assert_eq!(direct.timeout(), None);
+        assert_eq!(optional.timeout(), None);
+    }
+
+    #[test]
+    fn none_disables_the_default_timeout_without_type_annotation() {
+        let defaults = TaskDefaults::default()
+            .with_timeout(Duration::from_secs(1))
+            .with_timeout(None);
 
         assert_eq!(defaults.timeout(), None);
     }

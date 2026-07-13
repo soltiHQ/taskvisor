@@ -83,6 +83,21 @@ impl SupervisorCore {
         Self::await_add_reply(id, reply).await
     }
 
+    /// Tries to add a watched task without waiting for queue capacity.
+    ///
+    /// After the command enters the queue, this still waits for the registry registration decision.
+    pub(crate) async fn try_add_task_watched(
+        &self,
+        spec: TaskSpec,
+    ) -> Result<(TaskId, tokio::sync::oneshot::Receiver<crate::TaskOutcome>), RuntimeError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (id, reply) = self
+            .enqueue_add_task(TaskId::next(), spec, Some(tx))
+            .map_err(|(error, _done)| error)?;
+        let id = Self::await_add_reply(id, reply).await?;
+        Ok((id, rx))
+    }
+
     /// Queues a task add command under a pre-minted identity.
     ///
     /// Used by the controller so a submission keeps the same [`TaskId`] from admission through registry registration.
@@ -272,6 +287,12 @@ impl SupervisorCore {
         Self::await_remove_reply(reply).await
     }
 
+    /// Tries to remove the task that owns `label` without waiting for command queue capacity.
+    pub(crate) async fn try_remove_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_remove_by_label(label)?;
+        Self::await_remove_reply(reply).await
+    }
+
     /// Resolves one authoritative registry Remove reply.
     async fn await_remove_reply(reply: RemoveReplyRx) -> Result<bool, RuntimeError> {
         match reply.await {
@@ -321,6 +342,23 @@ impl SupervisorCore {
         Ok(self.commit_remove(permit, id, reason))
     }
 
+    /// Queues one fail-fast atomic label Remove command.
+    fn enqueue_remove_by_label(&self, label: Arc<str>) -> Result<RemoveReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self.cmd_tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
+            mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
+        })?;
+        let Some(_admission) = self.command_admission() else {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        };
+
+        Ok(Self::commit_remove_by_label(permit, label))
+    }
+
     /// Waits for queue capacity, then sends one atomic label Remove command.
     async fn enqueue_remove_by_label_wait(
         &self,
@@ -339,9 +377,17 @@ impl SupervisorCore {
             return Err(RuntimeError::ShuttingDown);
         };
 
+        Ok(Self::commit_remove_by_label(permit, label))
+    }
+
+    /// Publishes one already-reserved Remove command by label.
+    fn commit_remove_by_label(
+        permit: mpsc::Permit<'_, RegistryCommand>,
+        label: Arc<str>,
+    ) -> RemoveReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::RemoveByLabel { label, reply });
-        Ok(reply_rx)
+        reply_rx
     }
 
     /// Publishes one identity request and makes its reserved command visible.
@@ -375,9 +421,32 @@ impl SupervisorCore {
             return Err(RuntimeError::ShuttingDown);
         };
 
+        Ok(Self::commit_cancel(permit, id))
+    }
+
+    /// Waits for bounded queue capacity, then queues one Cancel command by identity.
+    async fn enqueue_cancel_wait(&self, id: TaskId) -> Result<CancelReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self
+            .cmd_tx
+            .reserve()
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        let Some(_admission) = self.command_admission() else {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        };
+
+        Ok(Self::commit_cancel(permit, id))
+    }
+
+    /// Publishes one already-reserved Cancel command by identity.
+    fn commit_cancel(permit: mpsc::Permit<'_, RegistryCommand>, id: TaskId) -> CancelReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::Cancel { id, reply });
-        Ok(reply_rx)
+        reply_rx
     }
 
     /// Queues one fail-fast atomic Cancel command by label.
@@ -394,9 +463,38 @@ impl SupervisorCore {
             return Err(RuntimeError::ShuttingDown);
         };
 
+        Ok(Self::commit_cancel_by_label(permit, label))
+    }
+
+    /// Waits for bounded queue capacity, then queues one atomic Cancel command by label.
+    async fn enqueue_cancel_by_label_wait(
+        &self,
+        label: Arc<str>,
+    ) -> Result<CancelReplyRx, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self
+            .cmd_tx
+            .reserve()
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        let Some(_admission) = self.command_admission() else {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        };
+
+        Ok(Self::commit_cancel_by_label(permit, label))
+    }
+
+    /// Publishes one already-reserved Cancel command by label.
+    fn commit_cancel_by_label(
+        permit: mpsc::Permit<'_, RegistryCommand>,
+        label: Arc<str>,
+    ) -> CancelReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::CancelByLabel { label, reply });
-        Ok(reply_rx)
+        reply_rx
     }
 
     /// Returns registered tasks as `(id, label)` pairs from the registry.
@@ -424,6 +522,16 @@ impl SupervisorCore {
 
     /// Cancels a task by identity and waits for registry terminal completion.
     pub(crate) async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_cancel_wait(id).await?;
+        let decision = Self::await_cancel_reply(reply).await?;
+        Self::wait_cancel_decision(decision, None).await
+    }
+
+    /// Tries to cancel a task by identity without waiting for command queue capacity.
+    ///
+    /// After the command enters the queue, this still waits for the registry decision and
+    /// terminal completion.
+    pub(crate) async fn try_cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let decision = Self::await_cancel_reply(self.enqueue_cancel(id)?).await?;
         Self::wait_cancel_decision(decision, None).await
     }
@@ -437,14 +545,58 @@ impl SupervisorCore {
         id: TaskId,
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_cancel_wait(id).await?;
+        let decision = Self::await_cancel_reply(reply).await?;
+        Self::wait_cancel_decision(decision, Some(wait_for)).await
+    }
+
+    /// Tries to cancel a task without waiting for command queue capacity and bounds the terminal
+    /// completion wait after registry admission.
+    pub(crate) async fn try_cancel_with_timeout(
+        &self,
+        id: TaskId,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
         let decision = Self::await_cancel_reply(self.enqueue_cancel(id)?).await?;
         Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
     /// Cancels the task that owns `label` at the registry ordering point.
     pub(crate) async fn cancel_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_cancel_by_label_wait(label).await?;
+        let decision = Self::await_cancel_reply(reply).await?;
+        Self::wait_cancel_decision(decision, None).await
+    }
+
+    /// Tries to cancel the task that owns `label` without waiting for command queue capacity.
+    pub(crate) async fn try_cancel_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
         let decision = Self::await_cancel_reply(self.enqueue_cancel_by_label(label)?).await?;
         Self::wait_cancel_decision(decision, None).await
+    }
+
+    /// Cancels the task that owns `label` with an explicit terminal-completion window.
+    ///
+    /// Queue admission and the registry decision are not part of `wait_for`. The timeout only
+    /// bounds this caller's wait for shared terminal completion and does not stop removal.
+    pub(crate) async fn cancel_by_label_with_timeout(
+        &self,
+        label: Arc<str>,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let reply = self.enqueue_cancel_by_label_wait(label).await?;
+        let decision = Self::await_cancel_reply(reply).await?;
+        Self::wait_cancel_decision(decision, Some(wait_for)).await
+    }
+
+    /// Tries to cancel the task that owns `label` without waiting for command queue capacity and
+    /// bounds the terminal-completion wait after the registry decision.
+    pub(crate) async fn try_cancel_by_label_with_timeout(
+        &self,
+        label: Arc<str>,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let decision = Self::await_cancel_reply(self.enqueue_cancel_by_label(label)?).await?;
+        Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
     /// Resolves one authoritative registry cancellation decision.
@@ -470,7 +622,7 @@ impl SupervisorCore {
 
         if let Some(wait_for) = wait_for {
             if timeout(wait_for, decision.wait()).await.is_err() && !decision.is_complete() {
-                return Err(RuntimeError::TaskRemoveTimeout {
+                return Err(RuntimeError::TaskTerminationTimeout {
                     id,
                     timeout: wait_for,
                 });

@@ -22,7 +22,7 @@
 
 use tracing::Level;
 
-use crate::events::{BackoffSource, Event, EventKind};
+use crate::events::{Event, EventKind};
 use crate::reasons::MAX_RETRIES_EXCEEDED;
 use crate::subscribers::Subscribe;
 
@@ -101,10 +101,7 @@ impl Subscribe for TracingBridge {
                     timeout_ms = e.timeout_ms.map(u64::from),
                     duration_ms = e.duration_ms.map(u64::from),
                     exit_code = e.exit_code.map(i64::from),
-                    backoff_source = e.backoff_source.map(|s| match s {
-                        BackoffSource::Success => "success",
-                        BackoffSource::Failure => "failure",
-                    }),
+                    backoff_source = e.backoff_source.map(|s| s.as_label()),
                 )
             };
         }

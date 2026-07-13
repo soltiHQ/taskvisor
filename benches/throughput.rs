@@ -15,6 +15,7 @@
 //! cargo bench --bench throughput
 //! ```
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -69,14 +70,14 @@ impl Subscribe for CountingSubscriber {
     fn name(&self) -> &'static str {
         "counter"
     }
-    fn queue_capacity(&self) -> usize {
-        16384
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(16384).unwrap()
     }
 }
 
 fn bench_config() -> SupervisorConfig {
     SupervisorConfig::default()
-        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
+        .with_bus_capacity(NonZeroUsize::new(16384).unwrap())
         .with_grace(Duration::from_secs(5))
 }
 

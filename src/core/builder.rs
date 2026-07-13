@@ -11,7 +11,7 @@
 //! let runtime = SupervisorConfig::default()
 //!     .with_grace(Duration::from_secs(30))
 //!     .with_max_concurrent(NonZeroUsize::new(4));
-//! let tasks = TaskDefaults::default().with_timeout(Some(Duration::from_secs(5)));
+//! let tasks = TaskDefaults::default().with_timeout(Duration::from_secs(5));
 //!
 //! let supervisor = SupervisorBuilder::new(runtime)
 //!     .with_task_defaults(tasks)
@@ -41,6 +41,7 @@ use crate::{
 /// Runtime settings and task defaults are separate inputs. The produced
 /// supervisor is inert until [`Supervisor::run`](crate::Supervisor::run) or
 /// [`Supervisor::serve`](crate::Supervisor::serve) starts it.
+#[must_use]
 pub struct SupervisorBuilder {
     runtime: SupervisorConfig,
     task_defaults: TaskDefaults,
@@ -65,37 +66,35 @@ impl SupervisorBuilder {
     }
 
     /// Replaces all runtime settings.
-    #[must_use]
     pub fn with_runtime_config(mut self, runtime: SupervisorConfig) -> Self {
         self.runtime = runtime;
         self
     }
 
     /// Replaces all task defaults.
-    #[must_use]
     pub fn with_task_defaults(mut self, task_defaults: TaskDefaults) -> Self {
         self.task_defaults = task_defaults;
         self
     }
 
     /// Sets the graceful task-shutdown window.
-    #[must_use]
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.runtime = self.runtime.with_grace(grace);
         self
     }
 
     /// Sets the shared subscriber-drain timeout.
-    #[must_use]
     pub fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.runtime = self.runtime.with_subscriber_shutdown_timeout(timeout);
         self
     }
 
     /// Sets or clears the global task-attempt concurrency limit.
-    #[must_use]
-    pub fn with_max_concurrent(mut self, max_concurrent: Option<NonZeroUsize>) -> Self {
-        self.runtime = self.runtime.with_max_concurrent(max_concurrent);
+    ///
+    /// Accepts either a [`NonZeroUsize`] or an `Option<NonZeroUsize>`; pass
+    /// either form directly without calling `.into()`.
+    pub fn with_max_concurrent(mut self, max_concurrent: impl Into<Option<NonZeroUsize>>) -> Self {
+        self.runtime = self.runtime.with_max_concurrent(max_concurrent.into());
         self
     }
 
@@ -109,7 +108,6 @@ impl SupervisorBuilder {
     }
 
     /// Sets the non-zero runtime event-bus capacity.
-    #[must_use]
     pub fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
         self.runtime = self.runtime.with_bus_capacity(bus_capacity);
         self
@@ -125,7 +123,6 @@ impl SupervisorBuilder {
     }
 
     /// Sets the non-zero registry management-queue capacity.
-    #[must_use]
     pub fn with_registry_queue_capacity(mut self, registry_queue_capacity: NonZeroUsize) -> Self {
         self.runtime = self
             .runtime
@@ -148,7 +145,6 @@ impl SupervisorBuilder {
     }
 
     /// Replaces event subscribers used for runtime observability.
-    #[must_use]
     pub fn with_subscribers(mut self, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         self.subscribers = subscribers;
         self
@@ -156,7 +152,6 @@ impl SupervisorBuilder {
 
     /// Enables slot-based controller admission.
     #[cfg(feature = "controller")]
-    #[must_use]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
         self
@@ -238,7 +233,7 @@ mod tests {
         let task_defaults = TaskDefaults::default()
             .with_restart(RestartPolicy::Never)
             .with_backoff(BackoffPolicy::constant(Duration::from_millis(50)))
-            .with_timeout(Some(Duration::from_secs(5)))
+            .with_timeout(Duration::from_secs(5))
             .with_max_retries(NonZeroU32::new(10));
 
         let builder =
@@ -293,5 +288,18 @@ mod tests {
                 field: "registry_queue_capacity"
             })
         ));
+    }
+
+    #[test]
+    fn max_concurrent_accepts_a_limit_or_an_option() {
+        let limit = NonZeroUsize::new(4).unwrap();
+        let direct = SupervisorBuilder::new(SupervisorConfig::default()).with_max_concurrent(limit);
+        let optional =
+            SupervisorBuilder::new(SupervisorConfig::default()).with_max_concurrent(Some(limit));
+        let cleared = SupervisorBuilder::new(SupervisorConfig::default()).with_max_concurrent(None);
+
+        assert_eq!(direct.runtime.max_concurrent(), Some(limit));
+        assert_eq!(optional.runtime.max_concurrent(), Some(limit));
+        assert_eq!(cleared.runtime.max_concurrent(), None);
     }
 }

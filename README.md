@@ -178,7 +178,9 @@ let handle = sup.serve();
 let id = handle.add(spec).await?;                 // registry accepted this TaskId
 handle.cancel(id).await?;                         // cancel by identity and wait for cleanup
 // Alternative: handle.cancel_by_label("task-name").await?;
+// try_* management methods fail fast instead of waiting for queue capacity.
 let tasks = handle.list().await;                  // Vec<(TaskId, name)>
+let alive = handle.alive_snapshot().await;        // best-effort, event-fed view
 
 handle.shutdown().await?;
 ```
@@ -256,7 +258,7 @@ let spec = TaskSpec::periodic(task, Duration::from_secs(30));
 ```rust,ignore
 // Each attempt gets 5s; the task gives up after 3 failure-driven retries.
 let spec = TaskSpec::restartable(task)
-    .with_timeout(Some(Duration::from_secs(5)))
+    .with_timeout(Duration::from_secs(5))
     .with_max_retries(std::num::NonZeroU32::new(3).unwrap());
 ```
 
@@ -273,7 +275,7 @@ let runtime = SupervisorConfig::default()
     .with_registry_queue_capacity(NonZeroUsize::new(256).unwrap())
     .with_max_concurrent(NonZeroUsize::new(4));
 let task_defaults = TaskDefaults::default()
-    .with_timeout(Some(Duration::from_secs(10)));
+    .with_timeout(Duration::from_secs(10));
 
 let sup = Supervisor::builder(runtime)
     .with_task_defaults(task_defaults)
@@ -346,6 +348,7 @@ See [`examples/tracing.rs`](examples/tracing.rs) for the full program and [`exam
 
 ```rust,ignore
 // add_and_watch returns a TaskWaiter resolving to the final TaskOutcome.
+// try_add_and_watch provides the same waiter but fails fast if the queue is full.
 let (id, waiter) = handle
     .add_and_watch(TaskSpec::once(job))
     .await?;
@@ -379,6 +382,10 @@ let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
 let outcome = waiter.wait().await?;
 ```
 
+Use `try_submit_and_watch` when controller-queue admission must be fail-fast.
+The returned `TaskId` identifies the submission before runtime admission and remains the same if
+the task is admitted.
+
 Use the returned `TaskId` with `handle.remove(id)` or `handle.cancel(id)`. If the submission is
 still queued, the controller removes it directly and a watched submission resolves to
 `TaskOutcome::Rejected` with reason `removed_from_queue`.
@@ -387,6 +394,8 @@ still queued, the controller removes it directly and a watched submission resolv
 the controller loop before it returns.
 
 See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examples/admission.rs).
+
+For the current breaking API cleanup, see [`MIGRATION.md`](MIGRATION.md).
 
 ## Production notes
 

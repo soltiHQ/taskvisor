@@ -49,12 +49,13 @@ pub enum JitterPolicy {
 
     /// Randomized wideband.
     ///
-    /// When used by [`BackoffPolicy::next`](crate::BackoffPolicy::next), the delay is drawn from:
+    /// When used by [`BackoffPolicy::delay_for_retry`](crate::BackoffPolicy::delay_for_retry), the delay is drawn from:
     /// ```text
     /// [first, min(base * 3, max)]
     /// ```
     ///
-    /// Here `base` is the current retry delay before jitter: `first * factor^attempt`, capped at `max`.
+    /// Here `base` is the current retry delay before jitter:
+    /// `first * factor^retry_index`, capped at `max`, where `retry_index` is 0-based.
     RandomizedBand,
 }
 
@@ -98,43 +99,47 @@ impl JitterPolicy {
             return self.apply(lower);
         }
 
-        let lower_ms = (lower.as_millis().min(u128::from(u64::MAX))) as u64;
-        let seed_ms = (upper_seed.as_millis().min(u128::from(u64::MAX))) as u64;
-        let max_ms = (max.as_millis().min(u128::from(u64::MAX))) as u64;
-        let upper = seed_ms.saturating_mul(3).min(max_ms).max(lower_ms);
-        if lower_ms >= upper {
+        let upper = upper_seed.saturating_mul(3).min(max).max(lower);
+        if lower >= upper {
             return lower;
         }
-        Duration::from_millis(fastrand::u64(lower_ms..=upper))
+
+        let nanos = fastrand::u128(lower.as_nanos()..=upper.as_nanos());
+        duration_from_nanos(nanos)
     }
 
     /// Full jitter: random in `[0, delay]`.
     ///
     /// Nanosecond-faithful: a sub-millisecond `delay` is **not** truncated to zero.
     fn full_jitter(&self, delay: Duration) -> Duration {
-        let ns = (delay.as_nanos().min(u128::from(u64::MAX))) as u64;
+        let ns = delay.as_nanos();
         if ns == 0 {
             return Duration::ZERO;
         }
-        Duration::from_nanos(fastrand::u64(0..=ns))
+        duration_from_nanos(fastrand::u128(0..=ns))
     }
 
     /// Equal jitter: `delay/2 + random[0, delay/2]`.
     ///
     /// Nanosecond-faithful: a sub-millisecond `delay` is **not** truncated to zero.
     fn equal_jitter(&self, delay: Duration) -> Duration {
-        let ns = (delay.as_nanos().min(u128::from(u64::MAX))) as u64;
+        let ns = delay.as_nanos();
         if ns == 0 {
             return Duration::ZERO;
         }
         let half = ns / 2;
-        let jitter = if half == 0 {
-            0
-        } else {
-            fastrand::u64(0..=half)
-        };
-        Duration::from_nanos(half + jitter)
+        let jitter = fastrand::u128(0..=(ns - half));
+        duration_from_nanos(half + jitter)
     }
+}
+
+/// Converts a total nanosecond count known to fit in [`Duration`].
+fn duration_from_nanos(nanos: u128) -> Duration {
+    const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+    let seconds = (nanos / NANOS_PER_SECOND) as u64;
+    let subsec_nanos = (nanos % NANOS_PER_SECOND) as u32;
+    Duration::new(seconds, subsec_nanos)
 }
 
 #[cfg(test)]
@@ -205,6 +210,77 @@ mod tests {
                 "draw {d:?} outside [{lower:?}, {upper:?}]"
             );
         }
+    }
+
+    #[test]
+    fn randomized_band_preserves_sub_millisecond_bounds_and_entropy() {
+        let lower = Duration::from_nanos(123_457);
+        let upper_seed = Duration::from_nanos(321_987);
+        let upper = upper_seed.saturating_mul(3);
+        let mut saw_value_above_lower = false;
+
+        for _ in 0..500 {
+            let result = JitterPolicy::RandomizedBand.apply_randomized_band(
+                lower,
+                upper_seed,
+                Duration::from_millis(2),
+            );
+            assert!(
+                result >= lower && result <= upper,
+                "sub-ms draw {result:?} outside [{lower:?}, {upper:?}]"
+            );
+            saw_value_above_lower |= result > lower;
+        }
+
+        assert!(
+            saw_value_above_lower,
+            "a non-degenerate sub-ms band must not collapse to its lower bound"
+        );
+    }
+
+    #[test]
+    fn randomized_band_handles_duration_max_without_overflow() {
+        let lower = Duration::MAX.saturating_sub(Duration::from_nanos(32));
+
+        for _ in 0..100 {
+            let result = JitterPolicy::RandomizedBand.apply_randomized_band(
+                lower,
+                Duration::MAX,
+                Duration::MAX,
+            );
+            assert!(result >= lower && result <= Duration::MAX);
+        }
+
+        assert_eq!(
+            duration_from_nanos(Duration::MAX.as_nanos()),
+            Duration::MAX,
+            "nanosecond conversion must preserve the largest Duration"
+        );
+    }
+
+    #[test]
+    fn full_and_equal_jitter_preserve_duration_max_bounds() {
+        let equal_lower = duration_from_nanos(Duration::MAX.as_nanos() / 2);
+        let legacy_u64_ceiling = Duration::from_nanos(u64::MAX);
+        let mut full_used_the_wide_range = false;
+
+        for _ in 0..100 {
+            let full = JitterPolicy::Full.apply(Duration::MAX);
+            assert!(full <= Duration::MAX);
+            full_used_the_wide_range |= full > legacy_u64_ceiling;
+
+            let equal = JitterPolicy::Equal.apply(Duration::MAX);
+            assert!(
+                equal >= equal_lower && equal <= Duration::MAX,
+                "equal jitter {equal:?} outside [{equal_lower:?}, {:?}]",
+                Duration::MAX
+            );
+        }
+
+        assert!(
+            full_used_the_wide_range,
+            "full jitter must not truncate its nanosecond range to u64::MAX"
+        );
     }
 
     #[test]

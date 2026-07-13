@@ -42,6 +42,7 @@
 //! | [`tracing.rs`](tracing.rs)   | Forward events into the `tracing` ecosystem           |
 //! | [`dynamic.rs`](dynamic.rs)   | `serve()` → `SupervisorHandle` for runtime management |
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -99,8 +100,8 @@ impl Subscribe for Metrics {
         "metrics"
     }
 
-    fn queue_capacity(&self) -> usize {
-        2048
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(2048).unwrap()
     }
 }
 

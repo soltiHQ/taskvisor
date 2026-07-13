@@ -103,7 +103,7 @@ async fn duplicate_add_returns_error_and_only_first_runs() {
             .expect_err("duplicate add must fail");
         assert!(matches!(
             error,
-            RuntimeError::TaskAlreadyExists { ref name } if name.as_ref() == "dup"
+            RuntimeError::TaskAlreadyExists { ref name, .. } if name.as_ref() == "dup"
         ));
         assert_eq!(rejected_runs.load(Ordering::SeqCst), 0);
 
@@ -129,7 +129,7 @@ async fn add_duplicate_name_returns_already_exists() {
             .await
             .expect_err("second add must fail");
         match err {
-            RuntimeError::TaskAlreadyExists { name } => assert_eq!(&*name, "dup"),
+            RuntimeError::TaskAlreadyExists { name, .. } => assert_eq!(&*name, "dup"),
             other => panic!("expected TaskAlreadyExists, got {other:?}"),
         }
         let _ = handle.shutdown().await;
@@ -241,7 +241,7 @@ async fn remove_by_label_returns_true_then_false() {
             .expect("svc must start before removal");
 
         assert!(handle.remove_by_label("svc").await.expect("remove1"));
-        assert!(!handle.remove_by_label("svc").await.expect("remove2"));
+        assert!(!handle.try_remove_by_label("svc").await.expect("remove2"));
         assert_eq!(handle.list().await, vec![(id, Arc::from("svc"))]);
 
         release.notify_one();
@@ -333,6 +333,37 @@ async fn cancel_with_timeout_true_for_cooperative_task() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cancel_by_label_with_timeout_variants_are_public_contracts() {
+    let (handle, _c) = served_with_collector(5);
+    with_timeout(10, async {
+        let _ = handle
+            .add(TaskSpec::restartable(make_coop("label-timeout")))
+            .await
+            .expect("add label-timeout");
+        assert!(
+            handle
+                .cancel_by_label_with_timeout("label-timeout", Duration::from_secs(2))
+                .await
+                .expect("cancel_by_label_with_timeout")
+        );
+
+        let _ = handle
+            .add(TaskSpec::restartable(make_coop("try-label-timeout")))
+            .await
+            .expect("add try-label-timeout");
+        assert!(
+            handle
+                .try_cancel_by_label_with_timeout("try-label-timeout", Duration::from_secs(2),)
+                .await
+                .expect("try_cancel_by_label_with_timeout")
+        );
+
+        let _ = handle.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancel_timeout_does_not_stop_shared_removal() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
@@ -363,15 +394,16 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
             .expect("task must start before cancellation");
 
         match handle.cancel_with_timeout(id, Duration::ZERO).await {
-            Err(RuntimeError::TaskRemoveTimeout {
+            Err(RuntimeError::TaskTerminationTimeout {
                 id: timed_id,
                 timeout,
+                ..
             }) => {
                 assert_eq!(timed_id, id);
                 assert_eq!(timeout, Duration::ZERO);
             }
             other => panic!(
-                "expected TaskRemoveTimeout while terminal completion is blocked, got {other:?}"
+                "expected TaskTerminationTimeout while terminal completion is blocked, got {other:?}"
             ),
         }
         tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
@@ -498,18 +530,22 @@ async fn snapshot_and_is_alive_track_alive_set() {
             })
             .await
         );
-        assert!(handle.snapshot().await.iter().any(|n| &**n == "live"));
+        assert!(handle.alive_snapshot().await.iter().any(|n| &**n == "live"));
 
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 !handle.is_alive("oneshot").await
-                    && !handle.snapshot().await.iter().any(|n| &**n == "oneshot")
+                    && !handle
+                        .alive_snapshot()
+                        .await
+                        .iter()
+                        .any(|n| &**n == "oneshot")
                     && !handle.list().await.iter().any(|(_, l)| &**l == "oneshot")
             })
             .await
         );
 
-        let snap = handle.snapshot().await;
+        let snap = handle.alive_snapshot().await;
         let mut sorted = snap.clone();
         sorted.sort();
         assert_eq!(snap, sorted);
@@ -523,7 +559,7 @@ async fn is_alive_false_for_unknown_label() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(5, async {
         assert!(!handle.is_alive("nope").await);
-        assert!(handle.snapshot().await.is_empty());
+        assert!(handle.alive_snapshot().await.is_empty());
         assert!(handle.list().await.is_empty());
         let _ = handle.shutdown().await;
     })

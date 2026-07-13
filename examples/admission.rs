@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     match v2.wait().await? {
-        TaskOutcome::Rejected { reason } => {
+        TaskOutcome::Rejected { reason, .. } => {
             println!("    deploy-v2 -> Rejected ({reason}) — never ran\n");
         }
         other => println!("    deploy-v2 -> {other:?} (unexpected)\n"),

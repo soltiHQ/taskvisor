@@ -144,7 +144,7 @@ pub async fn run_once<T: Task + ?Sized>(
             Err(_elapsed) => {
                 child.cancel();
                 publish_timeout(bus, id, task.name(), dur, attempt, started.elapsed());
-                Err(TaskError::Timeout { timeout: dur })
+                Err(TaskError::timeout(dur))
             }
         }
     } else {

@@ -1,7 +1,7 @@
 //! # Task completion outcomes.
 //!
 //! This module defines:
-//! - [`TaskOutcome`]: the final result of one supervised task run,
+//! - [`TaskOutcome`]: the final disposition of one watched task or submission,
 //! - [`TaskWaiter`]: an awaitable receiver for that result.
 //!
 //! Outcomes are delivered on the completion plane, not through the event bus.
@@ -28,11 +28,12 @@
 //!
 //! ## Resolution Rules
 //!
-//! - One waiter observes one task identity.
+//! - One waiter observes one [`TaskId`] from submission through final disposition.
 //! - The outcome is resolved through a `oneshot` channel.
 //! - The sender has one owner at a time.
 //! - Dropping [`TaskWaiter`] is safe. Sending the outcome then becomes a no-op.
-//! - The outcome describes the final actor result, after retries are finished.
+//! - For admitted work, the outcome describes the final actor result after retries are finished.
+//! - For rejected work, the outcome records that the task body never ran.
 //! - Per-attempt progress is reported by lifecycle events.
 //!
 //! ## Rejection
@@ -50,10 +51,11 @@ use tokio::sync::oneshot;
 use crate::error::{RuntimeError, SharedError};
 use crate::identity::TaskId;
 
-/// Final result of a supervised task run.
+/// Final disposition of a watched task or controller submission.
 ///
-/// This is the authoritative terminal result for a watched task.
-/// It is delivered after the actor retry loop has ended and the registry has joined the actor.
+/// For admitted work, this is delivered after the actor retry loop has ended
+/// and the registry has joined the actor. A controller may instead resolve it
+/// as [`Rejected`](Self::Rejected) before the task body starts.
 ///
 /// Use events for live progress.
 /// Use `TaskOutcome` when you need the final result.
@@ -78,10 +80,11 @@ use crate::identity::TaskId;
 ///
 /// # Also
 ///
-/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) - direct watched task add
+/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) and
+///   [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch) - direct watched task add
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - controller watched submission"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
 )]
 /// - [`TaskWaiter`] - awaitable handle that returns this outcome
 /// - [`EventKind`](crate::EventKind) - live observability events
@@ -138,11 +141,12 @@ pub enum TaskOutcome {
     ///
     /// Common reasons:
     /// - controller slot was busy under `DropIfRunning`,
-    /// - controller queue was full,
+    /// - controller slot queue was full,
     /// - queued submission was replaced,
     /// - queued submission was removed,
     /// - controller was shutting down,
     /// - registration failed because the task name already existed.
+    #[non_exhaustive]
     Rejected {
         /// Why the submission was rejected.
         reason: Arc<str>,
@@ -159,7 +163,7 @@ impl TaskOutcome {
     /// Creates a [`Failed`](Self::Failed) outcome for tests.
     ///
     /// Real outcomes normally come from the runtime.
-    /// The `Failed` and `Fatal` variants are `#[non_exhaustive]`;
+    /// The `Failed`, `Fatal`, and `Rejected` variants are `#[non_exhaustive]`;
     /// other crates cannot build them directly.
     ///
     /// This helper lets tests cover code that handles failed outcomes; `source` is `None`.
@@ -192,6 +196,25 @@ impl TaskOutcome {
             reason: reason.into(),
             exit_code,
             source: None,
+        }
+    }
+
+    /// Creates a [`Rejected`](Self::Rejected) outcome for tests.
+    ///
+    /// See [`failed_for_tests`](Self::failed_for_tests) for why this helper exists.
+    ///
+    /// ```rust
+    /// use taskvisor::TaskOutcome;
+    ///
+    /// let outcome = TaskOutcome::rejected_for_tests("queue_full");
+    /// assert_eq!(outcome.as_label(), "outcome_rejected");
+    /// ```
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn rejected_for_tests(reason: impl Into<Arc<str>>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
         }
     }
 
@@ -229,17 +252,19 @@ impl TaskOutcome {
     }
 }
 
-/// Awaitable handle for one task outcome.
+/// Awaitable handle for one task or submission outcome.
 ///
 /// Created by:
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
+/// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)"
 )]
 ///
 /// A waiter is consumed by [`wait`](Self::wait).
-/// It resolves once the watched task reaches a terminal outcome, or returns an error if the sender is dropped before an outcome is produced.
+/// It resolves once the watched task or submission reaches a terminal outcome, or returns an
+/// error if the sender is dropped before an outcome is produced.
 ///
 /// ## Example
 ///
@@ -275,13 +300,13 @@ impl TaskWaiter {
         Self { id, rx }
     }
 
-    /// Returns the task identity observed by this waiter.
+    /// Returns the submission identity observed by this waiter.
     #[must_use]
     pub fn id(&self) -> TaskId {
         self.id
     }
 
-    /// Waits until the task reaches a final outcome.
+    /// Waits until the task or submission reaches a final outcome.
     ///
     /// During normal operation, this returns a [`TaskOutcome`].
     /// During normal shutdown, tasks resolve to [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
@@ -301,7 +326,7 @@ mod tests {
 
     #[cfg(feature = "test-util")]
     #[test]
-    fn test_constructors_build_the_terminal_failure_variants() {
+    fn test_constructors_build_the_terminal_failure_and_rejection_variants() {
         let failed = TaskOutcome::failed_for_tests("boom", Some(3));
         assert!(matches!(
             &failed,
@@ -314,6 +339,13 @@ mod tests {
             &fatal,
             TaskOutcome::Fatal { reason, exit_code: None, .. } if reason.as_ref() == "bad config"
         ));
+
+        let rejected = TaskOutcome::rejected_for_tests("queue_full");
+        assert!(matches!(
+            &rejected,
+            TaskOutcome::Rejected { reason, .. } if reason.as_ref() == "queue_full"
+        ));
+        assert!(rejected.source().is_none());
     }
 
     #[test]
@@ -347,6 +379,12 @@ mod tests {
         assert!(TaskOutcome::Completed.is_success());
         assert!(!TaskOutcome::Canceled.is_success());
         assert!(!TaskOutcome::Panicked.is_success());
+        assert!(
+            !TaskOutcome::Rejected {
+                reason: Arc::from("queue_full"),
+            }
+            .is_success()
+        );
     }
 
     #[test]

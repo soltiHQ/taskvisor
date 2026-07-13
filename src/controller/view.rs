@@ -45,11 +45,14 @@ pub struct SlotView {
     /// Current controller status for this slot.
     pub status: SlotStatusKind,
 
-    /// Current slot owner, if any.
+    /// Identity of the current slot owner, if any.
     ///
     /// Present for `Admitting`, `Running`, and `Terminating`.
     /// Absent for `Idle`.
-    pub running: Option<TaskId>,
+    ///
+    /// In `Admitting`, this identity has been allocated for the controller
+    /// submission but the runtime registry has not accepted it yet.
+    pub owner_id: Option<TaskId>,
 
     /// Number of pending submissions in this slot's queue.
     ///

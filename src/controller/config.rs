@@ -31,6 +31,7 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 /// assert_eq!(config.max_slot_queue(), 100);
 /// ```
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ControllerConfig {
     /// Capacity of the ordered controller command channel.
     ///
@@ -41,9 +42,10 @@ pub struct ControllerConfig {
     /// When it is full:
     /// - `submit()` waits for capacity,
     /// - `submit_and_watch()` waits for capacity,
-    /// - `try_submit()` returns [`ControllerError::Full`](crate::ControllerError::Full).
+    /// - `try_submit()` and `try_submit_and_watch()` return [`ControllerError::Full`](crate::ControllerError::Full),
     /// - `remove()`, `cancel()`, and `cancel_with_timeout()` wait for capacity,
-    /// - `try_remove()` returns [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull).
+    /// - `try_remove()`, `try_cancel()`, and `try_cancel_with_timeout()` return
+    ///   [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull).
     ///
     /// The non-zero type makes an unusable zero-capacity channel impossible to configure.
     queue_capacity: NonZeroUsize,
@@ -67,7 +69,6 @@ impl ControllerConfig {
     /// `queue_capacity` is non-zero by type. `max_slot_queue = 0` is valid and
     /// rejects FIFO `Queue` submissions behind a busy slot. `Replace` may still
     /// retain one latest replacement.
-    #[must_use]
     pub const fn new(queue_capacity: NonZeroUsize, max_slot_queue: usize) -> Self {
         Self {
             queue_capacity,
@@ -102,7 +103,6 @@ impl ControllerConfig {
     }
 
     /// Sets the capacity of the ordered controller command channel.
-    #[must_use]
     pub const fn with_queue_capacity(mut self, queue_capacity: NonZeroUsize) -> Self {
         self.queue_capacity = queue_capacity;
         self
@@ -123,7 +123,6 @@ impl ControllerConfig {
     ///
     /// `0` rejects `Queue` submissions behind a busy slot. `Replace` may still
     /// retain one latest replacement.
-    #[must_use]
     pub const fn with_max_slot_queue(mut self, max_slot_queue: usize) -> Self {
         self.max_slot_queue = max_slot_queue;
         self

@@ -50,6 +50,9 @@ pub enum RestartPolicy {
     ///
     /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
     /// Fatal errors and cooperative cancellation stop the task.
+    ///
+    /// This is an input/configuration variant: its field shape is intentionally stable and
+    /// remains directly constructible, even though [`RestartPolicy`] itself is non-exhaustive.
     Always {
         /// Wait time between a successful completion and the next run.
         ///

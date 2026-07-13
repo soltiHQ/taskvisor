@@ -27,7 +27,7 @@
 //! - `kind`: event type.
 //!
 //! Correlation fields:
-//! - `id`: runtime task identity, when the event belongs to a task run.
+//! - `id`: Taskvisor submission/run identity, when the event belongs to managed work.
 //! - `attempt`: task attempt number, starting from 1.
 //! - `task`: a task name or subscriber name.
 //!
@@ -348,6 +348,24 @@ pub enum BackoffSource {
     Failure,
 }
 
+impl BackoffSource {
+    /// Returns the stable machine-readable label used by logs and metrics.
+    ///
+    /// ```rust
+    /// use taskvisor::BackoffSource;
+    ///
+    /// assert_eq!(BackoffSource::Success.as_label(), "success");
+    /// assert_eq!(BackoffSource::Failure.as_label(), "failure");
+    /// ```
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            BackoffSource::Success => "success",
+            BackoffSource::Failure => "failure",
+        }
+    }
+}
+
 /// Runtime event with optional metadata.
 ///
 /// - `at`: wall-clock timestamp (for logs)
@@ -382,10 +400,11 @@ pub struct Event {
     pub attempt: Option<u32>,
     /// Name of the task, if applicable. A free-form human **label** (not an identity).
     pub task: Option<Arc<str>>,
-    /// Runtime identity of the task run instance this event belongs to, if applicable.
+    /// Submission/run identity this event belongs to, if applicable.
     ///
     /// This is the canonical correlation key: unlike [`task`](Self::task) (a human label
-    /// that may repeat), a [`TaskId`] is unique per run instance and never reused.
+    /// that may repeat), a [`TaskId`] is unique per submission and never reused. Controller
+    /// events may carry it before runtime admission.
     pub id: Option<TaskId>,
     /// Numeric exit code, from a process-like runtime.
     /// `None` for events that have no process behind them.
@@ -432,7 +451,7 @@ impl Event {
         self
     }
 
-    /// Attaches the runtime task identity ([`TaskId`]).
+    /// Attaches the submission/run identity ([`TaskId`]).
     #[inline]
     #[must_use]
     pub fn with_id(mut self, id: TaskId) -> Self {
@@ -483,20 +502,26 @@ impl Event {
         self
     }
 
+    /// Attaches the source that caused a backoff to be scheduled.
+    #[inline]
+    #[must_use]
+    pub fn with_backoff_source(mut self, source: BackoffSource) -> Self {
+        self.backoff_source = Some(source);
+        self
+    }
+
     /// Marks that this backoff comes from a successful attempt.
     #[inline]
     #[must_use]
-    pub fn with_backoff_success(mut self) -> Self {
-        self.backoff_source = Some(BackoffSource::Success);
-        self
+    pub fn with_backoff_success(self) -> Self {
+        self.with_backoff_source(BackoffSource::Success)
     }
 
     /// Marks that this backoff comes from a failed attempt.
     #[inline]
     #[must_use]
-    pub fn with_backoff_failure(mut self) -> Self {
-        self.backoff_source = Some(BackoffSource::Failure);
-        self
+    pub fn with_backoff_failure(self) -> Self {
+        self.with_backoff_source(BackoffSource::Failure)
     }
 
     /// Creates a subscriber overflow event.
@@ -678,6 +703,32 @@ mod tests {
                 .with_exit_code(-1)
                 .exit_code,
             Some(-1)
+        );
+    }
+
+    #[test]
+    fn backoff_source_labels_are_stable() {
+        assert_eq!(BackoffSource::Success.as_label(), "success");
+        assert_eq!(BackoffSource::Failure.as_label(), "failure");
+    }
+
+    #[test]
+    fn generic_and_convenience_backoff_builders_agree() {
+        let generic =
+            Event::new(EventKind::BackoffScheduled).with_backoff_source(BackoffSource::Failure);
+        assert_eq!(generic.backoff_source, Some(BackoffSource::Failure));
+
+        assert_eq!(
+            Event::new(EventKind::BackoffScheduled)
+                .with_backoff_success()
+                .backoff_source,
+            Some(BackoffSource::Success)
+        );
+        assert_eq!(
+            Event::new(EventKind::BackoffScheduled)
+                .with_backoff_failure()
+                .backoff_source,
+            Some(BackoffSource::Failure)
         );
     }
 

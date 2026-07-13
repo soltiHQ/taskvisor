@@ -30,6 +30,7 @@
 //! ## Example
 //!
 //! ```rust
+//! use std::num::NonZeroUsize;
 //! use taskvisor::{Event, EventKind, Subscribe};
 //!
 //! struct Metrics;
@@ -42,11 +43,17 @@
 //!     }
 //!
 //!     fn name(&self) -> &str { "metrics" }
-//!     fn queue_capacity(&self) -> usize { 2048 }
+//!     fn queue_capacity(&self) -> NonZeroUsize {
+//!         NonZeroUsize::new(2048).unwrap()
+//!     }
 //! }
 //! ```
 
+use std::num::NonZeroUsize;
+
 use crate::events::Event;
+
+const DEFAULT_QUEUE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 /// Event subscriber for runtime observability.
 ///
@@ -78,11 +85,27 @@ pub trait Subscribe: Send + Sync + 'static {
 
     /// Returns this subscriber's preferred queue capacity.
     ///
-    /// The runtime clamps this value to at least `1`.
+    /// The return type guarantees that the queue can hold at least one event.
     /// If the queue is full, ordinary events are dropped for this subscriber and reported as `SubscriberOverflow`.
     ///
     /// Default: `1024`.
-    fn queue_capacity(&self) -> usize {
-        1024
+    fn queue_capacity(&self) -> NonZeroUsize {
+        DEFAULT_QUEUE_CAPACITY
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefaultCapacity;
+
+    impl Subscribe for DefaultCapacity {
+        fn on_event(&self, _event: &Event) {}
+    }
+
+    #[test]
+    fn default_queue_capacity_is_1024() {
+        assert_eq!(DefaultCapacity.queue_capacity().get(), 1024);
     }
 }

@@ -30,7 +30,9 @@ pub(super) enum IdentityOperation {
     Remove,
     TryRemove,
     Cancel,
+    TryCancel,
     CancelWithTimeout(std::time::Duration),
+    TryCancelWithTimeout(std::time::Duration),
 }
 
 impl IdentityOperation {
@@ -38,7 +40,10 @@ impl IdentityOperation {
     pub(super) fn request_reason(self) -> Option<&'static str> {
         match self {
             Self::Remove | Self::TryRemove => None,
-            Self::Cancel | Self::CancelWithTimeout(_) => Some("manual_cancel"),
+            Self::Cancel
+            | Self::TryCancel
+            | Self::CancelWithTimeout(_)
+            | Self::TryCancelWithTimeout(_) => Some("manual_cancel"),
         }
     }
 }

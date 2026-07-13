@@ -82,6 +82,30 @@ impl ControllerHandle {
         Ok((id, rx))
     }
 
+    /// Tries to send a watched submission without waiting for command-channel capacity.
+    ///
+    /// The returned receiver has the same completion semantics as [`submit_and_watch`](Self::submit_and_watch).
+    /// `ControllerError::Full` means the controller command channel is full, not that the target
+    /// slot rejected the submission.
+    pub fn try_submit_and_watch(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
+        let id = TaskId::next();
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .try_send(ControllerCommand::Submit(Submission {
+                id,
+                spec,
+                done: Some(tx),
+            }))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => ControllerError::Full,
+                mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
+            })?;
+        Ok((id, rx))
+    }
+
     /// Sends one waiting identity operation to the ordered controller command channel.
     async fn manage_identity(
         &self,
@@ -133,12 +157,26 @@ impl ControllerHandle {
         self.manage_identity(id, IdentityOperation::Cancel).await
     }
 
+    pub(crate) async fn try_cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        self.try_manage_identity(id, IdentityOperation::TryCancel)
+            .await
+    }
+
     pub(crate) async fn cancel_with_timeout(
         &self,
         id: TaskId,
         wait_for: std::time::Duration,
     ) -> Result<bool, RuntimeError> {
         self.manage_identity(id, IdentityOperation::CancelWithTimeout(wait_for))
+            .await
+    }
+
+    pub(crate) async fn try_cancel_with_timeout(
+        &self,
+        id: TaskId,
+        wait_for: std::time::Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.try_manage_identity(id, IdentityOperation::TryCancelWithTimeout(wait_for))
             .await
     }
 }

@@ -63,13 +63,13 @@ use crate::TaskSpec;
 #[must_use]
 pub struct ControllerSpec {
     /// Admission policy used when the target slot is busy.
-    pub admission: AdmissionPolicy,
+    admission: AdmissionPolicy,
 
     /// Task execution specification.
     ///
     /// The task name inside this spec remains the runtime task name.
     /// The controller slot may be the same name, or a separate grouping key set with [`with_slot`](Self::with_slot).
-    pub task_spec: TaskSpec,
+    task_spec: TaskSpec,
 
     /// Admission slot key.
     ///
@@ -100,6 +100,40 @@ impl ControllerSpec {
         }
     }
 
+    /// Returns the admission policy used when the target slot is busy.
+    #[must_use]
+    pub fn admission(&self) -> AdmissionPolicy {
+        self.admission
+    }
+
+    /// Sets the admission policy used when the target slot is busy.
+    pub fn with_admission(mut self, admission: AdmissionPolicy) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    /// Returns the task execution specification.
+    #[must_use = "use the returned task specification"]
+    pub fn task_spec(&self) -> &TaskSpec {
+        &self.task_spec
+    }
+
+    /// Replaces the task execution specification.
+    ///
+    /// When no explicit slot is configured, the effective slot changes to the
+    /// name of the replacement task. An explicit slot is preserved.
+    pub fn with_task_spec(mut self, task_spec: TaskSpec) -> Self {
+        self.task_spec = task_spec;
+        self
+    }
+
+    /// Consumes this submission spec and returns its task execution specification.
+    ///
+    /// Controller-only metadata such as the admission policy and slot override is discarded.
+    pub fn into_task_spec(self) -> TaskSpec {
+        self.task_spec
+    }
+
     /// Sets the admission slot key.
     ///
     /// The slot is the controller's concurrency unit: only one task can occupy a slot at a time.
@@ -111,17 +145,30 @@ impl ControllerSpec {
         self
     }
 
+    /// Removes an explicit slot override.
+    ///
+    /// After this call, [`slot_name`](Self::slot_name) falls back to the current
+    /// task name.
+    pub fn without_slot(mut self) -> Self {
+        self.slot = None;
+        self
+    }
+
     /// Returns the effective slot key.
     ///
     /// If [`with_slot`](Self::with_slot) was not used, this returns the task name from [`TaskSpec::name`](crate::TaskSpec::name).
+    #[must_use]
     pub fn slot_name(&self) -> &str {
         self.slot
             .as_deref()
             .unwrap_or_else(|| self.task_spec.name())
     }
 
-    /// Returns an explicit slot without calling user-provided task metadata.
-    pub(super) fn configured_slot(&self) -> Option<&str> {
+    /// Returns the explicit slot override, if one was configured.
+    ///
+    /// Unlike [`slot_name`](Self::slot_name), this does not fall back to the task name.
+    #[must_use]
+    pub fn slot_override(&self) -> Option<&str> {
         self.slot.as_deref()
     }
 
@@ -166,15 +213,15 @@ mod tests {
     #[test]
     fn convenience_constructors_set_correct_policy() {
         assert_eq!(
-            ControllerSpec::queue(make_spec("t")).admission,
+            ControllerSpec::queue(make_spec("t")).admission(),
             AdmissionPolicy::Queue
         );
         assert_eq!(
-            ControllerSpec::replace(make_spec("t")).admission,
+            ControllerSpec::replace(make_spec("t")).admission(),
             AdmissionPolicy::Replace
         );
         assert_eq!(
-            ControllerSpec::drop_if_running(make_spec("t")).admission,
+            ControllerSpec::drop_if_running(make_spec("t")).admission(),
             AdmissionPolicy::DropIfRunning
         );
     }
@@ -189,6 +236,30 @@ mod tests {
     fn slot_name_uses_explicit_slot() {
         let cs = ControllerSpec::queue(make_spec("runner-web-7")).with_slot("web");
         assert_eq!(cs.slot_name(), "web");
-        assert_eq!(cs.task_spec.name(), "runner-web-7");
+        assert_eq!(cs.slot_override(), Some("web"));
+        assert_eq!(cs.task_spec().name(), "runner-web-7");
+    }
+
+    #[test]
+    fn without_slot_restores_task_name_fallback() {
+        let cs = ControllerSpec::queue(make_spec("runner-web-7"))
+            .with_slot("web")
+            .without_slot();
+
+        assert_eq!(cs.slot_override(), None);
+        assert_eq!(cs.slot_name(), "runner-web-7");
+    }
+
+    #[test]
+    fn builders_replace_private_components() {
+        let cs = ControllerSpec::queue(make_spec("old"))
+            .with_slot("shared")
+            .with_admission(AdmissionPolicy::Replace)
+            .with_task_spec(make_spec("new"));
+
+        assert_eq!(cs.admission(), AdmissionPolicy::Replace);
+        assert_eq!(cs.task_spec().name(), "new");
+        assert_eq!(cs.slot_name(), "shared");
+        assert_eq!(cs.into_task_spec().name(), "new");
     }
 }

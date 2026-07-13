@@ -51,8 +51,12 @@ impl Controller {
                 IdentityOperation::Remove => supervisor.remove(id).await,
                 IdentityOperation::TryRemove => supervisor.try_remove(id).await,
                 IdentityOperation::Cancel => supervisor.cancel(id).await,
+                IdentityOperation::TryCancel => supervisor.try_cancel(id).await,
                 IdentityOperation::CancelWithTimeout(wait_for) => {
                     supervisor.cancel_with_timeout(id, wait_for).await
+                }
+                IdentityOperation::TryCancelWithTimeout(wait_for) => {
+                    supervisor.try_cancel_with_timeout(id, wait_for).await
                 }
             };
             reply.send(result);

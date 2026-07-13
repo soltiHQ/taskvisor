@@ -55,8 +55,8 @@ impl Controller {
         }
 
         let slot_name: Arc<str> = Arc::from(spec.slot_name());
-        let admission = spec.admission;
-        let task_spec = spec.task_spec;
+        let admission = spec.admission();
+        let task_spec = spec.into_task_spec();
 
         let slot_arc = self.get_or_create_slot(&slot_name);
         let mut slot = slot_arc.lock().await;

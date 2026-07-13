@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -93,8 +94,8 @@ impl Subscribe for EventCollector {
         "collector"
     }
 
-    fn queue_capacity(&self) -> usize {
-        8192
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(8192).unwrap()
     }
 }
 

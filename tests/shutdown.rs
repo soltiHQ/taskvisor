@@ -3,6 +3,7 @@
 mod common;
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Poll;
@@ -82,8 +83,8 @@ impl Subscribe for BlockingSubscriber {
         "blocking-shutdown"
     }
 
-    fn queue_capacity(&self) -> usize {
-        64
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(64).unwrap()
     }
 }
 
@@ -410,18 +411,18 @@ async fn concurrent_shutdown_waiters_share_grace_exceeded() {
     .await;
 
     let (first_grace, first_stuck) = match first_result {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => (grace, stuck),
         other => panic!("first caller must receive GraceExceeded, got {other:?}"),
     };
     let (second_grace, second_stuck) = match second_result {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => (grace, stuck),
         other => panic!("second caller must receive GraceExceeded, got {other:?}"),
     };
     assert_eq!(first_grace, grace);
     assert_eq!(second_grace, grace);
     assert_eq!(first_stuck, second_stuck, "callers need the same snapshot");
     let (late_grace, late_stuck) = match late.shutdown().await {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => (grace, stuck),
         other => panic!("late caller must receive GraceExceeded, got {other:?}"),
     };
     assert_eq!(late_grace, grace);
@@ -629,7 +630,7 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
         .unwrap();
 
     match with_timeout(5, handle.shutdown()).await {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => {
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => {
             assert_eq!(grace, Duration::from_millis(200));
             assert!(stuck.iter().any(|n| &**n == "stubborn"));
         }
@@ -688,7 +689,7 @@ async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
         .unwrap();
 
     match with_timeout(5, handle.shutdown()).await {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => {
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => {
             assert_eq!(grace, Duration::ZERO);
             assert!(stuck.iter().any(|n| &**n == "z"));
         }

@@ -407,7 +407,7 @@ impl TaskActor {
                         };
                     }
 
-                    let delay = self.params.backoff.next(backoff_attempt);
+                    let delay = self.params.backoff.delay_for_retry(backoff_attempt);
                     backoff_attempt = backoff_attempt.saturating_add(1);
 
                     self.bus.publish(

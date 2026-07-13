@@ -126,7 +126,7 @@ impl SubscriberSet {
         let definitions = subs
             .into_iter()
             .map(|subscriber| SubscriberDefinition {
-                capacity: subscriber.queue_capacity().max(1),
+                capacity: subscriber.queue_capacity().get(),
                 name: Arc::from(subscriber.name()),
                 subscriber,
             })
@@ -322,6 +322,7 @@ fn extract_panic_info(panic_err: &Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
     use crate::events::EventKind;
+    use std::num::NonZeroUsize;
     use std::sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -358,7 +359,7 @@ mod tests {
 
     struct CountingSub {
         count: Arc<AtomicU64>,
-        capacity: usize,
+        capacity: NonZeroUsize,
     }
 
     impl CountingSub {
@@ -366,7 +367,8 @@ mod tests {
             let count = Arc::new(AtomicU64::new(0));
             let sub = Arc::new(Self {
                 count: Arc::clone(&count),
-                capacity,
+                capacity: NonZeroUsize::new(capacity)
+                    .expect("test subscriber capacity must be non-zero"),
             });
             (count, sub)
         }
@@ -379,7 +381,7 @@ mod tests {
         fn name(&self) -> &str {
             "counting"
         }
-        fn queue_capacity(&self) -> usize {
+        fn queue_capacity(&self) -> NonZeroUsize {
             self.capacity
         }
     }
@@ -394,7 +396,11 @@ mod tests {
         );
 
         let state = set.state.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(matches!(&*state, SubscriberState::Pending(definitions) if definitions.len() == 1));
+        let SubscriberState::Pending(definitions) = &*state else {
+            panic!("subscriber set must remain pending until start")
+        };
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].capacity, 8);
         assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 
@@ -463,8 +469,8 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
-        fn queue_capacity(&self) -> usize {
-            16
+        fn queue_capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(16).unwrap()
         }
     }
 
@@ -481,8 +487,8 @@ mod tests {
         fn name(&self) -> &str {
             "recorder"
         }
-        fn queue_capacity(&self) -> usize {
-            64
+        fn queue_capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(64).unwrap()
         }
     }
 
@@ -534,8 +540,8 @@ mod tests {
             "blocking-order"
         }
 
-        fn queue_capacity(&self) -> usize {
-            4
+        fn queue_capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(4).unwrap()
         }
     }
 

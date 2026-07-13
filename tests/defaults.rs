@@ -18,7 +18,7 @@ fn pending(name: &str) -> TaskRef {
 }
 
 fn timeout_defaults() -> TaskDefaults {
-    TaskDefaults::default().with_timeout(Some(Duration::from_millis(20)))
+    TaskDefaults::default().with_timeout(Duration::from_millis(20))
 }
 
 #[tokio::test(flavor = "current_thread")]

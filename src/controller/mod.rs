@@ -64,10 +64,19 @@
 //!
 //! - Build submissions with [`ControllerSpec::queue`], [`ControllerSpec::replace`], or [`ControllerSpec::drop_if_running`].
 //! - Configure with `Supervisor::builder(...).with_controller(ControllerConfig)`.
-//! - Submit with `SupervisorHandle::submit`, `try_submit`, or `submit_and_watch`.
+//! - Submit with `SupervisorHandle::submit`, `try_submit`, `submit_and_watch`, or
+//!   `try_submit_and_watch`.
 //! - Remove or cancel by the [`TaskId`](crate::TaskId) returned from submission; queued work is
 //!   removed through the reliable controller command path before registry fallback.
 //! - Inspect live slot state with `SupervisorHandle::controller_snapshot`.
+//!
+//! The returned `TaskId` is allocated for the controller submission before runtime admission.
+//! If admission succeeds, the same ID becomes the runtime task identity. Before then, it still
+//! identifies queued or admitting work for cancellation and event correlation.
+//!
+//! A watched submission that never reaches successful runtime admission resolves to
+//! [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected). Once admitted, its waiter resolves to
+//! the runtime task's terminal outcome.
 //!
 //! ## Events
 //!

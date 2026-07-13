@@ -22,7 +22,7 @@ async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries()
         Ok(())
     });
     let spec = TaskSpec::restartable(task)
-        .with_timeout(Some(Duration::from_millis(50)))
+        .with_timeout(Duration::from_millis(50))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(1).unwrap());
     with_timeout(10, sup.run(vec![spec]))
@@ -84,7 +84,7 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
         }
     });
     let spec = TaskSpec::restartable(task)
-        .with_timeout(Some(Duration::from_millis(50)))
+        .with_timeout(Duration::from_millis(50))
         .with_backoff(fast_backoff());
     with_timeout(10, sup.run(vec![spec]))
         .await
@@ -132,7 +132,7 @@ async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
         tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(())
     });
-    let spec = TaskSpec::once(task).with_timeout(Some(Duration::ZERO));
+    let spec = TaskSpec::once(task).with_timeout(Duration::ZERO);
     with_timeout(5, sup.run(vec![spec]))
         .await
         .expect("run() should return Ok");

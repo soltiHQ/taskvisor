@@ -11,11 +11,15 @@ const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 const DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration value rejected by a checked convenience setter.
+///
+/// Match with a wildcard arm because the enum and its data-carrying variants
+/// are non-exhaustive.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
 pub enum ConfigError {
     /// A value that must be positive was zero.
     #[error("{field} must be greater than zero")]
+    #[non_exhaustive]
     Zero {
         /// Stable configuration field name.
         field: &'static str,
@@ -41,6 +45,21 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
+    /// Creates the default runtime configuration in a const context.
+    ///
+    /// This has the same values as [`Default::default`]. The
+    /// explicit constructor makes the `const` getters and setters usable for
+    /// compile-time configuration.
+    pub const fn new() -> Self {
+        Self {
+            grace: Duration::from_secs(60),
+            subscriber_shutdown_timeout: DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT,
+            max_concurrent: None,
+            bus_capacity: DEFAULT_CAPACITY,
+            registry_queue_capacity: DEFAULT_CAPACITY,
+        }
+    }
+
     /// Returns the graceful task-shutdown window.
     ///
     /// `Duration::ZERO` means no graceful wait before force-abort.
@@ -90,6 +109,9 @@ impl SupervisorConfig {
     }
 
     /// Sets or clears the global task-attempt concurrency limit.
+    ///
+    /// This method accepts an explicit `Option` so it remains usable in const
+    /// contexts. `NonZeroUsize::new(value)` already produces the required form.
     pub const fn with_max_concurrent(mut self, max_concurrent: Option<NonZeroUsize>) -> Self {
         self.max_concurrent = max_concurrent;
         self
@@ -157,13 +179,7 @@ impl Default for SupervisorConfig {
     /// - event bus capacity: 1024,
     /// - registry command capacity: 1024.
     fn default() -> Self {
-        Self {
-            grace: Duration::from_secs(60),
-            subscriber_shutdown_timeout: DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT,
-            max_concurrent: None,
-            bus_capacity: DEFAULT_CAPACITY,
-            registry_queue_capacity: DEFAULT_CAPACITY,
-        }
+        Self::new()
     }
 }
 
@@ -173,8 +189,14 @@ mod tests {
 
     #[test]
     fn default_contract_is_explicit() {
+        const CONFIG: SupervisorConfig = SupervisorConfig::new();
+        const LIMITED: SupervisorConfig =
+            SupervisorConfig::new().with_max_concurrent(NonZeroUsize::new(4));
         let config = SupervisorConfig::default();
 
+        assert_eq!(CONFIG.grace(), config.grace());
+        assert_eq!(CONFIG.max_concurrent(), config.max_concurrent());
+        assert_eq!(LIMITED.max_concurrent().map(NonZeroUsize::get), Some(4));
         assert_eq!(config.grace(), Duration::from_secs(60));
         assert_eq!(config.subscriber_shutdown_timeout(), Duration::from_secs(5));
         assert_eq!(config.max_concurrent(), None);

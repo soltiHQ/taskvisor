@@ -167,6 +167,25 @@ impl SupervisorHandle {
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
+    /// Tries to add a watched task without waiting for command queue capacity.
+    ///
+    /// When queue admission succeeds, this still waits for the direct registry reply before
+    /// returning the [`TaskWaiter`]. The registration and completion semantics are otherwise the
+    /// same as [`add_and_watch`](Self::add_and_watch).
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
+    pub async fn try_add_and_watch(
+        &self,
+        spec: TaskSpec,
+    ) -> Result<(TaskId, TaskWaiter), RuntimeError> {
+        let (id, done_rx) = self.core().try_add_task_watched(spec).await?;
+        Ok((id, TaskWaiter::new(id, done_rx)))
+    }
+
     /// Removes a task by identity.
     ///
     /// With a configured controller, this first orders the id after earlier submissions.
@@ -221,6 +240,9 @@ impl SupervisorHandle {
     /// `Ok(false)` means there was no registered owner to claim.
     /// This does not wait for terminal task cleanup.
     /// Queued controller submissions are not registered label owners; remove them by the [`TaskId`] returned from `submit` or `submit_and_watch`.
+    /// This method waits for registry command capacity. Use
+    /// [`try_remove_by_label`](Self::try_remove_by_label) for fail-fast admission.
+    /// Once the registry command is committed, dropping the caller does not undo removal.
     ///
     /// # Errors
     ///
@@ -229,24 +251,48 @@ impl SupervisorHandle {
         self.core().remove_by_label(Arc::from(name)).await
     }
 
+    /// Tries to remove the task currently holding `name` without waiting for registry queue capacity.
+    ///
+    /// Queued controller submissions are not registered label owners. When command admission
+    /// succeeds, this still waits for the authoritative registry reply, and the result has the
+    /// same meaning as [`remove_by_label`](Self::remove_by_label). Once the registry command is
+    /// committed, dropping the caller does not undo removal.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn try_remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.core().try_remove_by_label(Arc::from(name)).await
+    }
+
     /// Returns registered tasks as `(id, label)` pairs.
     ///
     /// The list comes from the registry and is sorted by [`TaskId`].
     /// It includes both `Registered` and `Removing` tasks.
     ///
-    /// See [`snapshot`](Self::snapshot) for the best-effort list of task names currently marked alive.
+    /// See [`alive_snapshot`](Self::alive_snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.core().list_tasks().await
     }
 
-    /// Returns task names currently marked alive.
+    /// Returns a best-effort snapshot of task names currently marked alive.
     ///
     /// This is a best-effort view from the alive tracker, which is fed by the lossy event bus.
     /// The result is sorted and deduplicated by task name.
     ///
     /// See [`list`](Self::list) for the authoritative registry view of registered tasks.
-    pub async fn snapshot(&self) -> Vec<Arc<str>> {
+    pub async fn alive_snapshot(&self) -> Vec<Arc<str>> {
         self.core().snapshot().await
+    }
+
+    /// Returns a best-effort snapshot of task names currently marked alive.
+    ///
+    /// This compatibility alias forwards to [`alive_snapshot`](Self::alive_snapshot).
+    /// Prefer the explicit name in new code so it is not confused with the authoritative
+    /// registry view from [`list`](Self::list).
+    pub async fn snapshot(&self) -> Vec<Arc<str>> {
+        self.alive_snapshot().await
     }
 
     /// Returns true if any task run with this name is currently marked alive.
@@ -258,11 +304,13 @@ impl SupervisorHandle {
     }
 
     /// Returns the immutable runtime configuration.
+    #[must_use = "inspect the returned runtime configuration"]
     pub fn runtime_config(&self) -> &crate::SupervisorConfig {
         self.core().runtime_config()
     }
 
     /// Returns the immutable task defaults applied during registry admission.
+    #[must_use = "inspect the returned task defaults"]
     pub fn task_defaults(&self) -> &crate::TaskDefaults {
         self.core().task_defaults()
     }
@@ -283,10 +331,11 @@ impl SupervisorHandle {
     /// may stop the operation. Once accepted, the controller owns both queued lookup and registry
     /// fallback, so dropping the caller does not undo cancellation.
     /// Without a controller, a registry Cancel command that was already committed also continues.
+    /// This method waits for controller and registry command capacity. Use
+    /// [`try_cancel`](Self::try_cancel) to fail fast when either bounded queue is full.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         #[cfg(feature = "controller")]
@@ -296,7 +345,30 @@ impl SupervisorHandle {
         self.core().cancel(id).await
     }
 
+    /// Tries to cancel queued or registered work without waiting for command queue capacity.
+    ///
+    /// When command admission succeeds, this has the same identity ordering, claimant result,
+    /// and terminal-completion semantics as [`cancel`](Self::cancel). With a configured
+    /// controller, both the ordered controller queue and the registry fallback are fail-fast.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::CommandQueueFull`] when a bounded controller or registry management queue has no capacity.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn try_cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &self.controller {
+            return controller.handle().try_cancel(id).await;
+        }
+        self.core().try_cancel(id).await
+    }
+
     /// Cancels the task currently holding `name`.
+    ///
+    /// Label lookup and the cancellation claim happen atomically in the registry. This waits for
+    /// registry command capacity, the authoritative claim decision, and terminal completion.
+    /// Once the registry command is committed, dropping the caller does not undo cancellation.
+    /// Use [`try_cancel_by_label`](Self::try_cancel_by_label) for fail-fast admission.
     ///
     /// # Errors
     ///
@@ -305,6 +377,76 @@ impl SupervisorHandle {
     /// returned [`TaskId`].
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().cancel_by_label(Arc::from(name)).await
+    }
+
+    /// Tries to cancel the task currently holding `name` without waiting for registry queue capacity.
+    ///
+    /// Queued controller submissions are not registered label owners. When command admission
+    /// succeeds, this still waits for the authoritative registry decision and terminal
+    /// completion. The result has the same meaning as [`cancel_by_label`](Self::cancel_by_label),
+    /// and dropping the caller does not undo a committed registry cancellation.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn try_cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.core().try_cancel_by_label(Arc::from(name)).await
+    }
+
+    /// Cancels the task currently holding `name` with an explicit confirmation window.
+    ///
+    /// Queued controller submissions are not registered label owners; cancel them by their
+    /// returned [`TaskId`]. Registry queue admission and the atomic label lookup/claim decision
+    /// are outside `wait_for`. The timer starts only while this caller waits for shared terminal
+    /// completion. A timeout does not stop removal, and dropping the caller does not undo a
+    /// committed registry cancellation.
+    ///
+    /// This method waits for registry command capacity. Use
+    /// [`try_cancel_by_label_with_timeout`](Self::try_cancel_by_label_with_timeout) for fail-fast
+    /// admission.
+    ///
+    /// On completion, the boolean follows the same claimant rules as
+    /// [`cancel_by_label`](Self::cancel_by_label).
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn cancel_by_label_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.core()
+            .cancel_by_label_with_timeout(Arc::from(name), wait_for)
+            .await
+    }
+
+    /// Tries to cancel the task currently holding `name` with an explicit confirmation window,
+    /// without waiting for registry queue capacity.
+    ///
+    /// Fail-fast behavior applies only to queue admission. Once admitted, this still waits for
+    /// the authoritative registry decision. That decision is outside `wait_for`; the timer only
+    /// bounds shared terminal completion. Queued controller submissions are not registered label
+    /// owners, and a timeout or dropped caller does not undo a committed cancellation.
+    ///
+    /// On completion, the boolean follows the same claimant rules as
+    /// [`cancel_by_label`](Self::cancel_by_label).
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
+    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn try_cancel_by_label_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.core()
+            .try_cancel_by_label_with_timeout(Arc::from(name), wait_for)
+            .await
     }
 
     /// Cancels a task with an explicit confirmation window.
@@ -317,13 +459,15 @@ impl SupervisorHandle {
     /// Once the ordered controller command is accepted, dropping this future does not stop its
     /// queued lookup or registry fallback.
     /// Without a controller, dropping the caller does not undo a committed registry cancellation.
+    /// This method waits for controller and registry command capacity. Use
+    /// [`try_cancel_with_timeout`](Self::try_cancel_with_timeout) to fail fast when either bounded
+    /// queue is full.
     ///
     /// On completion, the boolean follows the same claimant rules as [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::TaskRemoveTimeout`] when confirmation does not arrive in time.
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
+    /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel_with_timeout(
         &self,
@@ -335,6 +479,33 @@ impl SupervisorHandle {
             return controller.handle().cancel_with_timeout(id, wait_for).await;
         }
         self.core().cancel_with_timeout(id, wait_for).await
+    }
+
+    /// Tries to cancel a task with an explicit terminal-confirmation window without waiting for
+    /// command queue capacity.
+    ///
+    /// Command admission and the registry claim decision are outside `wait_for`, just as in
+    /// [`cancel_with_timeout`](Self::cancel_with_timeout). With a configured controller, both the
+    /// ordered controller queue and the registry fallback are fail-fast.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
+    /// - [`RuntimeError::CommandQueueFull`] when a bounded controller or registry management queue has no capacity.
+    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn try_cancel_with_timeout(
+        &self,
+        id: TaskId,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        #[cfg(feature = "controller")]
+        if let Some(controller) = &self.controller {
+            return controller
+                .handle()
+                .try_cancel_with_timeout(id, wait_for)
+                .await;
+        }
+        self.core().try_cancel_with_timeout(id, wait_for).await
     }
 
     /// Initiates graceful shutdown of the supervisor runtime.
@@ -418,6 +589,33 @@ impl SupervisorHandle {
         match &self.controller {
             Some(ctrl) => {
                 let (id, rx) = ctrl.handle().submit_and_watch(spec).await?;
+                Ok((id, TaskWaiter::new(id, rx)))
+            }
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
+    }
+
+    /// Tries to submit a watched task to the controller without waiting for command queue capacity.
+    ///
+    /// On success, the returned [`TaskWaiter`] has the same final-outcome semantics as
+    /// [`submit_and_watch`](Self::submit_and_watch). `Ok` means only that the ordered controller
+    /// channel accepted the submission; slot admission happens later.
+    ///
+    /// Requires the `controller` feature.
+    ///
+    /// # Errors
+    ///
+    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
+    /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
+    /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
+    #[cfg(feature = "controller")]
+    pub fn try_submit_and_watch(
+        &self,
+        spec: crate::controller::ControllerSpec,
+    ) -> Result<(TaskId, TaskWaiter), crate::controller::ControllerError> {
+        match &self.controller {
+            Some(ctrl) => {
+                let (id, rx) = ctrl.handle().try_submit_and_watch(spec)?;
                 Ok((id, TaskWaiter::new(id, rx)))
             }
             None => Err(crate::controller::ControllerError::NotConfigured),

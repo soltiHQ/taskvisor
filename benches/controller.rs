@@ -79,8 +79,8 @@ impl Subscribe for RemovalCounter {
         "removal-counter"
     }
 
-    fn queue_capacity(&self) -> usize {
-        65536
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(65536).unwrap()
     }
 }
 

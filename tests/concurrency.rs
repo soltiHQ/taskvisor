@@ -369,7 +369,7 @@ async fn rapid_short_lived_once_tasks_alive_tracker_converges_empty() {
         }
         assert!(
             poll_until(Duration::from_secs(15), || async {
-                handle.list().await.is_empty() && handle.snapshot().await.is_empty()
+                handle.list().await.is_empty() && handle.alive_snapshot().await.is_empty()
             })
             .await,
             "registry and alive-tracker must converge to empty"
@@ -398,7 +398,7 @@ async fn add_storm_with_concurrency_limit_bound_respected_no_deadlock() {
         );
 
         for _ in 0..150 {
-            let alive = handle.snapshot().await.len();
+            let alive = handle.alive_snapshot().await.len();
             assert!(alive <= 4, "alive {alive} exceeded max_concurrent=4");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -470,7 +470,7 @@ async fn controller_many_distinct_slots_all_settle() {
         }
         assert!(
             poll_until(Duration::from_secs(15), || async {
-                let snap = handle.snapshot().await;
+                let snap = handle.alive_snapshot().await;
                 (0..S).all(|s| snap.iter().any(|n| **n == format!("svc-{s}")))
             })
             .await,
@@ -508,7 +508,7 @@ async fn controller_replace_storm_single_slot_one_alive() {
         }
         let alive_in_family = || async {
             handle
-                .snapshot()
+                .alive_snapshot()
                 .await
                 .iter()
                 .filter(|n| n.starts_with("run-"))
@@ -561,7 +561,7 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
         assert!(
             poll_until(Duration::from_secs(10), || async {
                 let alive = handle
-                    .snapshot()
+                    .alive_snapshot()
                     .await
                     .iter()
                     .filter(|n| n.starts_with("d-"))
@@ -573,7 +573,7 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
         );
         for _ in 0..50 {
             let alive = handle
-                .snapshot()
+                .alive_snapshot()
                 .await
                 .iter()
                 .filter(|n| n.starts_with("d-"))

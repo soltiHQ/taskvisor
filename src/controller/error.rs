@@ -14,7 +14,7 @@ pub enum ControllerError {
 
     /// The ordered controller command queue is full.
     ///
-    /// Returned only by `try_submit`.
+    /// Returned only by `try_submit` and `try_submit_and_watch`.
     /// Use async `submit` or `submit_and_watch` if the caller should wait for command capacity instead of failing fast.
     #[error("submission queue full")]
     Full,

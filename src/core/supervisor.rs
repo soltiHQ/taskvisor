@@ -139,7 +139,8 @@ impl Supervisor {
     /// exists. A failed first call does not mark the supervisor as started, so
     /// it may be retried inside Tokio. Once started, later calls only create a
     /// handle and do not require the caller to be on a Tokio worker.
-    pub fn serve(self: &Arc<Self>) -> super::handle::SupervisorHandle {
+    #[must_use = "use the returned runtime handle to manage or shut down the supervisor"]
+    pub fn serve(&self) -> super::handle::SupervisorHandle {
         self.owner.core().start();
         #[cfg(feature = "controller")]
         self.start_controller();
@@ -173,11 +174,13 @@ impl Supervisor {
     }
 
     /// Returns the immutable runtime configuration.
+    #[must_use = "use the returned runtime configuration"]
     pub fn runtime_config(&self) -> &SupervisorConfig {
         self.owner.core().runtime_config()
     }
 
     /// Returns the immutable task defaults applied during registry admission.
+    #[must_use = "use the returned task defaults"]
     pub fn task_defaults(&self) -> &crate::TaskDefaults {
         self.owner.core().task_defaults()
     }

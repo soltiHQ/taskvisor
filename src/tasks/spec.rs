@@ -4,7 +4,10 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use crate::{
-    core::TaskDefaults, policies::BackoffPolicy, policies::RestartPolicy, tasks::task::TaskRef,
+    core::{ConfigError, TaskDefaults},
+    policies::BackoffPolicy,
+    policies::RestartPolicy,
+    tasks::task::TaskRef,
 };
 
 /// Converts `Some(Duration::ZERO)` to `None`.
@@ -41,7 +44,7 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 ///
 /// // Restartable with builder chain:
 /// let spec = TaskSpec::restartable(task.clone())
-///     .with_timeout(Some(Duration::from_secs(30)))
+///     .with_timeout(Duration::from_secs(30))
 ///     .with_max_retries(NonZeroU32::new(5).unwrap());
 ///
 /// // Named constructors inherit settings that they do not set:
@@ -143,19 +146,21 @@ impl TaskSpec {
     /// Prefer the named constructors for common cases:
     /// [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
     ///
-    /// A `Some(Duration::ZERO)` timeout is stored as `None` (no timeout).
+    /// Accepts either a [`Duration`] or an `Option<Duration>`; pass either form
+    /// directly without calling `.into()`.
+    /// `Duration::ZERO` and `Some(Duration::ZERO)` are stored as `None` (no timeout).
     /// The retry limit is explicitly set to unlimited. Change it with
     /// [`with_max_retries`](Self::with_max_retries).
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
         backoff: BackoffPolicy,
-        timeout: Option<Duration>,
+        timeout: impl Into<Option<Duration>>,
     ) -> Self {
         Self {
             restart: Override::Set(restart),
             backoff: Override::Set(backoff),
-            timeout: Override::Set(normalize_timeout(timeout)),
+            timeout: Override::Set(normalize_timeout(timeout.into())),
             max_retries: Override::Set(None),
             task,
         }
@@ -226,11 +231,13 @@ impl TaskSpec {
     }
 
     /// Returns the task handle.
+    #[must_use]
     pub fn task(&self) -> &TaskRef {
         &self.task
     }
 
     /// Returns the task name.
+    #[must_use]
     pub fn name(&self) -> &str {
         self.task.name()
     }
@@ -269,11 +276,13 @@ impl TaskSpec {
 
     /// Builder: sets the timeout.
     ///
+    /// Accepts either a `Duration` or an `Option<Duration>`; pass either form
+    /// directly without calling `.into()`.
     /// - Stored `Some(d)` is always a positive duration.
-    /// - `Some(Duration::ZERO)` is normalized to `None`.
+    /// - `Duration::ZERO` and `Some(Duration::ZERO)` are normalized to `None`.
     /// - `None` means explicitly disable an inherited timeout.
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = Override::Set(normalize_timeout(timeout));
+    pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.timeout = Override::Set(normalize_timeout(timeout.into()));
         self
     }
 
@@ -295,11 +304,24 @@ impl TaskSpec {
 
     /// Builder: set the failure-retry limit (`None` = unlimited).
     ///
-    /// Accepts a `NonZeroU32` (a limit) or an `Option<NonZeroU32>`.
+    /// Accepts a `NonZeroU32` (a limit) or an `Option<NonZeroU32>`; pass either
+    /// form directly without calling `.into()`.
     /// `None` explicitly disables an inherited retry limit.
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
         self.max_retries = Override::Set(max_retries.into());
         self
+    }
+
+    /// Convenience setter that validates a raw failure-retry limit.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Zero`] when `max_retries` is zero. Use
+    /// [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
+    pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
+        let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
+            field: "max_retries",
+        })?;
+        Ok(self.with_max_retries(max_retries))
     }
 
     /// Applies inherited task defaults and returns a concrete specification.
@@ -398,12 +420,7 @@ mod tests {
     fn new_marks_every_setting_as_explicit() {
         let backoff = BackoffPolicy::constant(Duration::from_secs(2));
         let timeout = Duration::from_secs(7);
-        let spec = TaskSpec::new(
-            task("explicit"),
-            RestartPolicy::Never,
-            backoff,
-            Some(timeout),
-        );
+        let spec = TaskSpec::new(task("explicit"), RestartPolicy::Never, backoff, timeout);
 
         assert!(matches!(
             spec.restart_override(),
@@ -435,7 +452,7 @@ mod tests {
     fn explicit_none_disables_inherited_optional_settings() {
         let retries = NonZeroU32::new(4).unwrap();
         let defaults = TaskDefaults::default()
-            .with_timeout(Some(Duration::from_secs(9)))
+            .with_timeout(Duration::from_secs(9))
             .with_max_retries(retries);
         let spec = TaskSpec::restartable(task("disabled"))
             .with_timeout(None)
@@ -455,7 +472,7 @@ mod tests {
         let defaults = TaskDefaults::default()
             .with_restart(RestartPolicy::Never)
             .with_backoff(BackoffPolicy::constant(Duration::from_secs(3)))
-            .with_timeout(Some(Duration::from_secs(12)))
+            .with_timeout(Duration::from_secs(12))
             .with_max_retries(retries);
         let spec = TaskSpec::restartable(task("worker"));
 
@@ -475,7 +492,7 @@ mod tests {
         let defaults = TaskDefaults::default()
             .with_restart(RestartPolicy::OnFailure)
             .with_backoff(BackoffPolicy::constant(Duration::from_secs(8)))
-            .with_timeout(Some(Duration::from_secs(9)))
+            .with_timeout(Duration::from_secs(9))
             .with_max_retries(NonZeroU32::new(3).unwrap());
         let spec = TaskSpec::new(
             task("explicit"),
@@ -493,10 +510,17 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_is_an_explicit_disabled_override() {
-        let via_builder = TaskSpec::once(task("z")).with_timeout(Some(Duration::ZERO));
+    fn with_timeout_accepts_duration_or_option_and_normalizes_zero() {
+        let via_duration = TaskSpec::once(task("zero-duration")).with_timeout(Duration::ZERO);
         assert_eq!(
-            via_builder.timeout_override(),
+            via_duration.timeout_override(),
+            Some(None),
+            "with_timeout(ZERO) must normalize to None"
+        );
+
+        let via_some = TaskSpec::once(task("zero-option")).with_timeout(Some(Duration::ZERO));
+        assert_eq!(
+            via_some.timeout_override(),
             Some(None),
             "with_timeout(Some(ZERO)) must normalize to None"
         );
@@ -513,11 +537,46 @@ mod tests {
             "new(.., Some(ZERO)) must normalize to None"
         );
 
-        let positive = TaskSpec::once(task("p")).with_timeout(Some(Duration::from_secs(1)));
+        let duration = Duration::from_secs(1);
+        let positive_duration = TaskSpec::once(task("positive-duration")).with_timeout(duration);
         assert_eq!(
-            positive.timeout_override(),
-            Some(Some(Duration::from_secs(1))),
-            "a positive timeout must be preserved"
+            positive_duration.timeout_override(),
+            Some(Some(duration)),
+            "a positive Duration must be preserved"
+        );
+
+        let positive_some = TaskSpec::once(task("positive-option")).with_timeout(Some(duration));
+        assert_eq!(
+            positive_some.timeout_override(),
+            Some(Some(duration)),
+            "a positive Some(Duration) must be preserved"
+        );
+
+        let disabled = TaskSpec::once(task("none-inference")).with_timeout(None);
+        assert_eq!(
+            disabled.timeout_override(),
+            Some(None),
+            "None must infer Option<Duration> and explicitly disable the timeout"
+        );
+    }
+
+    #[test]
+    fn raw_retry_limit_is_validated_like_task_defaults() {
+        let spec = TaskSpec::once(task("limited"))
+            .try_with_max_retries(3)
+            .expect("a positive retry limit must be accepted");
+        assert_eq!(
+            spec.max_retries_override().flatten().map(NonZeroU32::get),
+            Some(3)
+        );
+
+        assert_eq!(
+            TaskSpec::once(task("zero"))
+                .try_with_max_retries(0)
+                .unwrap_err(),
+            ConfigError::Zero {
+                field: "max_retries"
+            }
         );
     }
 }
