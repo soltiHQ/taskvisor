@@ -233,15 +233,21 @@ mod tests {
     }
 
     #[test]
-    fn is_cancelled_reflects_underlying_token() {
+    fn context_and_clone_share_underlying_cancellation_state() {
         let token = CancellationToken::new();
         let ctx = TaskContext::from_token(token.clone());
+        let clone = ctx.clone();
 
         assert!(!ctx.is_cancelled(), "fresh context must not be cancelled");
+        assert!(!clone.is_cancelled(), "fresh clone must not be cancelled");
         token.cancel();
         assert!(
             ctx.is_cancelled(),
             "context must observe the underlying token's cancellation"
+        );
+        assert!(
+            clone.is_cancelled(),
+            "a cloned context must share cancellation state with the original"
         );
     }
 
@@ -254,19 +260,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), ctx.cancelled())
             .await
             .expect("cancelled() must resolve promptly after the token is cancelled");
-    }
-
-    #[test]
-    fn clone_shares_cancellation_state() {
-        let token = CancellationToken::new();
-        let ctx = TaskContext::from_token(token.clone());
-        let clone = ctx.clone();
-
-        token.cancel();
-        assert!(
-            clone.is_cancelled(),
-            "a cloned context must share cancellation state with the original"
-        );
     }
 
     #[test]

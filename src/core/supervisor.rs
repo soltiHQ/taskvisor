@@ -201,7 +201,6 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaskContext, TaskFn, TaskRef};
     use std::time::Duration;
 
     #[tokio::test]
@@ -221,110 +220,5 @@ mod tests {
         })
         .await
         .expect("last-owner Drop must not leave a core ownership cycle");
-    }
-
-    #[tokio::test]
-    async fn shutdown_force_terminates_noncooperative_task_within_grace() {
-        let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(200));
-        let sup = Supervisor::new(cfg, vec![]);
-        let handle = sup.serve();
-
-        let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok(())
-        });
-        handle
-            .add(TaskSpec::once(stubborn))
-            .await
-            .expect("task should register");
-
-        let res = tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-            .await
-            .expect("shutdown must return within grace, not block on the stuck task");
-
-        match res {
-            Err(RuntimeError::GraceExceeded { stuck, .. }) => {
-                assert!(
-                    stuck.iter().any(|n| &**n == "stubborn"),
-                    "stuck set must list the non-cooperative task, got {stuck:?}"
-                );
-            }
-            other => panic!("expected GraceExceeded listing the stuck task, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn shutdown_cooperative_task_returns_ok() {
-        let cfg = SupervisorConfig::default().with_grace(Duration::from_secs(5));
-        let sup = Supervisor::new(cfg, vec![]);
-        let handle = sup.serve();
-
-        let good: TaskRef = TaskFn::arc("good", |ctx: TaskContext| async move {
-            ctx.cancelled().await;
-            Ok(())
-        });
-        handle
-            .add(TaskSpec::restartable(good))
-            .await
-            .expect("task should register");
-
-        let res = tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-            .await
-            .expect("cooperative shutdown must not hang");
-        assert!(
-            res.is_ok(),
-            "cooperative shutdown should be Ok, got {res:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn add_duplicate_name_returns_already_exists() {
-        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-        let handle = sup.serve();
-
-        let make = || -> TaskRef {
-            TaskFn::arc("dup", |ctx: TaskContext| async move {
-                ctx.cancelled().await;
-                Ok(())
-            })
-        };
-        handle
-            .add(TaskSpec::restartable(make()))
-            .await
-            .expect("first add should succeed");
-
-        let res = handle.add(TaskSpec::restartable(make())).await;
-        assert!(
-            matches!(res, Err(RuntimeError::TaskAlreadyExists { .. })),
-            "duplicate add must return TaskAlreadyExists, got {res:?}"
-        );
-
-        let _ = handle.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn cancel_reports_removed_then_absent() {
-        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-        let handle = sup.serve();
-
-        let t: TaskRef = TaskFn::arc("c", |ctx: TaskContext| async move {
-            ctx.cancelled().await;
-            Ok(())
-        });
-        let id = handle
-            .add(TaskSpec::restartable(t))
-            .await
-            .expect("add should succeed");
-
-        let removed = handle.cancel(id).await.expect("cancel should not error");
-        assert!(
-            removed,
-            "cancelling an existing task should report removed=true"
-        );
-
-        let absent = handle.cancel(id).await.expect("cancel should not error");
-        assert!(!absent, "cancelling a missing task should report false");
-
-        let _ = handle.shutdown().await;
     }
 }

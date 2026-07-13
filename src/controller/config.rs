@@ -163,19 +163,16 @@ mod tests {
 
     #[test]
     fn raw_zero_capacity_returns_a_clear_error() {
-        assert_eq!(
-            ControllerConfig::try_new(0, 10).unwrap_err(),
-            ConfigError::Zero {
-                field: "controller_queue_capacity"
-            }
-        );
-        assert_eq!(
-            ControllerConfig::default()
-                .try_with_queue_capacity(0)
-                .unwrap_err(),
-            ConfigError::Zero {
-                field: "controller_queue_capacity"
-            }
-        );
+        for result in [
+            ControllerConfig::try_new(0, 10),
+            ControllerConfig::default().try_with_queue_capacity(0),
+        ] {
+            assert_eq!(
+                result.unwrap_err(),
+                ConfigError::Zero {
+                    field: "controller_queue_capacity"
+                }
+            );
+        }
     }
 }

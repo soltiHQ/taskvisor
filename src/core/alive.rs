@@ -254,44 +254,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_starting_sets_alive() {
-        let tracker = AliveTracker::new();
+    async fn stale_and_equal_sequence_events_are_rejected() {
+        for (incoming_seq, case) in [(99, "stale"), (100, "equal")] {
+            let tracker = AliveTracker::new();
+            tracker.update(&ev(EventKind::TaskStopped, "t1", 100)).await;
 
-        let changed = tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await;
-        assert!(
-            changed,
-            "first TaskStarting should change alive from false to true"
-        );
-        assert!(tracker.is_alive("t1").await);
-    }
-
-    #[tokio::test]
-    async fn stale_event_rejected() {
-        let tracker = AliveTracker::new();
-        tracker.update(&ev(EventKind::TaskStopped, "t1", 100)).await;
-
-        let changed = tracker.update(&ev(EventKind::TaskStarting, "t1", 99)).await;
-        assert!(!changed, "stale event must not change state");
-        assert!(
-            !tracker.is_alive("t1").await,
-            "task must remain dead after stale event"
-        );
-    }
-
-    #[tokio::test]
-    async fn equal_seq_rejected() {
-        let tracker = AliveTracker::new();
-        tracker.update(&ev(EventKind::TaskStopped, "t1", 50)).await;
-
-        let changed = tracker.update(&ev(EventKind::TaskStarting, "t1", 50)).await;
-        assert!(!changed);
-        assert!(!tracker.is_alive("t1").await);
+            let changed = tracker
+                .update(&ev(EventKind::TaskStarting, "t1", incoming_seq))
+                .await;
+            assert!(!changed, "{case} event must not change state");
+            assert!(
+                !tracker.is_alive("t1").await,
+                "task must remain dead after a {case} event"
+            );
+        }
     }
 
     #[tokio::test]
     async fn task_removed_deletes_entry() {
         let tracker = AliveTracker::new();
-        tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await;
+        assert!(
+            tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await,
+            "first TaskStarting should change alive from false to true"
+        );
         assert!(tracker.is_alive("t1").await);
 
         let changed = tracker.update(&ev(EventKind::TaskRemoved, "t1", 2)).await;
@@ -313,12 +298,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_removed_for_unknown_task() {
+    async fn task_removed_for_unknown_task_is_a_noop() {
         let tracker = AliveTracker::new();
         let changed = tracker
             .update(&ev(EventKind::TaskRemoved, "ghost", 1))
             .await;
         assert!(!changed, "removing unknown task is a no-op");
+        assert!(!tracker.is_alive("ghost").await);
+        assert!(tracker.snapshot().await.is_empty());
     }
 
     #[tokio::test]
@@ -340,12 +327,6 @@ mod tests {
         let alive = tracker.snapshot().await;
         let names: Vec<&str> = alive.iter().map(|a| &**a).collect();
         assert_eq!(names, vec!["alpha", "charlie"]);
-    }
-
-    #[tokio::test]
-    async fn is_alive_unknown_returns_false() {
-        let tracker = AliveTracker::new();
-        assert!(!tracker.is_alive("nonexistent").await);
     }
 
     #[tokio::test]

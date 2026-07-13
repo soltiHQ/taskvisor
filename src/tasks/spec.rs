@@ -378,31 +378,35 @@ mod tests {
         TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) })
     }
 
+    fn assert_inherits_non_restart_settings(spec: &TaskSpec) {
+        assert!(spec.backoff_override().is_none());
+        assert!(spec.timeout_override().is_none());
+        assert!(spec.max_retries_override().is_none());
+    }
+
+    fn assert_explicit_timeout(spec: TaskSpec, expected: Option<Duration>, case: &str) {
+        assert_eq!(spec.timeout_override(), Some(expected), "{case}");
+    }
+
     #[test]
     fn named_constructors_set_restart_and_inherit_other_settings() {
         let inherited = TaskSpec::from_defaults(task("inherited"));
         assert!(inherited.restart_override().is_none());
-        assert!(inherited.backoff_override().is_none());
-        assert!(inherited.timeout_override().is_none());
-        assert!(inherited.max_retries_override().is_none());
+        assert_inherits_non_restart_settings(&inherited);
 
         let once = TaskSpec::once(task("once"));
         assert!(matches!(
             once.restart_override(),
             Some(RestartPolicy::Never)
         ));
-        assert!(once.backoff_override().is_none());
-        assert!(once.timeout_override().is_none());
-        assert!(once.max_retries_override().is_none());
+        assert_inherits_non_restart_settings(&once);
 
         let restartable = TaskSpec::restartable(task("restartable"));
         assert!(matches!(
             restartable.restart_override(),
             Some(RestartPolicy::OnFailure)
         ));
-        assert!(restartable.backoff_override().is_none());
-        assert!(restartable.timeout_override().is_none());
-        assert!(restartable.max_retries_override().is_none());
+        assert_inherits_non_restart_settings(&restartable);
 
         let every = Duration::from_secs(30);
         let spec = TaskSpec::periodic(task("tick"), every);
@@ -411,9 +415,17 @@ mod tests {
             "periodic must set RestartPolicy::Always with the given interval, got {:?}",
             spec.restart_override()
         );
-        assert!(spec.backoff_override().is_none());
-        assert!(spec.timeout_override().is_none());
-        assert!(spec.max_retries_override().is_none());
+        assert_inherits_non_restart_settings(&spec);
+
+        let immediate = TaskSpec::periodic(task("immediate"), Duration::ZERO);
+        assert!(
+            matches!(
+                immediate.restart_override(),
+                Some(RestartPolicy::Always { interval: None })
+            ),
+            "a zero interval must normalize to None (immediate restart), got {:?}",
+            immediate.restart_override()
+        );
     }
 
     #[test]
@@ -432,20 +444,6 @@ mod tests {
         );
         assert_eq!(spec.timeout_override(), Some(Some(timeout)));
         assert_eq!(spec.max_retries_override(), Some(None));
-    }
-
-    #[test]
-    fn periodic_zero_interval_normalizes_to_immediate_restart() {
-        let spec = TaskSpec::periodic(task("tick"), Duration::ZERO);
-
-        assert!(
-            matches!(
-                spec.restart_override(),
-                Some(RestartPolicy::Always { interval: None })
-            ),
-            "a zero interval must normalize to None (immediate restart), got {:?}",
-            spec.restart_override()
-        );
     }
 
     #[test]
@@ -511,52 +509,42 @@ mod tests {
 
     #[test]
     fn with_timeout_accepts_duration_or_option_and_normalizes_zero() {
-        let via_duration = TaskSpec::once(task("zero-duration")).with_timeout(Duration::ZERO);
-        assert_eq!(
-            via_duration.timeout_override(),
-            Some(None),
-            "with_timeout(ZERO) must normalize to None"
+        assert_explicit_timeout(
+            TaskSpec::once(task("zero-duration")).with_timeout(Duration::ZERO),
+            None,
+            "with_timeout(ZERO) must normalize to None",
         );
-
-        let via_some = TaskSpec::once(task("zero-option")).with_timeout(Some(Duration::ZERO));
-        assert_eq!(
-            via_some.timeout_override(),
-            Some(None),
-            "with_timeout(Some(ZERO)) must normalize to None"
+        assert_explicit_timeout(
+            TaskSpec::once(task("zero-option")).with_timeout(Some(Duration::ZERO)),
+            None,
+            "with_timeout(Some(ZERO)) must normalize to None",
         );
-
-        let via_new = TaskSpec::new(
-            task("z"),
-            RestartPolicy::Never,
-            BackoffPolicy::default(),
-            Some(Duration::ZERO),
-        );
-        assert_eq!(
-            via_new.timeout_override(),
-            Some(None),
-            "new(.., Some(ZERO)) must normalize to None"
+        assert_explicit_timeout(
+            TaskSpec::new(
+                task("z"),
+                RestartPolicy::Never,
+                BackoffPolicy::default(),
+                Some(Duration::ZERO),
+            ),
+            None,
+            "new(.., Some(ZERO)) must normalize to None",
         );
 
         let duration = Duration::from_secs(1);
-        let positive_duration = TaskSpec::once(task("positive-duration")).with_timeout(duration);
-        assert_eq!(
-            positive_duration.timeout_override(),
-            Some(Some(duration)),
-            "a positive Duration must be preserved"
+        assert_explicit_timeout(
+            TaskSpec::once(task("positive-duration")).with_timeout(duration),
+            Some(duration),
+            "a positive Duration must be preserved",
         );
-
-        let positive_some = TaskSpec::once(task("positive-option")).with_timeout(Some(duration));
-        assert_eq!(
-            positive_some.timeout_override(),
-            Some(Some(duration)),
-            "a positive Some(Duration) must be preserved"
+        assert_explicit_timeout(
+            TaskSpec::once(task("positive-option")).with_timeout(Some(duration)),
+            Some(duration),
+            "a positive Some(Duration) must be preserved",
         );
-
-        let disabled = TaskSpec::once(task("none-inference")).with_timeout(None);
-        assert_eq!(
-            disabled.timeout_override(),
-            Some(None),
-            "None must infer Option<Duration> and explicitly disable the timeout"
+        assert_explicit_timeout(
+            TaskSpec::once(task("none-inference")).with_timeout(None),
+            None,
+            "None must infer Option<Duration> and explicitly disable the timeout",
         );
     }
 

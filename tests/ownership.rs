@@ -3,10 +3,11 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common::{poll_until, with_timeout};
+#[cfg(feature = "controller")]
+use common::poll_until;
+use common::with_timeout;
 use taskvisor::prelude::*;
 
 struct NoopSubscriber;
@@ -107,17 +108,17 @@ async fn temporary_supervisor_transfers_ownership_to_serve_handle() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
-    let started = Arc::new(AtomicBool::new(false));
-    let canceled = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let canceled = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
     let task_canceled = Arc::clone(&canceled);
     let task = TaskFn::arc("last-owner-cancel", move |ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         let canceled = Arc::clone(&task_canceled);
         async move {
-            started.store(true, Ordering::SeqCst);
+            started.notify_one();
             ctx.cancelled().await;
-            canceled.store(true, Ordering::SeqCst);
+            canceled.notify_one();
             Ok(())
         }
     });
@@ -128,34 +129,26 @@ async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
         .add(TaskSpec::once(task))
         .await
         .expect("task must be admitted");
-    assert!(
-        poll_until(Duration::from_secs(2), || async {
-            started.load(Ordering::SeqCst)
-        })
-        .await,
-        "task must start before the last owner is dropped"
-    );
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("task must start before the last owner is dropped");
 
     drop(supervisor);
     drop(handle);
 
-    assert!(
-        poll_until(Duration::from_secs(2), || async {
-            canceled.load(Ordering::SeqCst)
-        })
-        .await,
-        "last-owner Drop must propagate cancellation"
-    );
+    tokio::time::timeout(Duration::from_secs(2), canceled.notified())
+        .await
+        .expect("last-owner Drop must propagate cancellation");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn watched_task_resolves_after_last_owner_drop() {
-    let started = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
     let task = TaskFn::arc("abandoned-watcher", move |_ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         async move {
-            started.store(true, Ordering::SeqCst);
+            started.notify_one();
             std::future::pending::<()>().await;
             Ok(())
         }
@@ -166,12 +159,9 @@ async fn watched_task_resolves_after_last_owner_drop() {
         .add_and_watch(TaskSpec::once(task))
         .await
         .expect("task must be admitted");
-    assert!(
-        poll_until(Duration::from_secs(2), || async {
-            started.load(Ordering::SeqCst)
-        })
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
-    );
+        .expect("task must start before owners are dropped");
 
     drop(supervisor);
     drop(handle);

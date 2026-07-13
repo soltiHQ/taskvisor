@@ -349,42 +349,48 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_stable_and_distinct() {
-        let outcomes = [
-            TaskOutcome::Completed,
-            TaskOutcome::Failed {
-                reason: Arc::from("x"),
-                exit_code: None,
-                source: None,
-            },
-            TaskOutcome::Fatal {
-                reason: Arc::from("x"),
-                exit_code: Some(1),
-                source: None,
-            },
-            TaskOutcome::Canceled,
-            TaskOutcome::ForceAborted,
-            TaskOutcome::Panicked,
-            TaskOutcome::Rejected {
-                reason: Arc::from("x"),
-            },
+    fn labels_and_success_flags_are_stable_for_every_variant() {
+        let cases = [
+            (TaskOutcome::Completed, "outcome_completed", true),
+            (
+                TaskOutcome::Failed {
+                    reason: Arc::from("x"),
+                    exit_code: None,
+                    source: None,
+                },
+                "outcome_failed",
+                false,
+            ),
+            (
+                TaskOutcome::Fatal {
+                    reason: Arc::from("x"),
+                    exit_code: Some(1),
+                    source: None,
+                },
+                "outcome_fatal",
+                false,
+            ),
+            (TaskOutcome::Canceled, "outcome_canceled", false),
+            (TaskOutcome::ForceAborted, "outcome_force_aborted", false),
+            (TaskOutcome::Panicked, "outcome_panicked", false),
+            (
+                TaskOutcome::Rejected {
+                    reason: Arc::from("x"),
+                },
+                "outcome_rejected",
+                false,
+            ),
         ];
-        let labels: std::collections::HashSet<&str> =
-            outcomes.iter().map(|o| o.as_label()).collect();
-        assert_eq!(labels.len(), outcomes.len(), "labels must be distinct");
-    }
 
-    #[test]
-    fn only_completed_is_success() {
-        assert!(TaskOutcome::Completed.is_success());
-        assert!(!TaskOutcome::Canceled.is_success());
-        assert!(!TaskOutcome::Panicked.is_success());
-        assert!(
-            !TaskOutcome::Rejected {
-                reason: Arc::from("queue_full"),
-            }
-            .is_success()
-        );
+        let labels: std::collections::HashSet<_> = cases
+            .iter()
+            .map(|(outcome, expected_label, expected_success)| {
+                assert_eq!(outcome.as_label(), *expected_label);
+                assert_eq!(outcome.is_success(), *expected_success, "{expected_label}");
+                outcome.as_label()
+            })
+            .collect();
+        assert_eq!(labels.len(), cases.len(), "labels must remain distinct");
     }
 
     #[test]
@@ -420,7 +426,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn waiter_resolves_with_sent_outcome() {
+    async fn waiter_resolves_sent_outcome_and_maps_a_dropped_sender() {
         let (tx, rx) = oneshot::channel();
         let waiter = TaskWaiter::new(TaskId::next(), rx);
         tx.send(TaskOutcome::Completed).unwrap();
@@ -428,10 +434,7 @@ mod tests {
             waiter.wait().await.unwrap(),
             TaskOutcome::Completed
         ));
-    }
 
-    #[tokio::test]
-    async fn waiter_maps_dropped_sender_to_shutting_down() {
         let (tx, rx) = oneshot::channel::<TaskOutcome>();
         let waiter = TaskWaiter::new(TaskId::next(), rx);
         drop(tx);

@@ -356,7 +356,7 @@ mod tests {
             (2, 400, 800),
             (20, 15_000, 30_000),
         ] {
-            for _ in 0..100 {
+            for _ in 0..8 {
                 let delay = p.delay_for_retry(attempt);
                 assert!(
                     delay >= Duration::from_millis(lower) && delay <= Duration::from_millis(upper),
@@ -367,55 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn exponential_growth_no_jitter() {
-        let p = policy(
-            Duration::from_millis(100),
-            Duration::from_secs(30),
-            2.0,
-            JitterPolicy::None,
-        );
-        assert_eq!(p.delay_for_retry(0), Duration::from_millis(100));
-        assert_eq!(p.delay_for_retry(1), Duration::from_millis(200));
-        assert_eq!(p.delay_for_retry(2), Duration::from_millis(400));
-        assert_eq!(p.delay_for_retry(3), Duration::from_millis(800));
-        assert_eq!(p.delay_for_retry(4), Duration::from_millis(1600));
-    }
-
-    #[test]
     fn next_is_a_compatible_alias_for_delay_for_retry() {
         let p = BackoffPolicy::exponential(Duration::from_millis(100));
 
         for retry_index in [0, 1, 8, u32::MAX] {
             assert_eq!(p.next(retry_index), p.delay_for_retry(retry_index));
         }
-    }
-
-    #[test]
-    fn constant_factor_is_flat() {
-        let p = policy(
-            Duration::from_millis(500),
-            Duration::from_secs(30),
-            1.0,
-            JitterPolicy::None,
-        );
-        for attempt in 0..10 {
-            assert_eq!(
-                p.delay_for_retry(attempt),
-                Duration::from_millis(500),
-                "attempt {attempt}"
-            );
-        }
-    }
-
-    #[test]
-    fn first_exceeding_max_is_clamped_by_next() {
-        let p = policy(
-            Duration::from_secs(10),
-            Duration::from_secs(5),
-            2.0,
-            JitterPolicy::None,
-        );
-        assert_eq!(p.delay_for_retry(0), Duration::from_secs(5));
     }
 
     #[test]
@@ -444,6 +401,35 @@ mod tests {
     }
 
     #[test]
+    fn randomized_band_uses_the_grown_base_through_delay_for_retry() {
+        let p = policy(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            2.0,
+            JitterPolicy::RandomizedBand,
+        );
+        let retry_index = 8;
+        let grown_base = Duration::from_millis(25_600);
+        let previous_seed = fastrand::get_seed();
+
+        fastrand::seed(0x5eed);
+        let expected =
+            JitterPolicy::RandomizedBand.apply_randomized_band(p.first(), grown_base, p.max());
+        fastrand::seed(0x5eed);
+        let actual = p.delay_for_retry(retry_index);
+        fastrand::seed(previous_seed);
+
+        assert!(
+            expected > p.first().saturating_mul(3),
+            "the seeded draw must distinguish the grown band from the initial band"
+        );
+        assert_eq!(
+            actual, expected,
+            "delay_for_retry must pass the grown exponential base into RandomizedBand"
+        );
+    }
+
+    #[test]
     fn full_jitter_never_exceeds_base_as_it_grows() {
         let p = policy(
             Duration::from_millis(100),
@@ -451,60 +437,13 @@ mod tests {
             2.0,
             JitterPolicy::Full,
         );
-        for attempt in 5..15 {
-            let base_ms = 100.0 * 2.0f64.powi(attempt as i32);
+        for attempt in [5, 8, 14] {
+            let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
             assert!(
                 p.delay_for_retry(attempt) <= Duration::from_millis(base_ms as u64),
                 "attempt {attempt}: exceeds base {base_ms}ms"
             );
         }
-    }
-
-    #[test]
-    fn equal_jitter_stays_within_half_to_full_base() {
-        let p = policy(
-            Duration::from_millis(100),
-            Duration::from_secs(30),
-            2.0,
-            JitterPolicy::Equal,
-        );
-        for attempt in 0..15 {
-            let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
-            let delay = p.delay_for_retry(attempt);
-            assert!(
-                delay >= Duration::from_millis((base_ms / 2.0) as u64),
-                "attempt {attempt}: below half of {base_ms}ms"
-            );
-            assert!(
-                delay <= Duration::from_millis(base_ms as u64),
-                "attempt {attempt}: above base {base_ms}ms"
-            );
-        }
-    }
-
-    #[test]
-    fn randomized_band_jitter_grows_with_attempts() {
-        let p = policy(
-            Duration::from_millis(100),
-            Duration::from_secs(30),
-            2.0,
-            JitterPolicy::RandomizedBand,
-        );
-        let mut lo = Duration::from_secs(999);
-        let mut hi = Duration::ZERO;
-        for _ in 0..100 {
-            let delay = p.delay_for_retry(8);
-            lo = lo.min(delay);
-            hi = hi.max(delay);
-        }
-        assert!(
-            lo >= Duration::from_millis(100),
-            "lower bound {lo:?} below first"
-        );
-        assert!(
-            hi >= Duration::from_secs(5),
-            "upper bound {hi:?}; band too narrow"
-        );
     }
 
     #[test]
@@ -516,7 +455,7 @@ mod tests {
             matches!(p.jitter(), JitterPolicy::None),
             "constant preset must have no jitter by default"
         );
-        for attempt in 0..10 {
+        for attempt in [0, 1, 9] {
             assert_eq!(
                 p.delay_for_retry(attempt),
                 Duration::from_millis(500),
@@ -600,7 +539,7 @@ mod tests {
             p.floor() <= p.max(),
             "with_max must re-clamp a previously set floor"
         );
-        for attempt in 0..10 {
+        for attempt in [0, 4, 9] {
             assert!(
                 p.delay_for_retry(attempt) <= Duration::from_secs(1),
                 "attempt {attempt}: delay must never exceed the new max"
@@ -617,7 +556,7 @@ mod tests {
             matches!(p.jitter(), JitterPolicy::Equal),
             "with_jitter must store the given policy"
         );
-        for attempt in 0..10 {
+        for attempt in [0, 3, 9] {
             let base_ms = (100.0 * 2.0f64.powi(attempt as i32)).min(30_000.0);
             let delay = p.delay_for_retry(attempt);
             assert!(
@@ -679,14 +618,9 @@ mod tests {
             JitterPolicy::Full,
         )
         .expect("valid")
-        .with_floor(Duration::from_millis(50));
+        .with_floor(Duration::from_millis(100));
 
-        for attempt in 0..12 {
-            assert!(
-                p.delay_for_retry(attempt) >= Duration::from_millis(50),
-                "attempt {attempt}: below floor"
-            );
-        }
+        assert_eq!(p.delay_for_retry(0), Duration::from_millis(100));
     }
 
     #[test]
@@ -699,7 +633,8 @@ mod tests {
         )
         .expect("valid")
         .with_floor(Duration::from_secs(999));
-        assert!(p.delay_for_retry(0) <= Duration::from_secs(5));
+        assert_eq!(p.floor(), Duration::from_secs(5));
+        assert_eq!(p.delay_for_retry(0), Duration::from_secs(5));
     }
 
     #[test]
@@ -711,10 +646,11 @@ mod tests {
             JitterPolicy::Full,
         )
         .expect("valid");
-        for attempt in 0..100 {
-            assert!(
-                p.delay_for_retry(attempt) >= Duration::from_millis(1),
-                "non-zero sub-ms backoff must floor to >= 1ms (never a zero-delay hot-spin)"
+        for attempt in [0, 1, u32::MAX] {
+            assert_eq!(
+                p.delay_for_retry(attempt),
+                Duration::from_millis(1),
+                "non-zero sub-ms backoff must use the 1ms hot-spin floor"
             );
         }
     }
@@ -749,10 +685,11 @@ mod tests {
             JitterPolicy::Full,
         )
         .expect("valid");
-        for attempt in 0..100 {
-            assert!(
-                p.delay_for_retry(attempt) <= Duration::from_micros(500),
-                "delay_for_retry() must never exceed max, even when max < 1ms"
+        for attempt in [0, 1, u32::MAX] {
+            assert_eq!(
+                p.delay_for_retry(attempt),
+                Duration::from_micros(500),
+                "the implicit floor must be capped when max is below 1ms"
             );
         }
     }

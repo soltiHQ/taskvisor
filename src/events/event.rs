@@ -604,6 +604,43 @@ mod tests {
     }
 
     #[test]
+    fn event_kind_labels_are_stable() {
+        let cases = [
+            (EventKind::SubscriberPanicked, "subscriber_panicked"),
+            (EventKind::SubscriberOverflow, "subscriber_overflow"),
+            (EventKind::ShutdownRequested, "shutdown_requested"),
+            (EventKind::AllStoppedWithinGrace, "all_stopped_within_grace"),
+            (EventKind::GraceExceeded, "grace_exceeded"),
+            (EventKind::TaskStarting, "task_starting"),
+            (EventKind::TaskStopped, "task_stopped"),
+            (EventKind::TaskCanceled, "task_canceled"),
+            (EventKind::TaskFailed, "task_failed"),
+            (EventKind::TimeoutHit, "timeout_hit"),
+            (EventKind::BackoffScheduled, "backoff_scheduled"),
+            (EventKind::TaskAddRequested, "task_add_requested"),
+            (EventKind::TaskAdded, "task_added"),
+            (EventKind::TaskAddFailed, "task_add_failed"),
+            (EventKind::TaskRemoveRequested, "task_remove_requested"),
+            (EventKind::TaskRemoved, "task_removed"),
+            (EventKind::ActorExhausted, "actor_exhausted"),
+            (EventKind::ActorDead, "actor_dead"),
+            #[cfg(feature = "controller")]
+            (EventKind::ControllerRejected, "controller_rejected"),
+            #[cfg(feature = "controller")]
+            (EventKind::ControllerSubmitted, "controller_submitted"),
+            #[cfg(feature = "controller")]
+            (
+                EventKind::ControllerSlotTransition,
+                "controller_slot_transition",
+            ),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_label(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn new_event_leaves_all_optionals_empty() {
         let ev = Event::new(EventKind::TaskStarting);
         assert_eq!(ev.timeout_ms, None);
@@ -621,51 +658,42 @@ mod tests {
     fn ms_builders_set_then_clamp_to_u32_max() {
         let normal = Duration::from_millis(42);
         let huge = Duration::from_millis(u64::from(u32::MAX) + 1000);
+        type Builder = fn(Event, Duration) -> Event;
+        type ReadMs = fn(&Event) -> Option<u32>;
 
-        assert_eq!(
-            Event::new(EventKind::TimeoutHit)
-                .with_timeout(normal)
-                .timeout_ms,
-            Some(42)
-        );
-        assert_eq!(
-            Event::new(EventKind::TimeoutHit)
-                .with_timeout(huge)
-                .timeout_ms,
-            Some(u32::MAX)
-        );
+        let cases: [(&str, EventKind, Builder, ReadMs); 3] = [
+            ("timeout", EventKind::TimeoutHit, Event::with_timeout, |e| {
+                e.timeout_ms
+            }),
+            (
+                "delay",
+                EventKind::BackoffScheduled,
+                Event::with_delay,
+                |e| e.delay_ms,
+            ),
+            (
+                "duration",
+                EventKind::TaskStopped,
+                Event::with_duration,
+                |e| e.duration_ms,
+            ),
+        ];
 
-        assert_eq!(
-            Event::new(EventKind::BackoffScheduled)
-                .with_delay(normal)
-                .delay_ms,
-            Some(42)
-        );
-        assert_eq!(
-            Event::new(EventKind::BackoffScheduled)
-                .with_delay(huge)
-                .delay_ms,
-            Some(u32::MAX)
-        );
-
-        assert_eq!(
-            Event::new(EventKind::TaskStopped)
-                .with_duration(normal)
-                .duration_ms,
-            Some(42)
-        );
-        assert_eq!(
-            Event::new(EventKind::TaskStopped)
-                .with_duration(huge)
-                .duration_ms,
-            Some(u32::MAX)
-        );
+        for (label, kind, build, read) in cases {
+            assert_eq!(read(&build(Event::new(kind), normal)), Some(42), "{label}");
+            assert_eq!(
+                read(&build(Event::new(kind), huge)),
+                Some(u32::MAX),
+                "{label} must saturate"
+            );
+        }
     }
 
     #[test]
     fn is_internal_diagnostic_covers_both_variants() {
-        assert!(Event::new(EventKind::SubscriberOverflow).is_internal_diagnostic());
-        assert!(Event::new(EventKind::SubscriberPanicked).is_internal_diagnostic());
+        for kind in [EventKind::SubscriberOverflow, EventKind::SubscriberPanicked] {
+            assert!(Event::new(kind).is_internal_diagnostic(), "{kind:?}");
+        }
         assert!(!Event::new(EventKind::TaskStarting).is_internal_diagnostic());
     }
 
@@ -692,28 +720,20 @@ mod tests {
 
     #[test]
     fn with_exit_code_keeps_sign() {
-        assert_eq!(
-            Event::new(EventKind::TaskFailed)
-                .with_exit_code(42)
-                .exit_code,
-            Some(42)
-        );
-        assert_eq!(
-            Event::new(EventKind::ActorDead)
-                .with_exit_code(-1)
-                .exit_code,
-            Some(-1)
-        );
+        for (kind, code) in [(EventKind::TaskFailed, 42), (EventKind::ActorDead, -1)] {
+            assert_eq!(Event::new(kind).with_exit_code(code).exit_code, Some(code));
+        }
     }
 
     #[test]
-    fn backoff_source_labels_are_stable() {
-        assert_eq!(BackoffSource::Success.as_label(), "success");
-        assert_eq!(BackoffSource::Failure.as_label(), "failure");
-    }
+    fn backoff_source_labels_and_builders_are_stable() {
+        for (source, label) in [
+            (BackoffSource::Success, "success"),
+            (BackoffSource::Failure, "failure"),
+        ] {
+            assert_eq!(source.as_label(), label);
+        }
 
-    #[test]
-    fn generic_and_convenience_backoff_builders_agree() {
         let generic =
             Event::new(EventKind::BackoffScheduled).with_backoff_source(BackoffSource::Failure);
         assert_eq!(generic.backoff_source, Some(BackoffSource::Failure));

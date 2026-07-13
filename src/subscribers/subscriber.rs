@@ -105,7 +105,11 @@ mod tests {
     }
 
     #[test]
-    fn default_queue_capacity_is_1024() {
+    fn subscriber_defaults_use_type_name_and_capacity_1024() {
+        assert_eq!(
+            DefaultCapacity.name(),
+            std::any::type_name::<DefaultCapacity>()
+        );
         assert_eq!(DefaultCapacity.queue_capacity().get(), 1024);
     }
 }

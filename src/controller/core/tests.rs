@@ -61,20 +61,7 @@ async fn abort_and_drain<T: 'static>(workers: &mut JoinSet<T>) {
     while workers.join_next().await.is_some() {}
 }
 
-#[test]
-fn replace_head_or_push_into_empty_queue() {
-    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
-    let mut slot = SlotState::new();
-    ctrl.replace_head_or_push(
-        &mut slot,
-        &slot_arc_name(),
-        TaskId::next(),
-        make_spec("first"),
-    );
-
-    assert_eq!(slot.queue.len(), 1);
-    assert_eq!(slot.queue.front().unwrap().1.name(), "first");
-}
+// Queue and slot primitives.
 
 #[test]
 fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
@@ -106,11 +93,14 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
 }
 
 #[test]
-fn replace_head_multiple_times_keeps_depth_1() {
+fn replace_head_or_push_appends_to_empty_then_keeps_only_the_latest_head() {
     let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
     let mut slot = SlotState::new();
     let name = slot_arc_name();
     ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v1"));
+    assert_eq!(slot.queue.len(), 1);
+    assert_eq!(slot.queue.front().unwrap().1.name(), "v1");
+
     ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v2"));
     ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v3"));
 
@@ -119,53 +109,41 @@ fn replace_head_multiple_times_keeps_depth_1() {
 }
 
 #[test]
-fn reject_if_full_returns_false_below_capacity() {
-    let bus = Bus::new(64);
+fn reject_if_full_respects_the_capacity_boundary() {
     let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 3);
-    let ctrl = make_controller(config, bus);
-    assert!(!ctrl.reject_if_full("slot", TaskId::next(), 0));
-    assert!(!ctrl.reject_if_full("slot", TaskId::next(), 2));
+    let ctrl = make_controller(config, Bus::new(64));
+
+    for (depth, expected_rejection) in [(0, false), (2, false), (3, true), (10, true)] {
+        assert_eq!(
+            ctrl.reject_if_full("slot", TaskId::next(), depth),
+            expected_rejection,
+            "unexpected decision at queue depth {depth}"
+        );
+    }
 }
 
 #[test]
-fn reject_if_full_returns_true_at_capacity() {
-    let bus = Bus::new(64);
-    let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 3);
-    let ctrl = make_controller(config, bus);
-    assert!(ctrl.reject_if_full("slot", TaskId::next(), 3));
-    assert!(ctrl.reject_if_full("slot", TaskId::next(), 10));
-}
-
-#[test]
-fn get_or_create_slot_creates_idle_slot() {
-    let bus = Bus::new(64);
-    let ctrl = make_controller(ControllerConfig::default(), bus);
+fn get_or_create_slot_preserves_name_identity_and_initial_state() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
 
     let slot_arc = ctrl.get_or_create_slot("my-slot");
-    let slot = slot_arc.blocking_lock();
-    assert_eq!(slot.phase(), SlotPhase::Idle);
-    assert!(slot.queue.is_empty());
+    {
+        let slot = slot_arc.blocking_lock();
+        assert_eq!(slot.phase(), SlotPhase::Idle);
+        assert!(slot.queue.is_empty());
+    }
+
+    assert!(
+        Arc::ptr_eq(&slot_arc, &ctrl.get_or_create_slot("my-slot")),
+        "the same slot name must return the same allocation"
+    );
+    assert!(
+        !Arc::ptr_eq(&slot_arc, &ctrl.get_or_create_slot("other-slot")),
+        "different slot names must not share state"
+    );
 }
 
-#[test]
-fn get_or_create_slot_returns_same_arc() {
-    let bus = Bus::new(64);
-    let ctrl = make_controller(ControllerConfig::default(), bus);
-
-    let s1 = ctrl.get_or_create_slot("x");
-    let s2 = ctrl.get_or_create_slot("x");
-    assert!(Arc::ptr_eq(&s1, &s2), "same slot name must return same Arc");
-}
-
-#[test]
-fn get_or_create_slot_different_names_different_arcs() {
-    let bus = Bus::new(64);
-    let ctrl = make_controller(ControllerConfig::default(), bus);
-
-    let s1 = ctrl.get_or_create_slot("a");
-    let s2 = ctrl.get_or_create_slot("b");
-    assert!(!Arc::ptr_eq(&s1, &s2));
-}
+// Stale-result and state-transition invariants.
 
 #[tokio::test]
 async fn stale_completion_does_not_free_current_owner() {
@@ -556,6 +534,8 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
     abort_and_drain(&mut completions).await;
     abort_and_drain(&mut removals).await;
 }
+
+// Shutdown finalization and controller-task lifetime.
 
 #[tokio::test]
 async fn shutdown_finalizes_buffered_submission_as_rejected() {
@@ -1011,6 +991,8 @@ async fn natural_run_waits_for_controller_join() {
     assert!(ctrl.is_joined().await);
 }
 
+// Identity-operation ordering and backpressure.
+
 #[tokio::test(flavor = "current_thread")]
 async fn accepted_cancel_continues_after_caller_future_is_dropped() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
@@ -1246,6 +1228,8 @@ async fn identity_operation_limit_preserves_command_backpressure() {
     stop_controller_loop(token, runner).await;
     let _ = runtime_handle.shutdown().await;
 }
+
+// Reliable registry/controller coordination.
 
 #[tokio::test(flavor = "current_thread")]
 async fn registry_reply_marks_slot_running_without_task_added() {
@@ -1778,31 +1762,20 @@ async fn queued_admission_skips_registry_rejected_head() {
     let _ = handle.shutdown().await;
 }
 
-async fn sup_with_live_task() -> (Arc<Supervisor>, crate::core::SupervisorHandle, TaskId) {
-    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-    let handle = sup.serve();
-    let task: TaskRef = TaskFn::arc("occupant", |ctx: TaskContext| async move {
-        ctx.cancelled().await;
-        Ok(())
-    });
-    let id = handle
-        .add(TaskSpec::restartable(task))
-        .await
-        .expect("task should register");
-    (sup, handle, id)
-}
+// Shutdown and public snapshot state contracts.
 
 #[tokio::test]
 async fn no_queue_advancement_after_shutdown_starts() {
-    let (sup, handle, id) = sup_with_live_task().await;
+    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let handle = sup.serve();
+    let id = handle
+        .add(waiting_spec("occupant"))
+        .await
+        .expect("task should register");
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
-    let queued: TaskRef = TaskFn::arc("queued", |ctx: TaskContext| async move {
-        ctx.cancelled().await;
-        Ok(())
-    });
     let mut queue = std::collections::VecDeque::new();
-    queue.push_back((TaskId::next(), TaskSpec::restartable(queued)));
+    queue.push_back((TaskId::next(), waiting_spec("queued")));
     let mut slot = running_slot(id);
     slot.queue = queue;
     ctrl.slots
@@ -1818,73 +1791,14 @@ async fn no_queue_advancement_after_shutdown_starts() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        admissions.is_empty(),
+        "shutdown must prevent a queued admission from being scheduled"
+    );
     assert!(
         sup.core().id_for_label("queued").await.is_none(),
         "controller must not start queued tasks once shutdown has been requested"
     );
-
-    let _ = handle.shutdown().await;
-}
-
-#[tokio::test]
-async fn replace_supersedes_in_same_slot() {
-    let sup = Supervisor::builder(crate::SupervisorConfig::default())
-        .with_controller(ControllerConfig::default())
-        .build();
-    let handle = sup.serve();
-
-    let mk = |name: &'static str| -> ControllerSpec {
-        let task: TaskRef = TaskFn::arc(name, |ctx: TaskContext| async move {
-            ctx.cancelled().await;
-            Ok(())
-        });
-        ControllerSpec::replace(TaskSpec::restartable(task)).with_slot("s")
-    };
-
-    handle.submit(mk("run-1")).await.unwrap();
-    handle.submit(mk("run-2")).await.unwrap();
-
-    let superseded = poll_until(std::time::Duration::from_secs(3), || async {
-        let alive = handle.snapshot().await;
-        alive.iter().any(|n| &**n == "run-2") && alive.iter().all(|n| &**n != "run-1")
-    })
-    .await;
-    assert!(
-        superseded,
-        "Replace must supersede run-1 with run-2 in the shared slot, not run both"
-    );
-
-    let _ = handle.shutdown().await;
-}
-
-#[tokio::test]
-async fn snapshot_reports_status_running_and_queue_depth() {
-    use crate::controller::SlotStatusKind;
-
-    let (sup, handle, id) = sup_with_live_task().await;
-    let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
-
-    let queued: TaskRef = TaskFn::arc("queued", |ctx: TaskContext| async move {
-        ctx.cancelled().await;
-        Ok(())
-    });
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((TaskId::next(), TaskSpec::restartable(queued)));
-    let mut slot = running_slot(id);
-    slot.queue = queue;
-    ctrl.slots
-        .insert(Arc::from("s"), Arc::new(Mutex::new(slot)));
-
-    let snap = ctrl.snapshot().await;
-    assert_eq!(snap.len(), 1, "one slot tracked");
-    assert_eq!(snap.running_count(), 1);
-    assert_eq!(snap.total_queued(), 1);
-
-    let view = snap.slot("s").expect("slot 's' must be present");
-    assert_eq!(view.status, SlotStatusKind::Running);
-    assert_eq!(view.queue_depth, 1);
-    assert_eq!(view.owner_id, Some(id));
 
     let _ = handle.shutdown().await;
 }

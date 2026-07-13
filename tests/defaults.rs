@@ -21,7 +21,7 @@ fn timeout_defaults() -> TaskDefaults {
     TaskDefaults::default().with_timeout(Duration::from_millis(20))
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn dynamic_add_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())
@@ -71,7 +71,7 @@ async fn fully_inherited_spec_uses_default_restart_policy() {
     handle.shutdown().await.expect("shutdown must join");
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn static_batch_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())
@@ -85,7 +85,7 @@ async fn static_batch_applies_inherited_timeout() {
     .expect("timed-out static task must reach natural completion");
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn explicit_none_disables_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())
@@ -184,7 +184,7 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
 }
 
 #[cfg(feature = "controller")]
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn controller_admission_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())

@@ -261,6 +261,10 @@ mod tests {
             slot.phase(),
             SlotPhase::CancelPendingAdmission { owner: id, .. } if id == owner
         ));
+        assert!(
+            !slot.complete_owner(owner),
+            "completion cannot release an admission that is still pending"
+        );
         assert_eq!(
             slot.confirm_admission(owner, now),
             AdmissionTransition::RemoveNow(owner)
@@ -269,29 +273,6 @@ mod tests {
             slot.phase(),
             SlotPhase::Terminating { owner: id, .. } if id == owner
         ));
-    }
-
-    #[test]
-    fn completion_cannot_release_an_admission_that_is_still_pending() {
-        let owner = TaskId::next();
-        let now = Instant::now();
-        let mut slot = SlotState::new();
-
-        assert!(slot.begin_admission(owner, now));
-        assert_eq!(
-            slot.request_replacement(now),
-            ReplaceAction::WaitForAdmission
-        );
-        assert!(!slot.complete_owner(owner));
-        assert!(matches!(
-            slot.phase(),
-            SlotPhase::CancelPendingAdmission { owner: id, .. } if id == owner
-        ));
-
-        assert_eq!(
-            slot.confirm_admission(owner, now),
-            AdmissionTransition::RemoveNow(owner)
-        );
         assert!(slot.complete_owner(owner));
         assert!(slot.is_idle());
     }

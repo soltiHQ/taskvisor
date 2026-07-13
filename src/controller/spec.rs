@@ -212,18 +212,22 @@ mod tests {
 
     #[test]
     fn convenience_constructors_set_correct_policy() {
-        assert_eq!(
-            ControllerSpec::queue(make_spec("t")).admission(),
-            AdmissionPolicy::Queue
-        );
-        assert_eq!(
-            ControllerSpec::replace(make_spec("t")).admission(),
-            AdmissionPolicy::Replace
-        );
-        assert_eq!(
-            ControllerSpec::drop_if_running(make_spec("t")).admission(),
-            AdmissionPolicy::DropIfRunning
-        );
+        for (spec, expected) in [
+            (
+                ControllerSpec::queue(make_spec("queue")),
+                AdmissionPolicy::Queue,
+            ),
+            (
+                ControllerSpec::replace(make_spec("replace")),
+                AdmissionPolicy::Replace,
+            ),
+            (
+                ControllerSpec::drop_if_running(make_spec("drop")),
+                AdmissionPolicy::DropIfRunning,
+            ),
+        ] {
+            assert_eq!(spec.admission(), expected);
+        }
     }
 
     #[test]
@@ -238,28 +242,5 @@ mod tests {
         assert_eq!(cs.slot_name(), "web");
         assert_eq!(cs.slot_override(), Some("web"));
         assert_eq!(cs.task_spec().name(), "runner-web-7");
-    }
-
-    #[test]
-    fn without_slot_restores_task_name_fallback() {
-        let cs = ControllerSpec::queue(make_spec("runner-web-7"))
-            .with_slot("web")
-            .without_slot();
-
-        assert_eq!(cs.slot_override(), None);
-        assert_eq!(cs.slot_name(), "runner-web-7");
-    }
-
-    #[test]
-    fn builders_replace_private_components() {
-        let cs = ControllerSpec::queue(make_spec("old"))
-            .with_slot("shared")
-            .with_admission(AdmissionPolicy::Replace)
-            .with_task_spec(make_spec("new"));
-
-        assert_eq!(cs.admission(), AdmissionPolicy::Replace);
-        assert_eq!(cs.task_spec().name(), "new");
-        assert_eq!(cs.slot_name(), "shared");
-        assert_eq!(cs.into_task_spec().name(), "new");
     }
 }

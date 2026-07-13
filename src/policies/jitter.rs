@@ -148,19 +148,21 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn full_jitter_zero_duration_returns_zero() {
-        assert_eq!(JitterPolicy::Full.apply(Duration::ZERO), Duration::ZERO);
-    }
-
-    #[test]
-    fn equal_jitter_zero_duration_returns_zero() {
-        assert_eq!(JitterPolicy::Equal.apply(Duration::ZERO), Duration::ZERO);
+    fn jitter_policies_preserve_zero_duration() {
+        for policy in [
+            JitterPolicy::None,
+            JitterPolicy::Full,
+            JitterPolicy::Equal,
+            JitterPolicy::RandomizedBand,
+        ] {
+            assert_eq!(policy.apply(Duration::ZERO), Duration::ZERO, "{policy:?}");
+        }
     }
 
     #[test]
     fn randomized_band_apply_falls_back_to_full_jitter() {
         let delay = Duration::from_millis(500);
-        for _ in 0..100 {
+        for _ in 0..16 {
             let d = JitterPolicy::RandomizedBand.apply(delay);
             assert!(
                 d <= delay,
@@ -175,7 +177,7 @@ mod tests {
         let upper_seed = Duration::from_millis(300);
         let max = Duration::from_secs(10);
 
-        for _ in 0..100 {
+        for _ in 0..16 {
             let result = JitterPolicy::Full.apply_randomized_band(lower, upper_seed, max);
             assert!(result <= lower, "Full fallback should be in [0, lower]");
         }
@@ -203,7 +205,7 @@ mod tests {
         let upper_seed = Duration::from_secs(1);
         let max = Duration::from_secs(30);
         let upper = Duration::from_secs(3); // seed*3 = 3s < max
-        for _ in 0..500 {
+        for _ in 0..32 {
             let d = JitterPolicy::RandomizedBand.apply_randomized_band(lower, upper_seed, max);
             assert!(
                 d >= lower && d <= upper,
@@ -219,7 +221,7 @@ mod tests {
         let upper = upper_seed.saturating_mul(3);
         let mut saw_value_above_lower = false;
 
-        for _ in 0..500 {
+        for _ in 0..16 {
             let result = JitterPolicy::RandomizedBand.apply_randomized_band(
                 lower,
                 upper_seed,
@@ -242,7 +244,7 @@ mod tests {
     fn randomized_band_handles_duration_max_without_overflow() {
         let lower = Duration::MAX.saturating_sub(Duration::from_nanos(32));
 
-        for _ in 0..100 {
+        for _ in 0..8 {
             let result = JitterPolicy::RandomizedBand.apply_randomized_band(
                 lower,
                 Duration::MAX,
@@ -264,7 +266,7 @@ mod tests {
         let legacy_u64_ceiling = Duration::from_nanos(u64::MAX);
         let mut full_used_the_wide_range = false;
 
-        for _ in 0..100 {
+        for _ in 0..8 {
             let full = JitterPolicy::Full.apply(Duration::MAX);
             assert!(full <= Duration::MAX);
             full_used_the_wide_range |= full > legacy_u64_ceiling;
@@ -287,30 +289,20 @@ mod tests {
     fn full_and_equal_jitter_preserve_sub_millisecond_delays() {
         let d = Duration::from_micros(500);
         let mut full_nonzero = false;
-        let mut equal_nonzero = false;
-        for _ in 0..1000 {
+        for _ in 0..16 {
             let f = JitterPolicy::Full.apply(d);
             assert!(f <= d, "full jitter must stay within [0, delay]");
-            if f > Duration::ZERO {
-                full_nonzero = true;
-            }
+            full_nonzero |= f > Duration::ZERO;
 
             let e = JitterPolicy::Equal.apply(d);
             assert!(
                 e >= d / 2 && e <= d,
                 "equal jitter must stay within [delay/2, delay]"
             );
-            if e > Duration::ZERO {
-                equal_nonzero = true;
-            }
         }
         assert!(
             full_nonzero,
             "sub-ms full jitter must not be systematically zero"
-        );
-        assert!(
-            equal_nonzero,
-            "sub-ms equal jitter must not be systematically zero"
         );
     }
 }

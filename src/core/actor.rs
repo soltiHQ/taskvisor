@@ -603,7 +603,7 @@ mod tests {
         assert!(matches!(reason, ActorExitReason::Completed));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn always_none_instant_ok_is_rate_limited() {
         use std::sync::atomic::{AtomicU32, Ordering};
 

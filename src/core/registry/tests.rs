@@ -5,36 +5,45 @@ use crate::{
     events::{Event, EventKind},
     reasons,
 };
+use std::{future::Future, pin::Pin, task::Poll};
 use tokio::sync::oneshot;
 
+async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
+    std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("future completed before the expected ordering point"),
+    })
+    .await;
+}
+
+async fn assert_ready_once<F: Future<Output = ()>>(mut future: Pin<&mut F>) {
+    std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Ready(()) => Poll::Ready(()),
+        Poll::Pending => panic!("future was not immediately ready"),
+    })
+    .await;
+}
+
 #[tokio::test]
-async fn pending_wait_drained_resolves_after_last_dec() {
+async fn pending_wait_drained_handles_empty_and_resolves_after_last_dec() {
     let p = Arc::new(PendingJoins::default());
+    let mut initially_empty = Box::pin(p.wait_drained());
+    assert_ready_once(initially_empty.as_mut()).await;
+    drop(initially_empty);
+
     let a = TaskId::next();
     let b = TaskId::next();
     p.inc(a);
     p.inc(b);
     assert!(!p.is_empty());
 
-    let p2 = Arc::clone(&p);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        p2.dec(a);
-        p2.dec(b);
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), p.wait_drained())
-        .await
-        .expect("wait_drained must resolve once every join is decremented");
+    let mut drained = Box::pin(p.wait_drained());
+    assert_pending_once(drained.as_mut()).await;
+    p.dec(a);
+    assert_pending_once(drained.as_mut()).await;
+    p.dec(b);
+    drained.await;
     assert!(p.is_empty(), "no joins should remain after draining");
-}
-
-#[tokio::test]
-async fn pending_wait_drained_returns_immediately_when_empty() {
-    let p = PendingJoins::default();
-    tokio::time::timeout(Duration::from_millis(100), p.wait_drained())
-        .await
-        .expect("an empty PendingJoins must resolve immediately");
 }
 
 fn registry() -> Arc<Registry> {
@@ -145,6 +154,41 @@ fn started_registry(
     );
     registry.clone().spawn_listener();
     (registry, bus, token, tx)
+}
+
+struct ControlledCancellationTask {
+    task: crate::TaskRef,
+    started: Arc<Notify>,
+    cancellation_seen: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+fn controlled_cancellation_task(label: &'static str) -> ControlledCancellationTask {
+    let started = Arc::new(Notify::new());
+    let cancellation_seen = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let started_by_task = Arc::clone(&started);
+    let seen_by_task = Arc::clone(&cancellation_seen);
+    let release_by_task = Arc::clone(&release);
+    let task = crate::TaskFn::arc(label, move |ctx: crate::TaskContext| {
+        let started = Arc::clone(&started_by_task);
+        let cancellation_seen = Arc::clone(&seen_by_task);
+        let release = Arc::clone(&release_by_task);
+        async move {
+            started.notify_one();
+            ctx.cancelled().await;
+            cancellation_seen.notify_one();
+            release.notified().await;
+            Err(crate::TaskError::Canceled)
+        }
+    });
+
+    ControlledCancellationTask {
+        task,
+        started,
+        cancellation_seen,
+        release,
+    }
 }
 
 fn send_add(
@@ -402,37 +446,25 @@ async fn duplicate_inside_batch_rejects_every_item_without_starting_bodies() {
 async fn batch_conflict_with_registered_or_removing_label_starts_no_new_body() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+    use crate::{TaskContext, TaskFn, TaskRef};
 
     let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
-    let started = Arc::new(Notify::new());
-    let cancellation_seen = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let started_by_task = Arc::clone(&started);
-    let seen_by_task = Arc::clone(&cancellation_seen);
-    let release_by_task = Arc::clone(&release);
-    let existing: TaskRef = TaskFn::arc("reserved-batch-name", move |ctx: TaskContext| {
-        let started = Arc::clone(&started_by_task);
-        let cancellation_seen = Arc::clone(&seen_by_task);
-        let release = Arc::clone(&release_by_task);
-        async move {
-            started.notify_one();
-            ctx.cancelled().await;
-            cancellation_seen.notify_one();
-            release.notified().await;
-            Err(TaskError::Canceled)
-        }
-    });
+    let controlled = controlled_cancellation_task("reserved-batch-name");
     let existing_id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, existing_id, TaskSpec::restartable(existing), None,),
+            send_add(
+                &tx,
+                existing_id,
+                TaskSpec::restartable(controlled.task),
+                None,
+            ),
             "existing add reply",
         )
         .await
         .is_ok()
     );
-    tokio::time::timeout(Duration::from_secs(2), started.notified())
+    tokio::time::timeout(Duration::from_secs(2), controlled.started.notified())
         .await
         .expect("the existing task body must start before removal");
 
@@ -472,9 +504,12 @@ async fn batch_conflict_with_registered_or_removing_label_starts_no_new_body() {
         receive_reply(send_remove(&tx, existing_id), "existing remove reply").await,
         Ok(true)
     ));
-    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
-        .await
-        .expect("the existing task must enter Removing");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("the existing task must enter Removing");
 
     let removing_result = receive_reply(
         send_batch(
@@ -498,7 +533,7 @@ async fn batch_conflict_with_registered_or_removing_label_starts_no_new_body() {
         vec![(existing_id, Arc::from("reserved-batch-name"))]
     );
 
-    release.notify_one();
+    controlled.release.notify_one();
     tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
         .await
         .expect("the existing removing task must finish");
@@ -560,28 +595,13 @@ async fn duplicate_add_reply_rejects_without_starting_body() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn remove_reply_claims_once_before_terminal_completion() {
-    use crate::{TaskContext, TaskError, TaskFn, TaskRef};
-
     let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
     let mut events = bus.subscribe();
-    let cancellation_seen = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let seen_by_task = Arc::clone(&cancellation_seen);
-    let task_release = Arc::clone(&release);
-    let task: TaskRef = TaskFn::arc("remove-once", move |ctx: TaskContext| {
-        let seen = Arc::clone(&seen_by_task);
-        let release = Arc::clone(&task_release);
-        async move {
-            ctx.cancelled().await;
-            seen.notify_one();
-            release.notified().await;
-            Err(TaskError::Canceled)
-        }
-    });
+    let controlled = controlled_cancellation_task("remove-once");
     let id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(task), None),
+            send_add(&tx, id, TaskSpec::restartable(controlled.task), None),
             "setup add reply",
         )
         .await
@@ -596,9 +616,12 @@ async fn remove_reply_claims_once_before_terminal_completion() {
         ),
         "the first remove must claim the task"
     );
-    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
-        .await
-        .expect("the task must observe cancellation");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("the task must observe cancellation");
     assert!(registry.pending_joins.contains(id));
     assert!(
         registry.contains(id).await,
@@ -610,12 +633,9 @@ async fn remove_reply_claims_once_before_terminal_completion() {
         "a removing task must stay visible in registry listings"
     );
     assert_eq!(registry.id_for_label("remove-once").await, Some(id));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), registry.wait_until_empty())
-            .await
-            .is_err(),
-        "the registry cannot become empty before the actor join"
-    );
+    let mut empty = Box::pin(registry.wait_until_empty());
+    assert_pending_once(empty.as_mut()).await;
+    drop(empty);
     while let Ok(event) = events.try_recv() {
         assert_ne!(
             event.kind,
@@ -645,7 +665,7 @@ async fn remove_reply_claims_once_before_terminal_completion() {
         "joining cancellation cannot complete before the actor join"
     );
 
-    release.notify_one();
+    controlled.release.notify_one();
     tokio::time::timeout(Duration::from_secs(2), joined_cancel.wait())
         .await
         .expect("joined cancellation must finish with the Remove owner");
@@ -662,28 +682,13 @@ async fn remove_reply_claims_once_before_terminal_completion() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn concurrent_cancel_commands_share_one_terminal_completion() {
-    use crate::{TaskContext, TaskError, TaskFn, TaskRef};
-
     let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(5));
     let mut events = bus.subscribe();
-    let cancellation_seen = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let seen_by_task = Arc::clone(&cancellation_seen);
-    let task_release = Arc::clone(&release);
-    let task: TaskRef = TaskFn::arc("shared-cancel", move |ctx: TaskContext| {
-        let seen = Arc::clone(&seen_by_task);
-        let release = Arc::clone(&task_release);
-        async move {
-            ctx.cancelled().await;
-            seen.notify_one();
-            release.notified().await;
-            Err(TaskError::Canceled)
-        }
-    });
+    let controlled = controlled_cancellation_task("shared-cancel");
     let id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(task), None),
+            send_add(&tx, id, TaskSpec::restartable(controlled.task), None),
             "shared cancel add reply",
         )
         .await
@@ -702,9 +707,12 @@ async fn concurrent_cancel_commands_share_one_terminal_completion() {
                 .expect("the task must still be removing"),
         );
     }
-    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
-        .await
-        .expect("the task must observe one cancellation");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("the task must observe one cancellation");
 
     assert_eq!(
         decisions.iter().filter(|decision| decision.claimed).count(),
@@ -719,7 +727,7 @@ async fn concurrent_cancel_commands_share_one_terminal_completion() {
         "terminal cleanup cannot happen before the task is released"
     );
 
-    release.notify_one();
+    controlled.release.notify_one();
     for decision in &decisions {
         tokio::time::timeout(Duration::from_secs(2), decision.wait())
             .await
@@ -743,27 +751,14 @@ async fn concurrent_cancel_commands_share_one_terminal_completion() {
 async fn removing_task_keeps_label_reserved_until_terminal_join() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::{TaskContext, TaskError, TaskFn, TaskRef};
+    use crate::{TaskContext, TaskFn, TaskRef};
 
     let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(5));
-    let cancellation_seen = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let seen_by_task = Arc::clone(&cancellation_seen);
-    let task_release = Arc::clone(&release);
-    let first: TaskRef = TaskFn::arc("reserved-name", move |ctx: TaskContext| {
-        let seen = Arc::clone(&seen_by_task);
-        let release = Arc::clone(&task_release);
-        async move {
-            ctx.cancelled().await;
-            seen.notify_one();
-            release.notified().await;
-            Err(TaskError::Canceled)
-        }
-    });
+    let controlled = controlled_cancellation_task("reserved-name");
     let first_id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, first_id, TaskSpec::restartable(first), None),
+            send_add(&tx, first_id, TaskSpec::restartable(controlled.task), None,),
             "reserved-name add reply",
         )
         .await
@@ -773,9 +768,12 @@ async fn removing_task_keeps_label_reserved_until_terminal_join() {
         receive_reply(send_remove(&tx, first_id), "reserved-name remove reply").await,
         Ok(true)
     ));
-    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
-        .await
-        .expect("the old task must observe cancellation");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("the old task must observe cancellation");
 
     let duplicate_runs = Arc::new(AtomicUsize::new(0));
     let runs_by_task = Arc::clone(&duplicate_runs);
@@ -807,14 +805,11 @@ async fn removing_task_keeps_label_reserved_until_terminal_join() {
         registry.list().await,
         vec![(first_id, Arc::from("reserved-name"))]
     );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), registry.wait_until_empty())
-            .await
-            .is_err(),
-        "terminal join must control when the registry becomes empty"
-    );
+    let mut empty = Box::pin(registry.wait_until_empty());
+    assert_pending_once(empty.as_mut()).await;
+    drop(empty);
 
-    release.notify_one();
+    controlled.release.notify_one();
     tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
         .await
         .expect("terminal join must release the old task identity");
@@ -924,28 +919,13 @@ async fn dropped_add_reply_does_not_stop_command_processing() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn dropped_remove_reply_does_not_skip_join_cleanup() {
-    use crate::{TaskContext, TaskError, TaskFn, TaskRef};
-
     let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
     let mut events = bus.subscribe();
-    let cancellation_seen = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let seen_by_task = Arc::clone(&cancellation_seen);
-    let task_release = Arc::clone(&release);
-    let task: TaskRef = TaskFn::arc("dropped-remove", move |ctx: TaskContext| {
-        let seen = Arc::clone(&seen_by_task);
-        let release = Arc::clone(&task_release);
-        async move {
-            ctx.cancelled().await;
-            seen.notify_one();
-            release.notified().await;
-            Err(TaskError::Canceled)
-        }
-    });
+    let controlled = controlled_cancellation_task("dropped-remove");
     let id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(task), None),
+            send_add(&tx, id, TaskSpec::restartable(controlled.task), None),
             "setup add reply",
         )
         .await
@@ -965,11 +945,14 @@ async fn dropped_remove_reply_does_not_skip_join_cleanup() {
         ),
         "the listener must process commands after a dropped reply"
     );
-    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
-        .await
-        .expect("dropped receiver must not suppress cancellation");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("dropped receiver must not suppress cancellation");
 
-    release.notify_one();
+    controlled.release.notify_one();
     tokio::time::timeout(
         Duration::from_secs(2),
         registry.pending_joins.wait_drained(),
@@ -987,7 +970,7 @@ async fn dropped_remove_reply_does_not_skip_join_cleanup() {
     stop_registry(&registry, &token).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_joins_within_reports_stuck_labels_then_drains() {
     let reg = registry();
 
@@ -1008,15 +991,11 @@ async fn wait_joins_within_reports_stuck_labels_then_drains() {
         "an in-flight join must be reported with its label on timeout"
     );
 
-    let p = Arc::clone(&reg.pending_joins);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        p.dec(id);
-    });
+    let mut draining = Box::pin(reg.wait_joins_within(Duration::from_secs(1)));
+    assert_pending_once(draining.as_mut()).await;
+    reg.pending_joins.dec(id);
     assert!(
-        reg.wait_joins_within(Duration::from_secs(1))
-            .await
-            .is_empty(),
+        draining.await.is_empty(),
         "must drain once the in-flight join is decremented"
     );
 }
@@ -1222,29 +1201,14 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn remove_path_owns_cleanup_when_completion_signal_arrives() {
-    use crate::{TaskContext, TaskError, TaskFn, TaskRef};
-
     let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
     let mut events = bus.subscribe();
-    let cancellation_seen = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let seen_by_task = Arc::clone(&cancellation_seen);
-    let task_release = Arc::clone(&release);
-    let task: TaskRef = TaskFn::arc("remove-completion-race", move |ctx: TaskContext| {
-        let seen = Arc::clone(&seen_by_task);
-        let release = Arc::clone(&task_release);
-        async move {
-            ctx.cancelled().await;
-            seen.notify_one();
-            release.notified().await;
-            Err(TaskError::Canceled)
-        }
-    });
+    let controlled = controlled_cancellation_task("remove-completion-race");
     let id = TaskId::next();
     let (done, done_rx) = oneshot::channel();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(task), Some(done),),
+            send_add(&tx, id, TaskSpec::restartable(controlled.task), Some(done),),
             "race add reply",
         )
         .await
@@ -1256,10 +1220,13 @@ async fn remove_path_owns_cleanup_when_completion_signal_arrives() {
         receive_reply(send_remove(&tx, id), "race remove reply").await,
         Ok(true)
     ));
-    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
-        .await
-        .expect("removed task must observe cancellation");
-    release.notify_one();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("removed task must observe cancellation");
+    controlled.release.notify_one();
     assert!(matches!(
         receive_reply(done_rx, "race outcome").await,
         TaskOutcome::Canceled
@@ -1329,12 +1296,9 @@ async fn completion_claim_before_remove_emits_one_terminal_event() {
     assert!(registry.pending_joins.contains(id));
     assert!(registry.contains(id).await);
     assert_eq!(registry.id_for_label("completion-first").await, Some(id));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), registry.wait_until_empty())
-            .await
-            .is_err(),
-        "completion ownership must retain membership until join"
-    );
+    let mut empty = Box::pin(registry.wait_until_empty());
+    assert_pending_once(empty.as_mut()).await;
+    drop(empty);
     assert!(matches!(
         receive_reply(send_remove(&tx, id), "completion-first remove reply").await,
         Ok(false)

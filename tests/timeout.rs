@@ -11,12 +11,20 @@ use common::*;
 use taskvisor::BackoffSource;
 use taskvisor::prelude::*;
 
-#[tokio::test(flavor = "current_thread")]
-async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
+async fn run_to_exhaustion(spec: TaskSpec) -> Arc<EventCollector> {
+    let (supervisor, collector) = supervisor_with_collector(SupervisorConfig::default());
+    with_timeout(10, supervisor.run(vec![spec]))
+        .await
+        .expect("run() should return Ok");
+    collector
+        .wait_for(EventKind::ActorExhausted, Duration::from_secs(2))
+        .await
+        .expect("ActorExhausted was not observed");
+    collector
+}
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries() {
     let task = TaskFn::arc("slow", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         Ok(())
@@ -25,16 +33,7 @@ async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries()
         .with_timeout(Duration::from_millis(50))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(1).unwrap());
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    assert!(
-        poll_until(Duration::from_secs(2), || async {
-            collector.find(EventKind::ActorExhausted).is_some()
-        })
-        .await
-    );
+    let collector = run_to_exhaustion(spec).await;
 
     assert_eq!(collector.count(EventKind::TimeoutHit), 2);
     assert_eq!(collector.count(EventKind::TaskFailed), 2);
@@ -65,12 +64,8 @@ async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries()
     assert!(reason.contains("max_retries_exceeded") && reason.contains("(1/1)"));
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
     let task = TaskFn::arc("slow-then-ok", move |_ctx: TaskContext| {
@@ -86,16 +81,7 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
     let spec = TaskSpec::restartable(task)
         .with_timeout(Duration::from_millis(50))
         .with_backoff(fast_backoff());
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    assert!(
-        poll_until(Duration::from_secs(2), || async {
-            collector.find(EventKind::ActorExhausted).is_some()
-        })
-        .await
-    );
+    let collector = run_to_exhaustion(spec).await;
 
     assert_eq!(collector.count(EventKind::TimeoutHit), 1);
     assert_eq!(collector.count(EventKind::TaskFailed), 1);
@@ -122,27 +108,14 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let task = TaskFn::arc("zero-to", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(())
     });
     let spec = TaskSpec::once(task).with_timeout(Duration::ZERO);
-    with_timeout(5, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    assert!(
-        poll_until(Duration::from_secs(2), || async {
-            collector.find(EventKind::ActorExhausted).is_some()
-        })
-        .await
-    );
+    let collector = run_to_exhaustion(spec).await;
 
     assert_eq!(collector.count(EventKind::TimeoutHit), 0);
     assert_eq!(collector.count(EventKind::TaskStopped), 1);

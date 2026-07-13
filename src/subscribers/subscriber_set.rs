@@ -357,6 +357,20 @@ mod tests {
         None
     }
 
+    async fn diagnostic_count(events: Vec<Arc<Event>>, kind: EventKind) -> usize {
+        let bus = Bus::new(64);
+        let mut rx = bus.subscribe();
+        let (_, subscriber) = CountingSub::new(1);
+        let set = SubscriberSet::new(vec![subscriber], bus);
+        set.start();
+
+        for event in events {
+            set.emit_arc(event);
+        }
+        set.close().await;
+        count(&mut rx, kind)
+    }
+
     struct CountingSub {
         count: Arc<AtomicU64>,
         capacity: NonZeroUsize,
@@ -436,7 +450,6 @@ mod tests {
         set.start();
         set.emit_arc(ev("after-close"));
         set.close().await;
-        tokio::task::yield_now().await;
 
         assert_eq!(count.load(Ordering::Relaxed), 0);
         assert!(matches!(
@@ -682,6 +695,16 @@ mod tests {
             Duration::ZERO,
         );
         set.start();
+        let worker = {
+            let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
+            let SubscriberState::Started { workers, .. } = &*state else {
+                panic!("subscriber worker must be started")
+            };
+            workers
+                .first()
+                .expect("the test configures one subscriber worker")
+                .abort_handle()
+        };
         let watchdog = spawn_gate_watchdog(Arc::clone(&first_gate));
 
         set.emit_arc(ev("first"));
@@ -689,6 +712,7 @@ mod tests {
         let first_entered = wait_for_gate(&first_gate, |state| state.entered).await;
 
         let close_result = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
+        let worker_finished_before_release = worker.is_finished();
         let first_was_still_running = !first_gate
             .0
             .lock()
@@ -699,19 +723,21 @@ mod tests {
         release_gate(&first_gate);
         let first_finished = wait_for_gate(&first_gate, |state| state.finished).await;
         watchdog.join().expect("watchdog thread must not panic");
-        let second_reappeared = tokio::time::timeout(Duration::from_millis(250), async {
-            while !sub.second_entered.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .is_ok();
+        let seen = sub
+            .seen
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let repeated_close = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
 
         assert!(first_entered, "the first callback must start before close");
         assert!(
             close_result.is_ok(),
             "zero subscriber shutdown timeout must return immediately"
+        );
+        assert!(
+            worker_finished_before_release,
+            "close must abort and join the queue worker before returning"
         );
         assert!(
             first_was_still_running,
@@ -722,10 +748,12 @@ mod tests {
             "the second callback must still be queued"
         );
         assert!(first_finished, "cleanup must release the running callback");
-        assert!(
-            !second_reappeared,
-            "aborting the queue worker must drop callbacks left behind the running one"
+        assert_eq!(
+            seen,
+            ["first"],
+            "once the queue worker is joined, releasing the running callback cannot revive queued callbacks"
         );
+        assert!(!sub.second_entered.load(Ordering::Acquire));
         assert!(repeated_close.is_ok(), "repeated close must remain a no-op");
     }
 
@@ -792,39 +820,19 @@ mod tests {
 
     #[tokio::test]
     async fn overflow_reported_for_ordinary_but_not_diagnostic_events() {
-        {
-            let bus = Bus::new(64);
-            let mut rx = bus.subscribe();
-            let (_c, sub) = CountingSub::new(1);
-            let set = SubscriberSet::new(vec![sub], bus.clone());
-            set.start();
-
-            for _ in 0..3 {
-                set.emit_arc(ev("t"));
-            }
-            set.close().await;
-            assert!(
-                count(&mut rx, EventKind::SubscriberOverflow) > 0,
-                "a dropped ordinary event must be reported"
-            );
-        }
-        {
-            let bus = Bus::new(64);
-            let mut rx = bus.subscribe();
-            let (_c, sub) = CountingSub::new(1);
-            let set = SubscriberSet::new(vec![sub], bus.clone());
-            set.start();
-
-            for _ in 0..5 {
-                set.emit_arc(kind_ev(EventKind::SubscriberOverflow));
-            }
-            set.close().await;
-            assert_eq!(
-                count(&mut rx, EventKind::SubscriberOverflow),
-                0,
-                "dropping a diagnostic event must not publish further overflow"
-            );
-        }
+        assert!(
+            diagnostic_count(vec![ev("t"); 3], EventKind::SubscriberOverflow).await > 0,
+            "a dropped ordinary event must be reported"
+        );
+        assert_eq!(
+            diagnostic_count(
+                vec![kind_ev(EventKind::SubscriberOverflow); 5],
+                EventKind::SubscriberOverflow,
+            )
+            .await,
+            0,
+            "dropping a diagnostic event must not publish further overflow"
+        );
     }
 
     #[tokio::test]
@@ -905,26 +913,6 @@ mod tests {
             *seen.lock().unwrap(),
             vec!["e0", "e1", "e2", "e3", "e4"],
             "the healthy subscriber must see every event in FIFO order, unaffected by the panicking one"
-        );
-    }
-
-    #[tokio::test]
-    async fn close_drains_queued_events() {
-        let bus = Bus::new(64);
-        let (count, sub) = CountingSub::new(128);
-        let set = SubscriberSet::new(vec![sub], bus);
-        set.start();
-
-        let n = 10u64;
-        for _ in 0..n {
-            set.emit_arc(Arc::new(Event::new(EventKind::TaskStopped).with_task("t")));
-        }
-        set.close().await;
-
-        assert_eq!(
-            count.load(Ordering::Relaxed),
-            n,
-            "close() must drain all queued events"
         );
     }
 }

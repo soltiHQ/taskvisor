@@ -8,20 +8,13 @@ use std::time::Duration;
 use common::*;
 use taskvisor::prelude::*;
 
-fn supervisor() -> (std::sync::Arc<Supervisor>, SupervisorHandle) {
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = sup.serve();
-    (sup, handle)
+fn served() -> SupervisorHandle {
+    Supervisor::new(SupervisorConfig::default(), vec![]).serve()
 }
 
 #[tokio::test]
 async fn outcome_reason_is_byte_identical_to_the_event_reason() {
-    use std::sync::Arc;
-
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-    let handle = sup.serve();
+    let (handle, collector) = served_with_collector(SupervisorConfig::default());
 
     let spec = TaskSpec::restartable(make_fail("drifter", Some(9)))
         .with_backoff(fast_backoff())
@@ -36,13 +29,13 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
         .expect("waiter errored");
 
     assert!(
-        poll_until(Duration::from_secs(2), || async {
-            collector
-                .by_id(id)
-                .iter()
-                .any(|e| e.kind == EventKind::ActorExhausted)
-        })
-        .await
+        collector
+            .wait_until(Duration::from_secs(2), |events| {
+                events
+                    .iter()
+                    .any(|event| event.id == Some(id) && event.kind == EventKind::ActorExhausted)
+            })
+            .await
     );
     let event = collector
         .by_id(id)
@@ -54,6 +47,8 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
         TaskOutcome::Failed {
             reason, exit_code, ..
         } => {
+            assert!(reason.contains("max_retries_exceeded"));
+            assert_eq!(exit_code, Some(9));
             assert_eq!(
                 &*reason,
                 event.reason.as_deref().expect("event carries a reason"),
@@ -68,8 +63,8 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
 }
 
 #[tokio::test]
-async fn completed_outcome_for_successful_once_task() {
-    let (_sup, handle) = supervisor();
+async fn watched_add_variants_return_the_same_completed_contract() {
+    let handle = served();
 
     let (id, waiter) = handle
         .add_and_watch(TaskSpec::once(make_ok_once("ok")))
@@ -82,13 +77,6 @@ async fn completed_outcome_for_successful_once_task() {
         .expect("waiter errored");
     assert!(matches!(outcome, TaskOutcome::Completed));
     assert!(outcome.is_success());
-
-    let _ = handle.shutdown().await;
-}
-
-#[tokio::test]
-async fn try_add_and_watch_returns_the_same_public_waiter_contract() {
-    let (_sup, handle) = supervisor();
 
     let (id, waiter) = handle
         .try_add_and_watch(TaskSpec::once(make_ok_once("try-ok")))
@@ -104,39 +92,8 @@ async fn try_add_and_watch_returns_the_same_public_waiter_contract() {
 }
 
 #[tokio::test]
-async fn failed_outcome_carries_reason_and_exit_code() {
-    let (_sup, handle) = supervisor();
-
-    let spec = TaskSpec::restartable(make_fail("flaky", Some(7)))
-        .with_backoff(fast_backoff())
-        .with_max_retries(NonZeroU32::new(2).unwrap());
-    let (_id, waiter) = handle
-        .add_and_watch(spec)
-        .await
-        .expect("add_and_watch should succeed");
-
-    match with_timeout(5, waiter.wait())
-        .await
-        .expect("waiter errored")
-    {
-        TaskOutcome::Failed {
-            reason, exit_code, ..
-        } => {
-            assert!(
-                reason.contains("max_retries_exceeded"),
-                "reason must mention exhausted retries: {reason}"
-            );
-            assert_eq!(exit_code, Some(7), "exit code must survive to the outcome");
-        }
-        other => panic!("expected Failed, got {other:?}"),
-    }
-
-    let _ = handle.shutdown().await;
-}
-
-#[tokio::test]
 async fn fatal_outcome_for_fatal_error() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let (_id, waiter) = handle
         .add_and_watch(TaskSpec::restartable(make_fatal("doomed", Some(137))))
@@ -164,7 +121,7 @@ async fn fatal_outcome_for_fatal_error() {
 
 #[tokio::test]
 async fn failed_outcome_after_task_panic_with_never_policy() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let (_id, waiter) = handle
         .add_and_watch(TaskSpec::once(make_panic("kaboom")))
@@ -189,7 +146,7 @@ async fn failed_outcome_after_task_panic_with_never_policy() {
 
 #[tokio::test]
 async fn spurious_canceled_return_resolves_canceled_outcome() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let liar: TaskRef = TaskFn::arc("liar-watch", |_ctx: TaskContext| async {
         Err(TaskError::Canceled)
@@ -210,20 +167,18 @@ async fn spurious_canceled_return_resolves_canceled_outcome() {
     let _ = handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn shutdown_drain_force_aborts_stubborn_watched_task() {
     let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(150));
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let stubborn: TaskRef = TaskFn::arc("stubborn-watch", |_ctx: TaskContext| async {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        Ok(())
-    });
+    let (stubborn, started) = make_stubborn("stubborn-watch");
     let (_id, waiter) = handle
         .add_and_watch(TaskSpec::once(stubborn))
         .await
         .expect("add_and_watch should succeed");
+    wait_for_start("stubborn-watch", &started).await;
 
     let (shutdown_res, outcome) = tokio::join!(handle.shutdown(), with_timeout(5, waiter.wait()));
     assert!(
@@ -236,9 +191,9 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn waiter_stays_pending_across_periodic_reruns() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let spec =
         TaskSpec::restartable(make_ok_once("periodic-watch")).with_restart(RestartPolicy::Always {
@@ -261,7 +216,7 @@ async fn waiter_stays_pending_across_periodic_reruns() {
 
 #[tokio::test]
 async fn cancelled_outcome_when_task_is_cancelled() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let (id, waiter) = handle
         .add_and_watch(TaskSpec::restartable(make_coop("coop")))
@@ -279,20 +234,18 @@ async fn cancelled_outcome_when_task_is_cancelled() {
     let _ = handle.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn force_aborted_outcome_for_noncooperative_task() {
     let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(100));
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        Ok(())
-    });
+    let (stubborn, started) = make_stubborn("stubborn");
     let (id, waiter) = handle
         .add_and_watch(TaskSpec::once(stubborn))
         .await
         .expect("add_and_watch should succeed");
+    wait_for_start("stubborn", &started).await;
 
     assert!(
         handle.cancel(id).await.expect("cancel should be accepted"),
@@ -309,7 +262,7 @@ async fn force_aborted_outcome_for_noncooperative_task() {
 
 #[tokio::test]
 async fn duplicate_name_returns_already_exists_not_a_waiter() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let first = handle
         .add_and_watch(TaskSpec::restartable(make_coop("dup")))
@@ -329,7 +282,7 @@ async fn duplicate_name_returns_already_exists_not_a_waiter() {
 
 #[tokio::test]
 async fn shutdown_resolves_pending_waiters() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let (_id, waiter) = handle
         .add_and_watch(TaskSpec::restartable(make_coop("worker")))
@@ -353,7 +306,7 @@ async fn shutdown_resolves_pending_waiters() {
 
 #[tokio::test]
 async fn dropping_waiter_does_not_affect_task() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let (id, waiter) = handle
         .add_and_watch(TaskSpec::restartable(make_coop("ignored")))
@@ -403,7 +356,7 @@ async fn outcome_is_delivered_even_under_bus_lag() {
 
 #[tokio::test]
 async fn task_error_source_survives_end_to_end_to_the_outcome() {
-    let (_sup, handle) = supervisor();
+    let handle = served();
 
     let task: TaskRef = TaskFn::arc("io-fail", |_ctx: TaskContext| async {
         Err(TaskError::fail_from(std::io::Error::new(

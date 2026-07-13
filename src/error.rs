@@ -368,20 +368,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_queue_full_has_stable_label() {
-        let error = RuntimeError::CommandQueueFull;
-        assert_eq!(error.as_label(), "runtime_command_queue_full");
-        assert_eq!(error.to_string(), "management command queue is full");
+    #[allow(deprecated)]
+    fn runtime_error_labels_are_stable() {
+        let id = TaskId::next();
+        let cases = [
+            (
+                RuntimeError::GraceExceeded {
+                    grace: Duration::from_secs(1),
+                    stuck: vec![Arc::from("worker")],
+                },
+                "runtime_grace_exceeded",
+            ),
+            (
+                RuntimeError::TaskAlreadyExists {
+                    name: Arc::from("worker"),
+                },
+                "runtime_task_already_exists",
+            ),
+            (RuntimeError::CommandQueueFull, "runtime_command_queue_full"),
+            (
+                RuntimeError::TaskTerminationTimeout {
+                    id,
+                    timeout: Duration::from_secs(1),
+                },
+                "runtime_task_termination_timeout",
+            ),
+            (
+                RuntimeError::TaskRemoveTimeout {
+                    id,
+                    timeout: Duration::from_secs(1),
+                },
+                "runtime_task_remove_timeout",
+            ),
+            (
+                RuntimeError::SignalSetupFailed {
+                    source: std::io::Error::other("boom"),
+                },
+                "runtime_signal_setup_failed",
+            ),
+            (RuntimeError::ShuttingDown, "runtime_shutting_down"),
+            (RuntimeError::AlreadyRunning, "runtime_already_running"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.as_label(), expected, "{error:?}");
+        }
     }
 
     #[test]
-    fn task_termination_timeout_has_stable_label() {
+    fn runtime_error_displays_are_stable() {
+        assert_eq!(
+            RuntimeError::CommandQueueFull.to_string(),
+            "management command queue is full"
+        );
+
         let id = TaskId::next();
         let error = RuntimeError::TaskTerminationTimeout {
             id,
             timeout: Duration::from_secs(1),
         };
-        assert_eq!(error.as_label(), "runtime_task_termination_timeout");
         assert_eq!(
             error.to_string(),
             format!("timeout waiting for task {id} termination after 1s")
@@ -389,59 +434,20 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_is_some_for_fail_with_code() {
-        let e = TaskError::fail("x").with_exit_code(5);
-        assert_eq!(e.exit_code(), Some(5));
-        assert!(e.is_retryable());
-        assert!(!e.is_fatal());
-    }
-
-    #[test]
-    fn exit_code_is_some_for_fatal_with_code() {
-        let e = TaskError::fatal("x").with_exit_code(137);
-        assert_eq!(e.exit_code(), Some(137));
-        assert!(!e.is_retryable());
-        assert!(e.is_fatal());
-    }
-
-    #[test]
-    fn exit_code_is_none_for_logical_fail() {
-        let e = TaskError::fail("logical");
-        assert_eq!(e.exit_code(), None);
-    }
-
-    #[test]
-    fn timeout_constructor_is_const_retryable_and_has_stable_label() {
+    fn timeout_constructor_is_const_and_preserves_payload_and_display() {
         const TIMEOUT: TaskError = TaskError::timeout(Duration::from_secs(1));
 
         assert!(matches!(
             &TIMEOUT,
             TaskError::Timeout { timeout, .. } if *timeout == Duration::from_secs(1)
         ));
-        assert_eq!(TIMEOUT.as_label(), "task_timeout");
         assert_eq!(TIMEOUT.to_string(), "timed out after 1s");
-        assert!(TIMEOUT.is_retryable());
-        assert!(!TIMEOUT.is_fatal());
-        assert_eq!(TIMEOUT.exit_code(), None);
     }
 
     #[test]
-    fn exit_code_is_none_for_canceled() {
-        assert_eq!(TaskError::Canceled.exit_code(), None);
-    }
-
-    #[test]
-    fn display_still_renders_reason_only() {
-        let e = TaskError::fail("boom").with_exit_code(1);
-        assert_eq!(e.to_string(), "execution failed: boom");
-    }
-
-    #[test]
-    fn fail_constructor_is_retryable_and_sourceless() {
+    fn fail_constructor_preserves_reason_and_is_sourceless() {
         let e = TaskError::fail("logical");
         assert_eq!(e.to_string(), "execution failed: logical");
-        assert!(e.is_retryable());
-        assert_eq!(e.exit_code(), None);
         assert!(std::error::Error::source(&e).is_none());
     }
 
@@ -471,14 +477,57 @@ mod tests {
     }
 
     #[test]
-    fn with_exit_code_accepts_bare_and_option() {
-        assert_eq!(TaskError::fail("x").with_exit_code(7).exit_code(), Some(7));
-
+    fn classification_and_exit_codes_cover_every_task_error_variant() {
         let dynamic: Option<i32> = None;
-        assert_eq!(
-            TaskError::fail("y").with_exit_code(dynamic).exit_code(),
-            None
-        );
+        let cases = [
+            (
+                "fail",
+                TaskError::fail("x").with_exit_code(7),
+                "task_failed",
+                Some(7),
+                true,
+                false,
+            ),
+            (
+                "fatal",
+                TaskError::fatal("x").with_exit_code(137),
+                "task_fatal",
+                Some(137),
+                false,
+                true,
+            ),
+            (
+                "optional exit code",
+                TaskError::fail("y").with_exit_code(dynamic),
+                "task_failed",
+                None,
+                true,
+                false,
+            ),
+            (
+                "timeout",
+                TaskError::timeout(Duration::from_secs(1)),
+                "task_timeout",
+                None,
+                true,
+                false,
+            ),
+            (
+                "canceled",
+                TaskError::Canceled,
+                "task_canceled",
+                None,
+                false,
+                false,
+            ),
+        ];
+
+        for (case, error, label, exit_code, retryable, fatal) in cases {
+            assert_eq!(error.as_label(), label, "{case}");
+            assert_eq!(error.exit_code(), exit_code, "{case}");
+            assert_eq!(error.is_retryable(), retryable, "{case}");
+            assert_eq!(error.is_fatal(), fatal, "{case}");
+        }
     }
 
     #[test]

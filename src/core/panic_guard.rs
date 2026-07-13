@@ -62,34 +62,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn ok_output_passes_through() {
+    async fn normal_outputs_pass_through_before_and_after_await() {
         assert_eq!(guarded(async { 42 }).await, Ok(42));
+        assert_eq!(
+            guarded(async {
+                tokio::task::yield_now().await;
+                "done"
+            })
+            .await,
+            Ok("done")
+        );
     }
 
     #[tokio::test]
-    async fn completes_normally_after_await() {
-        let r = guarded(async {
-            tokio::task::yield_now().await;
-            "done"
-        })
-        .await;
-        assert_eq!(r, Ok("done"));
-    }
+    async fn panics_before_and_after_await_become_errors() {
+        let before: Result<(), String> = guarded(async { panic!("boom") }).await;
+        assert!(
+            before
+                .as_ref()
+                .is_err_and(|message| message.contains("boom")),
+            "panic before the first await must become Err, got {before:?}"
+        );
 
-    #[tokio::test]
-    async fn panic_before_await_becomes_err() {
-        let r: Result<(), String> = guarded(async { panic!("boom") }).await;
-        assert!(r.clone().is_err(), "panic must become Err, got {r:?}");
-        assert!(r.unwrap_err().contains("boom"));
-    }
-
-    #[tokio::test]
-    async fn panic_after_await_becomes_err() {
-        let r: Result<(), String> = guarded(async {
+        let after: Result<(), String> = guarded(async {
             tokio::task::yield_now().await;
             panic!("late {}", 7);
         })
         .await;
-        assert!(r.unwrap_err().contains("late 7"));
+        assert!(
+            after
+                .as_ref()
+                .is_err_and(|message| message.contains("late 7")),
+            "panic after an await must become Err, got {after:?}"
+        );
     }
 }

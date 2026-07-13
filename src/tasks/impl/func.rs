@@ -124,20 +124,17 @@ mod tests {
     }
 
     #[test]
-    fn constructors_infer_closure_types_without_annotations() {
-        let t = TaskFn::arc("infer", |ctx| async move {
+    fn constructors_preserve_names_and_infer_closure_types() {
+        let inferred = TaskFn::arc("infer", |ctx| async move {
             if ctx.is_cancelled() {
                 return Err(TaskError::Canceled);
             }
             Ok(())
         });
-        assert_eq!(t.name(), "infer");
-    }
+        let direct = TaskFn::new("worker-7", |_ctx: TaskContext| async { Ok(()) });
 
-    #[test]
-    fn name_round_trips() {
-        let t = TaskFn::new("worker-7", |_ctx: TaskContext| async { Ok(()) });
-        assert_eq!(t.name(), "worker-7");
+        assert_eq!(inferred.name(), "infer");
+        assert_eq!(direct.name(), "worker-7");
     }
 
     #[test]

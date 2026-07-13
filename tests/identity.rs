@@ -10,14 +10,9 @@ use common::*;
 use taskvisor::prelude::*;
 
 fn served_with_collector(grace_secs: u64) -> (SupervisorHandle, Arc<EventCollector>) {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(
+    common::served_with_collector(
         SupervisorConfig::default().with_grace(Duration::from_secs(grace_secs)),
     )
-    .with_subscribers(subs)
-    .build();
-    (sup.serve(), collector)
 }
 
 async fn stale_id(handle: &SupervisorHandle) -> TaskId {
@@ -36,7 +31,7 @@ async fn stale_id(handle: &SupervisorHandle) -> TaskId {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn add_returns_taskid_and_task_runs() {
+async fn add_confirms_registration_returns_id_and_starts_task() {
     let (handle, collector) = served_with_collector(5);
     with_timeout(10, async {
         let id = handle
@@ -52,29 +47,10 @@ async fn add_returns_taskid_and_task_runs() {
             })
             .await
         );
-        let _ = handle.shutdown().await;
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn add_confirms_registration_and_returns_id() {
-    let (handle, _c) = served_with_collector(5);
-    with_timeout(10, async {
-        let id = handle
-            .add(TaskSpec::restartable(make_coop("w")))
-            .await
-            .expect("add ok");
-        assert!(
-            poll_until(Duration::from_secs(1), || async {
-                handle.is_alive("w").await
-            })
-            .await
-        );
         let list = handle.list().await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, id);
-        assert_eq!(&*list[0].1, "w");
+        assert_eq!(&*list[0].1, "worker");
         let _ = handle.shutdown().await;
     })
     .await;
@@ -111,27 +87,6 @@ async fn duplicate_add_returns_error_and_only_first_runs() {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, id1);
         assert!(handle.is_alive("dup").await);
-        let _ = handle.shutdown().await;
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn add_duplicate_name_returns_already_exists() {
-    let (handle, _c) = served_with_collector(5);
-    with_timeout(10, async {
-        let _ = handle
-            .add(TaskSpec::restartable(make_coop("dup")))
-            .await
-            .expect("first add ok");
-        let err = handle
-            .add(TaskSpec::restartable(make_coop("dup")))
-            .await
-            .expect_err("second add must fail");
-        match err {
-            RuntimeError::TaskAlreadyExists { name, .. } => assert_eq!(&*name, "dup"),
-            other => panic!("expected TaskAlreadyExists, got {other:?}"),
-        }
         let _ = handle.shutdown().await;
     })
     .await;
@@ -279,17 +234,6 @@ async fn cancel_by_id_true_then_false_on_double_cancel() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_unknown_id_returns_false() {
-    let (handle, _c) = served_with_collector(5);
-    with_timeout(10, async {
-        let stale = stale_id(&handle).await;
-        assert!(!handle.cancel(stale).await.expect("cancel stale"));
-        let _ = handle.shutdown().await;
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn cancel_by_label_true_then_false() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
@@ -313,7 +257,7 @@ async fn cancel_by_label_true_then_false() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_with_timeout_true_for_cooperative_task() {
+async fn timed_cancel_variants_are_public_contracts() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let id = handle
@@ -327,15 +271,7 @@ async fn cancel_with_timeout_true_for_cooperative_task() {
                 .expect("cancel_with_timeout")
         );
         assert!(!handle.is_alive("coop").await);
-        let _ = handle.shutdown().await;
-    })
-    .await;
-}
 
-#[tokio::test(flavor = "current_thread")]
-async fn cancel_by_label_with_timeout_variants_are_public_contracts() {
-    let (handle, _c) = served_with_collector(5);
-    with_timeout(10, async {
         let _ = handle
             .add(TaskSpec::restartable(make_coop("label-timeout")))
             .await
@@ -353,7 +289,7 @@ async fn cancel_by_label_with_timeout_variants_are_public_contracts() {
             .expect("add try-label-timeout");
         assert!(
             handle
-                .try_cancel_by_label_with_timeout("try-label-timeout", Duration::from_secs(2),)
+                .try_cancel_by_label_with_timeout("try-label-timeout", Duration::from_secs(2))
                 .await
                 .expect("try_cancel_by_label_with_timeout")
         );
@@ -434,36 +370,32 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup =
-        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(300)))
-            .with_subscribers(subs)
-            .build();
-    let handle = sup.serve();
+    let (handle, collector) = common::served_with_collector(
+        SupervisorConfig::default().with_grace(Duration::from_millis(300)),
+    );
 
     with_timeout(10, async {
-        let task = TaskFn::arc("stuck-runner", |_ctx: TaskContext| async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok(())
-        });
+        let (task, started) = make_stubborn("stuck-runner");
         let id = handle
             .add(TaskSpec::restartable(task))
             .await
             .expect("add stuck-runner");
+        wait_for_start("stuck-runner", &started).await;
 
         assert!(handle.remove(id).await.expect("remove"));
 
         assert!(
-            poll_until(Duration::from_secs(3), || async {
-                collector.by_id(id).iter().any(|e| {
-                    e.kind == EventKind::TaskRemoved
-                        && e.reason.as_deref() == Some("force_terminated_after_grace")
+            collector
+                .wait_until(Duration::from_secs(3), |events| {
+                    events.iter().any(|event| {
+                        event.id == Some(id)
+                            && event.kind == EventKind::TaskRemoved
+                            && event.reason.as_deref() == Some("force_terminated_after_grace")
+                    })
                 })
-            })
-            .await,
+                .await,
             "stuck task must be force-aborted after grace, not leaked"
         );
         let _ = handle.shutdown().await;
@@ -515,6 +447,10 @@ async fn list_reflects_registered_set_sorted_by_id() {
 async fn snapshot_and_is_alive_track_alive_set() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
+        assert!(!handle.is_alive("never-registered").await);
+        assert!(handle.alive_snapshot().await.is_empty());
+        assert!(handle.list().await.is_empty());
+
         let _ = handle
             .add(TaskSpec::restartable(make_coop("live")))
             .await
@@ -549,18 +485,6 @@ async fn snapshot_and_is_alive_track_alive_set() {
         let mut sorted = snap.clone();
         sorted.sort();
         assert_eq!(snap, sorted);
-        let _ = handle.shutdown().await;
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn is_alive_false_for_unknown_label() {
-    let (handle, _c) = served_with_collector(5);
-    with_timeout(5, async {
-        assert!(!handle.is_alive("nope").await);
-        assert!(handle.alive_snapshot().await.is_empty());
-        assert!(handle.list().await.is_empty());
         let _ = handle.shutdown().await;
     })
     .await;

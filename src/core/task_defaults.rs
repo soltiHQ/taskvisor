@@ -155,21 +155,23 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_means_no_default_timeout() {
-        let direct = TaskDefaults::default().with_timeout(Duration::ZERO);
-        let optional = TaskDefaults::default().with_timeout(Some(Duration::ZERO));
+    fn optional_timeout_normalizes_zero_and_allows_none_to_clear() {
+        for defaults in [
+            TaskDefaults::default().with_timeout(Duration::ZERO),
+            TaskDefaults::default().with_timeout(Some(Duration::ZERO)),
+            TaskDefaults::default()
+                .with_timeout(Duration::from_secs(1))
+                .with_timeout(None),
+        ] {
+            assert_eq!(defaults.timeout(), None);
+        }
 
-        assert_eq!(direct.timeout(), None);
-        assert_eq!(optional.timeout(), None);
-    }
-
-    #[test]
-    fn none_disables_the_default_timeout_without_type_annotation() {
-        let defaults = TaskDefaults::default()
-            .with_timeout(Duration::from_secs(1))
-            .with_timeout(None);
-
-        assert_eq!(defaults.timeout(), None);
+        assert_eq!(
+            TaskDefaults::default()
+                .with_timeout(Duration::from_secs(1))
+                .timeout(),
+            Some(Duration::from_secs(1))
+        );
     }
 
     #[test]

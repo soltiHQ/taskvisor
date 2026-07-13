@@ -222,29 +222,21 @@ mod tests {
 
     #[test]
     fn raw_zero_values_return_clear_errors() {
-        assert_eq!(
-            SupervisorConfig::default()
-                .try_with_max_concurrent(0)
-                .unwrap_err(),
-            ConfigError::Zero {
-                field: "max_concurrent"
-            }
-        );
-        assert_eq!(
-            SupervisorConfig::default()
-                .try_with_bus_capacity(0)
-                .unwrap_err(),
-            ConfigError::Zero {
-                field: "bus_capacity"
-            }
-        );
-        assert_eq!(
-            SupervisorConfig::default()
-                .try_with_registry_queue_capacity(0)
-                .unwrap_err(),
-            ConfigError::Zero {
-                field: "registry_queue_capacity"
-            }
-        );
+        type RawSetter = fn(SupervisorConfig, usize) -> Result<SupervisorConfig, ConfigError>;
+        let cases: [(&str, RawSetter); 3] = [
+            ("max_concurrent", SupervisorConfig::try_with_max_concurrent),
+            ("bus_capacity", SupervisorConfig::try_with_bus_capacity),
+            (
+                "registry_queue_capacity",
+                SupervisorConfig::try_with_registry_queue_capacity,
+            ),
+        ];
+
+        for (field, set) in cases {
+            assert_eq!(
+                set(SupervisorConfig::default(), 0).unwrap_err(),
+                ConfigError::Zero { field }
+            );
+        }
     }
 }

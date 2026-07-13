@@ -13,12 +13,27 @@ use taskvisor::prelude::*;
 
 async fn drained(collector: &EventCollector, at_least_removed: usize) {
     assert!(
-        poll_until(Duration::from_secs(3), || async {
-            collector.count(EventKind::TaskRemoved) >= at_least_removed
-        })
-        .await,
+        collector
+            .wait_until(Duration::from_secs(3), |events| {
+                events
+                    .iter()
+                    .filter(|event| event.kind == EventKind::TaskRemoved)
+                    .count()
+                    >= at_least_removed
+            })
+            .await,
         "collector never observed {at_least_removed} TaskRemoved event(s)"
     );
+}
+
+async fn run_static(specs: Vec<TaskSpec>) -> Arc<EventCollector> {
+    let expected_removed = specs.len();
+    let (supervisor, collector) = supervisor_with_collector(SupervisorConfig::default());
+    with_timeout(10, supervisor.run(specs))
+        .await
+        .expect("run() should return Ok");
+    drained(&collector, expected_removed).await;
+    collector
 }
 
 #[test]
@@ -29,16 +44,7 @@ fn supervisor_builder_is_nameable_from_public_api() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn never_oneshot_success_emits_starting_stopped_exhausted_once() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
-    let spec = TaskSpec::once(make_ok_once("oneshot"));
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 1).await;
+    let collector = run_static(vec![TaskSpec::once(make_ok_once("oneshot"))]).await;
 
     assert_eq!(collector.count(EventKind::TaskStarting), 1);
     assert_eq!(collector.count(EventKind::TaskStopped), 1);
@@ -54,23 +60,19 @@ async fn never_oneshot_success_emits_starting_stopped_exhausted_once() {
         Some("policy_exhausted_success")
     );
     let stopped = collector.find(EventKind::TaskStopped).unwrap();
+    assert!(
+        stopped.duration_ms.is_some(),
+        "terminal TaskStopped must carry attempt duration"
+    );
     assert!(exhausted.seq > stopped.seq, "exhausted must follow stopped");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn never_oneshot_failure_emits_taskfailed_then_exhausted_no_backoff() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let task = TaskFn::arc("fail-once", |_ctx: TaskContext| async move {
         Err(TaskError::fail("boom".to_string()))
     });
-    with_timeout(10, sup.run(vec![TaskSpec::once(task)]))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 1).await;
+    let collector = run_static(vec![TaskSpec::once(task)]).await;
 
     assert_eq!(collector.count(EventKind::TaskStarting), 1);
     assert_eq!(collector.count(EventKind::TaskFailed), 1);
@@ -93,10 +95,6 @@ async fn never_oneshot_failure_emits_taskfailed_then_exhausted_no_backoff() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let remaining = Arc::new(AtomicU32::new(2));
     let r = remaining.clone();
     let task = TaskFn::arc("flaky", move |_ctx: TaskContext| {
@@ -111,11 +109,7 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
         }
     });
     let spec = TaskSpec::restartable(task).with_backoff(fast_backoff());
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 1).await;
+    let collector = run_static(vec![spec]).await;
 
     assert_eq!(collector.count(EventKind::TaskStarting), 3);
     assert_eq!(collector.count(EventKind::TaskFailed), 2);
@@ -134,20 +128,16 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
         exhausted.reason.as_deref(),
         Some("policy_exhausted_success")
     );
+    assert!(
+        !collector.any_reason_contains(EventKind::ActorExhausted, "max_retries_exceeded"),
+        "unlimited retries must end on success, not retry-budget exhaustion"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn on_failure_fatal_emits_actordead_with_exit_code_no_retry() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let spec = TaskSpec::restartable(make_fatal("fatal-task", Some(7)));
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 1).await;
+    let collector = run_static(vec![spec]).await;
 
     assert_eq!(collector.count(EventKind::TaskStarting), 1);
     assert_eq!(collector.count(EventKind::TaskFailed), 1);
@@ -167,17 +157,9 @@ async fn on_failure_fatal_emits_actordead_with_exit_code_no_retry() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fatal_no_restart_under_always_interval_none() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let spec = TaskSpec::restartable(make_fatal("always-fatal", None))
         .with_restart(RestartPolicy::Always { interval: None });
-    with_timeout(5, sup.run(vec![spec]))
-        .await
-        .expect("run() should return (Fatal must short-circuit Always restart)");
-
-    drained(&collector, 1).await;
+    let collector = run_static(vec![spec]).await;
 
     assert_eq!(collector.count(EventKind::TaskStarting), 1);
     assert_eq!(collector.count(EventKind::ActorDead), 1);
@@ -185,116 +167,55 @@ async fn fatal_no_restart_under_always_interval_none() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn max_retries_three_yields_four_runs_then_exhausted() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
+async fn max_retries_allows_initial_attempt_plus_configured_retries() {
+    for retries in [1, 3] {
+        let name = format!("fail-{retries}");
+        let spec = TaskSpec::restartable(make_fail(&name, Some(42)))
+            .with_backoff(fast_backoff())
+            .with_max_retries(NonZeroU32::new(retries).unwrap());
+        let collector = run_static(vec![spec]).await;
+        let expected_attempts = usize::try_from(retries + 1).unwrap();
 
-    let spec = TaskSpec::restartable(make_fail("always-fail", Some(42)))
-        .with_backoff(fast_backoff())
-        .with_max_retries(NonZeroU32::new(3).unwrap());
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
+        assert_eq!(
+            collector.count(EventKind::TaskStarting),
+            expected_attempts,
+            "retry limit {retries}"
+        );
+        assert_eq!(
+            collector.count(EventKind::TaskFailed),
+            expected_attempts,
+            "retry limit {retries}"
+        );
+        assert_eq!(
+            collector.count(EventKind::BackoffScheduled),
+            usize::try_from(retries).unwrap(),
+            "retry limit {retries}"
+        );
+        assert_eq!(collector.count(EventKind::ActorExhausted), 1);
+        assert_eq!(collector.count(EventKind::ActorDead), 0);
+        assert!(
+            collector
+                .find_all(EventKind::TaskFailed)
+                .iter()
+                .all(|event| event.exit_code == Some(42)),
+            "retry limit {retries}: every failed attempt keeps the exit code"
+        );
 
-    drained(&collector, 1).await;
-
-    assert_eq!(collector.count(EventKind::TaskStarting), 4);
-    assert_eq!(collector.count(EventKind::TaskFailed), 4);
-    assert_eq!(collector.count(EventKind::BackoffScheduled), 3);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
-    assert_eq!(collector.count(EventKind::ActorDead), 0);
-
-    for f in collector.find_all(EventKind::TaskFailed) {
-        assert_eq!(f.exit_code, Some(42));
+        let exhausted = collector.find(EventKind::ActorExhausted).unwrap();
+        assert_eq!(exhausted.exit_code, Some(42));
+        let reason = exhausted.reason.as_deref().unwrap();
+        assert!(reason.contains("max_retries_exceeded"), "got: {reason}");
+        assert!(
+            reason.contains(&format!("({retries}/{retries})")),
+            "got: {reason}"
+        );
     }
-    let exhausted = collector.find(EventKind::ActorExhausted).unwrap();
-    assert_eq!(exhausted.exit_code, Some(42));
-    let reason = exhausted.reason.as_deref().unwrap();
-    assert!(reason.contains("max_retries_exceeded"), "got: {reason}");
-    assert!(reason.contains("(3/3)"), "got: {reason}");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn max_retries_one_yields_two_runs_boundary() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
-    let spec = TaskSpec::restartable(make_fail("fail-1", None))
-        .with_backoff(fast_backoff())
-        .with_max_retries(NonZeroU32::new(1).unwrap());
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 1).await;
-
-    assert_eq!(collector.count(EventKind::TaskStarting), 2);
-    assert_eq!(collector.count(EventKind::TaskFailed), 2);
-    assert_eq!(collector.count(EventKind::BackoffScheduled), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
-
-    let reason = collector
-        .find(EventKind::ActorExhausted)
-        .unwrap()
-        .reason
-        .as_deref()
-        .unwrap()
-        .to_string();
-    assert!(reason.contains("max_retries_exceeded"), "got: {reason}");
-    assert!(reason.contains("(1/1)"), "got: {reason}");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn unlimited_retries_eventual_success_no_max_retries_reason() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
-    let n = Arc::new(AtomicU32::new(0));
-    let nc = n.clone();
-    let task = TaskFn::arc("eventual", move |_ctx: TaskContext| {
-        let nc = nc.clone();
-        async move {
-            let c = nc.fetch_add(1, Ordering::SeqCst);
-            if c < 3 {
-                Err(TaskError::fail("still-failing".to_string()))
-            } else {
-                Ok(())
-            }
-        }
-    });
-    let spec = TaskSpec::restartable(task).with_backoff(fast_backoff());
-    with_timeout(10, sup.run(vec![spec]))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 1).await;
-
-    assert_eq!(collector.count(EventKind::TaskFailed), 3);
-    assert_eq!(collector.count(EventKind::BackoffScheduled), 3);
-    assert_eq!(collector.count(EventKind::TaskStopped), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
-    assert_eq!(collector.count(EventKind::ActorDead), 0);
-
-    for b in collector.find_all(EventKind::BackoffScheduled) {
-        assert_eq!(b.backoff_source, Some(BackoffSource::Failure));
-    }
-    assert!(
-        !collector.any_reason_contains(EventKind::ActorExhausted, "max_retries_exceeded"),
-        "unlimited retries must never exhaust on max-retries"
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(2)))
-        .with_subscribers(subs)
-        .build();
-    let handle = sup.serve();
+    let (handle, collector) =
+        served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(2)));
 
     let counter = Arc::new(AtomicU32::new(0));
     let cc = counter.clone();
@@ -310,10 +231,16 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
     with_timeout(15, async {
         handle.add(spec).await.expect("add ok");
         assert!(
-            poll_until(Duration::from_secs(5), || async {
-                counter.load(Ordering::SeqCst) >= 5 && collector.count(EventKind::TaskStarting) >= 5
-            })
-            .await,
+            collector
+                .wait_until(Duration::from_secs(5), |events| {
+                    counter.load(Ordering::SeqCst) >= 5
+                        && events
+                            .iter()
+                            .filter(|event| event.kind == EventKind::TaskStarting)
+                            .count()
+                            >= 5
+                })
+                .await,
             "immediate-restart loop and its observable start events should reach 5 runs"
         );
         assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
@@ -323,14 +250,10 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn always_interval_some_emits_success_source_backoff_between_runs() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(2)))
-        .with_subscribers(subs)
-        .build();
-    let handle = sup.serve();
+    let (handle, collector) =
+        served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(2)));
 
     let counter = Arc::new(AtomicU32::new(0));
     let cc = counter.clone();
@@ -348,11 +271,16 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
     with_timeout(15, async {
         handle.add(spec).await.expect("add ok");
         assert!(
-            poll_until(Duration::from_secs(5), || async {
-                counter.load(Ordering::SeqCst) >= 3
-                    && collector.count(EventKind::BackoffScheduled) >= 2
-            })
-            .await,
+            collector
+                .wait_until(Duration::from_secs(5), |events| {
+                    counter.load(Ordering::SeqCst) >= 3
+                        && events
+                            .iter()
+                            .filter(|event| event.kind == EventKind::BackoffScheduled)
+                            .count()
+                            >= 2
+                })
+                .await,
             "periodic task and its observable backoff events should reach 3 runs"
         );
         let backoffs = collector.find_all(EventKind::BackoffScheduled);
@@ -368,14 +296,10 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn success_driven_restart_does_not_consume_failure_retry_budget() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(2)))
-        .with_subscribers(subs)
-        .build();
-    let handle = sup.serve();
+    let (handle, collector) =
+        served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(2)));
 
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
@@ -398,15 +322,15 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
     with_timeout(15, async {
         handle.add(spec).await.expect("add ok");
         assert!(
-            poll_until(Duration::from_secs(5), || async {
-                n.load(Ordering::SeqCst) >= 6
-                    && collector.count(EventKind::TaskFailed) >= 1
-                    && collector
-                        .find_all(EventKind::BackoffScheduled)
-                        .into_iter()
-                        .any(|event| event.backoff_source == Some(BackoffSource::Failure))
-            })
-            .await,
+            collector
+                .wait_until(Duration::from_secs(5), |events| {
+                    n.load(Ordering::SeqCst) >= 6
+                        && events.iter().any(|event| {
+                            event.kind == EventKind::BackoffScheduled
+                                && event.backoff_source == Some(BackoffSource::Failure)
+                        })
+                })
+                .await,
             "task and its first failure events should settle before assertions"
         );
         assert_eq!(collector.count(EventKind::TaskFailed), 1);
@@ -427,20 +351,12 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
     let specs = vec![
         TaskSpec::once(make_ok_once("a")),
         TaskSpec::once(make_ok_once("b")),
         TaskSpec::once(make_ok_once("c")),
     ];
-    with_timeout(10, sup.run(specs))
-        .await
-        .expect("run() should return Ok");
-
-    drained(&collector, 3).await;
+    let collector = run_static(specs).await;
 
     assert_eq!(collector.count(EventKind::TaskStarting), 3);
     assert_eq!(collector.count(EventKind::TaskStopped), 3);
@@ -462,11 +378,7 @@ async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn duplicate_static_batch_starts_no_task_body() {
-    let collector = EventCollector::new();
-    let supervisor = Supervisor::new(
-        SupervisorConfig::default(),
-        vec![collector.clone() as Arc<dyn Subscribe>],
-    );
+    let (supervisor, collector) = supervisor_with_collector(SupervisorConfig::default());
     let runs = Arc::new(AtomicU32::new(0));
     let specs = ["unique", "duplicate", "duplicate"]
         .into_iter()
@@ -536,28 +448,5 @@ async fn duplicate_static_batch_starts_no_task_body() {
         duplicate_reasons
             .iter()
             .any(|reason| reason.as_ref() == taskvisor::reasons::ALREADY_EXISTS)
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn terminal_events_carry_attempt_duration() {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-
-    with_timeout(10, sup.run(vec![TaskSpec::once(make_ok_once("dur"))]))
-        .await
-        .expect("run returns Ok");
-
-    let saw_duration = poll_until(Duration::from_secs(2), || async {
-        collector
-            .find_all(EventKind::TaskStopped)
-            .iter()
-            .any(|e| e.duration_ms.is_some())
-    })
-    .await;
-    assert!(
-        saw_duration,
-        "TaskStopped delivered to a subscriber must carry duration_ms"
     );
 }

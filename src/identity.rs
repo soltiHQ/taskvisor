@@ -94,17 +94,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_unique_and_monotonic() {
+    fn ids_are_nonzero_unique_and_monotonic() {
         let a = TaskId::next();
         let b = TaskId::next();
 
+        assert!(a.get() >= 1, "zero is reserved and must never be minted");
         assert!(b.get() > a.get(), "ids must increase: {a} then {b}");
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn never_mints_zero() {
-        assert!(TaskId::next().get() >= 1);
     }
 
     #[cfg(feature = "test-util")]

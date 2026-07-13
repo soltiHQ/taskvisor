@@ -179,7 +179,7 @@ mod tests {
         tracing::subscriber::with_default(cap.clone(), || {
             crate::subscribers::Subscribe::on_event(&TracingBridge, e);
         });
-        let mut events = cap.0.lock().unwrap().clone();
+        let mut events = cap.0.lock().unwrap();
         assert_eq!(events.len(), 1, "exactly one tracing event expected");
         events.pop().unwrap()
     }
@@ -217,36 +217,20 @@ mod tests {
     }
 
     #[test]
-    fn actor_exhausted_retry_limit_maps_to_warn() {
-        let e = Event::new(EventKind::ActorExhausted)
-            .with_task("worker")
-            .with_reason("max_retries_exceeded(3/3): boom");
-
-        let (level, _) = capture_one(&e);
-
-        assert_eq!(
-            level,
-            Level::WARN,
-            "a task that permanently gave up after max retries must be WARN"
-        );
-    }
-
-    #[test]
-    fn actor_exhausted_benign_reasons_stay_info() {
-        for reason in ["policy_exhausted_success", "task_returned_canceled"] {
-            let e = Event::new(EventKind::ActorExhausted)
-                .with_task("worker")
-                .with_reason(reason);
+    fn actor_exhausted_level_depends_on_reason() {
+        for (reason, expected) in [
+            (Some("max_retries_exceeded(3/3): boom"), Level::WARN),
+            (Some("policy_exhausted_success"), Level::INFO),
+            (Some("task_returned_canceled"), Level::INFO),
+            (None, Level::INFO),
+        ] {
+            let mut e = Event::new(EventKind::ActorExhausted).with_task("worker");
+            if let Some(reason) = reason {
+                e = e.with_reason(reason);
+            }
             let (level, _) = capture_one(&e);
-            assert_eq!(level, Level::INFO, "wrong level for reason {reason:?}");
+            assert_eq!(level, expected, "wrong level for reason {reason:?}");
         }
-        let no_reason = Event::new(EventKind::ActorExhausted).with_task("worker");
-        let (level, _) = capture_one(&no_reason);
-        assert_eq!(
-            level,
-            Level::INFO,
-            "ActorExhausted without reason stays INFO"
-        );
     }
 
     #[test]
@@ -258,7 +242,17 @@ mod tests {
             Some("shutdown_requested")
         );
         assert!(fields.contains_key("seq"), "seq is always present");
-        for absent in ["task", "reason", "attempt", "delay_ms", "timeout_ms"] {
+        for absent in [
+            "id",
+            "task",
+            "reason",
+            "attempt",
+            "delay_ms",
+            "timeout_ms",
+            "duration_ms",
+            "exit_code",
+            "backoff_source",
+        ] {
             assert!(
                 !fields.contains_key(absent),
                 "unset optional field {absent:?} must not be recorded"

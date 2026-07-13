@@ -252,18 +252,6 @@ mod tests {
         }
     }
 
-    struct OkTask;
-
-    impl Task for OkTask {
-        fn name(&self) -> &str {
-            "ok-task"
-        }
-
-        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
-            Box::pin(async { Ok(()) })
-        }
-    }
-
     struct FailTask;
 
     impl Task for FailTask {
@@ -276,9 +264,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn timeout_returns_timeout_variant_not_fail() {
+    #[tokio::test(start_paused = true)]
+    async fn timeout_returns_timeout_and_publishes_timeout_hit() {
         let bus = Bus::new(16);
+        let mut rx = bus.subscribe();
         let parent = CancellationToken::new();
         let timeout = Some(Duration::from_millis(50));
 
@@ -295,31 +284,15 @@ mod tests {
                 panic!("expected TaskError::Timeout, got: {other:?}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn success_publishes_stopped_with_attempt() {
-        let bus = Bus::new(16);
-        let mut rx = bus.subscribe();
-        let parent = CancellationToken::new();
-
-        let _ = run_once(&OkTask, &parent, None, 3, TaskId::next(), &bus).await;
-
-        let mut stopped_attempt = None;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(ev.kind, EventKind::TaskStopped) {
-                stopped_attempt = ev.attempt;
-            }
-        }
-        assert_eq!(
-            stopped_attempt,
-            Some(3),
-            "TaskStopped must carry the attempt number"
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|event| event.kind == EventKind::TimeoutHit),
+            "a timeout result must be accompanied by TimeoutHit"
         );
     }
 
     #[tokio::test]
-    async fn stopped_event_carries_measured_attempt_duration() {
+    async fn success_returns_ok_and_publishes_measured_stopped_event() {
         struct SleepOk;
         impl Task for SleepOk {
             fn name(&self) -> &str {
@@ -337,30 +310,25 @@ mod tests {
         let mut rx = bus.subscribe();
         let parent = CancellationToken::new();
 
-        run_once(&SleepOk, &parent, None, 1, TaskId::next(), &bus)
+        run_once(&SleepOk, &parent, None, 3, TaskId::next(), &bus)
             .await
             .expect("task succeeds");
 
-        let mut duration_ms = None;
-        while let Ok(ev) = rx.try_recv() {
-            if ev.kind == EventKind::TaskStopped {
-                duration_ms = ev.duration_ms;
-            }
-        }
-        let measured = duration_ms.expect("TaskStopped must carry the attempt duration");
+        let stopped = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|event| event.kind == EventKind::TaskStopped)
+            .expect("a successful attempt must publish TaskStopped");
+        assert_eq!(
+            stopped.attempt,
+            Some(3),
+            "TaskStopped must carry the attempt number"
+        );
+        let measured = stopped
+            .duration_ms
+            .expect("TaskStopped must carry the attempt duration");
         assert!(
             measured >= 20,
             "attempt duration must reflect the ~30ms of work, got {measured}ms"
         );
-    }
-
-    #[tokio::test]
-    async fn success_returns_ok() {
-        let bus = Bus::new(16);
-        let parent = CancellationToken::new();
-
-        let result = run_once(&OkTask, &parent, None, 1, TaskId::next(), &bus).await;
-        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -374,30 +342,5 @@ mod tests {
             matches!(result, Err(TaskError::Fail { .. })),
             "expected TaskError::Fail, got: {result:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn timeout_publishes_timeout_hit_event() {
-        let bus = Bus::new(16);
-        let mut rx = bus.subscribe();
-        let parent = CancellationToken::new();
-
-        let _ = run_once(
-            &SlowTask,
-            &parent,
-            Some(Duration::from_millis(50)),
-            1,
-            TaskId::next(),
-            &bus,
-        )
-        .await;
-
-        let mut saw_timeout_hit = false;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(ev.kind, EventKind::TimeoutHit) {
-                saw_timeout_hit = true;
-            }
-        }
-        assert!(saw_timeout_hit, "expected TimeoutHit event to be published");
     }
 }
