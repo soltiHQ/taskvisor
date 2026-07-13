@@ -456,3 +456,16 @@ cargo bench --bench controller --features controller
 Issues and pull requests are welcome. Read the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
 
 Taskvisor is licensed under [Apache-2.0](LICENSE).
+
+<br>
+
+##
+
+<p align="center">
+  <a href="https://github.com/soltiHQ">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/word/solti-word-light.svg">
+      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg" alt="soltiHQ" height="84">
+    </picture>
+  </a>
+</p>
