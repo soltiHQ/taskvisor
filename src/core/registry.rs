@@ -1,39 +1,37 @@
-//! # Task registry.
+//! # Authoritative task registry
 //!
-//! Owns registered task actors and their runtime identity. The registry is the
-//! authoritative owner of active membership (`TaskId -> actor` and
-//! `label -> TaskId`) until terminal actor cleanup finishes.
+//! The registry owns active task identities, names, actor handles, and final
+//! cleanup. A task remains registered until its actor is joined and both
+//! indexes are released.
 //!
-//! ## Internal layout
+//! ## Internal Layout
 //!
-//! - `protocol`: management commands, direct replies, and cancel decisions.
-//! - `completion`: lossless watched-task and terminal-cleanup signals.
+//! - `protocol`: management commands and direct replies.
+//! - `completion`: watched outcomes and terminal cleanup signals.
 //! - `state`: the two synchronized indexes, entry state, and pending joins.
-//! - `admission`: actor construction and atomic single/batch registration.
-//! - `removal`: removal arbitration, actor joins, outcomes, and cleanup.
-//! - `listener`: command/control/completion dispatch and listener lifecycle.
+//! - `admission`: actor creation and atomic single or batch registration.
+//! - `removal`: removal claims, actor joins, outcomes, and cleanup.
+//! - `listener`: command and completion dispatch.
 //!
-//! ## Planes
+//! ## Paths
 //!
 //! ```text
-//! Management:   SupervisorCore -- bounded commands --> registry listener
-//!                              <-- oneshot replies ---
-//! Completion:   TaskActor ------ actor identity -----> registry listener
-//!                registry ------ terminal signal ----> waiters/controller
-//! Observability: runtime actors/registry -- Bus -----> subscribers
+//! commands:    SupervisorCore -- bounded queue --> Registry
+//!                                <-- direct reply --
+//! completion: TaskActor ------ reliable signal ---> Registry
+//!             Registry ------- final result ------> waiters/controller
+//! events:     runtime parts --- best-effort ------> subscribers
 //! ```
 //!
-//! ## Ordering invariants
+//! ## Invariants
 //!
 //! - Both identity indexes change under one write lock.
-//! - A label remains reserved while its entry is `Registered` or `Removing`.
-//! - Exactly one claimant owns an actor `JoinHandle`; later cancellation callers
-//!   share its terminal completion signal.
-//! - Static batches validate every label and hold actor bodies behind a start
-//!   gate until the complete batch is indexed and announced.
-//! - `TaskRemoved` is emitted only by terminal join cleanup; lossy actor events
-//!   never remove membership.
-//! - A control fence drains management commands visible before admission closes.
+//! - A name stays reserved while its entry is registered or being removed.
+//! - One removal claim owns the actor join handle. Later cancellation calls can
+//!   wait on the same completion signal.
+//! - A static batch starts only after every name is validated and indexed.
+//! - Only terminal join cleanup removes membership. Best-effort events cannot do it.
+//! - Shutdown processes accepted management commands before task drain starts.
 
 use std::{sync::Arc, time::Duration};
 
@@ -65,11 +63,10 @@ use removal::{JoinCompletion, RemovalReport};
 #[cfg(test)]
 use state::{Entry, EntryState, Handle};
 
-/// Owns registered task actors and task membership.
+/// Owns registered tasks and their membership state.
 ///
-/// The registry accepts add/remove commands, receives reliable actor completion
-/// signals, joins actors after removal or completion, and publishes registry-level
-/// lifecycle events such as `TaskAdded` and `TaskRemoved`.
+/// It accepts management commands, receives actor completion signals, joins
+/// actors, resolves watched outcomes, and publishes registry lifecycle events.
 ///
 /// # Also
 ///
@@ -126,7 +123,7 @@ impl Registry {
         }
     }
 
-    /// Returns registered and removing tasks as `(id, label)` pairs, sorted by identity.
+    /// Returns registered and removing tasks as `(id, name)` pairs, sorted by identity.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         let st = self.state.read().await;
         let mut tasks: Vec<(TaskId, Arc<str>)> = st
@@ -144,7 +141,7 @@ impl Registry {
         self.state.read().await.tasks.contains_key(&id)
     }
 
-    /// Resolves a label to the identity currently holding it (if any).
+    /// Resolves a name to its registered identity, if present.
     #[cfg(test)]
     pub async fn id_for_label(&self, name: &str) -> Option<TaskId> {
         self.state.read().await.by_label.get(name).copied()

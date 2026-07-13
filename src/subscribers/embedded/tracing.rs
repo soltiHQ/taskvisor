@@ -1,11 +1,11 @@
-//! # Tracing bridge subscriber.
+//! # Bridge to `tracing`
 //!
-//! Forwards every runtime [`Event`] into the [`tracing`] ecosystem.
-//! Use it to see supervisor lifecycle in your existing log pipeline.
+//! [`TracingBridge`] converts every event it receives into one structured
+//! [`tracing`] event. Subscriber delivery is best-effort, so this bridge does
+//! not make event delivery reliable.
 //!
-//! Each tracing event carries:
-//! - target `taskvisor`,
-//! - a level mapped from the event severity (see [`TracingBridge`]),
+//! Each tracing event uses target `taskvisor` and contains:
+//! - a level based on the event severity (see [`TracingBridge`]),
 //! - structured fields: `event` (the stable label), `seq`, and the optional payload fields that are set
 //!   (`task`, `id`, `attempt`, `reason`, `delay_ms`, `timeout_ms`, `duration_ms`, `exit_code`, `backoff_source`).
 //!
@@ -26,7 +26,7 @@ use crate::events::{Event, EventKind};
 use crate::reasons::MAX_RETRIES_EXCEEDED;
 use crate::subscribers::Subscribe;
 
-/// Subscriber that forwards runtime events to [`tracing`].
+/// Sends runtime events to [`tracing`] as structured events.
 ///
 /// Level mapping:
 /// - `ERROR`: task failed, actor dead, subscriber panicked.

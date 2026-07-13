@@ -1,46 +1,20 @@
-//! # Subscriber: Custom Event Handler
+//! # Custom event subscriber
 //!
-//! Implements the `Subscribe` trait to collect task lifecycle counters.
-//!
-//! This example counts events with plain atomics to keep the focus on the trait.
-//! For a real metrics integration see `metrics.rs` (Prometheus) and `tracing.rs`.
-//
-//! ## What this shows
-//!
-//! - **`on_event(&self, event: &Event)`** - your sync handler, run on Tokio's blocking pool.
-//! - **`Subscribe` trait** - extension point for observability.
-//! - **`queue_capacity()`** - per-subscriber buffer size (overflow → event dropped).
-//! - **`name()`** - identifier for logs and overflow/panic events.
-//!
-//! ## How subscribers are wired
+//! This example implements `Subscribe` and counts lifecycle events with
+//! atomics. Each subscriber has its own bounded queue:
 //!
 //! ```text
-//! Supervisor::new(config, vec![metrics])
-//!                               ▼
-//!                        SubscriberSet
-//!                         ├── [mpsc queue] → worker → blocking pool → metrics.on_event()
-//!                         └── [mpsc queue] → worker → blocking pool → other_sub.on_event()
+//! supervisor events
+//!       |
+//!       +--> bounded queue --> worker --> blocking pool --> on_event(metrics)
+//!       +--> bounded queue --> worker --> blocking pool --> on_event(other)
 //! ```
 //!
-//! ## Runtime flavor
+//! A slow subscriber does not block event producers, but its queue can overflow
+//! and lose events. Keep `on_event` bounded and use outcomes for decisions that
+//! must not depend on best-effort delivery.
 //!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example subscriber
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                      | What it adds                                          |
-//! |------------------------------|-------------------------------------------------------|
-//! | [`metrics.rs`](metrics.rs)   | Real Prometheus counters keyed by `as_label()`        |
-//! | [`tracing.rs`](tracing.rs)   | Forward events into the `tracing` ecosystem           |
-//! | [`dynamic.rs`](dynamic.rs)   | `serve()` → `SupervisorHandle` for runtime management |
+//! Run with `cargo run --example subscriber`.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

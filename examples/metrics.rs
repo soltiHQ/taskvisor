@@ -1,40 +1,16 @@
-//! # Metrics: Prometheus Counters from Lifecycle Events
+//! # Metrics from lifecycle events
 //!
-//! A real metrics integration: every supervisor event increments a Prometheus
-//! counter, keyed by the event's stable label.
+//! This example implements `Subscribe` and maps each event to a Prometheus
+//! counter. `EventKind::as_label` provides stable, machine-readable values such
+//! as `task_failed` and `backoff_scheduled`.
 //!
-//! ## The pattern
+//! A real service would expose the registry on its metrics endpoint. This
+//! example prints the Prometheus text format when it exits.
 //!
-//! - One `IntCounterVec` with labels `event` and `task`.
-//! - `EventKind::as_label()` gives a stable, machine-readable label value
-//!   (`task_failed`, `backoff_scheduled`, ...). No hand-written match.
-//! - In a real service, serve the encoded text at `GET /metrics`.
-//!   This example prints it at exit instead.
+//! The `task` label uses task names. Keep these names bounded and stable. Do not
+//! put request IDs, user IDs, or other unbounded values in metric labels.
 //!
-//! ## Label cardinality
-//!
-//! The `task` label uses the task name.
-//! Keep task names a bounded set (no per-request ids in names) to avoid
-//! high-cardinality metrics.
-//!
-//! ## What this shows
-//!
-//! - `Subscribe` + `prometheus::IntCounterVec` - the whole bridge is ~15 lines.
-//! - `EventKind::as_label()` as the metric label value.
-//! - `TextEncoder` - rendering the standard exposition format.
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example metrics
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                          | What it adds                                 |
-//! |----------------------------------|----------------------------------------------|
-//! | [`tracing.rs`](tracing.rs)       | The same event stream in your logs           |
-//! | [`subscriber.rs`](subscriber.rs) | The `Subscribe` trait itself, step by step   |
+//! Run with `cargo run --example metrics`.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

@@ -1,7 +1,23 @@
-//! # Stable `reason` strings.
+//! # Stable `reason` values
 //!
-//! Some events and outcomes have a `reason` string.
-//! This module lists the stable strings.
+//! Some events and outcomes contain a `reason` text.
+//! Only the values and prefixes in this module are stable for machine matching.
+//! Other reason text may change between releases.
+//!
+//! Exact value:
+//!
+//! ```rust
+//! use taskvisor::reasons::ALREADY_EXISTS;
+//! assert_eq!("already_exists", ALREADY_EXISTS);
+//! ```
+//!
+//! Prefix with details:
+//!
+//! ```rust
+//! use taskvisor::reasons::MAX_RETRIES_EXCEEDED;
+//! let reason = "max_retries_exceeded(3/3): connection lost";
+//! assert!(reason.starts_with(MAX_RETRIES_EXCEEDED));
+//! ```
 //!
 //! ## Where each value appears
 //!
@@ -31,14 +47,15 @@ pub const TASK_RETURNED_CANCELED: &str = "task_returned_canceled";
 
 /// `ActorExhausted` reason **prefix**: the task stopped after it used all retry attempts.
 ///
-/// The full reason is `max_retries_exceeded(<attempt>/<limit>): <last error>`.
+/// The full reason is
+/// `max_retries_exceeded(<retries_used>/<retry_limit>): <last error>`.
 /// Match with `starts_with`, not equality.
 pub const MAX_RETRIES_EXCEEDED: &str = "max_retries_exceeded";
 
-/// Registration/rejection reason: another running task already uses this name.
+/// Registration/rejection reason: another registered task already uses this name.
 pub const ALREADY_EXISTS: &str = "already_exists";
 
-/// Registration reason: another item caused an atomic static batch to be rejected.
+/// Registration reason: another item caused an all-or-nothing static batch to be rejected.
 pub const BATCH_REJECTED: &str = "batch_rejected";
 
 /// Rejection reason **prefix**: a controller slot queue is full.

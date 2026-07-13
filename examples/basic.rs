@@ -1,35 +1,18 @@
-//! # Basic
+//! # Basic: run one task
 //!
-//! The simplest possible taskvisor program: **one task, one run, one exit.**
-//! Start here to understand the minimal wiring.
+//! This example shows the smallest static setup: create a task, run it once,
+//! and wait for the supervisor to finish.
 //!
-//! ## What this shows
+//! It uses:
 //!
-//! - `TaskFn::arc` wraps a closure into an `Arc<dyn Task>` (a `TaskRef`).
-//! - `TaskSpec::once(task)` creates a one-shot spec (`RestartPolicy::Never`).
-//! - `Supervisor::run(specs)` blocks until all tasks finish or Ctrl+C is pressed.
+//! - `TaskFn::arc` to turn an async closure into a `TaskRef`;
+//! - `TaskSpec::once` to disable restarts;
+//! - `Supervisor::run` to start the task and wait for completion.
 //!
-//! The `TaskContext` parameter is unused here because the task completes instantly.
-//! For long-running tasks that **must react to shut down**, see `worker.rs`.
+//! The task finishes at once, so it does not use its `TaskContext`. A
+//! long-running task should observe cancellation; see `worker.rs`.
 //!
-//! ## Runtime flavor
-//!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example basic
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                      | What it adds                             |
-//! |------------------------------|------------------------------------------|
-//! | [`worker.rs`](worker.rs)     | Long-running task with graceful shutdown |
-//! | [`periodic.rs`](periodic.rs) | Cron-like repeated execution             |
+//! Run with `cargo run --example basic`.
 
 use taskvisor::prelude::*;
 

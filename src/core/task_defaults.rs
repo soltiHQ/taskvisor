@@ -1,4 +1,4 @@
-//! Default task execution settings.
+//! Supervisor-wide defaults for task execution.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -12,13 +12,19 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|duration| !duration.is_zero())
 }
 
-/// Default execution settings for task specifications.
+/// Default settings applied when a supervisor accepts a [`TaskSpec`](crate::TaskSpec).
 ///
-/// A [`TaskSpec`](crate::TaskSpec) may inherit any of these values. An explicit
-/// setting on the task specification always wins. Use
-/// [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults) to inherit every
-/// field, or a named constructor such as [`TaskSpec::restartable`](crate::TaskSpec::restartable)
-/// to set the restart mode while inheriting the remaining fields.
+/// An explicit value in `TaskSpec` always wins. For example,
+/// [`TaskSpec::restartable`](crate::TaskSpec::restartable) sets the restart
+/// policy but inherits backoff, timeout, and retry limit.
+///
+/// ```text
+/// TaskSpec field is inherited  -> use TaskDefaults value
+/// TaskSpec field is explicit   -> use TaskSpec value
+/// ```
+///
+/// The built-in defaults restart after retryable failures, use exponential
+/// backoff with jitter, set no attempt timeout, and allow unlimited retries.
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct TaskDefaults {
@@ -49,9 +55,9 @@ impl TaskDefaults {
         self.timeout
     }
 
-    /// Returns the default failure-retry limit.
+    /// Returns the default number of retries in one failure streak.
     ///
-    /// `None` means that failure retries are unlimited by default.
+    /// `None` means unlimited retries.
     #[must_use]
     pub fn max_retries(&self) -> Option<NonZeroU32> {
         self.max_retries
@@ -69,27 +75,25 @@ impl TaskDefaults {
         self
     }
 
-    /// Sets the default timeout for one task attempt.
+    /// Sets the default timeout for each task attempt.
     ///
-    /// Accepts either a [`Duration`] or an `Option<Duration>`; pass either form
-    /// directly without calling `.into()`.
-    /// `None`, `Duration::ZERO`, and `Some(Duration::ZERO)` mean no default timeout.
+    /// Pass a [`Duration`] to enable it. Pass `None` or zero for no timeout.
     pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
         self.timeout = normalize_timeout(timeout.into());
         self
     }
 
-    /// Sets the default failure-retry limit.
+    /// Sets the default number of retries in one failure streak.
     ///
-    /// Accepts either a [`NonZeroU32`] or an `Option<NonZeroU32>`; pass either
-    /// form directly without calling `.into()`. Pass `None` for unlimited
-    /// failure retries.
+    /// Pass a [`NonZeroU32`] for a limit or `None` for unlimited retries. A
+    /// limit of three allows one failed attempt and three retries. A successful
+    /// attempt resets the count.
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
         self.max_retries = max_retries.into();
         self
     }
 
-    /// Convenience setter that validates a raw failure-retry limit.
+    /// Sets the default retry limit from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `max_retries` is zero. Use

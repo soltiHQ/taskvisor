@@ -1,9 +1,8 @@
-//! # Runtime event model.
+//! # Event data model
 //!
-//! This module defines the event records emitted by taskvisor.
-//!
-//! Events are used for observability: logs, metrics, dashboards, tests, and subscriber integrations.
-//! Delivery is best-effort; consumers can lag and miss events. Do not use the event bus as durable storage.
+//! [`Event`] is a flat record. [`EventKind`] tells you what happened, and the
+//! optional fields give details. Delivery is best-effort; events are not durable
+//! storage and are not a reliable completion signal.
 //!
 //! | Type              | Role                                       |
 //! |-------------------|--------------------------------------------|
@@ -11,29 +10,38 @@
 //! | [`Event`]         | Event payload and metadata                 |
 //! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
 //!
-//! ## Sequence Numbers
+//! ## Sequence numbers
 //!
-//! Each event has a unique, increasing `seq` assigned when the event is created.
-//! `seq` is useful for sorting and de-duplication after a lag gap. `seq` is not a causal clock.
-//! With concurrent publishers, it reflects event construction order, not a guaranteed runtime order.
+//! [`Event::new`] gives each event a process-local increasing `seq`. Use it to
+//! sort observed events and detect gaps. It is not stored across process
+//! restarts. Like any `u64` counter, it wraps after `2^64` allocations;
+//! Taskvisor does not guard this theoretical limit.
 //!
-//! ## Field Model
+//! `seq` is not a causal clock. With concurrent publishers, it shows event
+//! construction order, not a guaranteed order of runtime effects or subscriber
+//! callbacks.
+//!
+//! ## Fields
 //!
 //! [`Event`] is a flat record with optional fields. Which fields are set depends on [`EventKind`].
 //!
-//! Common fields:
-//! - `seq`: unique event sequence.
+//! Always present:
+//! - `seq`: process-local event sequence.
 //! - `at`: wall-clock timestamp.
 //! - `kind`: event type.
 //!
-//! Correlation fields:
-//! - `id`: Taskvisor submission/run identity, when the event belongs to managed work.
+//! Present when relevant:
+//! - `id`: the stable [`TaskId`] for one submission and run.
 //! - `attempt`: task attempt number, starting from 1.
-//! - `task`: a task name or subscriber name.
+//! - `task`: usually a task name. Subscriber diagnostics use it for the
+//!   subscriber name, and controller events use it for the slot name.
 //!
-//! Timing fields are stored in milliseconds and saturate at `u32::MAX`.
+//! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds. Values
+//! above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
-//! `reason` is a diagnostic text unless a variant documents a small stable set of values.
+//! Treat `reason` as human-readable text unless the event points to a constant
+//! in [`reasons`](crate::reasons). Use [`EventKind::as_label`] for a stable event
+//! label.
 //!
 //! ## Example
 //!
@@ -59,66 +67,72 @@ use std::time::{Duration, SystemTime};
 
 use crate::identity::TaskId;
 
-/// Global counter minting unique, monotonic `seq` values at event construction.
+/// Process-local counter for `seq` values. It wraps after `2^64` allocations.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Classification of runtime events.
+/// Describes what happened in the runtime.
 ///
 /// Every event has `seq`, `at`, and `kind`.
 /// Variant docs list only the additional fields normally set by the runtime.
+/// Include a wildcard arm when matching because new event kinds may be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventKind {
-    /// Subscriber panicked during event processing.
+    /// A subscriber panicked while processing an event.
     ///
     /// Sets:
     /// - `task`: subscriber name
     /// - `reason`: panic info/message
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     SubscriberPanicked,
 
-    /// Subscriber dropped an event (queue full or worker closed).
+    /// An event was lost because a subscriber path fell behind or closed.
     ///
     /// Sets:
     /// - `task`: subscriber name (or the internal consumer that lagged)
-    /// - `reason`: bare cause — `"full"`, `"closed"`, or `"lagged(n)"`
+    /// - `reason`: `"full"`, `"closed"`, or `"lagged(n)"`
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     SubscriberOverflow,
 
-    /// Shutdown requested (OS signal observed).
+    /// Shutdown was requested.
+    ///
+    /// This can come from an OS signal or an explicit runtime shutdown request.
     ///
     /// Sets:
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     ShutdownRequested,
 
     /// All tasks stopped within configured grace period.
     ///
     /// Sets:
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     AllStoppedWithinGrace,
 
     /// Grace period exceeded; some tasks did not stop in time.
     ///
     /// Sets:
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     GraceExceeded,
 
-    /// Task is starting an attempt.
+    /// A task attempt is starting.
     ///
     /// Sets:
     /// - `id`: task run identity
     /// - `task`: task name
-    /// - `attempt`: attempt number (1-based, per actor)
+    /// - `attempt`: attempt number (1-based for this task run)
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     TaskStarting,
 
-    /// Task attempt finished successfully.
+    /// A task attempt returned `Ok(())`.
+    ///
+    /// This is an attempt result, not always the final task result. Under
+    /// [`RestartPolicy::Always`](crate::RestartPolicy::Always), another attempt follows.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -136,10 +150,10 @@ pub enum EventKind {
     /// - `duration_ms`: attempt duration
     TaskCanceled,
 
-    /// Task attempt returned an error.
+    /// A task attempt returned a failure.
     ///
-    /// This includes retryable failures, timeouts, and fatal errors.
-    /// The actor later decides whether to retry, exhaust, or die.
+    /// This includes retryable failures, timeouts, and fatal errors. A later
+    /// event shows whether Taskvisor retries or reaches a terminal state.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -162,7 +176,7 @@ pub enum EventKind {
     /// - `duration_ms`: elapsed attempt duration
     TimeoutHit,
 
-    /// Next attempt scheduled (after success or failure).
+    /// The next attempt was scheduled after success or failure.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -172,54 +186,54 @@ pub enum EventKind {
     /// - `backoff_source`: `Success` or `Failure`
     /// - `reason`: last failure message (only for failure-driven backoff)
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     BackoffScheduled,
 
-    /// Request to add a new task to the supervisor.
+    /// An add request was published before Taskvisor processed it.
     ///
-    /// Published before an `Add` command is sent. For an atomic `AddBatch`, one
-    /// request event is published per item before the whole command is sent.
+    /// This does not confirm admission. For an all-or-nothing batch, Taskvisor publishes
+    /// one request event per item before it sends the whole batch command.
     ///
     /// Sets:
     /// - `id`: task run identity (pre-allocated for this add request)
     /// - `task`: logical task name
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     TaskAddRequested,
 
-    /// Task was successfully added (actor spawned and registered).
+    /// A task was registered and its managed runner was spawned.
     ///
     /// Sets:
     /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     TaskAdded,
 
-    /// Task could not be added because its name conflicts or its atomic static
-    /// batch was rejected.
+    /// A task was not added because its name conflicted or its all-or-nothing batch was rejected.
     ///
-    /// Published by Registry instead of `TaskAdded`. No actor is spawned for a
-    /// rejected dynamic add or for any item in a rejected static batch.
+    /// No task runner is spawned for a rejected dynamic add. If an
+    /// all-or-nothing batch is rejected, no task runner is spawned for any item.
     ///
     /// Sets:
     /// - `id`: task run identity of the rejected add request
     /// - `task`: task name
     /// - `reason`: e.g. "already_exists" or "batch_rejected"
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     TaskAddFailed,
 
-    /// Request to remove a task from the supervisor.
+    /// A remove request was published before Taskvisor completed it.
     ///
-    /// This is a best-effort observability event, not a removal command or acknowledgement.
+    /// This is not proof of removal. Use the management method's result or a
+    /// waiter when you need a reliable answer.
     ///
     /// Sets:
     /// - `id`: task run identity
     /// - `task`: task name, when known
     /// - `reason`: optional removal reason
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     TaskRemoveRequested,
 
     /// Task was removed from the supervisor (after join/cleanup).
@@ -228,15 +242,16 @@ pub enum EventKind {
     /// - `id`: task run identity
     /// - `task`: task name
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     TaskRemoved,
 
-    /// Actor exhausted its restart policy and will not restart.
+    /// A task reached a non-fatal terminal state and will not restart.
     ///
     /// Emitted when:
-    /// - `RestartPolicy::Never` → task completed (success or handled case)
-    /// - `RestartPolicy::OnFailure` → task completed successfully
-    /// - retry budget exceeded on a retryable failure
+    /// - `RestartPolicy::Never` stops after success or a retryable failure
+    /// - `RestartPolicy::OnFailure` stops after success
+    /// - the retry limit is reached after retryable failures
+    /// - the task returns `TaskError::Canceled` without a runtime cancellation
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -245,10 +260,10 @@ pub enum EventKind {
     /// - `reason`: optional message
     /// - `exit_code`: numeric exit code (process-like runtimes); `None` otherwise
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     ActorExhausted,
 
-    /// Actor terminated permanently due to a fatal error.
+    /// A task reached a fatal terminal state and will not restart.
     ///
     /// Emitted when:
     /// - Task returned `TaskError::Fatal`
@@ -258,13 +273,13 @@ pub enum EventKind {
     /// - `task`: task name
     /// - `attempt`: last attempt number
     /// - `reason`: fatal error message
-    /// - `exit_code`: numeric exit code when the fatal error; `None` for logical errors
+    /// - `exit_code`: numeric exit code when the fatal error has one; `None` for logical errors
     /// - `at`: wall-clock timestamp
-    /// - `seq`: global sequence
+    /// - `seq`: process-local sequence
     ActorDead,
 
     #[cfg(feature = "controller")]
-    /// Controller submission rejected (queue full, add failed, superseded, etc).
+    /// The controller rejected a submission or could not complete admission.
     ///
     /// Sets:
     /// - `task`: slot name when known, or `controller` for loop-level diagnostics; may be absent
@@ -272,11 +287,15 @@ pub enum EventKind {
     /// - `id`: the rejected submission's [`TaskId`], when the rejection concerns a specific submission.
     ///   Absent for slot- or loop-level diagnostics that have no submission behind
     ///   them (e.g. a failed deferred removal or the controller loop exiting).
-    /// - `reason`: rejection reason ("queue_full", "add_failed: ...", "superseded_by_replace", "controller_shutting_down", etc)
+    /// - `reason`: rejection reason. Values listed in [`reasons`](crate::reasons)
+    ///   are stable; other text is diagnostic.
     ControllerRejected,
 
     #[cfg(feature = "controller")]
-    /// Task submitted successfully to controller slot.
+    /// The controller accepted a submission.
+    ///
+    /// The task may still be queued or waiting for runtime registration. This
+    /// event does not mean that the task body has started.
     ///
     /// Sets:
     /// - `task`: slot name
@@ -286,11 +305,11 @@ pub enum EventKind {
     ControllerSubmitted,
 
     #[cfg(feature = "controller")]
-    /// Slot transitioned state (e.g. Admitting → Running, Running → Terminating).
+    /// A controller slot changed state.
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: the transition, e.g. `admitting→running` or `running→terminating (replace)`
+    /// - `reason`: human-readable transition text; it is not a stable machine contract
     ControllerSlotTransition,
 }
 
@@ -366,14 +385,15 @@ impl BackoffSource {
     }
 }
 
-/// Runtime event with optional metadata.
+/// One runtime event with optional metadata.
 ///
 /// - `at`: wall-clock timestamp (for logs)
-/// - `seq`: globally unique, monotonic sequence (construction order; see the module-level "Sequence numbers" note)
+/// - `seq`: process-local construction sequence; see the module-level limits
 /// - other optional fields are set depending on the [`EventKind`]
 ///
-/// Fields are public for reading;
-/// Construct via [`Event::new`] and the `with_*` builders.
+/// Fields are public for reading. Create an event with [`Event::new`] and add
+/// optional values with the `with_*` builders.
+/// Use `..` when matching the struct because more fields may be added.
 ///
 /// # Also
 ///
@@ -383,28 +403,38 @@ impl BackoffSource {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Event {
-    /// Globally unique, monotonically increasing sequence number.
+    /// Process-local sequence number allocated when the event was created.
+    ///
+    /// It increases until the `u64` counter wraps and is not stored across
+    /// process restarts.
     pub seq: u64,
-    /// Wall-clock timestamp.
+    /// Wall-clock timestamp captured when the event was created.
+    ///
+    /// Wall clocks can move. Use `seq` for observed ordering, not `at`.
     pub at: SystemTime,
 
     /// Task timeout in milliseconds (compact).
     pub timeout_ms: Option<u32>,
     /// Backoff delay before next attempt in milliseconds (compact).
     pub delay_ms: Option<u32>,
-    /// Wall-clock duration of the attempt in milliseconds (compact).
+    /// Elapsed duration of the attempt in milliseconds.
     pub duration_ms: Option<u32>,
-    /// Human-readable reason (errors, overflow details, etc.).
+    /// Human-readable reason.
+    ///
+    /// Only values documented in [`reasons`](crate::reasons) are stable.
     pub reason: Option<Arc<str>>,
     /// Attempt count (starting from 1).
     pub attempt: Option<u32>,
-    /// Name of the task, if applicable. A free-form human **label** (not an identity).
+    /// Human-readable name, not an identity.
+    ///
+    /// This is normally a task name. Subscriber diagnostics use it for a
+    /// subscriber name, and controller events use it for a slot name.
     pub task: Option<Arc<str>>,
     /// Submission/run identity this event belongs to, if applicable.
     ///
-    /// This is the canonical correlation key: unlike [`task`](Self::task) (a human label
-    /// that may repeat), a [`TaskId`] is unique per submission and never reused. Controller
-    /// events may carry it before runtime admission.
+    /// This is the canonical correlation key. Unlike [`task`](Self::task), it
+    /// does not change during one submission. Controller events may carry it
+    /// before runtime admission. See [`TaskId`] for process and counter limits.
     pub id: Option<TaskId>,
     /// Numeric exit code, from a process-like runtime.
     /// `None` for events that have no process behind them.
@@ -416,7 +446,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// Creates a new event of the given kind with current timestamp and next sequence number.
+    /// Creates an event with the current wall-clock time and the next sequence number.
     #[must_use]
     pub fn new(kind: EventKind) -> Self {
         Self {
@@ -477,7 +507,7 @@ impl Event {
         self
     }
 
-    /// Attaches the attempt's wall-clock duration (stored as milliseconds).
+    /// Attaches the attempt's elapsed duration (stored as milliseconds).
     #[inline]
     #[must_use]
     pub fn with_duration(mut self, d: Duration) -> Self {
@@ -486,7 +516,7 @@ impl Event {
         self
     }
 
-    /// Attaches an attempt count.
+    /// Attaches the 1-based attempt number.
     #[inline]
     #[must_use]
     pub fn with_attempt(mut self, n: u32) -> Self {

@@ -1,51 +1,21 @@
-//! # Multiple Tasks
+//! # Multiple restart policies
 //!
-//! Runs three tasks concurrently, each with a different restart strategy.
+//! One supervisor can manage tasks with different lifecycles:
 //!
-//! This example shows how the same supervisor manages tasks with completely different lifecycles.
+//! | Task | Policy | Behavior |
+//! |------|--------|----------|
+//! | `one-shot` | never restart | run once |
+//! | `resilient` | restart on failure | fail twice, then succeed |
+//! | `always-on` | always restart | wait 500 ms after each successful run |
 //!
-//! ## Tasks
+//! The resilient task uses exponential backoff and a retry budget. Only
+//! failure-driven restarts consume that budget. The supervisor also has a
+//! five-second grace period for shutdown.
 //!
-//! | Task        | Spec                                       | Behavior                              |
-//! |-------------|--------------------------------------------|---------------------------------------|
-//! | `one-shot`  | `TaskSpec::once`                           | Runs once, exits.                     |
-//! | `resilient` | `TaskSpec::restartable` + backoff + retries| Fails twice, succeeds on 3rd attempt. |
-//! | `always-on` | `TaskSpec::periodic(500ms)`                | Runs forever, 500ms between runs.     |
+//! These task bodies are short, so they do not use `TaskContext`. A resident
+//! loop should observe cancellation as shown in `worker.rs`.
 //!
-//! ## What this shows
-//!
-//! - **`BackoffPolicy::exponential`** preset: delays 200ms, 400ms, 800ms, … capped at 5s.
-//! - **`max_retries(3)`**: the task gives up after 3 failure-driven retries.
-//!   Success-driven restarts (like `always-on`) don't count toward max_retries.
-//! - **`SupervisorConfig::grace()`**: how long the supervisor waits for tasks to stop during shutdown.
-//!   Here set to 5 seconds.
-//! - The `always-on` task runs indefinitely because `RestartPolicy::Always` never stops.
-//!   The supervisor only exits when it receives Ctrl+C (which triggers `drive_shutdown`: cancel all, wait the grace period, then exit).
-//!
-//! ## Why `_ctx` is unused
-//!
-//! These tasks are short-lived (100–300ms). They complete before any shutdown signal could arrive.
-//! For long-lived tasks, always use `ctx.cancelled()` - see `worker.rs`.
-//!
-//! ## Runtime flavor
-//!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example multiple
-//! # Press Ctrl+C to stop (always-on task runs indefinitely)
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                          | What it adds                                       |
-//! |----------------------------------|----------------------------------------------------|
-//! | [`subscriber.rs`](subscriber.rs) | Observe lifecycle events with a subscriber         |
-//! | [`dynamic.rs`](dynamic.rs)       | Add/remove tasks at runtime via `SupervisorHandle` |
+//! Run with `cargo run --example multiple`, then press Ctrl+C.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;

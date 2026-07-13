@@ -1,8 +1,16 @@
-//! Controller submission errors.
+//! # Controller API errors
+//!
+//! Most of these errors mean that a request was not accepted by the controller
+//! command path. [`ControllerError::AlreadyStarted`] is a controller lifecycle
+//! guard. These errors are not task outcomes. A request accepted by the
+//! controller can still be rejected later by a slot policy; use
+//! `submit_and_watch` when you need that final result.
 
 use thiserror::Error;
 
-/// Error returned by controller submission methods.
+/// Error from controller setup or command admission.
+///
+/// Include a wildcard arm when matching because new errors may be added.
 #[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {
@@ -14,8 +22,8 @@ pub enum ControllerError {
 
     /// The ordered controller command queue is full.
     ///
-    /// Returned only by `try_submit` and `try_submit_and_watch`.
-    /// Use async `submit` or `submit_and_watch` if the caller should wait for command capacity instead of failing fast.
+    /// Returned only by `try_submit` and `try_submit_and_watch`. Use async
+    /// `submit` or `submit_and_watch` to wait for command capacity.
     #[error("submission queue full")]
     Full,
 
@@ -27,7 +35,7 @@ pub enum ControllerError {
 
     /// The controller loop was started more than once.
     ///
-    /// This is an internal lifecycle guard. Normal submission APIs do not return this variant.
+    /// This is a lifecycle guard. Normal submission APIs do not return it.
     #[error("controller already started")]
     AlreadyStarted,
 }

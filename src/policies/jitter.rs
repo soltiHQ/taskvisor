@@ -1,22 +1,27 @@
-//! # Jitter policy for retry delays.
+//! # Random spread for retry delays
 //!
-//! [`JitterPolicy`] adds random spread to retry delays. This helps avoid many tasks retrying at the same moment.
+//! [`JitterPolicy`] changes a backoff delay by a random amount. This helps when
+//! many tasks fail together: their retries no longer happen at the same moment.
 //!
-//! | Policy                                           | Range when used by [`BackoffPolicy`](crate::BackoffPolicy) | Use when                       |
+//! | Policy                                           | Raw range before backoff floors                            | Use when                       |
 //! |--------------------------------------------------|------------------------------------------------------------|--------------------------------|
 //! | [`None`](JitterPolicy::None)                     | exact base delay                                           | Predictable timing or tests    |
 //! | [`Equal`](JitterPolicy::Equal)                   | `[base / 2, base]`                                         | Balanced spread, good default  |
 //! | [`Full`](JitterPolicy::Full)                     | `[0, base]`                                                | Maximum spread, shorter delays |
-//! | [`RandomizedBand`](JitterPolicy::RandomizedBand) | `[first, min(base * 3, max)]`                              | Widest spread                  |
+//! | [`RandomizedBand`](JitterPolicy::RandomizedBand) | `[first, min(base * 3, max)]`                              | Spread that may exceed base    |
 //!
-//! [`RandomizedBand`](JitterPolicy::RandomizedBand) is memoryless.
-//! It uses the current retry base delay, not the previous actual delay.
+//! All policies have no memory. A result from one retry does not affect the next
+//! retry. [`RandomizedBand`](JitterPolicy::RandomizedBand) uses the current base
+//! delay, not the previous random result.
+//! [`BackoffPolicy`](crate::BackoffPolicy) applies its user floor and safety
+//! floor after jitter, so the final delay can be above the raw lower bound.
 
 use std::time::Duration;
 
-/// Policy controlling randomization of retry delays.
+/// Controls random spread of retry delays.
 ///
 /// Most users configure this through [`BackoffPolicy`](crate::BackoffPolicy).
+/// Include a wildcard arm when matching because new policies may be added.
 ///
 /// ## Trade-offs
 ///
@@ -27,27 +32,26 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JitterPolicy {
-    /// No jitter: use exact backoff delay.
+    /// Uses the exact backoff delay.
     ///
-    /// Use when:
-    /// - Only one task retrying (no herd risk)
-    /// - Predictable timing required
-    /// - Testing/debugging
+    /// Use this for predictable timing and tests, or when retries cannot create
+    /// a large load spike.
     None,
 
-    /// Full jitter: random delay in [0, backoff_delay].
+    /// Chooses a random delay in `[0, base]`.
     ///
-    /// Most aggressive jitter, can significantly reduce delay.
-    /// Use when maximum load spreading is needed.
+    /// This gives the largest spread below the base, but it can also retry very
+    /// quickly. Use [`BackoffPolicy::with_floor`](crate::BackoffPolicy::with_floor)
+    /// when you need a strict minimum.
     Full,
 
-    /// Equal jitter: delay/2 + random[0, delay/2].
+    /// Chooses a random delay in `[base / 2, base]`.
     ///
-    /// Balances predictability with randomness (recommended default).
-    /// Preserves ~75% of the original backoff on average.
+    /// The average is about 75% of the base delay. This is the jitter used by
+    /// [`BackoffPolicy::default`](crate::BackoffPolicy::default).
     Equal,
 
-    /// Randomized wideband.
+    /// Chooses a wider random band that may be above the base delay.
     ///
     /// When used by [`BackoffPolicy::delay_for_retry`](crate::BackoffPolicy::delay_for_retry), the delay is drawn from:
     /// ```text
@@ -71,10 +75,11 @@ impl Default for JitterPolicy {
 }
 
 impl JitterPolicy {
-    /// Applies context-free jitter to `delay`.
+    /// Applies jitter using only `delay`.
     ///
-    /// [`RandomizedBand`](Self::RandomizedBand) needs `first` and `max` to build its full band.
-    /// This method does not have that context, so `RandomizedBand` falls back to [`Full`](Self::Full)-style jitter: `[0, delay]`.
+    /// [`RandomizedBand`](Self::RandomizedBand) needs `first` and `max` for its
+    /// normal range. This method does not have those values, so it uses the same
+    /// `[0, delay]` range as [`Full`](Self::Full).
     ///
     /// For full band behavior, use [`Self::apply_randomized_band`].
     #[must_use]
@@ -86,7 +91,11 @@ impl JitterPolicy {
         }
     }
 
-    /// Draws a uniform random delay over the band `[lower, min(upper_seed × 3, max)]`.
+    /// Chooses a uniform random delay in
+    /// `[lower, min(upper_seed × 3, max)]` for [`RandomizedBand`](Self::RandomizedBand).
+    ///
+    /// This method first clamps `lower` to `max`. For any other policy, it
+    /// applies that policy to the clamped `lower`; `upper_seed` is unused.
     #[must_use]
     pub fn apply_randomized_band(
         &self,
@@ -110,7 +119,7 @@ impl JitterPolicy {
 
     /// Full jitter: random in `[0, delay]`.
     ///
-    /// Nanosecond-faithful: a sub-millisecond `delay` is **not** truncated to zero.
+    /// Keeps sub-millisecond precision instead of rounding down to zero.
     fn full_jitter(&self, delay: Duration) -> Duration {
         let ns = delay.as_nanos();
         if ns == 0 {
@@ -121,7 +130,7 @@ impl JitterPolicy {
 
     /// Equal jitter: `delay/2 + random[0, delay/2]`.
     ///
-    /// Nanosecond-faithful: a sub-millisecond `delay` is **not** truncated to zero.
+    /// Keeps sub-millisecond precision instead of rounding down to zero.
     fn equal_jitter(&self, delay: Duration) -> Duration {
         let ns = delay.as_nanos();
         if ns == 0 {

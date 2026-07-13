@@ -1,13 +1,22 @@
-//! Controller configuration.
+//! # Controller queue limits
 //!
 //! [`ControllerConfig`] controls controller buffering:
 //! - `max_slot_queue` limits FIFO `Queue` submissions waiting inside each slot,
 //! - `queue_capacity` limits the controller's ordered command channel.
 //!
-//! These are different queues.
-//! `queue_capacity` is about getting a submission or identity-removal command into the controller.
-//! `max_slot_queue` is about how many FIFO submissions may wait behind a busy slot.
-//! `Replace` may retain one latest replacement independently of this limit.
+//! These limits apply at different stages:
+//!
+//! ```text
+//! caller
+//!   |
+//!   v
+//! [controller command channel]  limit: queue_capacity
+//!   |
+//!   v
+//! slot owner + [FIFO waiting items]  limit: max_slot_queue per slot
+//! ```
+//!
+//! `Replace` may keep one next replacement even when `max_slot_queue` is zero.
 
 use std::num::NonZeroUsize;
 
@@ -16,7 +25,7 @@ use crate::ConfigError;
 const DEFAULT_QUEUE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 
-/// Configuration for the controller.
+/// Queue limits for the controller.
 ///
 /// Passed to `SupervisorBuilder::with_controller`.
 ///
@@ -35,10 +44,10 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 pub struct ControllerConfig {
     /// Capacity of the ordered controller command channel.
     ///
-    /// This queue carries submissions and identity-removal commands in one order.
-    /// The same value limits controller-owned identity operations that are waiting on the registry
-    /// or terminal task cleanup. When that limit is reached, the controller leaves later commands
-    /// in this bounded queue until an operation finishes.
+    /// This channel carries submissions and ID-based remove/cancel commands in
+    /// one order. The same value limits controller operations that are waiting
+    /// for the registry or terminal cleanup. Later commands remain in the
+    /// bounded channel until capacity becomes available.
     /// When it is full:
     /// - `submit()` waits for capacity,
     /// - `submit_and_watch()` waits for capacity,
@@ -52,11 +61,10 @@ pub struct ControllerConfig {
 
     /// Maximum number of FIFO `Queue` submissions waiting per slot.
     ///
-    /// This is the queue behind a busy slot.
-    /// It does not include the current slot owner.
+    /// This counts only waiting FIFO items, not the current slot owner.
     ///
-    /// When the limit is reached, new `Queue` submissions for that slot are rejected with `ControllerRejected`.
-    /// The current owner may still run, but no extra submission may wait behind it.
+    /// When the limit is reached, new `Queue` submissions for that slot are
+    /// rejected. Taskvisor also tries to emit `ControllerRejected`.
     /// A value of `0` rejects `Queue` submissions behind busy slots.
     /// `Replace` may still retain one latest replacement while the current
     /// owner is being retired.
@@ -64,7 +72,7 @@ pub struct ControllerConfig {
 }
 
 impl ControllerConfig {
-    /// Creates a controller configuration with explicit queue limits.
+    /// Creates a configuration with explicit queue limits.
     ///
     /// `queue_capacity` is non-zero by type. `max_slot_queue = 0` is valid and
     /// rejects FIFO `Queue` submissions behind a busy slot. `Replace` may still

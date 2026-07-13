@@ -1,4 +1,4 @@
-//! Task execution specification.
+//! Per-task execution settings and default resolution.
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -16,42 +16,48 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|d| !d.is_zero())
 }
 
-/// Describes how a [`Task`](crate::Task) should run.
+/// A task and the rules used to run it.
 ///
-/// A `TaskSpec` combines a task with explicit settings and settings inherited
-/// from [`TaskDefaults`].
+/// A spec can set a value or inherit it from [`TaskDefaults`]. The supervisor
+/// resolves all inherited values when it accepts the task. A `with_*` method
+/// always sets an explicit value and wins over the default.
 ///
-/// Use:
-/// - [`from_defaults`](Self::from_defaults) when all execution settings should come from the supervisor.
-/// - [`restartable`](Self::restartable) for tasks that restart after failure.
-/// - [`periodic`](Self::periodic) for tasks that repeat on a fixed interval.
-/// - [`new`](Self::new) when you want to set all main options directly.
-/// - [`once`](Self::once) for tasks that run once and do not restart.
-///
-/// ## Creating a spec
-/// ```rust
-/// use taskvisor::TaskContext;
-/// use taskvisor::{TaskSpec, TaskFn, RestartPolicy, BackoffPolicy, TaskRef, TaskError};
-/// use std::num::NonZeroU32;
-/// use std::time::Duration;
-///
-/// let task: TaskRef = TaskFn::arc("demo", |_ctx| async move {
-///     Ok(())
-/// });
-///
-/// // One-shot (most common):
-/// let spec = TaskSpec::once(task.clone());
-///
-/// // Restartable with builder chain:
-/// let spec = TaskSpec::restartable(task.clone())
-///     .with_timeout(Duration::from_secs(30))
-///     .with_max_retries(NonZeroU32::new(5).unwrap());
-///
-/// // Named constructors inherit settings that they do not set:
-/// let spec = TaskSpec::restartable(task);
+/// ```text
+/// TaskSpec                    TaskDefaults
+///   restart = OnFailure        restart = OnFailure
+///   timeout = inherit    +      timeout = 30s
+///             |
+///             v
+/// resolved at admission: restart = OnFailure, timeout = 30s
 /// ```
 ///
-/// ## Also
+/// | Constructor | Restart setting | Other settings |
+/// |-------------|-----------------|----------------|
+/// | [`once`](Self::once) | Never | Inherited |
+/// | [`restartable`](Self::restartable) | On failure | Inherited |
+/// | [`periodic`](Self::periodic) | Always | Inherited |
+/// | [`from_defaults`](Self::from_defaults) | Inherited | Inherited |
+/// | [`new`](Self::new) | Explicit | Explicit; retries are unlimited |
+///
+/// ## Example
+///
+/// ```rust
+/// use std::num::NonZeroU32;
+/// use std::time::Duration;
+/// use taskvisor::{TaskFn, TaskRef, TaskSpec};
+///
+/// let task: TaskRef = TaskFn::arc("worker", |_ctx| async { Ok(()) });
+///
+/// let spec = TaskSpec::restartable(task)
+///     .with_timeout(Duration::from_secs(30))
+///     .with_max_retries(NonZeroU32::new(5).unwrap());
+/// ```
+///
+/// `max_retries = 5` allows the first failed attempt plus five retries. A
+/// successful attempt resets this count, so an `Always` task may still have more
+/// than six attempts over its full lifetime.
+///
+/// ## See Also
 ///
 /// - See [`Task`](crate::Task) for the execution contract and cancellation semantics.
 /// - For the closure-based implementation see [`TaskFn`](crate::TaskFn).
@@ -90,7 +96,7 @@ impl<T: Copy> Override<T> {
     }
 }
 
-/// A task specification after all inherited settings have been applied.
+/// A task specification after default resolution.
 #[derive(Clone)]
 #[must_use]
 pub(crate) struct ResolvedTaskSpec {
@@ -126,11 +132,11 @@ impl std::fmt::Debug for ResolvedTaskSpec {
 }
 
 impl TaskSpec {
-    /// Creates a task specification that inherits every execution setting.
+    /// Creates a spec that inherits every execution setting.
     ///
-    /// The admitting supervisor resolves restart, backoff, timeout, and retry
-    /// limit from its [`TaskDefaults`]. Any later `with_*` call overrides one
-    /// inherited value.
+    /// The supervisor resolves restart, backoff, timeout, and retry limit from
+    /// its [`TaskDefaults`] when it accepts the task. A later `with_*` call sets
+    /// that one field explicitly.
     pub fn from_defaults(task: TaskRef) -> Self {
         Self {
             restart: Override::Inherit,
@@ -141,15 +147,14 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a spec with explicit restart, backoff, and timeout settings.
+    /// Creates a spec with explicit main settings.
     ///
     /// Prefer the named constructors for common cases:
     /// [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
     ///
-    /// Accepts either a [`Duration`] or an `Option<Duration>`; pass either form
-    /// directly without calling `.into()`.
-    /// `Duration::ZERO` and `Some(Duration::ZERO)` are stored as `None` (no timeout).
-    /// The retry limit is explicitly set to unlimited. Change it with
+    /// `timeout` accepts a [`Duration`] or `Option<Duration>`.
+    /// `None` and zero disable the attempt timeout. The retry limit is set to
+    /// unlimited; change it with
     /// [`with_max_retries`](Self::with_max_retries).
     pub fn new(
         task: TaskRef,
@@ -166,10 +171,7 @@ impl TaskSpec {
         }
     }
 
-    /// One-shot: run once, never restart.
-    ///
-    /// The task runs a single attempt.
-    /// It does not restart, even after a failure.
+    /// Creates a one-shot task that never restarts.
     ///
     /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
     /// Override them with the matching `with_*` methods.
@@ -183,10 +185,10 @@ impl TaskSpec {
         }
     }
 
-    /// Restartable: restart on failure, stop on success.
+    /// Creates a task that restarts after retryable failures.
     ///
-    /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
-    /// Override them with the matching `with_*` methods.
+    /// Success, fatal failure, and cancellation stop the task. Backoff, timeout,
+    /// and retry limit are inherited from [`TaskDefaults`].
     pub fn restartable(task: TaskRef) -> Self {
         Self {
             restart: Override::Set(RestartPolicy::OnFailure),
@@ -197,25 +199,29 @@ impl TaskSpec {
         }
     }
 
-    /// Periodic: run, wait `every`, run again. Forever.
+    /// Creates a task that runs again after each success.
     ///
-    /// The task restarts after both success and failure.
-    /// On failure the inherited backoff delay applies first.
-    /// A zero `every` means restart immediately.
+    /// After success, the supervisor waits `every` before the next attempt. A
+    /// zero value means no configured interval; a small internal guard still
+    /// prevents an instant task from creating a hot loop.
     ///
-    /// The interval starts after the task completes.
-    /// This is not a wall-clock schedule (no "daily at 03:00").
+    /// Retryable failures use the backoff policy, not `every`. A retry limit can
+    /// stop the task after repeated failures. Fatal failure and cancellation
+    /// always stop it.
+    ///
+    /// The interval starts after an attempt completes. This is not a wall-clock
+    /// schedule such as "daily at 03:00".
     ///
     /// ```rust
     /// use std::time::Duration;
-    /// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
+    /// use taskvisor::{TaskFn, TaskRef, TaskSpec};
     ///
     /// let tick: TaskRef = TaskFn::arc("tick", |_ctx| async move {
     ///     println!("tick");
     ///     Ok(())
     /// });
     ///
-    /// // Runs every 30 seconds until shutdown.
+    /// // Starts the next successful cycle 30 seconds after this one ends.
     /// let spec = TaskSpec::periodic(tick, Duration::from_secs(30));
     /// ```
     pub fn periodic(task: TaskRef, every: Duration) -> Self {
@@ -242,19 +248,19 @@ impl TaskSpec {
         self.task.name()
     }
 
-    /// Returns the explicit restart policy, or `None` when it is inherited.
+    /// Returns the explicit restart policy, or `None` if it is inherited.
     #[must_use]
     pub fn restart_override(&self) -> Option<RestartPolicy> {
         self.restart.value()
     }
 
-    /// Returns the explicit backoff policy, or `None` when it is inherited.
+    /// Returns the explicit backoff policy, or `None` if it is inherited.
     #[must_use]
     pub fn backoff_override(&self) -> Option<BackoffPolicy> {
         self.backoff.value()
     }
 
-    /// Returns the explicit timeout override.
+    /// Returns how this spec overrides the attempt timeout.
     ///
     /// - `None` means inherit the default.
     /// - `Some(None)` means explicitly disable the timeout.
@@ -264,55 +270,51 @@ impl TaskSpec {
         self.timeout.value()
     }
 
-    /// Returns the explicit failure-retry limit override.
+    /// Returns how this spec overrides the retry limit.
     ///
     /// - `None` means inherit the default.
-    /// - `Some(None)` means explicitly allow unlimited failure retries.
+    /// - `Some(None)` means explicitly allow unlimited retries.
     /// - `Some(Some(limit))` means use that retry limit.
     #[must_use]
     pub fn max_retries_override(&self) -> Option<Option<NonZeroU32>> {
         self.max_retries.value()
     }
 
-    /// Builder: sets the timeout.
+    /// Sets the timeout for each attempt.
     ///
-    /// Accepts either a `Duration` or an `Option<Duration>`; pass either form
-    /// directly without calling `.into()`.
-    /// - Stored `Some(d)` is always a positive duration.
-    /// - `Duration::ZERO` and `Some(Duration::ZERO)` are normalized to `None`.
-    /// - `None` means explicitly disable an inherited timeout.
+    /// Pass a `Duration` to enable it. Pass `None` or zero to disable it,
+    /// including a timeout inherited from [`TaskDefaults`].
     pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
         self.timeout = Override::Set(normalize_timeout(timeout.into()));
         self
     }
 
-    /// Builder: sets the backoff policy.
+    /// Sets the delay policy for retryable failures.
     ///
-    /// Backoff controls the delay before a failed attempt restarts.
+    /// This value overrides the supervisor default.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
         self.backoff = Override::Set(backoff);
         self
     }
 
-    /// Builder: sets the restart policy.
+    /// Sets when the task may run another attempt.
     ///
-    /// Restart controls whether the task runs again after it exits.
+    /// This value overrides the supervisor default.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = Override::Set(restart);
         self
     }
 
-    /// Builder: set the failure-retry limit (`None` = unlimited).
+    /// Sets the number of retries after the first failed attempt in a failure streak.
     ///
-    /// Accepts a `NonZeroU32` (a limit) or an `Option<NonZeroU32>`; pass either
-    /// form directly without calling `.into()`.
-    /// `None` explicitly disables an inherited retry limit.
+    /// Pass a [`NonZeroU32`] to set a limit. Pass `None` for unlimited retries,
+    /// including when [`TaskDefaults`] has a limit. A success resets the count.
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
         self.max_retries = Override::Set(max_retries.into());
         self
     }
 
-    /// Convenience setter that validates a raw failure-retry limit.
+    /// Sets a retry limit from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `max_retries` is zero. Use
@@ -324,7 +326,7 @@ impl TaskSpec {
         Ok(self.with_max_retries(max_retries))
     }
 
-    /// Applies inherited task defaults and returns a concrete specification.
+    /// Applies inherited defaults at registry admission.
     pub(crate) fn resolve(self, defaults: &TaskDefaults) -> ResolvedTaskSpec {
         ResolvedTaskSpec {
             restart: self.restart.resolve(defaults.restart()),

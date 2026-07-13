@@ -1,4 +1,17 @@
-//! Error types for runtime orchestration and task execution.
+//! # Error model
+//!
+//! Taskvisor separates errors by where they happen:
+//!
+//! ```text
+//! task attempt ----------------------> TaskError
+//! add / cancel / shutdown / run ----> RuntimeError
+//! controller command path ----------> ControllerError (feature `controller`)
+//! mixed runtime + controller API ---> Error
+//! ```
+//!
+//! [`TaskError`] is part of task behavior. It tells the supervisor whether a
+//! failed attempt may be retried. [`RuntimeError`] and controller errors report
+//! that a management operation could not complete.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,16 +20,19 @@ use thiserror::Error;
 
 use crate::identity::TaskId;
 
-/// Boxed source error carried by [`TaskError::Fail`] and [`TaskError::Fatal`].
+/// Owned source error stored in [`TaskError::Fail`] or [`TaskError::Fatal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Shared source error carried on the completion plane.
+/// Shared source error stored in final task outcomes.
+///
+/// It uses [`Arc`] so a [`TaskOutcome`](crate::TaskOutcome) can be cloned without
+/// requiring the original source error to implement `Clone`.
 pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Errors produced by the supervisor runtime.
+/// Errors from supervisor lifecycle and management operations.
 ///
-/// These are orchestration errors: add, remove, cancel, shutdown, and run failures.
-/// They are separate from [`TaskError`], which is returned by task attempts.
+/// These errors come from add, remove, cancel, shutdown, and run operations.
+/// They are separate from [`TaskError`], which comes from a task attempt.
 ///
 /// Match with a wildcard arm because this enum is non-exhaustive. Data-carrying
 /// variants are also non-exhaustive, so include `..` when matching their fields.
@@ -30,7 +46,8 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 pub enum RuntimeError {
     /// Shutdown grace period was exceeded.
     ///
-    /// Some tasks did not stop in time and had to be force-terminated.
+    /// Some managed task runners did not stop in time and were force-terminated.
+    /// Work detached by user code is outside this guarantee.
     #[error("shutdown timeout {grace:?} exceeded; stuck: {stuck:?}; forcing termination")]
     #[non_exhaustive]
     GraceExceeded {
@@ -40,7 +57,7 @@ pub enum RuntimeError {
         stuck: Vec<Arc<str>>,
     },
 
-    /// A task with the same name is already registered or repeated in an atomic batch.
+    /// A task name is already registered or repeated in an all-or-nothing batch.
     #[error("task name '{name}' already exists")]
     #[non_exhaustive]
     TaskAlreadyExists {
@@ -50,12 +67,15 @@ pub enum RuntimeError {
 
     /// A bounded management command queue has no free capacity.
     ///
-    /// The requested state change was not accepted by the full queue. An earlier controller
-    /// ordering check may already have completed, but it does not change task or slot ownership.
+    /// A fail-fast management call could not enqueue its requested state change.
+    /// That request does not change task or slot ownership.
     #[error("management command queue is full")]
     CommandQueueFull,
 
-    /// Timed out while waiting for task termination to reach registry terminal completion.
+    /// Timed out while waiting for terminal registry cleanup.
+    ///
+    /// The stop request remains active. This error only ends the caller's wait;
+    /// it does not undo cancellation or change the supervisor grace period.
     #[error("timeout waiting for task {id} termination after {timeout:?}")]
     #[non_exhaustive]
     TaskTerminationTimeout {
@@ -84,7 +104,8 @@ pub enum RuntimeError {
     /// OS signal listener setup failed.
     ///
     /// Signal-based shutdown is unavailable.
-    /// The I/O error kind, message, and source chain are preserved for every caller that joins the shared shutdown operation.
+    /// The I/O error kind, message, and source chain are preserved for callers
+    /// that join the shared shutdown operation.
     #[error("failed to install shutdown signal handlers: {source}")]
     #[non_exhaustive]
     SignalSetupFailed {
@@ -124,15 +145,21 @@ impl RuntimeError {
     }
 }
 
-/// Errors returned by a task attempt.
+/// Result categories that a task attempt can return.
 ///
 /// A task returns `Result<(), TaskError>` from [`Task::spawn`](crate::Task::spawn).
 ///
-/// Restart behavior:
-/// - [`Canceled`](Self::Canceled) is cooperative shutdown and is not retried,
-/// - [`Fatal`](Self::Fatal) is not retryable,
-/// - [`Timeout`](Self::Timeout) is retryable,
-/// - [`Fail`](Self::Fail) is retryable.
+/// | Variant                    | Retry category | Meaning                              |
+/// |----------------------------|----------------|--------------------------------------|
+/// | [`Canceled`](Self::Canceled) | never          | cooperative stop                     |
+/// | [`Fatal`](Self::Fatal)       | never          | permanent failure                    |
+/// | [`Timeout`](Self::Timeout)   | eligible       | per-attempt time limit was exceeded  |
+/// | [`Fail`](Self::Fail)         | eligible       | temporary or unknown failure         |
+///
+/// "Eligible" does not guarantee a retry. The restart policy and retry limit
+/// must also allow it. In builds that unwind panics, a panic in the task body is
+/// caught and converted to [`Fail`](Self::Fail). A build with `panic = "abort"`
+/// exits the process instead.
 ///
 /// Match with a wildcard arm because this enum is non-exhaustive. Data-carrying
 /// variants are also non-exhaustive, so include `..` when matching their fields.
@@ -154,7 +181,7 @@ pub enum TaskError {
 
     /// Permanent task failure.
     ///
-    /// This stops the actor and is not retried.
+    /// This stops the managed task and is not retried.
     #[error("fatal error (no retry): {reason}")]
     #[non_exhaustive]
     Fatal {
@@ -171,7 +198,8 @@ pub enum TaskError {
 
     /// Retryable task failure.
     ///
-    /// The actor may restart after this error, depending on restart policy.
+    /// Taskvisor may restart after this error if the restart policy and retry
+    /// limit allow it.
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
@@ -195,7 +223,7 @@ pub enum TaskError {
 }
 
 impl TaskError {
-    /// Creates a retryable timeout error for the configured attempt limit.
+    /// Creates a retry-eligible timeout error.
     #[must_use]
     pub const fn timeout(timeout: Duration) -> Self {
         TaskError::Timeout { timeout }
@@ -249,9 +277,10 @@ impl TaskError {
         }
     }
 
-    /// Attaches a process-style exit code to `Fail` or `Fatal`.
+    /// Sets or clears the process-style exit code on `Fail` or `Fatal`.
     ///
-    /// No-op for `Timeout` and `Canceled`.
+    /// Pass an integer to set it or `None` to clear it. This has no effect on
+    /// `Timeout` or `Canceled`.
     #[must_use]
     pub fn with_exit_code(mut self, code: impl Into<Option<i32>>) -> Self {
         let code = code.into();
@@ -261,7 +290,7 @@ impl TaskError {
         self
     }
 
-    /// Attaches a source error to `Fail` or `Fatal`.
+    /// Sets a source error on `Fail` or `Fatal`.
     ///
     /// No-op for `Timeout` and `Canceled`.
     #[must_use]
@@ -294,7 +323,9 @@ impl TaskError {
         }
     }
 
-    /// Returns `true` for errors that may be retried by restart policy.
+    /// Returns `true` for a retry-eligible error category.
+    ///
+    /// The active restart policy and retry limit can still stop the task.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, TaskError::Timeout { .. } | TaskError::Fail { .. })
@@ -316,7 +347,7 @@ impl TaskError {
     }
 }
 
-/// Umbrella error for mixed supervisor and controller call chains.
+/// Umbrella error for code that mixes runtime and controller operations.
 ///
 /// [`RuntimeError`] and `ControllerError` (feature `controller`) convert into this type with `?`.
 /// Match on the variant to get the original error back.

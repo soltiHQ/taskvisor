@@ -1,83 +1,42 @@
-//! # TaskActor: single-task supervisor.
+//! # Restart loop for one task
 //!
-//! Supervises one [`Task`] in a restart loop.
-//!
-//! The actor owns the policy loop:
-//! - starts attempts,
-//! - applies [`RestartPolicy`],
-//! - schedules [`BackoffPolicy`] delays after retryable failures,
-//! - delays successful repeats for [`RestartPolicy::Always`],
-//! - returns the final actor exit reason to the registry.
-//!
-//! A single attempt is executed by [`run_once`](super::runner::run_once).
-//! `run_once` owns per-attempt timeout, panic capture, and attempt-level events.
+//! [`TaskActor`] runs attempts in order and applies restart, backoff, timeout,
+//! retry-limit, and cancellation rules. One actor belongs to one registered
+//! [`TaskId`](crate::TaskId).
 //!
 //! ## Flow
 //!
 //! ```text
-//! Registry -> TaskActor::run()
-//!
-//! loop:
-//!   wait for runtime permit, if configured
-//!   publish TaskStarting
-//!   run_once()
-//!     - Ok(())          -> TaskStopped
-//!     - Err(Canceled)   -> TaskCanceled
-//!     - Err(Timeout)    -> TimeoutHit, then TaskFailed
-//!     - Err(Fail/Fatal) -> TaskFailed
-//!
-//!   release runtime permit
-//!
-//!   success:
-//!     Never / OnFailure    -> ActorExhausted, exit
-//!     Always { Some(dur) } -> BackoffScheduled(Success), sleep effective delay
-//!     Always { None }      -> small safety delay/yield
-//!
-//!   retryable failure:
-//!     retry budget left    -> BackoffScheduled(Failure), sleep retry delay
-//!     retry budget used    -> ActorExhausted, exit
-//!
-//!   fatal failure:
-//!     ActorDead, exit
-//!
-//!   cancellation:
-//!     cancelled while waiting or sleeping
-//!       -> exit without an actor-level terminal event
-//!     task returned Canceled during runtime shutdown
-//!       -> TaskCanceled, then exit without ActorExhausted
-//!     task returned Canceled while runtime is active
-//!       -> TaskCanceled, then ActorExhausted(reason="task_returned_canceled")
+//! wait for permit -> TaskStarting -> run one attempt -> release permit
+//!                                      |
+//!                  +-------------------+-------------------+
+//!                  |                   |                   |
+//!               success         retryable failure    fatal/canceled
+//!                  |                   |                   |
+//!           stop or repeat       backoff or stop           stop
 //! ```
 //!
-//! ## Attempt Events vs Actor Exit
+//! [`run_once`](super::runner::run_once) handles one attempt, including timeout,
+//! panic capture, and attempt events. The actor then decides whether to stop,
+//! wait, or start another attempt.
 //!
-//! `run_once` publishes the result of one attempt:
-//! - `TaskStopped`
-//! - `TaskCanceled`
-//! - `TaskFailed`
-//! - `TimeoutHit` before `TaskFailed` on timeout
+//! ## Events and Final State
 //!
-//! `TaskActor` publishes the actor decision:
-//! - `BackoffScheduled` when a delay is scheduled before another attempt
-//! - `ActorExhausted` when the actor stops without a fatal error
-//! - `ActorDead` when a fatal error stops the actor
-//!
-//! `TaskFailed` does not mean the task is finished. It may be followed by
-//! `BackoffScheduled` and another `TaskStarting`.
+//! `TaskStopped`, `TaskCanceled`, and `TaskFailed` describe one attempt.
+//! `BackoffScheduled`, `ActorExhausted`, and `ActorDead` describe the actor's
+//! decision. A `TaskFailed` event is not a final outcome; another attempt may
+//! follow it.
 //!
 //! ## Rules
 //!
 //! - Attempts are sequential inside one actor.
-//! - The attempt counter starts at 1 and increments before each `run_once` call.
-//! - `max_retries` counts retries after the first failed attempt.
-//!   For example, `Some(1)` allows the first attempt plus one retry.
-//! - A runtime permit is held only while the attempt is running.
-//!   Backoff and success-delay sleeps do not hold it.
-//! - `run_once` derives a child cancellation token for each attempt.
-//! - The actor uses the runtime token while waiting for permits and sleeping between attempts.
-//! - Successful `Always` restarts are rate-limited for instant tasks.
-//! - Task panics are converted by `run_once` into retryable `TaskError::Fail`.
-//! - Event sequence numbers are useful for sorting, but are not a cross-task causal ordering guarantee.
+//! - Attempt numbers start at 1.
+//! - `max_retries` counts retries in one failure streak. A success resets it.
+//!   For example, `Some(1)` allows one failed attempt plus one retry.
+//! - A concurrency permit is held only while an attempt runs, not during delays.
+//! - Cancellation can stop permit waits and retry delays.
+//! - Instant successful repeats have a small delay to prevent a hot loop.
+//! - User-task panics become retryable `TaskError::Fail` values.
 
 use std::{
     num::NonZeroU32,
@@ -101,22 +60,24 @@ use crate::{
 /// Small delay used to prevent hot restart loops.
 ///
 /// This applies to `RestartPolicy::Always` when a task finishes very quickly.
-/// Without this delay, a task that returns `Ok(())` immediately could restart as fast as the scheduler allows and flood the event bus.
+/// Without it, a task that returns `Ok(())` at once could restart as fast as the
+/// scheduler allows and flood the event bus.
 ///
 /// The delay is only added when the task ran for less than this value.
 /// If the task already spent enough time doing work, no extra delay is added.
 const IMMEDIATE_RESTART_FLOOR: Duration = Duration::from_millis(1);
 
-/// Returns the effective delay after a successful `Always { interval: Some(d) }` attempt.
+/// Returns the delay after a successful `Always` attempt.
 ///
-/// The configured interval is used unless the restart safety delay requires a longer delay for an instant task.
+/// The small restart guard can make a very short configured delay longer.
 fn floored_interval(interval: Duration, elapsed: Duration) -> Duration {
     interval.max(IMMEDIATE_RESTART_FLOOR.saturating_sub(elapsed))
 }
 
 /// Final reason returned by [`TaskActor::run`].
 ///
-/// The registry uses this value after joining the actor to clean up the task and resolve the matching [`TaskOutcome`](crate::TaskOutcome).
+/// After joining the actor, the registry maps this value to the matching
+/// [`TaskOutcome`](crate::TaskOutcome).
 #[derive(Debug, Clone)]
 pub(crate) enum ActorExitReason {
     /// Final attempt succeeded and the restart policy stopped the actor.
@@ -217,7 +178,7 @@ impl TaskActor {
     /// Runs the actor until completion, retry exhaustion, fatal failure, or cancellation.
     ///
     /// `run_once` derives a child token for the current attempt.
-    /// The actor uses the runtime token while waiting for a permit and while sleeping between attempts, shutdown can interrupt both places.
+    /// The runtime token lets shutdown interrupt permit waits and retry delays.
     pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let task_name: Arc<str> = self.name.clone();
         let id = self.id;

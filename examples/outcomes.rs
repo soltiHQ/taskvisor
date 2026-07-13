@@ -1,59 +1,21 @@
-//! # Outcomes
+//! # Outcomes: wait for the final result
 //!
-//! Awaits the **final result** of a supervised task with `add_and_watch` + `TaskWaiter`.
+//! `add_and_watch` returns a `TaskWaiter`. The waiter resolves after the task
+//! entry has stopped, including all restarts allowed by its policy.
 //!
-//! This is the supervised analogue of awaiting a `tokio::JoinHandle`:
-//! you get back a single, guaranteed `TaskOutcome` once the task has *fully* terminated - after every retry the restart policy allows.
+//! Taskvisor has two result paths:
 //!
-//! ## Two planes, one truth
+//! | Path | Use | Delivery |
+//! |------|-----|----------|
+//! | lifecycle events | logs, metrics, live progress | bounded and best-effort |
+//! | `TaskOutcome` | final business decision | dedicated terminal channel |
 //!
-//! Taskvisor reports task progress on **two** channels:
+//! This example handles successful, failed, and canceled tasks. Other outcomes
+//! cover fatal errors, force-abort, actor panic, and controller rejection.
+//! `TaskWaiter::wait` can still return an error if the runtime closes the
+//! terminal channel unexpectedly.
 //!
-//! | Plane                          | Delivery                          | Granularity                       |
-//! |--------------------------------|-----------------------------------|-----------------------------------|
-//! | Events (`Subscribe`)           | Lossy broadcast bus (may drop)    | Every attempt: start/fail/backoff |
-//! | Outcome (`add_and_watch`)      | Guaranteed `oneshot` (never lost) | One terminal result per task      |
-//!
-//! Use **events** for live progress, metrics, and logging.
-//! Use the **outcome** when you just need to know how a task ended.
-//!
-//! ## What this shows
-//!
-//! - `handle.add_and_watch(spec)`: register a task and get `(TaskId, TaskWaiter)`.
-//! - `waiter.wait().await`: block until the task terminates, returning a `TaskOutcome`.
-//! - The three outcomes you will most often see:
-//!   - [`TaskOutcome::Completed`] - a one-shot job that succeeded.
-//!   - [`TaskOutcome::Failed`] - retries exhausted; carries the final reason + exit code.
-//!   - [`TaskOutcome::Canceled`] - stopped via `cancel` / `remove` / shutdown.
-//!
-//! Other variants exist for the edges:
-//!  - `Fatal` - a `TaskError::Fatal`,
-//!  - `ForceAborted` - ignored cancellation, killed after the grace period
-//!  - `Panicked` - an actor-level panic; panics in the task *body* are caught and surface as `Failed`.
-//!
-//! ## Controller analogue
-//!
-//! With the `controller` feature, `handle.submit_and_watch(spec)` is the slot-based counterpart.
-//! If a submission is never admitted (slot busy, queue full, superseded, removed, or shutting down) the waiter resolves to `TaskOutcome::Rejected`.
-//!
-//! ## Runtime flavor
-//!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example outcomes
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                    | What it adds                                |
-//! |----------------------------|---------------------------------------------|
-//! | [`dynamic.rs`](dynamic.rs) | Add / remove / cancel tasks at runtime      |
-//! | [`slots.rs`](slots.rs)     | Slot-based admission control (`controller`) |
+//! Run with `cargo run --example outcomes`.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;

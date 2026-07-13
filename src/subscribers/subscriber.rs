@@ -1,31 +1,34 @@
-//! # Event subscriber trait.
+//! # Event subscriber trait
 //!
 //! [`Subscribe`] is the extension point for observing runtime events.
 //!
-//! Each subscriber gets:
+//! Each registered subscriber gets:
 //! - a dedicated queue worker task,
 //! - a bounded queue,
-//! - panic isolation.
+//! - panic isolation from the runtime and other subscribers.
 //!
 //! Delivery is best-effort.
-//! If a subscriber falls behind, new events may be dropped for that subscriber only.
-//! Callbacks run on Tokio's blocking pool instead of its async workers.
+//! If a subscriber queue is full, new events may be dropped for that subscriber.
+//! Events may also be lost earlier if the shared event bus lags.
 //!
 //! ## Flow
 //!
 //! ```text
-//! SubscriberSet ──► [bounded queue] ──► worker ──► blocking pool ──► subscriber.on_event()
-//!                                   └─► overflow/panic diagnostics
+//! event --> [bounded queue] --> one queue worker --> blocking pool --> on_event
+//!                |
+//!                `-- full: drop event and try to report SubscriberOverflow
 //! ```
 //!
 //! ## Rules
 //!
-//! - Ordinary overflows are reported as [`EventKind::SubscriberOverflow`](crate::EventKind::SubscriberOverflow).
-//! - Ordinary panics are reported as [`EventKind::SubscriberPanicked`](crate::EventKind::SubscriberPanicked).
+//! - Taskvisor tries to report ordinary overflows as [`EventKind::SubscriberOverflow`](crate::EventKind::SubscriberOverflow).
+//! - Taskvisor tries to report ordinary panics as [`EventKind::SubscriberPanicked`](crate::EventKind::SubscriberPanicked).
 //! - Diagnostic events are not re-reported if they overflow or panic, to avoid feedback loops.
-//! - Events are processed sequentially (FIFO) per subscriber.
+//! - Successfully queued events are processed one at a time and in FIFO order
+//!   for each subscriber.
 //! - Queue overflow drops the event for this subscriber only.
 //! - A slow subscriber can fill only its own queue.
+//! - There is no processing order guarantee between different subscribers.
 //!
 //! ## Example
 //!
@@ -55,38 +58,44 @@ use crate::events::Event;
 
 const DEFAULT_QUEUE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
-/// Event subscriber for runtime observability.
+/// Synchronous handler for best-effort runtime events.
 ///
-/// `Subscribe` is synchronous by design.
-/// When Taskvisor delivers events, a dedicated queue worker schedules one callback at a time on Tokio's blocking pool.
+/// `Subscribe` is synchronous by design. A dedicated queue worker schedules one
+/// callback at a time on Tokio's blocking pool.
 ///
-/// Keep [`on_event`](Self::on_event) fast; for async I/O, send data to a channel and process it elsewhere.
+/// Keep [`on_event`](Self::on_event) fast. For async I/O or work that may wait a
+/// long time, send the event data to your own channel and process it elsewhere.
 /// During shutdown, Taskvisor gives all subscriber queues one shared drain timeout.
-/// At the deadline, queued events are dropped; an already-running callback may continue after Taskvisor returns.
-/// Tokio runtime shutdown may still wait for that running blocking callback.
+/// At the deadline, queued events are dropped. A callback that is already
+/// running cannot be aborted and may continue after Taskvisor returns. Tokio
+/// runtime shutdown may still wait for that blocking callback.
 ///
-/// Panics are caught and isolated.
-/// A panic while handling an ordinary event is reported as `SubscriberPanicked`.
+/// Unwinding panics are caught and isolated. A build with `panic = "abort"`
+/// cannot isolate panics because the process exits immediately.
+/// Taskvisor tries to report a panic on an ordinary event as `SubscriberPanicked`.
 /// A panic while handling an internal diagnostic event is not reported again, to avoid a feedback loop.
 pub trait Subscribe: Send + Sync + 'static {
-    /// Processes one event.
+    /// Processes one successfully queued event.
     ///
-    /// When Taskvisor delivers an event, it calls this method on Tokio's blocking pool, not from the publisher or an async worker.
-    /// Events are delivered in FIFO order per subscriber.
+    /// Taskvisor calls this method on Tokio's blocking pool, not from the event
+    /// publisher or a Tokio async worker. Calls are sequential and follow queue
+    /// order for this subscriber.
     fn on_event(&self, event: &Event);
 
-    /// Returns the subscriber name used in logs and diagnostic events.
-    /// The runtime snapshots it once at registration.
+    /// Returns the name used in logs and diagnostic events.
+    ///
+    /// Taskvisor reads and stores the name once during registration.
     ///
     /// The default returns the fully-qualified type path via [`type_name`](std::any::type_name).
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 
-    /// Returns this subscriber's preferred queue capacity.
+    /// Returns this subscriber's queue capacity.
     ///
     /// The return type guarantees that the queue can hold at least one event.
-    /// If the queue is full, ordinary events are dropped for this subscriber and reported as `SubscriberOverflow`.
+    /// If the queue is full, Taskvisor drops the new ordinary event for this
+    /// subscriber and tries to report `SubscriberOverflow`.
     ///
     /// Default: `1024`.
     fn queue_capacity(&self) -> NonZeroUsize {

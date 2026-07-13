@@ -1,34 +1,50 @@
-//! # Retry and restart policies.
+//! # Restart and retry timing
 //!
-//! This module contains the policy types that control task restarts.
+//! These policies answer two separate questions:
 //!
-//! | Type              | Role                                                   |
-//! |-------------------|--------------------------------------------------------|
-//! | [`RestartPolicy`] | Decides if a task starts again after success or failure |
-//! | [`BackoffPolicy`] | Computes retry delay after a retryable failure          |
-//! | [`JitterPolicy`]  | Adds random spread to retry delays                      |
-//! | [`BackoffError`]  | Error returned by invalid backoff settings              |
-//!
-//! ## Flow
-//!
-//! [`TaskDefaults`](crate::TaskDefaults) provides the supervisor-wide policies.
-//! A [`TaskSpec`](crate::TaskSpec) may inherit them or provide explicit overrides.
-//! [`BackoffPolicy`] stores the [`JitterPolicy`] used for retry delays.
+//! 1. Should the task run again? See [`RestartPolicy`].
+//! 2. If a failed attempt is retried, how long should Taskvisor wait? See
+//!    [`BackoffPolicy`] and [`JitterPolicy`].
 //!
 //! ```text
-//! RestartPolicy ─┐
-//!                ├──► TaskDefaults / TaskSpec ──► Supervisor
-//! BackoffPolicy ─┘
-//!      └── JitterPolicy
+//! attempt returns
+//!      |
+//!      +-- Ok(()) --------------------> RestartPolicy
+//!      |                                  |-- stop
+//!      |                                  `-- wait for Always.interval, then run again
+//!      |
+//!      +-- Fail / Timeout ------------> RestartPolicy
+//!      |                                  |-- stop
+//!      |                                  `-- BackoffPolicy -> wait -> run again
+//!      |
+//!      `-- Fatal / Canceled -----------> stop
 //! ```
 //!
-//! ## Defaults
+//! A [`TaskSpec`](crate::TaskSpec) can set these values for one task. If it does
+//! not, it inherits them from [`TaskDefaults`](crate::TaskDefaults).
 //!
-//! - [`RestartPolicy::OnFailure`] - restart only after retryable failures.
-//! - [`BackoffPolicy::default()`] - exponential retry delay starting at `200ms`, capped at `30s`, with equal jitter.
-//! - [`JitterPolicy::default()`] - no jitter when the jitter policy is constructed on its own.
+//! ## Default behavior
 //!
-//! The default backoff selects [`JitterPolicy::Equal`] explicitly. Named backoff constructors remain deterministic until jitter is added with [`BackoffPolicy::with_jitter`].
+//! - [`RestartPolicy::OnFailure`] retries [`TaskError::Fail`](crate::TaskError::Fail)
+//!   and [`TaskError::Timeout`](crate::TaskError::Timeout).
+//! - [`BackoffPolicy::default()`] uses exponential growth from `200ms` to
+//!   `30s`, with equal jitter.
+//! - [`JitterPolicy::default()`] is [`JitterPolicy::None`].
+//!
+//! The named backoff constructors are deterministic until you add jitter with
+//! [`BackoffPolicy::with_jitter`].
+//!
+//! ## Retry Budget
+//!
+//! [`TaskSpec::with_max_retries`](crate::TaskSpec::with_max_retries) counts
+//! retries after the first failed attempt in one failure streak. A limit of
+//! three therefore allows four attempts when every attempt fails. A successful
+//! attempt resets the count.
+//!
+//! Only retryable failures and timeouts use this budget. Fatal errors and
+//! cancellation always stop. For [`RestartPolicy::Always`], a successful
+//! attempt uses its configured interval; a failed attempt uses the backoff
+//! policy. The interval starts after success and is not a wall-clock schedule.
 
 mod backoff;
 pub use backoff::{BackoffError, BackoffPolicy};

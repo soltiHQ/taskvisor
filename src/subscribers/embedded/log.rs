@@ -1,7 +1,9 @@
-//! # LogWriter event printer example.
+//! # Simple stdout event printer
 //!
-//! A minimal subscriber that prints incoming [`Event`]s to stdout.
-//! Useful for development, debugging, and demos.
+//! [`LogWriter`] prints incoming [`Event`] values to standard output. It is
+//! useful for examples, local development, and debugging. For production
+//! structured logs, prefer [`TracingBridge`](crate::TracingBridge) with the
+//! `tracing` feature.
 //!
 //! Each line starts with the event's stable label from [`EventKind::as_label`].
 //!
@@ -33,10 +35,10 @@
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
 
-/// Event printer for stdout example.
+/// Prints human-readable events to standard output.
 ///
 /// Implements [`Subscribe`] and prints `[seq] [event-type] key=value ...` with relevant metadata.
-/// Useful for debugging, demos, or understanding supervisor flow.
+/// Output is intended for people and is not a stable machine-readable format.
 ///
 /// ## Also
 ///

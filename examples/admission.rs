@@ -1,54 +1,19 @@
-//! # Admission
+//! # Admission outcomes
 //!
-//! Awaits the outcome of a **controller** submission with `submit_and_watch`.
+//! `submit` returning `Ok(id)` means that the controller accepted the request.
+//! It does not mean that the slot admitted the task. The admission decision is asynchronous.
 //!
-//! This is the slot-based counterpart of [`outcomes.rs`](outcomes.rs)'s `add_and_watch`:
-//! the controller decides whether to admit, queue, or reject each submission, and the returned `TaskWaiter` resolves to the final [`TaskOutcome`] either way.
+//! `submit_and_watch` also returns a `TaskWaiter`:
 //!
-//! ## The key distinction: admitted vs. rejected
+//! - an admitted task resolves to its final runtime outcome;
+//! - a task that never starts resolves to `TaskOutcome::Rejected` with a reason.
 //!
-//! `handle.submit(spec)` is fire-and-forget: `Ok(id)` means *enqueued*, not *admitted*.
-//! The admission decision is asynchronous. `submit_and_watch` lets you await the result:
+//! This example shows both paths and reads a live controller snapshot. Use the
+//! waiter when rejection affects application logic. Events are best-effort and
+//! are better suited to logs and metrics.
 //!
-//! - If the slot **admits** the task, the waiter resolves to its real terminal outcome (`Completed`, `Failed`, `Canceled`, ...) once it has run.
-//! - If the slot **never admits** it - busy under `DropIfRunning`, queue full, superseded by a later `Replace`, removed while queued, or shutting down
-//!   The waiter resolves to [`TaskOutcome::Rejected`], carrying the reason. The task body never ran.
-//!
-//! This closes a real gap: with plain `submit`, a rejected submission is only visible as a `ControllerRejected` event on the lossy bus.
-//! With `submit_and_watch` the rejection is a guaranteed, awaitable result.
-//!
-//! ## What this shows
-//!
-//! - `handle.submit_and_watch(ControllerSpec::...)`: submit and get `(TaskId, TaskWaiter)`.
-//! - An **admitted** `Queue` job resolving to `Completed`.
-//! - A **rejected** `DropIfRunning` job (slot busy) resolving to `Rejected { reason }`.
-//! - `handle.controller_snapshot()`: pull the live slot state (status, queue depth) without parsing events.
-//!
-//! ## Enabling the feature
-//!
-//! ```toml
-//! [dependencies]
-//! taskvisor = { version = "...", features = ["controller"] }
-//! ```
-//!
-//! ## Runtime flavor
-//!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example admission --features controller
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                      | What it adds                               |
-//! |------------------------------|--------------------------------------------|
-//! | [`slots.rs`](slots.rs)       | All three admission policies, side by side |
-//! | [`outcomes.rs`](outcomes.rs) | The direct-path waiter (`add_and_watch`)   |
+//! Run with
+//! `cargo run --example admission --features controller`.
 
 #[cfg(not(feature = "controller"))]
 compile_error!(
@@ -103,8 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 2) While deploy-v1 holds the slot, a DropIfRunning submission is refused.
-    //     submit() would only fire a ControllerRejected event on the lossy bus;
-    //     submit_and_watch() lets us *await* the rejection as a guaranteed result.
+    //     submit() would only report rejection on the best-effort event path;
+    //     submit_and_watch() gives this submission a dedicated outcome channel.
     println!("2) submit deploy-v2 (DropIfRunning) while the slot is busy");
     let (_id, v2) = handle
         .submit_and_watch(
@@ -114,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     match v2.wait().await? {
         TaskOutcome::Rejected { reason, .. } => {
-            println!("    deploy-v2 -> Rejected ({reason}) — never ran\n");
+            println!("    deploy-v2 -> Rejected ({reason}) - never ran\n");
         }
         other => println!("    deploy-v2 -> {other:?} (unexpected)\n"),
     }

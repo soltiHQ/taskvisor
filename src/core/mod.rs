@@ -1,85 +1,50 @@
-//! # Runtime core.
+//! # Runtime API
 //!
-//! This module contains the taskvisor runtime implementation.
+//! This module contains the public runtime types:
 //!
-//! Public API:
+//! - [`Supervisor`] and [`SupervisorBuilder`] create and start a runtime.
+//! - [`SupervisorHandle`] manages tasks in dynamic mode.
+//! - [`SupervisorConfig`] sets runtime limits.
+//! - [`TaskDefaults`] sets inherited task behavior.
+//! - [`TaskWaiter`] returns a final [`TaskOutcome`].
 //!
-//! | File               | Role                                      |
-//! |--------------------|-------------------------------------------|
-//! | `supervisor.rs`    | Public facade and composition root        |
-//! | `handle.rs`        | Dynamic task management API               |
-//! | `config.rs`        | Runtime defaults and limits               |
-//! | `task_defaults.rs` | Default task execution settings           |
-//! | `outcome.rs`       | Guaranteed task completion results        |
-//! | `builder.rs`       | Runtime construction                      |
+//! ## Runtime Paths
 //!
-//! Internal runtime:
-//!
-//! | File / directory        | Role                                                   |
-//! |-------------------------|--------------------------------------------------------|
-//! | `runtime.rs`, `runtime/`   | Composition, management, events, lifecycle, shutdown |
-//! | `registry.rs`, `registry/` | Membership, admission, joins, removal, listener       |
-//! | `actor.rs`                  | Runs one task with restart/backoff policy             |
-//! | `runner.rs`                 | Executes one task attempt                             |
-//! | `alive.rs`                  | Best-effort live-task snapshot                        |
-//! | `shutdown.rs`               | OS signal handling                                    |
-//! | `panic_guard.rs`            | Panic boundary for long-lived listeners               |
-//!
-//! ## Planes
-//!
-//! taskvisor has three important runtime planes:
+//! State changes and observations use different paths:
 //!
 //! ```text
-//! Management plane:
-//!   SupervisorHandle ──► SupervisorCore ──mpsc──► Registry
-//!
-//! Event plane:
-//!   runtime components ──broadcast──► subscriber_listener ──► Subscribe impls
-//!
-//! Completion plane:
-//!   Registry ──oneshot outcome──► TaskWaiter
-//!            └─shared terminal──► cancel callers / controller slots
-//!   SupervisorCore ──shared result──► shutdown callers
+//! add / remove / cancel -- reliable command --> Registry
+//! watched task --------- direct result -----> TaskWaiter
+//! lifecycle progress --- best-effort -------> subscribers
 //! ```
 //!
-//! The management plane uses an mpsc command channel. Add, remove, and cancel commands are not delivered through the lossy event bus.
-//! The event plane is best-effort and used for logs, metrics, snapshots, and subscriber integrations. Slow consumers can lag and miss events.
-//! The completion plane provides watched task outcomes, terminal registry cleanup for cancellation
-//! and controller slots, and one cached shutdown result.
+//! The registry is the source of truth for registered identities and names.
+//! Events are for observability and may be lost when consumers are slow. Alive
+//! snapshots are based on those events, so they are also best-effort.
 //!
-//! ## Main Flow
+//! ## When a Command Returns
 //!
-//! ```text
-//! Supervisor::run(tasks)
-//!   ├─ start subscriber listener
-//!   ├─ start registry listener
-//!   ├─ send one initial AddBatch command
-//!   ├─ wait for the direct registry decision
-//!   └─ wait for OS shutdown signal or natural completion
+//! | Operation | What the return value confirms |
+//! |-----------|--------------------------------|
+//! | `add*` | The registry accepted or rejected the task. The first attempt may not have started yet. |
+//! | `remove*` | Whether this caller claimed the stop request. Registered task cleanup may still be running. |
+//! | `cancel*` | Known work reached terminal cleanup, unless the caller's explicit wait timeout expired. |
+//! | `shutdown` | Shared runtime cleanup finished, or returned its final error. |
 //!
-//! Supervisor::serve()
-//!   ├─ start listeners
-//!   └─ return SupervisorHandle
-//! ```
+//! The regular methods wait for management-queue capacity. Their `try_*`
+//! versions fail fast when that queue is full. [`SupervisorHandle::list`] reads
+//! authoritative registry membership. [`SupervisorHandle::alive_snapshot`] and
+//! [`SupervisorHandle::is_alive`] are best-effort views built from events.
 //!
-//! ## Events
+//! ## Important Rules
 //!
-//! Events are published by:
-//!
-//! - `SupervisorCore`: add/remove/shutdown requests and final runtime verdicts.
-//! - `TaskActor`: attempt starts, retry scheduling, actor terminal state.
-//! - `SubscriberSet`: subscriber overflow and panic diagnostics.
-//! - `Registry`: task added/removed confirmations.
-//! - `runner`: per-attempt result events.
-//!
-//! `AllStoppedWithinGrace` can be emitted after explicit shutdown or after natural completion when all cleanup joins finish within the grace period.
-//!
-//! ## Notes
-//!
-//! - `Supervisor::run` is single-shot for one supervisor instance.
-//! - Attempts within one `TaskActor` are sequential; the same actor never runs two attempts in parallel.
-//! - Event sequence numbers are useful for stale-event filtering and sorting, but they are not a causal ordering guarantee across concurrent producers.
-//! - A panic in a long-lived listener is caught and reported as a diagnostic event instead of silently killing the control loop.
+//! - [`Supervisor::run`] is single-shot and registers its initial tasks as one batch.
+//! - Attempts for one registered task are sequential.
+//! - New task admission closes when shutdown starts.
+//! - Explicit shutdown returns after task, listener, and subscriber cleanup.
+//! - Dropping the last public owner only starts best-effort cancellation.
+//! - Event sequence numbers help sort observations, but do not prove causal
+//!   order between concurrent tasks.
 
 mod outcome;
 pub use outcome::{TaskOutcome, TaskWaiter};

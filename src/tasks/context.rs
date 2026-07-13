@@ -1,4 +1,4 @@
-//! Task execution context handed to [`Task::spawn`](crate::Task::spawn).
+//! Cooperative cancellation for one task attempt.
 
 use std::future::Future;
 
@@ -6,31 +6,42 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::TaskError;
 
-/// Context passed to a [`Task`](crate::Task) for one attempt.
-///
-/// It tells the task when it should stop.
+/// Cancellation context passed to one [`Task`](crate::Task) attempt.
 ///
 /// ## Cancellation
 ///
-/// The context is cancelled by the supervisor during shutdown or when the task is removed at runtime.
-/// - Short-lived, one-shot tasks that finish quickly may ignore it.
-/// - Long-running tasks should wrap their awaits in [`run_until_cancelled`](Self::run_until_cancelled),
-///   or await [`cancelled`](Self::cancelled) / check [`is_cancelled`](Self::is_cancelled) manually.
+/// The supervisor cancels this context when the task is removed or the runtime
+/// shuts down. Cancellation is a signal; it does not stop user code by itself.
+/// Long-running tasks must observe the signal and return.
+///
+/// ```text
+/// remove / cancel / shutdown
+///             |
+///             v
+///       TaskContext cancelled
+///             |
+///             v
+/// task returns TaskError::Canceled
+/// ```
+///
+/// Await [`cancelled`](Self::cancelled), check
+/// [`is_cancelled`](Self::is_cancelled), or wrap a cancellation-safe future in
+/// [`run_until_cancelled`](Self::run_until_cancelled).
 #[derive(Clone, Debug)]
 pub struct TaskContext {
     cancel: CancellationToken,
 }
 
 impl TaskContext {
-    /// Wraps a raw cancellation token (crate-internal; the runtime owns token creation).
+    /// Wraps the token created by the runtime.
     pub(crate) fn from_token(cancel: CancellationToken) -> Self {
         Self { cancel }
     }
 
-    /// A task context that is not connected to a supervisor.
+    /// Creates an active context that is not connected to a supervisor.
     ///
-    /// It starts active. Use it in tests when you want to call [`Task::spawn`](crate::Task::spawn)
-    /// or any function that takes a [`TaskContext`] without starting a supervisor.
+    /// Use it in tests that call [`Task::spawn`](crate::Task::spawn) or another
+    /// function that accepts a context.
     ///
     /// ```rust
     /// use taskvisor::TaskContext;
@@ -45,9 +56,9 @@ impl TaskContext {
         Self::from_token(CancellationToken::new())
     }
 
-    /// A task context that is already cancelled.
+    /// Creates an already-cancelled context for tests.
     ///
-    /// Use it in tests to check cancellation code:
+    /// Use it to check cancellation paths:
     /// [`run_until_cancelled`](Self::run_until_cancelled) returns
     /// [`Err(TaskError::Canceled)`](TaskError::Canceled) without polling the future.
     ///
@@ -66,42 +77,40 @@ impl TaskContext {
         Self::from_token(token)
     }
 
-    /// Waits until the context is cancelled.
+    /// Waits for cancellation.
     ///
-    /// Resolves immediately if the context is already cancelled.
-    /// Safe to call repeatedly and to use as a branch in `tokio::select!`.
+    /// It returns immediately if cancellation has already happened. It is safe
+    /// to call more than once and to use inside `tokio::select!`.
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await;
     }
 
-    /// Returns `true` if the context has already been cancelled.
+    /// Returns `true` after cancellation has happened.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
 
-    /// Runs a future until it completes or this context is cancelled.
+    /// Runs `fut` until it completes or the context is cancelled.
     ///
-    /// Returns `Ok(output)` when `fut` completes first.
-    /// Returns [`Err(TaskError::Canceled)`](TaskError::Canceled) when the context is cancelled first.
+    /// Returns `Ok(output)` if `fut` finishes first. Returns
+    /// [`TaskError::Canceled`] if cancellation wins.
     ///
-    /// Cancellation wins ties: if the context is already cancelled, `fut` is not polled at all.
-    /// On cancellation `fut` is dropped together with any work it owns.
+    /// Cancellation wins a tie. If the context is already cancelled, `fut` is
+    /// not polled. When cancellation wins, `fut` is dropped. Use this method only
+    /// with futures that are safe to cancel by dropping.
     ///
-    /// Use it instead of the manual `tokio::select!` + `Err(TaskError::Canceled)` pattern:
+    /// This is a short form of `tokio::select!` for common worker loops:
     ///
     /// ```rust,no_run
     /// use std::time::Duration;
-    /// use taskvisor::{TaskContext, TaskError, TaskFn, TaskRef};
+    /// use taskvisor::{TaskFn, TaskRef};
     ///
-    /// # async fn poll_once() -> Result<(), TaskError> { Ok(()) }
     /// let poller: TaskRef = TaskFn::arc("poller", |ctx| async move {
     ///     loop {
-    ///         // `?` propagates poll_once() errors.
-    ///         // On shutdown this returns TaskError::Canceled (clean stop, not a failure).
-    ///         ctx.run_until_cancelled(poll_once()).await??;
     ///         ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
     ///             .await?;
+    ///         // Do one unit of work.
     ///     }
     /// });
     /// ```
@@ -113,12 +122,10 @@ impl TaskContext {
         }
     }
 
-    /// Creates a child context.
+    /// Creates a child cancellation scope.
     ///
-    /// Use it to give a piece of sub-work its own cancellation scope.
-    ///
-    /// The child is cancelled when this context is cancelled.
-    /// Cancelling the child (through interop APIs) does not cancel this context.
+    /// Parent cancellation reaches the child. Cancelling the child through an
+    /// interop API does not cancel the parent.
     #[must_use]
     pub fn child(&self) -> TaskContext {
         TaskContext {
@@ -126,10 +133,10 @@ impl TaskContext {
         }
     }
 
-    /// Returns the raw [`tokio_util`] cancellation token.
+    /// Returns the underlying [`tokio_util`] cancellation token.
     ///
-    /// Use this only when another API needs a `CancellationToken`.
-    /// The returned token shares cancellation state with this context.
+    /// Use this only when another API requires a `CancellationToken`. The
+    /// returned token shares state with this context.
     ///
     /// Requires the `tokio-util-interop` feature.
     #[cfg(feature = "tokio-util-interop")]

@@ -1,4 +1,4 @@
-//! Common re-exports.
+//! # Common imports
 //!
 //! Import the prelude when building ordinary Taskvisor applications:
 //!
@@ -6,9 +6,12 @@
 //! use taskvisor::prelude::*;
 //! ```
 //!
-//! The prelude includes the common runtime, task, policy, event, subscriber, error, and identity types.
+//! The prelude includes the main runtime, task, policy, event, subscriber,
+//! error, and identity types. It does not change behavior or enable features.
 //!
-//! Feature-gated APIs are included only when their feature is enabled.
+//! Feature-gated types appear only when their Cargo feature is enabled. In
+//! public libraries, explicit imports can make your own API dependencies easier
+//! to see. The prelude is most useful in applications and examples.
 
 /// Core supervisor runtime.
 pub use crate::core::{

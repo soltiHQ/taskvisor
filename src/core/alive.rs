@@ -1,34 +1,32 @@
-//! # Best-effort alive-task tracker.
+//! # Best-effort alive-task view
 //!
-//! Tracks which task runs are currently marked alive based on lifecycle events.
-//!
-//! This is a read-side cache used for snapshots and shutdown diagnostics.
-//! The registry remains the authoritative owner of task membership.
+//! [`AliveTracker`] builds a current view from lifecycle events. It supports
+//! fast status queries and shutdown diagnostics. It is not the source of truth;
+//! the registry owns task membership.
 //!
 //! ## Flow
 //!
 //! ```text
-//! runtime bus -> subscriber listener -> AliveTracker::update() -> HashMap<AliveKey, TaskState>
+//! event bus -> AliveTracker::update() -> cached alive names
 //! ```
 //!
 //! ## Keys
 //!
-//! Entries are keyed by [`TaskId`] when an event has one.
-//! For older/id-less events, the task name is used as a fallback key.
+//! Events normally use [`TaskId`]. An event without an identity falls back to
+//! the task name.
 //!
-//! Task names are labels and may be reused across runs.
-//! A late event from an old run with a different id cannot change the new run's state.
+//! Names may be reused after removal. Identity keys prevent a late event from an
+//! old run from changing a newer run with the same name.
 //!
 //! ## Rules
 //!
-//! - Other events are ignored and do not create entries or advance `last_seq`.
+//! - Only task lifecycle events change this view.
 //! - Events with `seq <= last_seq` for the same key are ignored as stale.
-//! - A fresh `TaskRemoved` removes the entry entirely.
-//! - Only lifecycle events are tracked.
-//! - `TaskStopped`, `TaskCanceled`, `TaskFailed`, `ActorExhausted`, and`ActorDead` mark a task as not alive.
-//! - `snapshot` and `is_alive` are eventually consistent because they are based on the lossy event bus.
-//! - `reconcile` prunes id-keyed entries that are no longer present in the registry live-id set.
 //! - `TaskStarting` marks a task as alive.
+//! - Stop, failure, cancellation, and actor-end events mark it as not alive.
+//! - `TaskRemoved` deletes the cache entry.
+//! - `reconcile` removes identities no longer present in the registry.
+//! - Queries are eventually consistent because event delivery is best-effort.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -39,14 +37,14 @@ use tokio::sync::RwLock;
 use crate::events::{Event, EventKind};
 use crate::identity::TaskId;
 
-/// Tracker key: task id when available, task name as fallback.
+/// Cache key: task identity when available, otherwise task name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AliveKey {
     Id(TaskId),
     Name(Arc<str>),
 }
 
-/// Cached alive state for one tracker key.
+/// Cached state for one key.
 #[derive(Debug, Clone)]
 struct TaskState {
     /// Task name reported by `is_alive` and `snapshot`.
@@ -57,10 +55,9 @@ struct TaskState {
     alive: bool,
 }
 
-/// Thread-safe best-effort tracker of alive tasks.
+/// Thread-safe, best-effort alive-task cache.
 ///
-/// Used by runtime snapshots and shutdown diagnostics.
-/// The tracker applies only lifecycle events and rejects stale events per key.
+/// It accepts only fresh lifecycle events for each key.
 pub(crate) struct AliveTracker {
     state: RwLock<HashMap<AliveKey, TaskState>>,
 }
@@ -73,7 +70,7 @@ impl AliveTracker {
         }
     }
 
-    /// Applies a lifecycle event to the tracked state.
+    /// Applies a fresh lifecycle event to the cache.
     ///
     /// Only task lifecycle events are tracked.
     /// Other events are ignored and do not create entries or advance `last_seq`.

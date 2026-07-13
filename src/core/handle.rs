@@ -1,14 +1,30 @@
-//! # Dynamic supervisor handle.
+//! # Manage a running supervisor
 //!
-//! [`SupervisorHandle`] is returned by [`Supervisor::serve`](crate::Supervisor::serve).
-//! It is the runtime API for adding, removing, cancelling, listing, and shutting down tasks after the supervisor has been started.
+//! [`Supervisor::serve`](crate::Supervisor::serve) returns a
+//! [`SupervisorHandle`]. Use it to add, inspect, stop, and watch tasks while the
+//! service is running.
 //!
-//! The handle talks to [`SupervisorCore`] for registered tasks.
-//! With the `controller` feature enabled, identity removal and cancellation are first ordered with
-//! slot-based submissions so queued work can be removed before it reaches the registry.
+//! ```text
+//! Supervisor::serve()
+//!         |
+//!         v
+//! SupervisorHandle
+//!   | add / add_and_watch
+//!   | list / alive_snapshot
+//!   | remove / cancel
+//!   + shutdown
+//! ```
 //!
-//! [`Supervisor::run`](crate::Supervisor::run) is the static entry point for a fixed task set.
-//! Use `serve` when tasks must be managed at runtime.
+//! For state changes, the regular method waits for management-queue capacity.
+//! Its `try_*` form returns a queue-full error instead. After queue admission,
+//! both forms wait for the same registry or controller decision.
+//! Dropping a management future before its command is accepted may stop the
+//! operation. After acceptance, the runtime owns the command and does not roll
+//! it back when the caller is dropped.
+//!
+//! With a controller, identity-based remove and cancel operations are ordered
+//! after earlier submissions. This lets them find work that is still queued and
+//! has not reached the registry.
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
@@ -21,40 +37,38 @@ use crate::tasks::TaskSpec;
 
 use super::outcome::TaskWaiter;
 
-/// Handle for managing a started supervisor.
+/// Cloneable handle for one running supervisor.
 ///
-/// A handle is created by [`Supervisor::serve`](crate::Supervisor::serve).
-/// It can be cloned and shared between tasks.
-/// Dropping one clone does not stop the runtime. Dropping the final public
-/// supervisor/handle owner sends non-blocking best-effort cancellation; call
-/// [`shutdown`](Self::shutdown) to wait for graceful cleanup and receive its result.
+/// Clones share the same runtime. Dropping one clone does not stop it. Dropping
+/// the last public `Supervisor` or handle sends best-effort cancellation, but
+/// cannot wait for cleanup. Call [`shutdown`](Self::shutdown) for a confirmed
+/// shutdown result.
+///
+/// Use [`remove`](Self::remove) to request a stop and return after the request is
+/// accepted. Use [`cancel`](Self::cancel) to wait until the task is joined and
+/// its name and identity are released.
 ///
 /// ## Example
 ///
 /// ```rust,no_run
 /// use std::time::Duration;
-/// use taskvisor::{
-///     Supervisor, SupervisorConfig, TaskContext, TaskError, TaskFn, TaskSpec,
-/// };
+/// use taskvisor::{Supervisor, SupervisorConfig, TaskFn, TaskSpec};
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-///     let handle = sup.serve();
+///     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+///     let handle = supervisor.serve();
 ///
 ///     let task = TaskFn::arc("worker", |ctx| async move {
 ///         loop {
-///             tokio::select! {
-///                 _ = ctx.cancelled() => return Err(TaskError::Canceled),
-///                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
-///                     // do one unit of work
-///                 }
-///             }
+///             ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(1)))
+///                 .await?;
+///             // Do one unit of work.
 ///         }
 ///     });
 ///
 ///     let id = handle.add(TaskSpec::restartable(task)).await?;
-///     let _ = handle.cancel(id).await?;
+///     let _claimed = handle.cancel(id).await?;
 ///     handle.shutdown().await?;
 ///     Ok(())
 /// }
@@ -99,14 +113,10 @@ impl SupervisorHandle {
         self
     }
 
-    /// Adds a task and waits for registry acceptance.
+    /// Adds a task and waits until the registry accepts or rejects it.
     ///
-    /// This waits for command queue capacity and then for the direct registry reply.
-    /// `Ok(id)` means the registry accepted the task identity and label.
-    /// Registration does not depend on lifecycle event delivery.
-    ///
-    /// Dropping this future after its command was queued does not roll the Add back.
-    /// The registry may still accept and start the task.
+    /// `Ok(id)` confirms registration. It does not mean that the first attempt
+    /// has started. This confirmation is direct and does not use the event bus.
     ///
     /// # Errors
     ///
@@ -116,10 +126,10 @@ impl SupervisorHandle {
         self.core().add_task(spec).await
     }
 
-    /// Tries to add a task without waiting for command queue capacity.
+    /// Adds a task only if the management queue has capacity now.
     ///
-    /// When queue admission succeeds, this still waits for the direct registry reply.
-    /// `Ok(id)` therefore has the same meaning as [`add`](Self::add).
+    /// After queue admission, it still waits for registry acceptance. `Ok(id)`
+    /// has the same meaning as [`add`](Self::add).
     ///
     /// # Errors
     ///
@@ -130,10 +140,11 @@ impl SupervisorHandle {
         self.core().try_add_task(spec).await
     }
 
-    /// Adds a task and returns a [`TaskWaiter`] after registry acceptance.
+    /// Adds a task and returns a waiter for its final outcome.
     ///
-    /// The waiter resolves to the final [`TaskOutcome`](crate::TaskOutcome) of the supervised task run.
-    /// Registration semantics are the same as [`add`](Self::add).
+    /// Registration is the same as [`add`](Self::add). The [`TaskWaiter`]
+    /// resolves after all retries end and the registry joins the task actor. It uses
+    /// a direct completion channel, not best-effort lifecycle events.
     ///
     /// # Errors
     ///
@@ -167,11 +178,10 @@ impl SupervisorHandle {
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
-    /// Tries to add a watched task without waiting for command queue capacity.
+    /// Adds a watched task only if the management queue has capacity now.
     ///
-    /// When queue admission succeeds, this still waits for the direct registry reply before
-    /// returning the [`TaskWaiter`]. The registration and completion semantics are otherwise the
-    /// same as [`add_and_watch`](Self::add_and_watch).
+    /// After queue admission, registration and outcome behavior are the same as
+    /// [`add_and_watch`](Self::add_and_watch).
     ///
     /// # Errors
     ///
@@ -186,22 +196,15 @@ impl SupervisorHandle {
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
-    /// Removes a task by identity.
+    /// Requests removal by task identity without waiting for termination.
     ///
-    /// With a configured controller, this first orders the id after earlier submissions.
-    /// Queued work is removed directly.
-    /// Otherwise this waits for registry command capacity and the direct registry reply.
+    /// `Ok(true)` means this call claimed the task and sent cancellation, or
+    /// removed it from the controller queue. `Ok(false)` means the identity was
+    /// unknown, already finished, or already claimed by another stop request.
     ///
-    /// `Ok(true)` means this call either removed a queued controller submission or claimed a registered task, changed it to `Removing`, and sent cancellation.
-    /// `Ok(false)` means the id was unknown, already claimed, or already terminated.
-    ///
-    /// For registered tasks, this does not wait for terminal cleanup.
-    /// Removing queued controller work is complete when this method returns.
-    /// Use [`cancel`](Self::cancel) when the call must return after termination.
-    ///
-    /// With a configured controller, dropping this future before its ordered command is accepted may stop the operation.
-    /// Once accepted, the controller owns both queued lookup and registry fallback, so dropping the caller does not undo the operation.
-    /// Without a controller, a registry Remove command that was already committed also continues.
+    /// For a registered task, the method returns before final cleanup. Use
+    /// [`cancel`](Self::cancel) when you need to wait until termination. Removing
+    /// queued controller work is complete when this method returns.
     ///
     /// # Errors
     ///
@@ -214,12 +217,10 @@ impl SupervisorHandle {
         self.core().remove(id).await
     }
 
-    /// Tries to remove a task without waiting for command queue capacity.
+    /// Requests removal only if the management queue has capacity now.
     ///
-    /// When the id is not queued in the controller, successful command admission still waits for the direct registry reply.
-    /// Its boolean result has the same meaning as [`remove`](Self::remove).
-    /// With a configured controller, this also fails fast when the ordered controller command channel is full.
-    /// Once the controller or registry accepts the command, dropping the caller does not undo it.
+    /// After queue admission, it waits for the same decision and returns the
+    /// same boolean as [`remove`](Self::remove).
     ///
     /// # Errors
     ///
@@ -233,16 +234,14 @@ impl SupervisorHandle {
         self.core().try_remove(id).await
     }
 
-    /// Removes the task currently holding `name`.
+    /// Requests removal of the registered task with `name`.
     ///
-    /// Label lookup and the `Registered` to `Removing` transition happen in one registry operation.
-    /// `Ok(true)` means this call claimed the label owner and sent cancellation.
-    /// `Ok(false)` means there was no registered owner to claim.
-    /// This does not wait for terminal task cleanup.
-    /// Queued controller submissions are not registered label owners; remove them by the [`TaskId`] returned from `submit` or `submit_and_watch`.
-    /// This method waits for registry command capacity. Use
-    /// [`try_remove_by_label`](Self::try_remove_by_label) for fail-fast admission.
-    /// Once the registry command is committed, dropping the caller does not undo removal.
+    /// Name lookup and the removal claim are one registry operation. The boolean
+    /// has the same meaning as [`remove`](Self::remove), and this method also
+    /// returns before final cleanup.
+    ///
+    /// Controller submissions that are still queued do not own a registered
+    /// name. Remove them with the [`TaskId`] returned by `submit`.
     ///
     /// # Errors
     ///
@@ -251,12 +250,10 @@ impl SupervisorHandle {
         self.core().remove_by_label(Arc::from(name)).await
     }
 
-    /// Tries to remove the task currently holding `name` without waiting for registry queue capacity.
+    /// Requests removal by name only if the registry queue has capacity now.
     ///
-    /// Queued controller submissions are not registered label owners. When command admission
-    /// succeeds, this still waits for the authoritative registry reply, and the result has the
-    /// same meaning as [`remove_by_label`](Self::remove_by_label). Once the registry command is
-    /// committed, dropping the caller does not undo removal.
+    /// After queue admission, behavior is the same as
+    /// [`remove_by_label`](Self::remove_by_label).
     ///
     /// # Errors
     ///
@@ -266,39 +263,38 @@ impl SupervisorHandle {
         self.core().try_remove_by_label(Arc::from(name)).await
     }
 
-    /// Returns registered tasks as `(id, label)` pairs.
+    /// Returns the authoritative registry view as `(id, name)` pairs.
     ///
     /// The list comes from the registry and is sorted by [`TaskId`].
-    /// It includes both `Registered` and `Removing` tasks.
+    /// It includes tasks that are running and tasks still being removed.
     ///
     /// See [`alive_snapshot`](Self::alive_snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.core().list_tasks().await
     }
 
-    /// Returns a best-effort snapshot of task names currently marked alive.
+    /// Returns task names currently marked alive by lifecycle events.
     ///
-    /// This is a best-effort view from the alive tracker, which is fed by the lossy event bus.
-    /// The result is sorted and deduplicated by task name.
+    /// This view is **best-effort** and eventually consistent because the event
+    /// bus can drop events. The result is sorted and deduplicated by name.
     ///
     /// See [`list`](Self::list) for the authoritative registry view of registered tasks.
     pub async fn alive_snapshot(&self) -> Vec<Arc<str>> {
         self.core().snapshot().await
     }
 
-    /// Returns a best-effort snapshot of task names currently marked alive.
+    /// Compatibility alias for [`alive_snapshot`](Self::alive_snapshot).
     ///
-    /// This compatibility alias forwards to [`alive_snapshot`](Self::alive_snapshot).
-    /// Prefer the explicit name in new code so it is not confused with the authoritative
-    /// registry view from [`list`](Self::list).
+    /// Prefer `alive_snapshot` in new code. It makes the best-effort behavior
+    /// clearer and avoids confusion with [`list`](Self::list).
     pub async fn snapshot(&self) -> Vec<Arc<str>> {
         self.alive_snapshot().await
     }
 
-    /// Returns true if any task run with this name is currently marked alive.
+    /// Returns whether an event currently marks this name as alive.
     ///
-    /// This is a best-effort label query from the alive tracker.
-    /// It does not check task identity.
+    /// This is a best-effort, eventually consistent label query. It does not
+    /// check a specific [`TaskId`]. Use [`list`](Self::list) for registry state.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
     }
@@ -315,24 +311,18 @@ impl SupervisorHandle {
         self.core().task_defaults()
     }
 
-    /// Cancels queued or registered work by identity.
+    /// Cancels work by identity and waits for terminal cleanup.
     ///
-    /// When the controller claims still-queued work, it removes it directly without a registry
-    /// cleanup wait. Registered work waits for terminal registry completion after the actor is
-    /// joined and its identity is released.
-    /// Returns `Ok(true)` only to the caller that removed a queued controller submission or
-    /// claimed registry removal.
-    /// A caller that joins an existing removal returns `Ok(false)` after the same terminal completion.
-    /// An unknown or terminated id returns `Ok(false)` without waiting for terminal completion.
-    /// A watched queued submission resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
-    /// with reason `removed_from_queue` because its task body never started.
+    /// For registered work, this returns after the actor is joined and its name
+    /// and identity are released. For queued controller work, removal is already
+    /// complete when this method returns.
     ///
-    /// With a configured controller, dropping this future before its ordered command is accepted
-    /// may stop the operation. Once accepted, the controller owns both queued lookup and registry
-    /// fallback, so dropping the caller does not undo cancellation.
-    /// Without a controller, a registry Cancel command that was already committed also continues.
-    /// This method waits for controller and registry command capacity. Use
-    /// [`try_cancel`](Self::try_cancel) to fail fast when either bounded queue is full.
+    /// `Ok(true)` is returned only to the call that claimed the stop. A call that
+    /// joins an existing removal waits for the same cleanup, then returns
+    /// `Ok(false)`. An unknown or finished identity returns `Ok(false)` at once.
+    /// A watched submission removed from a controller queue resolves as
+    /// [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) because its body
+    /// did not run.
     ///
     /// # Errors
     ///
@@ -345,11 +335,10 @@ impl SupervisorHandle {
         self.core().cancel(id).await
     }
 
-    /// Tries to cancel queued or registered work without waiting for command queue capacity.
+    /// Cancels work only if the management queue has capacity now.
     ///
-    /// When command admission succeeds, this has the same identity ordering, claimant result,
-    /// and terminal-completion semantics as [`cancel`](Self::cancel). With a configured
-    /// controller, both the ordered controller queue and the registry fallback are fail-fast.
+    /// After queue admission, it has the same result and cleanup guarantees as
+    /// [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///
@@ -363,28 +352,23 @@ impl SupervisorHandle {
         self.core().try_cancel(id).await
     }
 
-    /// Cancels the task currently holding `name`.
+    /// Cancels the registered task with `name` and waits for cleanup.
     ///
-    /// Label lookup and the cancellation claim happen atomically in the registry. This waits for
-    /// registry command capacity, the authoritative claim decision, and terminal completion.
-    /// Once the registry command is committed, dropping the caller does not undo cancellation.
-    /// Use [`try_cancel_by_label`](Self::try_cancel_by_label) for fail-fast admission.
+    /// Name lookup and the cancellation claim are one registry operation. The
+    /// result and terminal guarantees match [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///
-    /// Same as [`cancel`](Self::cancel).
-    /// Queued controller submissions are not registered label owners; cancel them by their
-    /// returned [`TaskId`].
+    /// Same as [`cancel`](Self::cancel). A controller submission that is still
+    /// queued has no registered name; cancel it by its returned [`TaskId`].
     pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().cancel_by_label(Arc::from(name)).await
     }
 
-    /// Tries to cancel the task currently holding `name` without waiting for registry queue capacity.
+    /// Cancels by name only if the registry queue has capacity now.
     ///
-    /// Queued controller submissions are not registered label owners. When command admission
-    /// succeeds, this still waits for the authoritative registry decision and terminal
-    /// completion. The result has the same meaning as [`cancel_by_label`](Self::cancel_by_label),
-    /// and dropping the caller does not undo a committed registry cancellation.
+    /// After queue admission, behavior is the same as
+    /// [`cancel_by_label`](Self::cancel_by_label).
     ///
     /// # Errors
     ///
@@ -394,20 +378,14 @@ impl SupervisorHandle {
         self.core().try_cancel_by_label(Arc::from(name)).await
     }
 
-    /// Cancels the task currently holding `name` with an explicit confirmation window.
+    /// Cancels by name and limits how long this caller waits for cleanup.
     ///
-    /// Queued controller submissions are not registered label owners; cancel them by their
-    /// returned [`TaskId`]. Registry queue admission and the atomic label lookup/claim decision
-    /// are outside `wait_for`. The timer starts only while this caller waits for shared terminal
-    /// completion. A timeout does not stop removal, and dropping the caller does not undo a
-    /// committed registry cancellation.
+    /// Queue admission and the registry claim are outside `wait_for`. The timer
+    /// covers only the final wait for task cleanup. A timeout stops waiting but
+    /// does not undo cancellation or change the supervisor grace period.
     ///
-    /// This method waits for registry command capacity. Use
-    /// [`try_cancel_by_label_with_timeout`](Self::try_cancel_by_label_with_timeout) for fail-fast
-    /// admission.
-    ///
-    /// On completion, the boolean follows the same claimant rules as
-    /// [`cancel_by_label`](Self::cancel_by_label).
+    /// The boolean follows [`cancel_by_label`](Self::cancel_by_label). Queued
+    /// controller work has no registered name; cancel it by [`TaskId`].
     ///
     /// # Errors
     ///
@@ -423,16 +401,11 @@ impl SupervisorHandle {
             .await
     }
 
-    /// Tries to cancel the task currently holding `name` with an explicit confirmation window,
-    /// without waiting for registry queue capacity.
+    /// Cancels by name with a wait limit and fail-fast queue admission.
     ///
-    /// Fail-fast behavior applies only to queue admission. Once admitted, this still waits for
-    /// the authoritative registry decision. That decision is outside `wait_for`; the timer only
-    /// bounds shared terminal completion. Queued controller submissions are not registered label
-    /// owners, and a timeout or dropped caller does not undo a committed cancellation.
-    ///
-    /// On completion, the boolean follows the same claimant rules as
-    /// [`cancel_by_label`](Self::cancel_by_label).
+    /// Fail-fast behavior applies only to queue admission. The timeout and
+    /// boolean semantics match
+    /// [`cancel_by_label_with_timeout`](Self::cancel_by_label_with_timeout).
     ///
     /// # Errors
     ///
@@ -449,21 +422,16 @@ impl SupervisorHandle {
             .await
     }
 
-    /// Cancels a task with an explicit confirmation window.
+    /// Cancels by identity and limits how long this caller waits for cleanup.
     ///
-    /// When the controller claims still-queued work, it removes it directly, so `wait_for` does
+    /// Controller ordering, queue admission, and the registry claim are outside
+    /// `wait_for`. The timer covers only the final wait for registered task
+    /// cleanup. Queued controller work is removed directly, so this timer does
     /// not apply to that path.
-    /// Controller ordering and the registry claim/join decision are not part of `wait_for`.
-    /// The timer starts only while this caller waits for shared terminal completion.
-    /// A timeout does not stop removal or change the registry's force-abort grace period.
-    /// Once the ordered controller command is accepted, dropping this future does not stop its
-    /// queued lookup or registry fallback.
-    /// Without a controller, dropping the caller does not undo a committed registry cancellation.
-    /// This method waits for controller and registry command capacity. Use
-    /// [`try_cancel_with_timeout`](Self::try_cancel_with_timeout) to fail fast when either bounded
-    /// queue is full.
     ///
-    /// On completion, the boolean follows the same claimant rules as [`cancel`](Self::cancel).
+    /// A timeout stops this caller's wait. It does not undo cancellation or
+    /// change the supervisor grace period. The boolean follows
+    /// [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///
@@ -481,12 +449,10 @@ impl SupervisorHandle {
         self.core().cancel_with_timeout(id, wait_for).await
     }
 
-    /// Tries to cancel a task with an explicit terminal-confirmation window without waiting for
-    /// command queue capacity.
+    /// Cancels by identity with a wait limit and fail-fast queue admission.
     ///
-    /// Command admission and the registry claim decision are outside `wait_for`, just as in
-    /// [`cancel_with_timeout`](Self::cancel_with_timeout). With a configured controller, both the
-    /// ordered controller queue and the registry fallback are fail-fast.
+    /// After queue admission, timeout and result behavior match
+    /// [`cancel_with_timeout`](Self::cancel_with_timeout).
     ///
     /// # Errors
     ///
@@ -508,22 +474,30 @@ impl SupervisorHandle {
         self.core().try_cancel_with_timeout(id, wait_for).await
     }
 
-    /// Initiates graceful shutdown of the supervisor runtime.
+    /// Shuts down the runtime and waits for cleanup.
     ///
-    /// With the `controller` feature enabled, this returns only after the controller command
-    /// channel is closed, pending controller work is resolved, and the controller loop is joined.
+    /// This closes admission, cancels registered tasks, waits for the configured
+    /// grace period, and joins internal workers. Subscriber queues are drained
+    /// up to their configured deadline. With a controller, pending submissions
+    /// are also resolved and the controller worker is joined.
+    ///
+    /// Shutdown is shared. Concurrent or later shutdown calls on other handles
+    /// receive the same cached result.
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
+    /// - [`RuntimeError::SignalSetupFailed`] if a concurrent static `run` call
+    ///   started shutdown after signal setup failed.
+    /// - [`RuntimeError::ShuttingDown`] when shared runtime cleanup cannot finish normally.
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
         self.core().shutdown().await
     }
 
-    /// Submits a task to the controller and returns its pre-minted [`TaskId`].
+    /// Sends a task to the controller and returns its reserved [`TaskId`].
     ///
-    /// This waits for controller queue capacity when needed.
-    /// `Ok(id)` means the submission was queued for controller processing, not that it was admitted to a slot or registered in the core runtime.
+    /// `Ok(id)` confirms only that the controller queue accepted the submission.
+    /// Slot admission and runtime registration happen later.
     ///
     /// Use [`try_submit`](Self::try_submit) to fail fast when the controller queue is full.
     /// Use [`submit_and_watch`](Self::submit_and_watch) to observe the final outcome, including admission rejection.
@@ -545,9 +519,9 @@ impl SupervisorHandle {
         }
     }
 
-    /// Tries to submit a task to the controller without waiting.
+    /// Submits only if the controller queue has capacity now.
     ///
-    /// `Ok(id)` has the same queued-not-admitted meaning as [`submit`](Self::submit).
+    /// `Ok(id)` has the same queue-only meaning as [`submit`](Self::submit).
     ///
     /// Requires the `controller` feature.
     ///
@@ -567,13 +541,12 @@ impl SupervisorHandle {
         }
     }
 
-    /// Submits a task to the controller and returns a [`TaskWaiter`].
+    /// Sends a task to the controller and returns a final-outcome waiter.
     ///
-    /// This is the controller-path version of [`add_and_watch`](Self::add_and_watch).
-    /// The waiter resolves on the guaranteed completion plane, not through the lossy event bus.
-    ///
-    /// If the controller never admits the submission, the waiter resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
-    /// If the submission is admitted, the waiter resolves like [`add_and_watch`](Self::add_and_watch) after the task fully terminates.
+    /// The waiter uses the direct completion channel, not the best-effort event
+    /// bus. It resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
+    /// if the controller never starts the task. If admitted, it resolves after
+    /// the task finishes and its actor is joined.
     ///
     /// Requires the `controller` feature.
     ///
@@ -595,11 +568,11 @@ impl SupervisorHandle {
         }
     }
 
-    /// Tries to submit a watched task to the controller without waiting for command queue capacity.
+    /// Submits watched work only if the controller queue has capacity now.
     ///
-    /// On success, the returned [`TaskWaiter`] has the same final-outcome semantics as
-    /// [`submit_and_watch`](Self::submit_and_watch). `Ok` means only that the ordered controller
-    /// channel accepted the submission; slot admission happens later.
+    /// On success, the waiter behaves like
+    /// [`submit_and_watch`](Self::submit_and_watch). `Ok` still confirms only
+    /// queue admission; slot admission happens later.
     ///
     /// Requires the `controller` feature.
     ///
@@ -622,9 +595,10 @@ impl SupervisorHandle {
         }
     }
 
-    /// Returns a point-in-time snapshot of controller slots.
+    /// Returns the current controller slot snapshot.
     ///
-    /// Returns `None` when the controller feature is enabled but this supervisor was built without a controller.
+    /// The value can become stale as soon as this method returns. It is `None`
+    /// when this supervisor was built without a controller.
     ///
     /// ## Example
     ///

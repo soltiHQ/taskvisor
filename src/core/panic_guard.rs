@@ -1,41 +1,33 @@
-//! # Panic boundary for core listener work.
+//! # Panic boundary for runtime listeners
 //!
-//! This module provides [`guarded`], a small helper for running one async unit of listener work behind `catch_unwind`.
-//!
-//! It is used by long-lived runtime listeners, such as:
-//! - the registry listener,
-//! - the subscriber fan-out listener.
-//!
-//! Without this boundary, a panic while processing one command or event could kill the spawned listener task.
-//! That would leave the runtime alive but unable to process later cleanup events.
+//! [`guarded`] catches a panic while one listener item is processed. This stops
+//! a bad command or event from silently killing a long-running registry or
+//! subscriber listener.
 //!
 //! ## What This Guard Does
 //!
-//! - Catches panics raised while polling the future.
-//! - Converts the panic payload into a string.
-//! - Returns `Err(message)` to the caller.
+//! It catches panics while polling the future and returns the panic text as
+//! `Err(message)`.
 //!
 //! ## What This Guard Does Not Do
 //!
-//! - It does not repair partially updated shared state.
-//! - It does not restart a loop by itself.
-//! - It does not replace task-body panic handling. Task execution uses the
-//!   runner's own panic boundary.
+//! It does not repair partially changed state or restart a loop. User task
+//! bodies use a separate panic boundary in the attempt runner.
 //!
-//! The caller decides what to do with `Err(message)`, usually by publishing a diagnostic event and continuing the listener loop.
+//! The caller normally publishes a diagnostic event and continues the loop.
 
 use std::future::{Future, poll_fn};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::Poll;
 
-/// Runs `fut` to completion under a panic boundary.
+/// Runs `fut` behind a panic boundary.
 ///
 /// Returns:
 /// - `Ok(output)` when the future completes normally,
 /// - `Err(message)` when polling the future panics.
 ///
-/// The future is boxed so it can be safely polled through `Pin<&mut F>` without unsafe pin projection.
+/// Boxing keeps pinning safe without custom unsafe projection.
 pub(crate) async fn guarded<F: Future>(fut: F) -> Result<F::Output, String> {
     let mut fut: Pin<Box<F>> = Box::pin(fut);
     poll_fn(

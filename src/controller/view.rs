@@ -1,16 +1,16 @@
-//! Read-only controller slot views.
+//! # Read-only controller state
 //!
 //! This module exposes the public snapshot types returned by [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot).
 //!
-//! Use these views for dashboards, metrics, health checks, and tests.
-//! They are pull-based introspection, so callers do not need to parse controller events.
+//! Use snapshots for gauges, dashboards, health checks, and tests. Callers do not
+//! need to parse best-effort events to read the current controller state.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::identity::TaskId;
 
-/// Public status of a controller slot.
+/// Public status of one controller slot.
 ///
 /// This is the public, `Instant`-free mirror of the controller's internal slot state.
 /// Use a wildcard arm when matching this enum, because new states may be added later.
@@ -23,7 +23,10 @@ pub enum SlotStatusKind {
     ///
     /// The slot is waiting for the direct registry Add reply.
     Admitting,
-    /// The registry accepted the task, and the slot is occupied.
+    /// The registry accepted the task, and it owns the slot.
+    ///
+    /// This does not prove that the task body is executing now. It may be
+    /// waiting for the supervisor's global concurrency permit.
     Running,
     /// The current slot owner is being retired.
     ///
@@ -33,6 +36,8 @@ pub enum SlotStatusKind {
 }
 
 /// Point-in-time view of one controller slot.
+///
+/// Use `..` when matching this struct because more fields may be added.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SlotView {
@@ -52,6 +57,8 @@ pub struct SlotView {
     ///
     /// In `Admitting`, this identity has been allocated for the controller
     /// submission but the runtime registry has not accepted it yet.
+    /// The same can be true in `Terminating` when `Replace` arrived during
+    /// admission.
     pub owner_id: Option<TaskId>,
 
     /// Number of pending submissions in this slot's queue.
@@ -65,16 +72,19 @@ pub struct SlotView {
     pub status_for: Duration,
 }
 
-/// Point-in-time snapshot of controller slots.
+/// Point-in-time snapshot of tracked controller slots.
 ///
 /// This is a read-side view for observability.
 /// It is not a lifecycle guarantee.
 ///
-/// The snapshot is not globally atomic: slots are sampled one by one.
-/// Treat all counts and durations as gauges.
+/// The snapshot is not globally atomic. Taskvisor reads slots one by one, so a
+/// busy controller can change between two entries. Treat all values as gauges,
+/// not as a transactional view.
 ///
 /// Only currently tracked slots are included.
-/// A slot that became idle and empty may be garbage-collected and therefore absent from the snapshot.
+/// A slot that becomes idle and empty may be removed and therefore absent.
+/// Entries are sorted by slot key.
+/// Use `..` when matching this struct because more fields may be added.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ControllerSnapshot {
@@ -85,7 +95,8 @@ pub struct ControllerSnapshot {
 impl ControllerSnapshot {
     /// Number of slots currently in `Running`.
     ///
-    /// This does not count `Admitting` or `Terminating` slots.
+    /// This counts registered slot owners, not task bodies executing at this
+    /// exact moment. It does not count `Admitting` or `Terminating` slots.
     #[must_use]
     pub fn running_count(&self) -> usize {
         self.slots

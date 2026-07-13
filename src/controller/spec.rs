@@ -1,18 +1,18 @@
-//! Controller submission specification.
+//! # One controller submission
 //!
 //! [`ControllerSpec`] is the value passed to controller submission methods.
-//! It combines:
+//! It combines three values:
 //! - an [`AdmissionPolicy`], which says what to do when the target slot is busy,
 //! - a [`TaskSpec`], which says what task to run and how it should run,
-//! - an optional slot key, which groups submissions into one sequential lane.
+//! - an optional slot key, which groups work into one sequential lane.
 //!
 //! ## Slot vs Task Name
 //!
 //! The task name belongs to the runtime registry.
-//! At most one registered task may use the same task name.
+//! A task name must be unique among all currently registered tasks.
 //!
 //! The slot belongs to the controller.
-//! At most one task may occupy the same slot at a time.
+//! At most one registered task may own the same slot at a time.
 //!
 //! If no slot is set, the slot defaults to the task name.
 //! Use [`ControllerSpec::with_slot`] when several differently named tasks should share one admission lane.
@@ -30,10 +30,10 @@ use std::sync::Arc;
 use super::admission::AdmissionPolicy;
 use crate::TaskSpec;
 
-/// A request to submit one task through the controller.
+/// Describes one task submission through the controller.
 ///
 /// A `ControllerSpec` does not run a task by itself.
-/// It describes one submission: what task should be submitted, which admission policy should be used, and which slot should receive it.
+/// It stores the task, the busy-slot policy, and the target slot.
 ///
 /// The slot is admission metadata.
 /// It is not part of the task execution model.
@@ -136,7 +136,8 @@ impl ControllerSpec {
 
     /// Sets the admission slot key.
     ///
-    /// The slot is the controller's concurrency unit: only one task can occupy a slot at a time.
+    /// The slot is the controller's admission unit: only one registered task can
+    /// own a slot at a time.
     ///
     /// Use the same slot for work that must not run in parallel.
     /// Use different slots for work that may run independently.
@@ -180,12 +181,14 @@ impl ControllerSpec {
         Self::new(AdmissionPolicy::Queue, task_spec)
     }
 
-    /// Creates a latest-wins submission.
+    /// Creates a latest-next submission.
     ///
     /// If the slot is idle, the task is admitted immediately.
-    /// If the slot is busy, the controller retires the current owner and keeps this submission as the next one to run.
+    /// If the slot is busy, the controller retires the current owner and puts
+    /// this submission at the front of the waiting queue.
     ///
-    /// Repeated `Replace` submissions replace the next queued owner instead of growing the queue.
+    /// Repeated `Replace` submissions replace the queue head instead of growing
+    /// the queue. Existing FIFO items behind the head remain queued.
     pub fn replace(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Replace, task_spec)
     }

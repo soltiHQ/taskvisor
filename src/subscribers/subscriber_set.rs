@@ -1,10 +1,9 @@
-//! # Non-blocking event fan-out to subscribers.
+//! # Non-blocking event fan-out
 //!
 //! [`SubscriberSet`] sends each event to every registered subscriber.
 //!
 //! Each subscriber has its own bounded queue and one async queue worker.
-//! `emit_arc` uses `try_send`; it does not wait for slow subscribers.
-//! A slow subscriber can only overflow its own queue.
+//! `emit_arc` uses `try_send`, so it does not wait for subscriber code.
 //!
 //! ## Flow
 //!
@@ -20,9 +19,9 @@
 //!
 //! - No cross-subscriber ordering: subscribers may process different events at the same time.
 //! - Diagnostic events are not re-reported on overflow or panic, to avoid feedback loops.
-//! - Per-subscriber FIFO: each subscriber sees events in queue order.
-//! - Ordinary overflow is reported as `SubscriberOverflow`.
-//! - Ordinary panic is reported as `SubscriberPanicked`.
+//! - Per-subscriber FIFO: successfully queued events are processed in queue order.
+//! - Taskvisor tries to report ordinary overflow as `SubscriberOverflow`.
+//! - Taskvisor tries to report an ordinary panic as `SubscriberPanicked`.
 //! - `emit_arc` is non-blocking and uses `try_send`.
 //!
 //! ## Panic Handling
@@ -71,7 +70,7 @@ enum SubscriberState {
     Closed,
 }
 
-/// Distributes events to subscribers.
+/// Distributes best-effort events to subscribers.
 ///
 /// `SubscriberSet` owns:
 /// - one bounded queue per subscriber,
@@ -79,7 +78,8 @@ enum SubscriberState {
 /// - snapshotted subscriber names for diagnostics.
 ///
 /// Delivery is best-effort.
-/// Slow subscribers may drop events from their own queue, but callbacks do not block Tokio async workers.
+/// Slow subscribers may lose events from their own queues. Their callbacks run
+/// on Tokio's blocking pool instead of Tokio async workers.
 ///
 /// ## Shutdown
 ///
@@ -222,9 +222,10 @@ impl SubscriberSet {
     /// Sends an event to all subscriber queues.
     ///
     /// This method does not wait for subscribers.
-    /// It tries to enqueue the event for each subscriber and returns after one pass over the channel list.
+    /// It tries once to enqueue the event for each subscriber, then returns.
     ///
-    /// Ordinary events that cannot be queued are dropped for that subscriber and reported as `SubscriberOverflow`.
+    /// Ordinary events that cannot be queued are dropped for that subscriber.
+    /// Taskvisor then publishes a `SubscriberOverflow` diagnostic event.
     /// Internal diagnostic events (`SubscriberOverflow` and `SubscriberPanicked`) are not re-reported if they overflow.
     /// This avoids diagnostic feedback loops.
     pub(crate) fn emit_arc(&self, event: Arc<Event>) {

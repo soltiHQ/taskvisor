@@ -1,6 +1,7 @@
-//! Runtime configuration for [`Supervisor`](crate::Supervisor).
+//! Runtime-wide limits and shutdown settings.
 //!
-//! Task execution defaults live separately in [`TaskDefaults`](crate::TaskDefaults).
+//! Per-task restart, backoff, timeout, and retry defaults live in
+//! [`TaskDefaults`](crate::TaskDefaults).
 
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use thiserror::Error;
 const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 const DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Configuration value rejected by a checked convenience setter.
+/// Error from a checked configuration setter.
 ///
 /// Match with a wildcard arm because the enum and its data-carrying variants
 /// are non-exhaustive.
@@ -26,14 +27,21 @@ pub enum ConfigError {
     },
 }
 
-/// Runtime limits and shutdown settings for a supervisor.
+/// Runtime-wide settings for one supervisor.
 ///
-/// This type contains only runtime-wide settings. Configure task restart,
-/// backoff, timeout, and retry defaults with [`TaskDefaults`](crate::TaskDefaults)
-/// and [`SupervisorBuilder::with_task_defaults`](crate::SupervisorBuilder::with_task_defaults).
+/// | Setting | What it controls |
+/// |---------|------------------|
+/// | `grace` | Time allowed for cooperative task stop before abort |
+/// | `subscriber_shutdown_timeout` | Time allowed to drain subscriber queues |
+/// | `max_concurrent` | Number of task attempts that may run at once |
+/// | `bus_capacity` | Number of recent events kept by the broadcast bus |
+/// | `registry_queue_capacity` | Backpressure for dynamic management commands |
 ///
-/// Fields are private so new settings can be added without making every struct
-/// literal a breaking change. Use the getters and `with_*` methods below.
+/// Backoff sleeps do not use a `max_concurrent` permit. The event bus is
+/// best-effort even with a large capacity; slow consumers can still miss events.
+///
+/// Configure task execution defaults with [`TaskDefaults`](crate::TaskDefaults)
+/// through [`SupervisorBuilder::with_task_defaults`](crate::SupervisorBuilder::with_task_defaults).
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct SupervisorConfig {
@@ -45,7 +53,7 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Creates the default runtime configuration in a const context.
+    /// Creates the default configuration in a const context.
     ///
     /// This has the same values as [`Default::default`]. The
     /// explicit constructor makes the `const` getters and setters usable for
@@ -60,64 +68,67 @@ impl SupervisorConfig {
         }
     }
 
-    /// Returns the graceful task-shutdown window.
+    /// Returns the cooperative task-stop window.
     ///
-    /// `Duration::ZERO` means no graceful wait before force-abort.
+    /// It is used for explicit removal and runtime shutdown. After this period,
+    /// a task that is still running is aborted. Zero means no graceful wait.
     #[must_use]
     pub const fn grace(&self) -> Duration {
         self.grace
     }
 
-    /// Returns the shared subscriber-drain timeout.
+    /// Returns the shared deadline for draining subscriber queues.
     ///
-    /// `Duration::ZERO` closes subscriber queues without waiting for them to drain.
+    /// Zero closes the queues without waiting for pending events.
     #[must_use]
     pub const fn subscriber_shutdown_timeout(&self) -> Duration {
         self.subscriber_shutdown_timeout
     }
 
-    /// Returns the global task-attempt concurrency limit.
+    /// Returns the global limit for running task attempts.
     ///
-    /// `None` means unlimited concurrency.
+    /// `None` means no limit. Waiting for a permit and retry backoff do not hold
+    /// one. Once an attempt starts, all work and awaits inside it hold the permit.
     #[must_use]
     pub const fn max_concurrent(&self) -> Option<NonZeroUsize> {
         self.max_concurrent
     }
 
-    /// Returns the non-zero runtime event-bus capacity.
+    /// Returns the number of recent events kept by the broadcast bus.
     #[must_use]
     pub const fn bus_capacity(&self) -> NonZeroUsize {
         self.bus_capacity
     }
 
-    /// Returns the non-zero registry management-queue capacity.
+    /// Returns the capacity of the registry management queue.
     #[must_use]
     pub const fn registry_queue_capacity(&self) -> NonZeroUsize {
         self.registry_queue_capacity
     }
 
-    /// Sets the graceful task-shutdown window.
+    /// Sets the cooperative task-stop window before abort.
     pub const fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
         self
     }
 
-    /// Sets the shared subscriber-drain timeout.
+    /// Sets the shared deadline for draining subscriber queues.
     pub const fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.subscriber_shutdown_timeout = timeout;
         self
     }
 
-    /// Sets or clears the global task-attempt concurrency limit.
+    /// Sets or clears the global limit for running task attempts.
     ///
-    /// This method accepts an explicit `Option` so it remains usable in const
-    /// contexts. `NonZeroUsize::new(value)` already produces the required form.
+    /// This const method accepts `Option<NonZeroUsize>`. Use
+    /// [`try_with_max_concurrent`](Self::try_with_max_concurrent) for a raw
+    /// integer.
     pub const fn with_max_concurrent(mut self, max_concurrent: Option<NonZeroUsize>) -> Self {
         self.max_concurrent = max_concurrent;
         self
     }
 
-    /// Convenience setter that validates a raw concurrency limit.
+    /// Sets the concurrency limit from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero.
@@ -128,13 +139,13 @@ impl SupervisorConfig {
         Ok(self.with_max_concurrent(Some(value)))
     }
 
-    /// Sets the runtime event-bus capacity.
+    /// Sets how many recent events the broadcast bus keeps.
     pub const fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
         self.bus_capacity = bus_capacity;
         self
     }
 
-    /// Convenience setter that validates a raw event-bus capacity.
+    /// Sets the event-bus capacity from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero.
@@ -145,7 +156,7 @@ impl SupervisorConfig {
         Ok(self.with_bus_capacity(value))
     }
 
-    /// Sets the registry management-queue capacity.
+    /// Sets the capacity of the registry management queue.
     pub const fn with_registry_queue_capacity(
         mut self,
         registry_queue_capacity: NonZeroUsize,
@@ -154,7 +165,7 @@ impl SupervisorConfig {
         self
     }
 
-    /// Convenience setter that validates a raw registry queue capacity.
+    /// Sets the registry queue capacity from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero.

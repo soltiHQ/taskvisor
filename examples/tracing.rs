@@ -1,41 +1,14 @@
-//! # Tracing: Supervisor Events in Your Log Pipeline
+//! # Send lifecycle events to `tracing`
 //!
-//! Forwards every lifecycle event into the [`tracing`](https://docs.rs/tracing) ecosystem
-//! with the built-in `TracingBridge` subscriber.
+//! The optional `TracingBridge` sends structured supervisor events to the
+//! application's existing `tracing` pipeline. The normal formatter, filters,
+//! and output sinks continue to apply.
 //!
-//! This is the production path for logging.
-//! Your service already formats and ships `tracing` output.
-//! The bridge makes supervisor events part of that stream: same format, same filters, same sinks.
+//! The example shows event levels, stable event labels, task fields, attempt
+//! numbers, reasons, and delays. Set `RUST_LOG=taskvisor=warn` to keep only
+//! warnings and errors.
 //!
-//! ## What this shows
-//!
-//! - `TracingBridge` - one line to wire taskvisor into `tracing`. Requires `--features tracing`.
-//! - Level mapping: failures are `ERROR`, timeouts and overflows are `WARN`,
-//!   lifecycle milestones are `INFO`, chatty events (attempts, backoff) are `DEBUG`.
-//! - Structured fields: `event` (stable label), `task`, `attempt`, `reason`, `delay_ms`, ...
-//! - Filtering with `RUST_LOG`: try `RUST_LOG=taskvisor=warn` to see only problems.
-//!
-//! ## Enabling the feature
-//!
-//! ```toml
-//! [dependencies]
-//! taskvisor = { version = "...", features = ["tracing"] }
-//! ```
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example tracing --features tracing
-//! # Only warnings and errors:
-//! RUST_LOG=taskvisor=warn cargo run --example tracing --features tracing
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                          | What it adds                                   |
-//! |----------------------------------|------------------------------------------------|
-//! | [`metrics.rs`](metrics.rs)       | Prometheus counters from the same event stream |
-//! | [`subscriber.rs`](subscriber.rs) | Writing your own `Subscribe` implementation    |
+//! Run with `cargo run --example tracing --features tracing`.
 
 #[cfg(not(feature = "tracing"))]
 compile_error!(

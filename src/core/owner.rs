@@ -1,14 +1,13 @@
-//! Shared lease for public runtime owners.
+//! Tracks the lifetime of public runtime owners.
 
 use std::sync::Arc;
 
 use super::SupervisorCore;
 
-/// One lease shared by the public `Supervisor` facade and every management handle.
+/// Shared ownership held by `Supervisor` and every management handle.
 ///
-/// Internal runtime tasks never clone this value. Its destructor therefore runs
-/// when the last public owner disappears, even if listeners still hold internal
-/// runtime components alive.
+/// Internal workers do not hold this value. Its destructor therefore runs when
+/// the last public owner disappears and starts best-effort runtime cancellation.
 pub(crate) struct RuntimeOwner {
     core: Arc<SupervisorCore>,
 }

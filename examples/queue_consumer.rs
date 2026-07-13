@@ -1,38 +1,16 @@
-//! # Queue Consumer: Reconnect and Restart on Failure
+//! # Queue consumer: reconnect after failure
 //!
-//! The most common resident-task shape: a consumer that reads from a broker (Kafka, Redis, SQS, ...) and must survive connection failures.
+//! This example models a long-lived broker consumer. An in-process channel
+//! stands in for Kafka, Redis, SQS, or another client.
 //!
-//! This example uses an in-process channel as a mock broker.
-//! The supervision pattern is the same for a real client.
+//! One task attempt represents one connection session. A connection error
+//! returns `TaskError::fail`, so the supervisor starts a new session after
+//! exponential backoff and jitter. A clean return stops the `OnFailure` task.
 //!
-//! ## The pattern
+//! The receive operation uses `TaskContext::run_until_cancelled`. This lets the
+//! consumer stop while it is waiting for the next message.
 //!
-//! - The task body is one **connection session**: connect, then consume in a loop.
-//! - A connection error returns `Err(TaskError::fail(...))`.
-//!   The supervisor restarts the task with exponential backoff and jitter.
-//!   No handwritten retry loop.
-//! - Every await on the broker goes through `ctx.run_until_cancelled(...)`.
-//!   On shutdown the consumer stops immediately, even while waiting for a message.
-//!
-//! ## What this shows
-//!
-//! - `TaskSpec::restartable` + `BackoffPolicy::exponential(..).with_jitter(..)` - the reconnect policy.
-//! - `ctx.run_until_cancelled(rx.recv())` - graceful shutdown while blocked on the broker.
-//! - Shared state (the receiver) captured with the clone-into-closure pattern.
-//! - The task returns `Ok(())` when the backlog is drained; `OnFailure` stops on success.
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example queue_consumer
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                          | What it adds                             |
-//! |----------------------------------|------------------------------------------|
-//! | [`worker.rs`](worker.rs)         | The minimal long-running worker pattern  |
-//! | [`subscriber.rs`](subscriber.rs) | Observe the retries with a subscriber    |
+//! Run with `cargo run --example queue_consumer`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

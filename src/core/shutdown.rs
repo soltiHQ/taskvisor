@@ -1,34 +1,34 @@
-//! # OS shutdown signals.
+//! # OS shutdown signal helper
 //!
-//! Provides [`wait_for_shutdown_signal`], an async helper used by `Supervisor::run` to wait for a process shutdown signal.
+//! [`Supervisor::run`](crate::Supervisor::run) uses
+//! [`wait_for_shutdown_signal`] in static mode. Dynamic mode through
+//! [`Supervisor::serve`](crate::Supervisor::serve) does not install this wait;
+//! the application decides when to call `shutdown`.
 //!
-//! This module only waits for OS signals.
-//! It does not publish runtime events, cancel tasks, or start shutdown by itself.
-//! The caller decides how to handle `Ok(())` and `Err(_)`.
+//! This helper only waits. It does not publish events or cancel tasks.
 //!
 //! ## Unix Signals
 //!
-//! On Unix platforms, the helper waits for the first of:
+//! On Unix, it waits for the first of:
 //! - `SIGINT`
 //! - `SIGTERM`
 //! - `SIGQUIT`
 //!
 //! ## Non-Unix Signals
 //!
-//! On non-Unix platforms, the helper waits for `tokio::signal::ctrl_c`.
+//! On other platforms, it waits for `tokio::signal::ctrl_c`.
 //!
 //! ## Errors
 //!
-//! `Err` means signal listener setup or waiting failed.
-//! It must not be treated as a normal shutdown signal.
+//! An error means signal setup or waiting failed. It is not a shutdown signal.
 
-/// Waits until the process receives a shutdown signal.
+/// Waits for a supported process shutdown signal.
 ///
 /// Returns:
 /// - `Ok(())` when a supported signal is received,
 /// - `Err(e)` when signal listener setup or waiting fails.
 ///
-/// The returned value does not include which signal was received.
+/// The result does not identify which signal arrived.
 #[cfg(unix)]
 pub async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};

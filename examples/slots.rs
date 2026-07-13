@@ -1,57 +1,21 @@
-//! # Slots: Admission Policies
+//! # Slot admission policies
 //!
-//! Uses the optional `controller` feature to demonstrate slot-based admission control.
-//! This is useful when you need to limit concurrency per logical operation - e.g., "only one deploy at a time" or "queue report generation".
+//! The optional controller groups tasks by a slot key. One task can run in a
+//! slot at a time. Different slot keys are independent.
 //!
-//! ## What is the controller?
+//! | Policy | When the slot is busy |
+//! |--------|-----------------------|
+//! | `Queue` | wait in FIFO order |
+//! | `Replace` | cancel the owner and replace the queue head |
+//! | `DropIfRunning` | reject the new submission |
 //!
-//! The controller is a thin layer over the supervisor that groups tasks into **slots**.
-//! The slot key is `ControllerSpec::slot_name()`: it defaults to the task name, override it with `ControllerSpec::with_slot(...)`.
-//! Each slot enforces an admission policy:
+//! The slot key defaults to the task name. `with_slot` can set an explicit key.
+//! `add` bypasses the controller; `submit` uses its admission rules. An
+//! `Ok(id)` from `submit` confirms intake, not final admission. Use
+//! `submit_and_watch` when application logic needs the final result.
+//! `Replace` does not clear the full FIFO queue; items behind the head remain.
 //!
-//! | Policy          | Behavior                                             | Use case           |
-//! |-----------------|------------------------------------------------------|--------------------|
-//! | `Queue`         | FIFO - new task waits until the current one finishes | Job queue          |
-//! | `Replace`       | Cancels running task, starts new one                 | Search-as-you-type |
-//! | `DropIfRunning` | Silently ignores if slot is busy                     | Debounced actions  |
-//!
-//! **Tasks with different slot keys go to different slots and never interfere.**
-//!
-//! ## What this shows
-//!
-//! - `Supervisor::builder(cfg).with_controller(config).build()` - enables the controller feature. Requires `--features controller`.
-//! - Three demos: Queue (sequential), Replace (latest-wins), DropIfRunning (reject-while-busy).
-//! - `handle.submit(ControllerSpec::queue(spec))`: submit to a slot.
-//!
-//! ## How it differs from `handle.add(...).await`
-//!
-//! `add` registers a task directly in the registry: no slot, no admission policy.
-//! `submit` goes through the controller, which manages the slot lifecycle and decides whether to accept, queue, or reject.
-//!
-//! ## Enabling the feature
-//!
-//! ```toml
-//! [dependencies]
-//! taskvisor = { version = "...", features = ["controller"] }
-//! ```
-//!
-//! ## Runtime flavor
-//!
-//! We use `current_thread` here because a single-threaded runtime is enough for examples and tests.
-//!
-//! *It can be used with `#[tokio::main]` (defaults to multi-thread): taskvisor works with both.*
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo run --example slots --features controller
-//! ```
-//!
-//! ## Next
-//!
-//! | Example                        | What it adds                                        |
-//! |--------------------------------|-----------------------------------------------------|
-//! | [`admission.rs`](admission.rs) | Await the admission outcome with `submit_and_watch` |
+//! Run with `cargo run --example slots --features controller`.
 
 #[cfg(not(feature = "controller"))]
 compile_error!(
@@ -136,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handle
         .submit(taskvisor::ControllerSpec::drop_if_running(second))
         .await?;
-    println!("  (second submission should be silently dropped)");
+    println!("  (the controller should reject the second submission)");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 

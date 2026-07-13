@@ -1,22 +1,29 @@
-//! # Public supervisor facade.
+//! # Start and own the runtime
 //!
-//! [`Supervisor`] is the public entry point for running taskvisor.
-//!
-//! It owns the runtime core and, when the `controller` feature is enabled, an optional controller.
-//! The runtime implementation lives in [`SupervisorCore`]; this type keeps the public API small and stable.
+//! [`Supervisor`] is the main entry point. Build it once, then choose static or
+//! dynamic mode.
 //!
 //! ## Modes
 //!
-//! - [`run`](Supervisor::run): run a fixed set of tasks until natural completion or an OS shutdown signal.
-//! - [`serve`](Supervisor::serve): start the runtime and return a [`SupervisorHandle`](crate::SupervisorHandle) for dynamic task management.
+//! ```text
+//! static:   Supervisor::run(batch)  -> wait -> cleanup -> Result
+//! dynamic:  Supervisor::serve()     -> SupervisorHandle
+//!                                      | add / remove / cancel
+//!                                      + shutdown -> cleanup -> Result
+//! ```
+//!
+//! [`run`](Supervisor::run) is for a known initial batch.
+//! [`serve`](Supervisor::serve) is for tasks managed while the service runs.
+//! `run` waits for OS shutdown signals. `serve` does not; in dynamic mode the
+//! application decides when to call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
 //!
 //! ## Ownership and Drop
 //!
-//! `Supervisor` and every [`SupervisorHandle`](crate::SupervisorHandle) share one
-//! public-owner lease. Dropping an individual clone has no runtime effect. When
-//! the final public owner is dropped, taskvisor closes admission and sends
-//! best-effort cancellation without blocking. Use `shutdown().await` when the
-//! caller needs graceful cleanup, joins, and an explicit result.
+//! `Supervisor` and all [`SupervisorHandle`](crate::SupervisorHandle) values
+//! share the runtime. Dropping one owner does nothing while another owner is
+//! alive. Dropping the last owner sends best-effort cancellation, but `Drop`
+//! cannot wait. Call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown)
+//! to wait for cleanup and get its result.
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
@@ -25,40 +32,13 @@ use std::sync::Arc;
 use crate::core::{RuntimeOwner, SupervisorConfig, SupervisorCore, builder::SupervisorBuilder};
 use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 
-/// Public facade for the taskvisor runtime.
+/// Owner and entry point for one taskvisor runtime.
 ///
-/// Use [`new`](Self::new) for simple construction, or [`builder`](Self::builder)
-/// when you need custom task defaults or optional features.
+/// Use [`new`](Self::new) for the standard defaults. Use
+/// [`builder`](Self::builder) to set [`TaskDefaults`](crate::TaskDefaults),
+/// subscribers, or optional controller admission.
 ///
-/// ## Static Mode
-///
-/// Static mode runs a known task set:
-///
-/// ```rust,no_run
-/// # use taskvisor::prelude::*;
-/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-/// supervisor.run(vec![/* task specs */]).await?;
-/// # Ok(()) }
-/// ```
-///
-/// ## Dynamic Mode
-///
-/// Dynamic mode returns a handle for runtime task management:
-///
-/// ```rust,no_run
-/// # use taskvisor::prelude::*;
-/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-/// let handle = supervisor.serve();
-///
-/// // handle.add(...).await?;
-/// // handle.cancel(id).await?;
-/// // handle.shutdown().await?;
-/// # Ok(()) }
-/// ```
-///
-/// # Also
+/// ## See Also
 ///
 /// - [`SupervisorHandle`](crate::SupervisorHandle) - dynamic runtime management API
 /// - [`SupervisorBuilder`](crate::SupervisorBuilder) - step-by-step construction
@@ -100,20 +80,20 @@ impl Supervisor {
         }
     }
 
-    /// Creates a new supervisor with config and subscribers.
+    /// Creates a stopped supervisor with runtime config and subscribers.
     ///
-    /// Task specifications use [`TaskDefaults::default`](crate::TaskDefaults::default).
-    /// Use [`builder`](Self::builder) with
+    /// Task specs use [`TaskDefaults::default`](crate::TaskDefaults::default).
+    /// Use [`builder`](Self::builder) and
     /// [`with_task_defaults`](crate::SupervisorBuilder::with_task_defaults) to
     /// replace those defaults.
     ///
-    /// The returned supervisor is not started yet.
-    /// Call [`run`](Self::run) for a fixed task set or [`serve`](Self::serve) for dynamic management.
+    /// This method does not start Tokio tasks. Call [`run`](Self::run) or
+    /// [`serve`](Self::serve) later.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
 
-    /// Creates a builder for constructing a supervisor.
+    /// Creates a builder for custom supervisor settings.
     ///
     /// ## Example
     ///
@@ -128,17 +108,16 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
-    /// Starts the runtime and returns a handle for dynamic task management.
+    /// Starts dynamic mode and returns a management handle.
     ///
-    /// Safe to call more than once.
-    /// Runtime listeners are started once, and each call returns a handle to the same runtime.
+    /// This method may be called more than once. Runtime workers start once;
+    /// every call returns another handle to the same runtime.
     ///
     /// # Panics
     ///
-    /// Panics when this call must start the runtime but no active Tokio runtime
-    /// exists. A failed first call does not mark the supervisor as started, so
-    /// it may be retried inside Tokio. Once started, later calls only create a
-    /// handle and do not require the caller to be on a Tokio worker.
+    /// Panics if the runtime must start and there is no active Tokio runtime. A
+    /// failed first call may be retried inside Tokio. After startup, later calls
+    /// only create a handle.
     #[must_use = "use the returned runtime handle to manage or shut down the supervisor"]
     pub fn serve(&self) -> super::handle::SupervisorHandle {
         self.owner.core().start();
@@ -150,16 +129,15 @@ impl Supervisor {
         handle
     }
 
-    /// Runs a fixed task set until natural completion or OS shutdown signal.
+    /// Runs an initial task batch until completion or an OS shutdown signal.
     ///
-    /// This is static mode.
-    /// It validates and registers the provided tasks as one atomic batch, then waits until all tasks complete or a shutdown signal is received.
-    /// If one task name conflicts, no task from the batch starts.
+    /// This is static mode. The registry accepts the full batch or rejects it.
+    /// If a name is repeated or already registered, no task from the batch
+    /// starts.
     ///
-    /// A rejected batch does not stop tasks that were already registered through [`serve`](Self::serve).
-    /// The runtime stays open for dynamic management, but `run` remains single-shot and cannot be called again.
-    ///
-    /// `run` is single-shot for one supervisor instance.
+    /// `run` can be called only once for a supervisor. A rejected batch does not
+    /// stop tasks that were added earlier through [`serve`](Self::serve), but
+    /// the `run` call is still used and cannot be retried.
     ///
     /// # Errors
     ///
@@ -167,6 +145,7 @@ impl Supervisor {
     /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
     /// - [`RuntimeError::SignalSetupFailed`] when OS signal handlers cannot be installed.
     /// - [`RuntimeError::AlreadyRunning`] when `run` is called a second time.
+    /// - [`RuntimeError::ShuttingDown`] when shutdown has started or cleanup cannot finish normally.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         #[cfg(feature = "controller")]
         self.start_controller();

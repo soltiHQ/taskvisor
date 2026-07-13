@@ -1,7 +1,8 @@
-//! Builder for a stopped [`Supervisor`](crate::Supervisor).
+//! Build a stopped [`Supervisor`](crate::Supervisor).
 //!
-//! Construction is runtime-independent: [`build`](SupervisorBuilder::build)
-//! does not spawn Tokio tasks. Workers start later in `run()` or `serve()`.
+//! [`SupervisorBuilder::build`] only creates the runtime state and channels. It
+//! does not spawn Tokio tasks. [`Supervisor::run`](crate::Supervisor::run) or
+//! [`Supervisor::serve`](crate::Supervisor::serve) starts the runtime.
 //!
 //! ```rust
 //! use std::num::NonZeroUsize;
@@ -36,11 +37,17 @@ use crate::{
     subscribers::{Subscribe, SubscriberSet},
 };
 
-/// Builder for constructing a [`Supervisor`](crate::Supervisor).
+/// Builder for a [`Supervisor`](crate::Supervisor).
 ///
-/// Runtime settings and task defaults are separate inputs. The produced
-/// supervisor is inert until [`Supervisor::run`](crate::Supervisor::run) or
-/// [`Supervisor::serve`](crate::Supervisor::serve) starts it.
+/// Runtime limits and task defaults are separate:
+///
+/// ```text
+/// SupervisorConfig -- runtime limits ---+
+/// TaskDefaults ----- task defaults -----+--> SupervisorBuilder --> Supervisor
+/// subscribers ------ observability -----+
+/// ```
+///
+/// The built supervisor stays stopped until `run` or `serve` starts it.
 #[must_use]
 pub struct SupervisorBuilder {
     runtime: SupervisorConfig,
@@ -52,8 +59,7 @@ pub struct SupervisorBuilder {
 }
 
 impl SupervisorBuilder {
-    /// Creates a builder with the provided runtime settings and
-    /// [`TaskDefaults::default`] for task execution.
+    /// Creates a builder with runtime settings and [`TaskDefaults::default`].
     pub fn new(runtime: SupervisorConfig) -> Self {
         Self {
             runtime,
@@ -77,28 +83,27 @@ impl SupervisorBuilder {
         self
     }
 
-    /// Sets the graceful task-shutdown window.
+    /// Sets the cooperative task-stop window before abort.
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.runtime = self.runtime.with_grace(grace);
         self
     }
 
-    /// Sets the shared subscriber-drain timeout.
+    /// Sets the shared deadline for draining subscriber queues.
     pub fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.runtime = self.runtime.with_subscriber_shutdown_timeout(timeout);
         self
     }
 
-    /// Sets or clears the global task-attempt concurrency limit.
+    /// Sets or clears the limit for task attempts running at the same time.
     ///
-    /// Accepts either a [`NonZeroUsize`] or an `Option<NonZeroUsize>`; pass
-    /// either form directly without calling `.into()`.
+    /// Pass a [`NonZeroUsize`] for a limit or `None` for no limit.
     pub fn with_max_concurrent(mut self, max_concurrent: impl Into<Option<NonZeroUsize>>) -> Self {
         self.runtime = self.runtime.with_max_concurrent(max_concurrent.into());
         self
     }
 
-    /// Convenience setter that validates a raw concurrency limit.
+    /// Sets the concurrency limit from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero.
@@ -107,13 +112,13 @@ impl SupervisorBuilder {
         Ok(self)
     }
 
-    /// Sets the non-zero runtime event-bus capacity.
+    /// Sets how many recent events the broadcast bus keeps.
     pub fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
         self.runtime = self.runtime.with_bus_capacity(bus_capacity);
         self
     }
 
-    /// Convenience setter that validates a raw event-bus capacity.
+    /// Sets the event-bus capacity from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero.
@@ -122,7 +127,7 @@ impl SupervisorBuilder {
         Ok(self)
     }
 
-    /// Sets the non-zero registry management-queue capacity.
+    /// Sets the registry management-queue capacity.
     pub fn with_registry_queue_capacity(mut self, registry_queue_capacity: NonZeroUsize) -> Self {
         self.runtime = self
             .runtime
@@ -130,7 +135,7 @@ impl SupervisorBuilder {
         self
     }
 
-    /// Convenience setter that validates a raw registry queue capacity.
+    /// Sets the registry queue capacity from a raw integer.
     ///
     /// # Errors
     /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero.
@@ -144,24 +149,23 @@ impl SupervisorBuilder {
         Ok(self)
     }
 
-    /// Replaces event subscribers used for runtime observability.
+    /// Replaces the subscribers that receive best-effort lifecycle events.
     pub fn with_subscribers(mut self, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         self.subscribers = subscribers;
         self
     }
 
-    /// Enables slot-based controller admission.
+    /// Enables slot-based admission through the optional controller.
     #[cfg(feature = "controller")]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
         self
     }
 
-    /// Builds an inert supervisor.
+    /// Builds a stopped supervisor.
     ///
-    /// This method is safe outside a Tokio runtime. It allocates channels and
-    /// stores subscribers, but does not spawn listeners, subscriber workers, or
-    /// controller tasks.
+    /// It is safe to call outside Tokio. The method allocates channels and
+    /// stores configuration, but does not spawn tasks.
     #[must_use]
     pub fn build(self) -> Arc<Supervisor> {
         let bus = Bus::new(self.runtime.bus_capacity().get());

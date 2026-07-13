@@ -1,70 +1,46 @@
-//! # Supervisor runtime core.
+//! # Runtime coordinator
 //!
-//! [`SupervisorCore`] owns the runtime components behind the public [`Supervisor`](super::supervisor::Supervisor) facade.
+//! [`SupervisorCore`] connects the registry, event bus, subscribers, alive
+//! tracker, and shutdown state behind the public
+//! [`Supervisor`](super::supervisor::Supervisor).
 //!
-//! It wires together:
-//! - registry command channel,
-//! - [`Registry`],
-//! - event bus,
-//! - subscriber fan-out,
-//! - alive-task tracker,
-//! - runtime shutdown token.
-//!
-//! ## Planes
+//! ## Data Paths
 //!
 //! ```text
-//! Management plane:
-//!   SupervisorHandle -> SupervisorCore -> mpsc -> Registry
-//!
-//! Event plane:
-//!   runtime components -> Bus -> subscriber_listener
-//!                               -> AliveTracker
-//!                               -> SubscriberSet
-//!
-//! Shutdown plane:
-//!   OS signal / handle.shutdown -> drain_with_grace
-//!                               -> cancel registry tasks
-//!                               -> join listeners
-//!                               -> close subscribers
+//! management: Handle -> SupervisorCore -> command queue -> Registry
+//! events:     runtime parts -> event bus -> alive tracker + subscribers
+//! shutdown:   signal / Handle -> cancel tasks -> join workers -> drain subscribers
 //! ```
 //!
-//! Add, remove, and cancel commands use the management plane.
-//! They are not delivered through the lossy event bus.
-//!
-//! Events are used for observability, alive snapshots, and subscriber delivery.
-//! Event consumers may lag.
+//! Management commands use direct replies. They do not depend on the
+//! best-effort event bus. Alive snapshots do use the event bus and may lag.
 //!
 //! ## Modes
 //!
 //! ```text
-//! start()
-//!   starts subscriber listener and registry listener
+//! start()       -> start listeners once
 //!
-//! run(tasks)
-//!   starts listeners
-//!   registers all initial tasks as one atomic batch
-//!   waits for the direct registry reply
-//!   waits for OS shutdown signal or natural completion
+//! run(tasks)    -> start listeners
+//!               -> register one atomic batch
+//!               -> wait for completion or OS signal
 //!
-//! shutdown()
-//!   cancels all tasks
-//!   waits up to grace
-//!   force-aborts tasks that do not stop
-//!   joins internal listeners
+//! shutdown()    -> close admission
+//!               -> cancel tasks and wait up to grace
+//!               -> abort remaining tasks
+//!               -> join workers and drain subscribers
 //! ```
 //!
 //! ## Rules
 //!
 //! - New task admission closes once shutdown begins.
-//! - Shutdown waits for a registry fence before it starts task drain.
-//! - Commands committed before the admission gate closes are processed before that fence.
-//! - Explicit, signal, and natural shutdown paths join one detached operation.
-//! - Every shutdown waiter receives the same cached result after full cleanup.
-//! - The first shutdown trigger controls the result and request events.
-//! - Static `run()` tasks are accepted or rejected as one registry operation.
+//! - Shutdown processes commands accepted before the admission gate closed.
+//! - Explicit, signal, and natural shutdown share one cleanup operation.
+//! - Every shutdown caller receives the same cached result.
+//! - The first shutdown trigger sets the result and request events.
+//! - Static `run()` tasks are accepted or rejected as one batch.
 //! - Registry membership is keyed by `TaskId`.
 //! - `run()` is single-shot. A second call returns `RuntimeError::AlreadyRunning`.
-//! - `snapshot` and `is_alive` are best-effort views from the alive tracker.
+//! - `snapshot` and `is_alive` are best-effort event-based views.
 //! - `start()` is idempotent.
 
 mod event_relay;
@@ -91,10 +67,9 @@ use crate::core::{
 };
 use crate::{events::Bus, subscribers::SubscriberSet};
 
-/// Runtime implementation behind the public [`Supervisor`](super::supervisor::Supervisor).
+/// Runtime coordinator behind [`Supervisor`](super::supervisor::Supervisor).
 ///
-/// This type is the composition root for the management, event, lifecycle, and
-/// shutdown planes. Controller admission remains outside the runtime core.
+/// Controller slot admission remains outside this core.
 pub(crate) struct SupervisorCore {
     settings: CoreSettings,
     pub(super) bus: Bus,
