@@ -16,14 +16,7 @@
 //!
 //! If no slot is set, the slot defaults to the task name.
 //! Use [`ControllerSpec::with_slot`] when several differently named tasks should share one admission lane.
-//!
-//! ```text
-//! task name: "deploy-main-42"  ┐
-//! task name: "deploy-main-43"  ├── slot: "deploy-main"
-//! task name: "deploy-main-44"  ┘
-//! ```
-//!
-//! All three tasks have different runtime names, but the controller admits them through one slot.
+//! For example, `deploy-main-42` and `deploy-main-43` may both use the slot `deploy-main`.
 
 use std::sync::Arc;
 
@@ -42,7 +35,7 @@ use crate::TaskSpec;
 /// # Example
 ///
 /// ```rust
-/// use taskvisor::{ControllerSpec, TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
+/// use taskvisor::{ControllerSpec, TaskFn, TaskRef, TaskSpec};
 ///
 /// let task: TaskRef = TaskFn::arc("deploy-main-42", |_ctx| async {
 ///     Ok(())
@@ -53,12 +46,12 @@ use crate::TaskSpec;
 /// assert_eq!(spec.slot_name(), "deploy-main");
 /// ```
 ///
-/// # Also
+/// # See also
 ///
 /// - [`AdmissionPolicy`] - how concurrent submissions to the same slot are handled
 /// - [`TaskSpec`] - task restart, backoff, timeout, and retry settings
 /// - [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) - submit without waiting for the final outcome
-/// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - submit and receive a [`TaskOutcome`](crate::TaskOutcome)
+/// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - submit and get a [`TaskWaiter`](crate::TaskWaiter) for the final [`TaskOutcome`](crate::TaskOutcome)
 #[derive(Clone)]
 #[must_use]
 pub struct ControllerSpec {
@@ -120,8 +113,8 @@ impl ControllerSpec {
 
     /// Replaces the task execution specification.
     ///
-    /// When no explicit slot is configured, the effective slot changes to the
-    /// name of the replacement task. An explicit slot is preserved.
+    /// When no explicit slot is configured, the effective slot changes to the name of the replacement task.
+    /// An explicit slot is preserved.
     pub fn with_task_spec(mut self, task_spec: TaskSpec) -> Self {
         self.task_spec = task_spec;
         self
@@ -136,8 +129,7 @@ impl ControllerSpec {
 
     /// Sets the admission slot key.
     ///
-    /// The slot is the controller's admission unit: only one registered task can
-    /// own a slot at a time.
+    /// The slot is the controller's admission unit: only one registered task can own a slot at a time.
     ///
     /// Use the same slot for work that must not run in parallel.
     /// Use different slots for work that may run independently.
@@ -148,8 +140,7 @@ impl ControllerSpec {
 
     /// Removes an explicit slot override.
     ///
-    /// After this call, [`slot_name`](Self::slot_name) falls back to the current
-    /// task name.
+    /// After this call, [`slot_name`](Self::slot_name) falls back to the current task name.
     pub fn without_slot(mut self) -> Self {
         self.slot = None;
         self
@@ -175,27 +166,29 @@ impl ControllerSpec {
 
     /// Creates a submission with FIFO queue admission.
     ///
-    /// If the slot is idle, the task is admitted immediately.
-    /// If the slot is busy, the submission is queued behind older queued submissions.
+    /// If the slot is idle, the controller tries to start registry admission.
+    /// If the slot is busy, the submission is appended behind older pending work when
+    /// [`ControllerConfig::max_slot_queue`](crate::ControllerConfig::max_slot_queue) allows it; otherwise it is rejected.
     pub fn queue(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Queue, task_spec)
     }
 
-    /// Creates a latest-next submission.
+    /// Creates a replacement submission.
     ///
-    /// If the slot is idle, the task is admitted immediately.
-    /// If the slot is busy, the controller retires the current owner and puts
-    /// this submission at the front of the waiting queue.
+    /// If the slot is idle, the controller tries to start registry admission.
+    /// If the slot is busy, this submission becomes the queue head.
+    /// The controller retires a registered owner, or waits for a pending registration decision before deciding whether removal is needed.
     ///
-    /// Repeated `Replace` submissions replace the queue head instead of growing
-    /// the queue. Existing FIFO items behind the head remain queued.
+    /// An existing head is rejected and replaced, even when it came from `Queue`.
+    /// Existing FIFO items behind the head remain queued.
+    /// Repeated replacements therefore keep only the latest head without growing the queue.
     pub fn replace(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Replace, task_spec)
     }
 
     /// Creates a submit-if-idle submission.
     ///
-    /// If the slot is idle, the task is admitted.
+    /// If the slot is idle, the controller tries to start registry admission.
     /// If the slot is busy, the submission is rejected instead of queued.
     pub fn drop_if_running(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::DropIfRunning, task_spec)

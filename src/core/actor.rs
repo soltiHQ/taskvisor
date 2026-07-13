@@ -6,14 +6,14 @@
 //! ## Flow
 //!
 //! ```text
-//! wait for permit -> TaskStarting -> run one attempt -> release permit
-//!                                      |
-//!                  +-------------------+-------------------+
-//!                  |                   |                   |
-//!               success         retryable failure    fatal/canceled
-//!                  |                   |                   |
-//!           stop or repeat       backoff or stop           stop
+//! wait for permit -> TaskStarting -> run attempt -> release permit -> apply policy
 //! ```
+//!
+//! | Attempt result              | Actor decision                                         |
+//! |-----------------------------|--------------------------------------------------------|
+//! | Success                     | Stop, or repeat under `RestartPolicy::Always`          |
+//! | Retryable failure           | Back off and retry, or stop at a policy or retry limit |
+//! | Fatal error or cancellation | Stop                                                   |
 //!
 //! [`run_once`] handles one attempt, including timeout, panic capture, and attempt events.
 //! The actor then decides whether to stop, wait, or start another attempt.
@@ -32,8 +32,9 @@
 //! - `max_retries` counts retries in one failure streak. A success resets it.
 //! - A concurrency permit is held only while an attempt runs, not during delays.
 //! - Cancellation can stop permit waits and retry delays.
+//! - During an attempt, cancellation only cancels its [`TaskContext`](crate::TaskContext). The task must observe it and return. Registry cleanup can force-abort an actor that misses its grace deadline.
 //! - Instant successful repeats have a small delay to prevent a hot loop.
-//! - User-task panics become retryable `TaskError::Fail` values.
+//! - Panics while calling `Task::spawn` or polling its future become retryable `TaskError::Fail` values.
 
 use std::{
     num::NonZeroU32,
@@ -57,8 +58,7 @@ use crate::{
 /// Small delay used to prevent hot restart loops.
 ///
 /// This applies to `RestartPolicy::Always` when a task finishes very quickly.
-/// Without it, a task that returns `Ok(())` at once could restart as fast as the
-/// scheduler allows and flood the event bus.
+/// Without it, a task that returns `Ok(())` at once could restart as fast as the scheduler allows and flood the event bus.
 ///
 /// The delay is only added when the task ran for less than this value.
 /// If the task already spent enough time doing work, no extra delay is added.
@@ -73,8 +73,7 @@ fn floored_interval(interval: Duration, elapsed: Duration) -> Duration {
 
 /// Final reason returned by [`TaskActor::run`].
 ///
-/// After joining the actor, the registry maps this value to the matching
-/// [`TaskOutcome`](crate::TaskOutcome).
+/// After joining the actor, the registry maps this value to the matching [`TaskOutcome`](crate::TaskOutcome).
 #[derive(Debug, Clone)]
 pub(crate) enum ActorExitReason {
     /// Final attempt succeeded and the restart policy stopped the actor.

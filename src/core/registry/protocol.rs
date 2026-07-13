@@ -53,7 +53,8 @@ impl CancelDecision {
 
 /// Authoritative result of one registry cancel command.
 ///
-/// `Ok(None)` means the task was unknown or already terminated.
+/// `Ok(None)` means no registry entry exists at this command's ordering point:
+/// the identity is unknown or terminal cleanup has already removed it.
 pub(crate) type CancelReply = Result<Option<CancelDecision>, RuntimeError>;
 
 /// Receiver for an authoritative registry cancel decision.
@@ -102,6 +103,6 @@ pub(crate) enum RegistryCommand {
 
 /// Reliable control messages that must not wait for management queue capacity.
 pub(super) enum RegistryControl {
-    /// Confirms that every command committed before admission closed has been processed.
+    /// Confirms that every command committed before admission closed reached its direct registry decision.
     Fence { reply: oneshot::Sender<()> },
 }

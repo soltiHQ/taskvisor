@@ -1,7 +1,6 @@
-//! # Panic boundary for runtime listeners
+//! # Panic boundary for internal async operations
 //!
-//! [`guarded`] catches a panic while one listener item is processed.
-//! This stops a bad command or event from silently killing a long-running registry or subscriber listener.
+//! [`guarded`] catches a panic while an internal future is polled.
 //!
 //! ## What This Guard Does
 //!
@@ -12,7 +11,8 @@
 //! It does not repair partially changed state or restart a loop.
 //! User task bodies use a separate panic boundary in the attempt runner.
 //!
-//! The caller normally publishes a diagnostic event and continues the loop.
+//! Listener callers can report the panic and continue the loop.
+//! Shutdown callers report it and continue later cleanup phases.
 
 use std::future::{Future, poll_fn};
 use std::panic::AssertUnwindSafe;

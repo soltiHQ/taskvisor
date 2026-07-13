@@ -1,7 +1,8 @@
 //! # Start and own the runtime
 //!
 //! [`Supervisor`] is the main entry point.
-//! Build it once, then choose static or dynamic mode.
+//! Build it once, then use `run` for a static batch or `serve` for dynamic management.
+//! The modes can be combined by calling `serve` before the single `run` call.
 //!
 //! ## Modes
 //!
@@ -14,8 +15,9 @@
 //!
 //! [`run`](Supervisor::run) is for a known initial batch.
 //! [`serve`](Supervisor::serve) is for tasks managed while the service runs.
-//! `run` waits for OS shutdown signals.
-//! `serve` does not; in dynamic mode the application decides when to call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
+//!
+//! After its batch is accepted, `run` waits for natural completion, explicit shutdown, or an OS shutdown signal.
+//! `serve` does not install a signal wait; the application decides when to call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
 //!
 //! ## Ownership and Drop
 //!
@@ -125,7 +127,8 @@ impl Supervisor {
         handle
     }
 
-    /// Runs an initial task batch until completion or an OS shutdown signal.
+    /// Runs an initial task batch until natural completion or shared shutdown,
+    /// started explicitly or by an OS signal.
     ///
     /// This is static mode.
     /// The registry accepts the full batch or rejects it.
@@ -133,6 +136,10 @@ impl Supervisor {
     ///
     /// `run` can be called only once for a supervisor.
     /// A rejected batch does not stop tasks that were added earlier through [`serve`](Self::serve), but the `run` call is still used and cannot be retried.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime must start and there is no active Tokio runtime.
     ///
     /// # Errors
     ///

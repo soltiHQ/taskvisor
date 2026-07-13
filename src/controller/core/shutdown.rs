@@ -1,10 +1,18 @@
 //! Controller shutdown drain.
 //!
-//! When the controller loop exits, submissions and control callers may still be waiting for a terminal decision.
+//! When the controller loop exits, submissions and identity callers may still be waiting for results.
 //!
-//! They can be in two places:
-//! - `watchers`: submissions already seen by the controller, with a parked waiter,
-//! - `rx`: commands accepted by the controller channel but not processed yet.
+//! Pending controller work can include:
+//!
+//! - `watchers` and slot queues: submissions seen but not handed to the runtime;
+//! - `rx`: commands accepted by the channel but not processed;
+//! - admission, completion, and removal workers;
+//! - identity-operation workers waiting for the registry or terminal cleanup.
+//!
+//! The lifecycle loop drains buffered commands and slot state, then aborts and drains every worker set.
+//!
+//! `IdentityReply` guards resolve aborted identity callers as `RuntimeError::ShuttingDown`.
+//! Watchers already handed to the registry remain runtime-owned and are resolved there.
 
 use std::sync::Arc;
 
@@ -22,7 +30,7 @@ impl Controller {
     /// This preserves the `submit_and_watch` contract:
     /// a submission that never reaches the runtime must resolve as [`TaskOutcome::Rejected`], not as a dropped oneshot.
     ///
-    /// `rx.close()` prevents new messages from being accepted while the remaining buffered submissions are drained.
+    /// `rx.close()` prevents new messages from being accepted while the remaining buffered commands are drained.
     pub(super) fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<ControllerCommand>) {
         rx.close();
 

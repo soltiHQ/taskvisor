@@ -1,8 +1,7 @@
 //! Registry management gateway and shutdown admission fence.
 //!
-//! Queue capacity is reserved before the final admission check. The same mutex
-//! covers that re-check and command commit, while shutdown closes the gate
-//! before awaiting the registry fence.
+//! Queue capacity is reserved before the final admission check.
+//! The same mutex covers that re-check and command commit, while shutdown closes the gate before awaiting the registry fence.
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -29,8 +28,7 @@ use crate::{
 impl SupervisorCore {
     /// Marks the runtime as shutting down.
     ///
-    /// The gate lock waits for every command that already passed its final
-    /// admission check to become visible in the registry queue.
+    /// The gate lock waits for every command that already passed its final admission check to become visible in the registry queue.
     pub(super) fn mark_shutting_down(&self) {
         let _gate = self
             .admission_gate
@@ -55,8 +53,7 @@ impl SupervisorCore {
     /// Closes command admission and waits until the registry reaches that ordering point.
     ///
     /// Every command committed before the gate closes is ahead of this fence.
-    /// Backpressured callers re-check the gate after receiving capacity and are
-    /// rejected instead of appearing behind the fence.
+    /// Backpressured callers re-check the gate after receiving capacity and are rejected instead of appearing behind the fence.
     pub(super) async fn close_admission_and_fence_registry(&self) -> Result<(), RuntimeError> {
         self.mark_shutting_down();
         self.registry.fence().await
@@ -269,25 +266,33 @@ impl SupervisorCore {
         }
     }
 
-    /// Removes a task after queue capacity and the registry claim decision.
+    /// Requests removal by identity and returns whether this command claimed the registered task.
+    ///
+    /// This does not wait for terminal cleanup.
     pub(crate) async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_remove_wait(id, None).await?;
         Self::await_remove_reply(reply).await
     }
 
-    /// Tries to remove a task without waiting for command queue capacity.
+    /// Tries to request removal without waiting for command queue capacity.
+    ///
+    /// The result is the registry claim decision, not terminal cleanup.
     pub(crate) async fn try_remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_remove(id, None)?;
         Self::await_remove_reply(reply).await
     }
 
-    /// Removes the task that owns `label` at the registry ordering point.
+    /// Requests removal of the task that owns `label` at the registry ordering point.
+    ///
+    /// This does not wait for terminal cleanup.
     pub(crate) async fn remove_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_remove_by_label_wait(label).await?;
         Self::await_remove_reply(reply).await
     }
 
-    /// Tries to remove the task that owns `label` without waiting for command queue capacity.
+    /// Tries to request label-based removal without waiting for command queue capacity.
+    ///
+    /// The result is the registry claim decision, not terminal cleanup.
     pub(crate) async fn try_remove_by_label(&self, label: Arc<str>) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_remove_by_label(label)?;
         Self::await_remove_reply(reply).await
@@ -380,7 +385,7 @@ impl SupervisorCore {
         Ok(Self::commit_remove_by_label(permit, label))
     }
 
-    /// Publishes one already-reserved Remove command by label.
+    /// Makes one already-reserved Remove command by label visible to the registry.
     fn commit_remove_by_label(
         permit: mpsc::Permit<'_, RegistryCommand>,
         label: Arc<str>,
@@ -442,7 +447,7 @@ impl SupervisorCore {
         Ok(Self::commit_cancel(permit, id))
     }
 
-    /// Publishes one already-reserved Cancel command by identity.
+    /// Makes one already-reserved Cancel command by identity visible to the registry.
     fn commit_cancel(permit: mpsc::Permit<'_, RegistryCommand>, id: TaskId) -> CancelReplyRx {
         let (reply, reply_rx) = oneshot::channel();
         permit.send(RegistryCommand::Cancel { id, reply });
@@ -487,7 +492,7 @@ impl SupervisorCore {
         Ok(Self::commit_cancel_by_label(permit, label))
     }
 
-    /// Publishes one already-reserved Cancel command by label.
+    /// Makes one already-reserved Cancel command by label visible to the registry.
     fn commit_cancel_by_label(
         permit: mpsc::Permit<'_, RegistryCommand>,
         label: Arc<str>,
@@ -529,8 +534,7 @@ impl SupervisorCore {
 
     /// Tries to cancel a task by identity without waiting for command queue capacity.
     ///
-    /// After the command enters the queue, this still waits for the registry decision and
-    /// terminal completion.
+    /// After the command enters the queue, this still waits for the registry decision and terminal completion.
     pub(crate) async fn try_cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let decision = Self::await_cancel_reply(self.enqueue_cancel(id)?).await?;
         Self::wait_cancel_decision(decision, None).await
@@ -538,8 +542,8 @@ impl SupervisorCore {
 
     /// Cancels a task with an explicit confirmation window.
     ///
-    /// The registry decision is not part of `wait_for`. The timeout only bounds
-    /// this caller's wait for shared terminal completion and does not stop removal.
+    /// The registry decision is not part of `wait_for`.
+    /// The timeout only bounds this caller's wait for shared terminal completion and does not stop removal.
     pub(crate) async fn cancel_with_timeout(
         &self,
         id: TaskId,
@@ -550,8 +554,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
-    /// Tries to cancel a task without waiting for command queue capacity and bounds the terminal
-    /// completion wait after registry admission.
+    /// Tries to cancel a task without waiting for command queue capacity and bounds the terminal completion wait after registry admission.
     pub(crate) async fn try_cancel_with_timeout(
         &self,
         id: TaskId,
@@ -576,8 +579,8 @@ impl SupervisorCore {
 
     /// Cancels the task that owns `label` with an explicit terminal-completion window.
     ///
-    /// Queue admission and the registry decision are not part of `wait_for`. The timeout only
-    /// bounds this caller's wait for shared terminal completion and does not stop removal.
+    /// Queue admission and the registry decision are not part of `wait_for`.
+    /// The timeout only bounds this caller's wait for shared terminal completion and does not stop removal.
     pub(crate) async fn cancel_by_label_with_timeout(
         &self,
         label: Arc<str>,

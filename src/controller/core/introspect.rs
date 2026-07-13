@@ -12,11 +12,13 @@ use crate::controller::view::{ControllerSnapshot, SlotStatusKind, SlotView};
 use super::Controller;
 
 impl Controller {
-    /// Builds a point-in-time snapshot of currently tracked slots.
+    /// Builds a best-effort rolling snapshot of tracked slots.
     ///
-    /// This snapshot is not globally atomic.
-    /// The controller first collects slot keys, then locks each slot one by one.
-    /// A slot may be removed between those two steps; such slots are skipped.
+    /// The controller captures slot keys, looks each key up again, and then locks each surviving slot separately.
+    /// A new slot created after key capture is absent.
+    ///
+    /// A removed slot may still appear if its `Arc` was cloned before removal.
+    /// Each included `SlotView` is internally consistent, but the full collection is not globally atomic.
     ///
     /// The result is sorted by slot key for stable output in tests, logs, and dashboards.
     pub(crate) async fn snapshot(&self) -> ControllerSnapshot {

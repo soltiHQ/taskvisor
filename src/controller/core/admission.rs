@@ -23,7 +23,7 @@ impl Controller {
     /// Watched submissions are parked in `watchers` until they are either rejected by the controller or handed to the runtime registry.
     ///
     /// Policy behavior:
-    /// - idle slot: admit immediately and enter `Admitting`,
+    /// - idle slot: try to commit the registry Add; enter `Admitting` on success, otherwise reject the submission,
     /// - busy + `Replace`: retire the current owner if needed and keep this submission as the next queued owner,
     /// - busy + `Queue`: append to the slot queue, unless the queue is full,
     /// - busy + `DropIfRunning`: reject immediately.
@@ -193,7 +193,7 @@ impl Controller {
 
     /// Applies one authoritative registry registration decision.
     ///
-    /// Correlation by both slot and [`TaskId`] makes a late result harmless after a fast task has already completed or a different owner has entered the slot.
+    /// Correlation by both slot and [`TaskId`] makes stale or duplicate results harmless.
     pub(super) async fn handle_admission_result(
         &self,
         result: AdmissionResult,
@@ -278,8 +278,8 @@ impl Controller {
 
     /// Hands a submission to the runtime under its pre-minted id.
     ///
-    /// On success, the slot enters `Admitting` and the watcher is owned by the runtime registry.
-    /// On failure, the watcher is put back into `watchers` so the caller can reject it normally instead of dropping the oneshot.
+    /// On successful Add-command commit, the slot enters `Admitting` and the watcher is owned by the runtime registry.
+    /// On commit failure, the watcher is put back into `watchers`, the controller can resolve it as rejected instead of dropping the oneshot.
     fn start_in_slot(
         &self,
         sup: &Arc<SupervisorCore>,
@@ -309,8 +309,8 @@ impl Controller {
 
     /// Starts the next queued submission, if any.
     ///
-    /// Failed starts are rejected and the function continues with the next queued item.
-    /// On the first successful start, the slot enters `Admitting`.
+    /// Failed Add-command commits are rejected, and the function continues with the next queued item.
+    /// After the first successful commit, the slot enters `Admitting` and waits for the direct registry decision.
     ///
     /// The caller should call this only after the current owner has been cleared.
     pub(super) fn start_next_from_queue(

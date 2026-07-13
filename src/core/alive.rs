@@ -1,32 +1,37 @@
 //! # Best-effort alive-task view
 //!
-//! [`AliveTracker`] builds a current view from lifecycle events. It supports
-//! fast status queries and shutdown diagnostics. It is not the source of truth;
-//! the registry owns task membership.
+//! [`AliveTracker`] builds an activity cache from received lifecycle events.
+//! It supports fast status queries.
+//! It is not the source of truth; the registry owns task membership.
 //!
-//! ## Flow
+//! ## Inputs
 //!
-//! ```text
-//! event bus -> AliveTracker::update() -> cached alive names
-//! ```
+//! | Input                             | Effect on the cache                       |
+//! |-----------------------------------|-------------------------------------------|
+//! | Lifecycle event                   | Create, update, or remove one keyed entry |
+//! | Registry identities after bus lag | Remove stale identity-keyed entries       |
 //!
 //! ## Keys
 //!
-//! Events normally use [`TaskId`]. An event without an identity falls back to
-//! the task name.
+//! Events normally use [`TaskId`].
+//! An event without an identity falls back to the task name.
 //!
-//! Names may be reused after removal. Identity keys prevent a late event from an
-//! old run from changing a newer run with the same name.
+//! Names may be reused after removal.
+//! Identity keys keep a late event from an old run from changing the newer run's entry.
+//! They do not make this cache authoritative.
 //!
 //! ## Rules
 //!
-//! - Only task lifecycle events change this view.
-//! - Events with `seq <= last_seq` for the same key are ignored as stale.
-//! - `TaskStarting` marks a task as alive.
+//! - Lifecycle events create and update entries. Reconciliation can remove them.
+//! - While an entry exists, events with `seq <= last_seq` for the same key are ignored as stale.
+//! - `TaskStarting` marks the current attempt as alive.
 //! - Stop, failure, cancellation, and actor-end events mark it as not alive.
 //! - `TaskRemoved` deletes the cache entry.
 //! - `reconcile` removes identities no longer present in the registry.
-//! - Queries are eventually consistent because event delivery is best-effort.
+//! - Queries can lag or miss state because event delivery is best-effort.
+//!
+//! Alive means that the latest applied lifecycle event for a task run is `TaskStarting`.
+//! A registered task can be marked not alive while it waits for a permit, retry, successful restart, or terminal cleanup.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -77,10 +82,15 @@ impl AliveTracker {
     ///
     /// A fresh [`EventKind::TaskRemoved`] removes the entry entirely.
     /// Stale `TaskRemoved` events are ignored like other stale events.
+    /// Removing the entry also removes its stored sequence.
+    /// A later lifecycle event for the same key can create a new entry; reconciliation can prune an old identity that is no longer registered.
+    ///
+    /// Returns `true` only when the visible alive flag changes or an existing entry is removed.
+    /// A fresh event that only advances `last_seq` returns `false`.
     ///
     /// ### Stale events
     ///
-    /// Events are applied only when `ev.seq > last_seq` for the same identity:
+    /// Events are applied only when `ev.seq > last_seq` for the same cache key ([`TaskId`] when present, otherwise the task name):
     ///
     /// ```text
     /// update(TaskStopped,  seq=100) -> alive=false, last_seq=100
@@ -378,7 +388,6 @@ mod tests {
         let kept = crate::identity::TaskId::next();
         let orphan = crate::identity::TaskId::next();
 
-        // Both look alive; `orphan` is the task whose `TaskRemoved` was lost to lag.
         tracker
             .update(&evi(EventKind::TaskStarting, "kept", 1, kept))
             .await;
@@ -387,7 +396,6 @@ mod tests {
             .await;
         assert!(tracker.is_alive("orphan").await);
 
-        // Registry's authoritative live set no longer contains `orphan`.
         let live: HashSet<TaskId> = [kept].into_iter().collect();
         tracker.reconcile(&live).await;
 

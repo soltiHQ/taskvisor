@@ -1,22 +1,16 @@
 //! # Controller queue limits
 //!
 //! [`ControllerConfig`] controls controller buffering:
-//! - `max_slot_queue` limits FIFO `Queue` submissions waiting inside each slot,
-//! - `queue_capacity` limits the controller's ordered command channel.
+//! - `queue_capacity` limits the ordered command channel.
+//!   The same value separately caps remove/cancel operations that did not find queued work and are waiting on the runtime registry;
+//! - `max_slot_queue` controls whether a new `Queue` submission may join a busy slot's pending queue.
 //!
-//! These limits apply at different stages:
+//! The limits apply at different boundaries:
 //!
-//! ```text
-//! caller
-//!   |
-//!   v
-//! [controller command channel]  limit: queue_capacity
-//!   |
-//!   v
-//! slot owner + [FIFO waiting items]  limit: max_slot_queue per slot
-//! ```
-//!
-//! `Replace` may keep one next replacement even when `max_slot_queue` is zero.
+//! | Setting          | Scope                      | Rule                                                                             |
+//! |------------------|----------------------------|----------------------------------------------------------------------------------|
+//! | `queue_capacity` | commands and remove/cancel | Set the command buffer; separately cap registry-backed remove/cancel operations. |
+//! | `max_slot_queue` | each busy slot             | Reject a new `Queue` when pending depth is at or above the limit.                |
 
 use std::num::NonZeroUsize;
 
@@ -27,7 +21,7 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 
 /// Queue limits for the controller.
 ///
-/// Passed to `SupervisorBuilder::with_controller`.
+/// Pass this value to [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller).
 ///
 /// # Example
 ///
@@ -44,39 +38,40 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 pub struct ControllerConfig {
     /// Capacity of the ordered controller command channel.
     ///
-    /// This channel carries submissions and ID-based remove/cancel commands in
-    /// one order. The same value limits controller operations that are waiting
-    /// for the registry or terminal cleanup. Later commands remain in the
-    /// bounded channel until capacity becomes available.
-    /// When it is full:
+    /// This channel receives submissions and ID-based remove/cancel commands in order.
+    /// Queued-work checks happen in that order.
+    /// If an ID is not queued, its registry-backed operation may finish concurrently with later operations.
+    /// The same value separately caps those registry-backed operations.
+    /// When that cap is reached, the controller stops draining new commands; later commands remain in the bounded channel.
+    ///
+    /// When the command channel is full:
     /// - `submit()` waits for capacity,
     /// - `submit_and_watch()` waits for capacity,
     /// - `try_submit()` and `try_submit_and_watch()` return [`ControllerError::Full`](crate::ControllerError::Full),
     /// - `remove()`, `cancel()`, and `cancel_with_timeout()` wait for capacity,
-    /// - `try_remove()`, `try_cancel()`, and `try_cancel_with_timeout()` return
-    ///   [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull).
+    /// - `try_remove()`, `try_cancel()`, and `try_cancel_with_timeout()` return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull).
     ///
     /// The non-zero type makes an unusable zero-capacity channel impossible to configure.
     queue_capacity: NonZeroUsize,
 
-    /// Maximum number of FIFO `Queue` submissions waiting per slot.
+    /// Admission threshold for new FIFO `Queue` submissions in one busy slot.
     ///
-    /// This counts only waiting FIFO items, not the current slot owner.
+    /// The current owner is not counted.
+    /// All pending entries are counted, including a replacement at the queue head.
+    /// A new `Queue` submission is rejected when this pending depth is already greater than or equal to the limit.
+    /// The controller also publishes a best-effort [`ControllerRejected`](crate::EventKind::ControllerRejected) event.
     ///
-    /// When the limit is reached, new `Queue` submissions for that slot are
-    /// rejected. Taskvisor also tries to emit `ControllerRejected`.
-    /// A value of `0` rejects `Queue` submissions behind busy slots.
-    /// `Replace` may still retain one latest replacement while the current
-    /// owner is being retired.
+    /// A value of `0` rejects every `Queue` submission behind a busy slot.
+    /// `Replace` may still create or replace the head because it does not use this check.
     max_slot_queue: usize,
 }
 
 impl ControllerConfig {
     /// Creates a configuration with explicit queue limits.
     ///
-    /// `queue_capacity` is non-zero by type. `max_slot_queue = 0` is valid and
-    /// rejects FIFO `Queue` submissions behind a busy slot. `Replace` may still
-    /// retain one latest replacement.
+    /// `queue_capacity` is non-zero by type.
+    /// `max_slot_queue = 0` is valid and rejects FIFO `Queue` submissions behind a busy slot.
+    /// `Replace` may still create or replace the queue head.
     pub const fn new(queue_capacity: NonZeroUsize, max_slot_queue: usize) -> Self {
         Self {
             queue_capacity,
@@ -87,6 +82,7 @@ impl ControllerConfig {
     /// Creates a controller configuration from a raw command-queue capacity.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `queue_capacity` is zero.
     pub fn try_new(queue_capacity: usize, max_slot_queue: usize) -> Result<Self, ConfigError> {
         let queue_capacity = NonZeroUsize::new(queue_capacity).ok_or(ConfigError::Zero {
@@ -95,22 +91,22 @@ impl ControllerConfig {
         Ok(Self::new(queue_capacity, max_slot_queue))
     }
 
-    /// Returns the capacity of the ordered controller command channel.
+    /// Returns the command-channel capacity and the separate cap for registry-backed remove/cancel operations.
     #[must_use]
     pub const fn queue_capacity(&self) -> NonZeroUsize {
         self.queue_capacity
     }
 
-    /// Returns the maximum number of FIFO `Queue` submissions allowed per busy slot.
+    /// Returns the pending-depth threshold for new FIFO `Queue` submissions.
     ///
-    /// `0` rejects `Queue` submissions behind a busy slot. `Replace` may still
-    /// retain one latest replacement.
+    /// The owner is not counted.
+    /// A replacement head is counted, but `Replace` itself does not use this threshold.
     #[must_use]
     pub const fn max_slot_queue(&self) -> usize {
         self.max_slot_queue
     }
 
-    /// Sets the capacity of the ordered controller command channel.
+    /// Sets the command-channel capacity and the separate cap for registry-backed remove/cancel operations.
     pub const fn with_queue_capacity(mut self, queue_capacity: NonZeroUsize) -> Self {
         self.queue_capacity = queue_capacity;
         self
@@ -119,6 +115,7 @@ impl ControllerConfig {
     /// Convenience setter that validates a raw command-queue capacity.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `queue_capacity` is zero.
     pub fn try_with_queue_capacity(self, queue_capacity: usize) -> Result<Self, ConfigError> {
         let queue_capacity = NonZeroUsize::new(queue_capacity).ok_or(ConfigError::Zero {
@@ -127,10 +124,10 @@ impl ControllerConfig {
         Ok(self.with_queue_capacity(queue_capacity))
     }
 
-    /// Sets the maximum number of FIFO `Queue` submissions allowed per busy slot.
+    /// Sets the pending-depth threshold for new FIFO `Queue` submissions.
     ///
-    /// `0` rejects `Queue` submissions behind a busy slot. `Replace` may still
-    /// retain one latest replacement.
+    /// `0` rejects `Queue` submissions behind a busy slot.
+    /// `Replace` may still create or replace the queue head.
     pub const fn with_max_slot_queue(mut self, max_slot_queue: usize) -> Self {
         self.max_slot_queue = max_slot_queue;
         self

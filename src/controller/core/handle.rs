@@ -23,8 +23,9 @@ impl ControllerHandle {
     /// Sends a submission to the ordered controller command channel.
     ///
     /// This waits for command-channel capacity.
-    /// `Ok(id)` means the controller received the submission.
-    /// It does not mean the task has been admitted to the runtime yet.
+    /// `Ok(id)` means the channel accepted the command.
+    ///
+    /// The controller may not have applied the admission policy yet, and runtime admission happens later.
     pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.tx
@@ -60,11 +61,11 @@ impl ControllerHandle {
     /// Sends a watched submission to the ordered controller command channel.
     ///
     /// The returned receiver resolves to:
-    /// - `TaskOutcome::Rejected` if the controller never admits the task body,
-    /// - the runtime task outcome if the task is admitted and later terminates.
+    /// - `TaskOutcome::Rejected` if registration never succeeds,
+    /// - the runtime task outcome after the registry accepts the task.
     ///
-    /// `Ok((id, rx))` means the controller received the submission.
-    /// It does not mean the slot accepted it yet.
+    /// `Ok((id, rx))` means the channel accepted the command.
+    /// The controller may not have applied the slot policy yet.
     pub async fn submit_and_watch(
         &self,
         spec: ControllerSpec,
@@ -85,6 +86,7 @@ impl ControllerHandle {
     /// Tries to send a watched submission without waiting for command-channel capacity.
     ///
     /// The returned receiver has the same completion semantics as [`submit_and_watch`](Self::submit_and_watch).
+    ///
     /// `ControllerError::Full` means the controller command channel is full, not that the target slot rejected the submission.
     pub fn try_submit_and_watch(
         &self,
@@ -105,7 +107,7 @@ impl ControllerHandle {
         Ok((id, rx))
     }
 
-    /// Sends one waiting identity operation to the ordered controller command channel.
+    /// Sends one identity operation, waiting for command-channel capacity and then for the operation's reply.
     async fn manage_identity(
         &self,
         id: TaskId,
@@ -123,7 +125,10 @@ impl ControllerHandle {
         reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)?
     }
 
-    /// Sends one fail-fast identity operation to the ordered controller command channel.
+    /// Enqueues one identity operation without waiting for command-channel capacity, then waits for its reply.
+    ///
+    /// Fail-fast behavior applies only to this first enqueue step.
+    /// Registry fallback and terminal cleanup may still wait.
     async fn try_manage_identity(
         &self,
         id: TaskId,

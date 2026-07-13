@@ -14,48 +14,44 @@
 //!
 //! ## Data Flow
 //!
-//! ```text
-//! Management command
-//! ------------------
-//! SupervisorCore
-//!       │ RegistryCommand (bounded channel)
-//!       ▼
-//! Registry listener
-//!       │ decision (oneshot reply)
-//!       ▼
-//! Calling method
+//! Management decisions use two separate transports:
 //!
-//! Terminal cleanup
-//! ----------------
-//! Managed actor task ends
-//!       │ TaskId (internal completion channel)
-//!       ▼
-//! Registry listener
-//!       │ claim actor handle, then join
-//!       ▼
-//! Remove TaskId and name from both indexes
-//!       ├── TaskOutcome ─────────► TaskWaiter
-//!       └── RemovalCompletion ───► cancel callers / controller
+//! | Direction                             | Transport                        |
+//! |---------------------------------------|----------------------------------|
+//! | `SupervisorCore` -> registry listener | Bounded management command queue |
+//! | Registry listener -> calling method   | Direct one-shot reply            |
 //!
-//! Observability
-//! -------------
-//! Runtime components ── Event (best-effort) ──► event bus
-//!                                                   │
-//!                                                   ▼
-//!                                            subscriber queues
-//! ```
+//! Actor joins have one owner:
 //!
-//! Commands and completion signals drive registry state. Events only describe
-//! that work; losing an event cannot block cleanup or keep a slot occupied.
+//! | Cleanup trigger                                | Actor-handle owner                      |
+//! |------------------------------------------------|-----------------------------------------|
+//! | Winning actor-completion claim in the listener | Detached join reporter                  |
+//! | Winning `Remove` or `Cancel` claim             | Detached join reporter                  |
+//! | Claim made by `cancel_all_within`              | Task currently running shutdown cleanup |
+//!
+//! Every owner uses the same terminal commit.
+//! It removes the [`TaskId`] and name from both indexes, resolves an optional watched [`TaskOutcome`](super::outcome::TaskOutcome),
+//! completes cancellation waiters, and publishes the final `TaskRemoved` event.
+//!
+//! The registry listener serializes management admission and removal-claim decisions.
+//! Shutdown can claim remaining handles directly; the shared state lock arbitrates that work with the listener.
+//! Actor joins run concurrently outside the listener.
+//! Final index removal uses the same state lock.
+//!
+//! Backpressure applies only to the bounded management queue.
+//! Actor completion signals and shutdown fences use separate internal unbounded channels.
+//!
+//! Management commands, reliable completion signals, and shutdown drive registry state.
+//! Events only describe that work; losing an event cannot block cleanup or keep a controller slot occupied.
 //!
 //! ## Invariants
 //!
 //! - Both identity indexes change under one write lock.
 //! - A name stays reserved while its entry is registered or being removed.
 //! - One removal claim owns the actor join handle. Later cancellation calls can wait on the same completion signal.
-//! - A static batch starts only after every name is validated and indexed.
+//! - An accepted static batch releases task bodies only after every name is checked, every entry is indexed, all `TaskAdded` publications are attempted, and the direct reply send is attempted.
 //! - Only terminal join cleanup removes membership. Best-effort events cannot do it.
-//! - Shutdown processes accepted management commands before task drain starts.
+//! - Before graceful task drain starts, every management command committed before admission closes reaches its direct registry decision.
 
 use std::{sync::Arc, time::Duration};
 
@@ -89,8 +85,7 @@ use state::{Entry, EntryState, Handle};
 
 /// Owns registered tasks and their membership state.
 ///
-/// It accepts management commands, receives actor completion signals, joins actors,
-/// resolves watched outcomes, and publishes registry lifecycle events.
+/// It accepts management commands, receives actor completion signals, joins actors, resolves watched outcomes, and publishes registry lifecycle events.
 ///
 /// # Also
 ///

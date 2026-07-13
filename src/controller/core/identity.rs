@@ -1,4 +1,4 @@
-//! Ordered identity operations and queued-submission removal.
+//! Ordered queued-work lookup and concurrent registry fallback by identity.
 
 use std::sync::Arc;
 
@@ -13,10 +13,12 @@ use crate::{
 use super::{Controller, IdentityOperation, IdentityReply};
 
 impl Controller {
-    /// Applies one accepted identity operation after all earlier controller commands.
+    /// Starts one accepted identity operation after earlier controller commands have been handled.
     ///
-    /// The controller claims still-queued work directly.
-    /// For every other id, it owns the registry fallback in a tracked task so dropping the public caller cannot stop an accepted operation.
+    /// The controller checks and claims still-queued work inline, preserving command order.
+    /// For every other ID, it starts a bounded registry-fallback worker.
+    /// Those workers may finish concurrently and are not a global ordering barrier.
+    /// The controller owns each worker; dropping the public caller cannot stop an accepted operation.
     pub(super) async fn handle_identity_operation(
         &self,
         id: TaskId,

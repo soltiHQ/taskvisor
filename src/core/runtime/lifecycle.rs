@@ -6,14 +6,15 @@ use super::{SupervisorCore, shutdown_workflow::ShutdownTrigger};
 use crate::{core::registry::AddBatchItem, error::RuntimeError, identity::TaskId, tasks::TaskSpec};
 
 impl SupervisorCore {
-    /// Starts runtime listeners without blocking.
+    /// Starts runtime workers and listeners.
     ///
     /// This starts:
-    /// - the subscriber listener,
+    /// - subscriber queue workers,
+    /// - the event relay,
     /// - the registry listener.
     ///
-    /// Safe to call more than once. Concurrent callers wait for the first
-    /// startup to install every listener before they return.
+    /// Safe to call more than once.
+    /// Concurrent callers wait for the first startup to install every listener before they return.
     pub(crate) fn start(&self) {
         if self.started.load(Ordering::Acquire) {
             return;
@@ -35,10 +36,10 @@ impl SupervisorCore {
         self.started.store(true, Ordering::Release);
     }
 
-    /// Runs a static task set until OS shutdown signal or natural completion.
+    /// Runs a static task set until explicit shutdown, an OS signal, or registry emptiness.
     ///
-    /// This starts the runtime listeners, registers the initial tasks as one
-    /// atomic batch, then drives shutdown or natural completion.
+    /// This starts the runtime and, when the task set is non-empty, registers it as one atomic batch.
+    /// It then drives shutdown or natural completion.
     ///
     /// Single-shot: a second or concurrent call returns [`RuntimeError::AlreadyRunning`].
     pub(crate) async fn run(self: &Arc<Self>, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
@@ -82,10 +83,11 @@ impl SupervisorCore {
     /// Drives static-mode completion.
     ///
     /// Waits for either:
+    /// - a shared shutdown already started by another entry point,
     /// - an OS shutdown signal,
     /// - natural completion when the registry becomes empty.
     ///
-    /// Both paths join registry/subscriber listeners and close subscribers before returning.
+    /// Every path joins registry and subscriber listeners and closes subscribers before returning.
     async fn drive_shutdown(self: &Arc<Self>) -> Result<(), RuntimeError> {
         tokio::select! {
             _ = self.shutdown.started.cancelled() => self.wait_started_shutdown().await,
@@ -96,8 +98,10 @@ impl SupervisorCore {
 
     /// Handles the result of OS shutdown-signal setup/waiting.
     ///
-    /// A real signal publishes `ShutdownRequested` and starts graceful drain.
-    /// Signal setup errors are returned as [`RuntimeError::SignalSetupFailed`] and are not treated as shutdown requests.
+    /// If a received signal wins the shutdown race, it starts graceful shutdown and publishes `ShutdownRequested`.
+    /// If a signal-setup error wins, the shared result is [`RuntimeError::SignalSetupFailed`];
+    /// common cleanup still runs, but `ShutdownRequested` and the graceful task-drain verdict are not emitted.
+    /// A losing signal result joins the operation already in progress.
     pub(super) async fn on_shutdown_signal(
         self: &Arc<Self>,
         res: std::io::Result<()>,

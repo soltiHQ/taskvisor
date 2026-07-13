@@ -73,9 +73,10 @@ impl Controller {
 
     /// Runs the controller event loop.
     ///
-    /// The loop receives ordered controller commands, registry admission/completion results, and the reliable runtime shutdown-start signal.
+    /// The loop handles ordered controller commands, results from tracked registry workers, and the reliable runtime shutdown-start signal.
+    /// Slot and queue transitions are applied in this loop.
     ///
-    /// On shutdown, it closes the command receiver, drains buffered commands, and resolves pending submissions and removal replies.
+    /// On shutdown, it closes the command receiver, drains buffered commands, and resolves pending submissions and identity-operation replies.
     pub(super) async fn run_inner(&self, token: CancellationToken) -> Result<(), ControllerError> {
         let mut rx = self
             .rx

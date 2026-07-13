@@ -58,9 +58,10 @@ struct PendingInner {
     labels: HashMap<TaskId, Arc<str>>,
 }
 
-/// Tracks actor joins owned by removing entries.
+/// Tracks actor joins in flight for entries in `Removing`.
 ///
-/// This provides shutdown diagnostics and a wait barrier while the registry map remains the authority for task membership.
+/// It provides shutdown diagnostics and a wait barrier.
+/// The registry map remains the authority for task membership.
 #[derive(Default)]
 pub(super) struct PendingJoins {
     inner: Mutex<PendingInner>,

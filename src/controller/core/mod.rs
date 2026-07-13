@@ -4,43 +4,46 @@
 //!
 //! It owns:
 //!
+//! - watched submission senders until they are handed to the runtime or rejected,
 //! - the bounded ordered channel for submissions and identity operations,
-//! - the per-slot state map,
-//! - watched submission senders until they are handed to the runtime or rejected.
+//! - the per-slot state map.
 //!
-//! ## Authoritative inputs
+//! ## Authoritative slot-state inputs
 //!
-//! One serialized loop applies all state changes. Its control inputs are
-//! separate from the best-effort event path:
+//! One controller loop applies slot ownership and queue transitions.
+//! These authoritative inputs are separate from the best-effort event path:
 //!
 //! ```text
 //! Ordered controller commands ────────┐
-//! Registry add decisions ─────────────┤
+//! Direct registry Add decisions ──────┤
 //! Terminal registry completions ──────┼──► controller loop ───► slot state
 //! Runtime shutdown-start signal ──────┘
 //!
 //! controller loop ── Event (best-effort) ──► event bus
 //! ```
 //!
-//! A successful removal request does not release a slot. The controller starts
-//! queued work only after the terminal completion confirms that the previous
-//! actor is joined and its ID and label are removed. Task lifecycle events are
-//! observability only and never decide slot state.
+//! A successful removal request does not release a slot.
+//! The controller starts queued work only after the terminal completion confirms that the previous actor is joined and its ID and label are removed.
+//! Task lifecycle events are observability only and never decide slot state.
+//!
+//! Removal replies and completed identity-operation workers also return to the loop.
+//! They may produce diagnostics or caller replies, but they do not release a slot owner.
 //!
 //! ## Submission Outcomes
 //!
-//! Unwatched submissions report progress only through events.
+//! Unwatched submissions have no final-outcome receiver.
+//! Their lifecycle can be observed through best-effort events and aggregate slot snapshots.
 //! Watched submissions keep an `OutcomeTx` until one of two things happens:
-//!
-//! - the submission is admitted and the watcher is handed to the runtime registry,
+//! - its Add command is committed and the watcher is handed to the runtime registry,
 //! - the submission is rejected and resolved as `TaskOutcome::Rejected`.
 //!
 //! ## Internal Architecture
 //!
-//! `Controller` keeps shared state and construction in this facade. The command-side API lives in
-//! `handle`, wire messages in `protocol`, and the single serialized actor loop in `lifecycle`.
-//! Admission, identity operations, registry worker tracking, and slot queue mechanics are isolated
-//! in dedicated workflow modules. Shutdown and introspection remain separate read/drain concerns.
+//! `Controller` keeps shared state and construction in this facade.
+//! The command-side API lives in `handle`, wire messages in `protocol`, and the serialized transition loop in `lifecycle`.
+//!
+//! Admission, identity operations, registry worker tracking, and slot queue mechanics live in dedicated workflow modules.
+//! Shutdown and introspection are separate read/drain concerns.
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -92,18 +95,19 @@ use tokio::{sync::oneshot, task::JoinSet, time::Instant};
 
 /// Slot-based admission controller.
 ///
-/// The controller is driven by four inputs:
+/// Slot ownership and queue state are driven by four authoritative inputs:
 /// - submissions and identity operations from its ordered command channel,
 /// - direct registry replies for in-flight admission,
 /// - shared registry completion signals for admitted slot owners,
 /// - the reliable runtime shutdown-start signal.
 ///
-/// Task lifecycle events such as `TaskAdded`, `TaskAddFailed`, and `TaskRemoved` are observability
-/// only and never decide slot state.
+/// Removal replies and identity-worker joins also return to the loop, but do not release a slot.
+/// Task lifecycle events such as `TaskAdded`, `TaskAddFailed`, and `TaskRemoved` are observability only and never decide slot state.
 pub(crate) struct Controller {
     /// Static controller configuration.
     config: ControllerConfig,
-    /// Runtime control surface. Weak avoids an ownership cycle with the supervisor.
+    /// Runtime control surface.
+    /// `Weak` avoids extending the runtime core's lifetime during teardown.
     supervisor: Weak<SupervisorCore>,
     /// Runtime event bus used for controller observability and diagnostics.
     bus: Bus,
@@ -117,7 +121,7 @@ pub(crate) struct Controller {
     tx: mpsc::Sender<ControllerCommand>,
     /// Single-use command receiver owned by the controller loop.
     rx: RwLock<Option<mpsc::Receiver<ControllerCommand>>>,
-    /// Set after the reliable runtime shutdown signal is observed.
+    /// Set when the controller loop begins shutdown or exits.
     shutting_down: std::sync::atomic::AtomicBool,
     /// Single controller loop task shared by every start and join caller.
     task: OnceLock<ControllerTask>,
@@ -156,13 +160,16 @@ impl Controller {
         }
     }
 
-    /// Marks the controller as no longer accepting or advancing work.
+    /// Marks the controller as no longer admitting or advancing queued work.
+    ///
+    /// The command receiver closes later during shutdown drain.
+    /// Commands that enter before then are rejected or resolved by that drain.
     fn mark_shutting_down(&self) {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Returns `true` after the reliable runtime shutdown signal is observed.
+    /// Returns `true` when the shutdown signal has fired or the loop set its local shutdown flag.
     fn is_shutting_down(&self) -> bool {
         self.shutdown_token.is_cancelled()
             || self

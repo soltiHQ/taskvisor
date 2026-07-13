@@ -28,8 +28,7 @@
 //! ## Guarantees
 //!
 //! - One waiter follows one [`TaskId`].
-//! - For admitted work, it resolves after all retries end and the registry joins
-//!   the task actor.
+//! - For admitted work, it resolves after all retries end and the registry joins the task actor.
 //! - Dropping a waiter is safe and does not cancel the task.
 //! - If the runtime drops the sender before it creates an outcome,
 //!   [`TaskWaiter::wait`] returns an error instead of inventing a result.
@@ -47,9 +46,8 @@ use crate::identity::TaskId;
 
 /// Final result of one watched task or controller submission.
 ///
-/// For admitted work, this value is sent after the retry loop ends, the actor is
-/// joined, and registry membership is removed. A controller can instead return
-/// [`Rejected`](Self::Rejected) before the task starts.
+/// For admitted work, this value is sent after the retry loop ends, the actor is joined, and registry membership is removed.
+/// A controller can instead return [`Rejected`](Self::Rejected) before the task starts.
 ///
 /// This enum is non-exhaustive.
 /// Include a fallback arm when matching it.
@@ -67,7 +65,7 @@ use crate::identity::TaskId;
 /// | [`Failed`](Self::Failed)             | Retryable failure reached a stop condition |
 /// | [`Fatal`](Self::Fatal)               | Task reported a permanent failure          |
 /// | [`Canceled`](Self::Canceled)         | Cooperative cancellation                   |
-/// | [`ForceAborted`](Self::ForceAborted) | Task did not stop before the grace period  |
+/// | [`ForceAborted`](Self::ForceAborted) | Runtime aborted before cooperative stop    |
 /// | [`Panicked`](Self::Panicked)         | Internal actor panicked                    |
 /// | [`Rejected`](Self::Rejected)         | Task body never ran                        |
 ///
@@ -121,7 +119,10 @@ pub enum TaskOutcome {
     /// This can come from shutdown, explicit removal, or the task returning [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
-    /// Task ignored cooperative cancellation and was aborted after the grace period.
+    /// The runtime aborted the actor before cooperative stop completed.
+    ///
+    /// This normally happens after the configured grace period. Last-owner
+    /// fallback and signal-setup failure cleanup cannot wait for that period.
     ForceAborted,
 
     /// The internal actor panicked.
@@ -132,7 +133,7 @@ pub enum TaskOutcome {
 
     /// The task body never ran.
     ///
-    /// Common reasons:
+    /// For controller submissions, common reasons are:
     /// - controller slot was busy under `DropIfRunning`,
     /// - controller slot queue was full,
     /// - queued submission was replaced,
@@ -299,7 +300,8 @@ impl TaskWaiter {
 
     /// Waits for the final outcome.
     ///
-    /// Normal shutdown resolves registered tasks as [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
+    /// A registered task stopped by shutdown normally resolves as [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
+    /// Work that was already finishing can keep its own terminal outcome.
     ///
     /// # Errors
     ///

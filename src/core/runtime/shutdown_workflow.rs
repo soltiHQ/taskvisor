@@ -127,13 +127,11 @@ pub(super) enum ShutdownTrigger {
 }
 
 impl SupervisorCore {
-    /// Performs the non-blocking last-owner safety shutdown.
+    /// Performs the last-owner fallback without awaiting graceful cleanup.
     ///
-    /// This path cannot await graceful cleanup or report its result. When no
-    /// explicit shutdown operation exists, it closes command admission, stops
-    /// controller intake, and cancels runtime listeners. An already-started
-    /// detached graceful shutdown keeps ownership of cleanup and is not
-    /// overridden by this fallback.
+    /// This path cannot await graceful cleanup or report its result.
+    /// When no shared shutdown operation exists, it closes command admission, stops controller intake, and cancels runtime listeners.
+    /// An already-started detached shutdown keeps ownership of cleanup and is not overridden by this fallback.
     pub(crate) fn abandon(&self) {
         if self.shutdown.operation_installed.load(Ordering::Acquire) {
             return;
@@ -253,7 +251,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Cancels runtime listeners and closes subscribers, attempting every phase.
+    /// Joins the controller when present, cancels and joins runtime listeners, then closes subscriber workers. Every phase is attempted.
     async fn finish_shutdown_cleanup(&self) -> bool {
         let mut clean = true;
 
@@ -305,10 +303,13 @@ impl SupervisorCore {
 
     /// Cancels tasks and waits for them within the configured grace window.
     ///
-    /// Admission closes first. The registry processes every command accepted
-    /// before that point, then this drains registered tasks and waits for
-    /// detached join reporters using the remaining grace.
-    /// Tasks/joiners that do not finish are returned as `GraceExceeded` stuck labels.
+    /// Admission closes first.
+    /// The registry processes every command committed before that point, then this drains registered tasks and
+    /// waits for detached join reporters using the remaining grace.
+    /// Labels of tasks force-aborted at the deadline, plus join reporters still pending at the deadline, are returned in `GraceExceeded.stuck`.
+    ///
+    /// This grace window covers task cleanup only.
+    /// Subscriber queues use the separate `subscriber_shutdown_timeout` during common cleanup.
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         self.close_admission_and_fence_registry().await?;
         let grace = self.settings.runtime.grace();

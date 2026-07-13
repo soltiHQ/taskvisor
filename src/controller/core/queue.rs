@@ -1,4 +1,4 @@
-//! Per-slot storage, queue limits, garbage collection, and latest-wins helpers.
+//! Per-slot storage, queue limits, garbage collection, and queue-head replacement.
 
 use std::sync::Arc;
 
@@ -66,10 +66,13 @@ impl Controller {
         }
     }
 
-    /// Implements latest-wins replacement for queued work.
+    /// Implements latest-wins replacement for the queue head only.
     ///
     /// If the queue has a head, that head is rejected as `superseded_by_replace` and replaced by the new submission.
-    /// If the queue is empty, the new submission becomes the queued head.
+    /// FIFO items behind it stay in place.
+    ///
+    /// If the queue is empty, the new submission becomes the head.
+    /// This operation does not apply `max_slot_queue`.
     pub(super) fn replace_head_or_push(
         &self,
         slot: &mut SlotState,

@@ -1,14 +1,17 @@
 //! # Runtime coordinator
 //!
-//! [`SupervisorCore`] connects the registry, event bus, subscribers, alive tracker, and shutdown state behind the public [`Supervisor`](super::supervisor::Supervisor).
+//! [`SupervisorCore`] connects the registry, event bus, subscribers, alive
+//! tracker, and shutdown state behind the public
+//! [`Supervisor`](super::supervisor::Supervisor).
 //!
 //! ## Data Paths
 //!
-//! ```text
-//! management: Handle          -> SupervisorCore -> command queue -> Registry
-//! events:     runtime parts   -> event bus      -> alive tracker +  subscribers
-//! shutdown:   signal / Handle -> cancel tasks   -> join workers  -> drain subscribers
-//! ```
+//! | Path | Route |
+//! |------|-------|
+//! | Management | handle -> core -> bounded registry queue -> registry -> direct reply |
+//! | Events | runtime components -> event bus -> event relay -> alive tracker and subscriber queues |
+//! | Shared shutdown | winning trigger -> shared owner -> admission fence -> task drain when applicable -> common cleanup |
+//! | Last-owner fallback | close management admission -> cancel shutdown and runtime tokens; no shared result |
 //!
 //! Management commands use direct replies.
 //! They do not depend on the best-effort event bus.
@@ -16,26 +19,20 @@
 //!
 //! ## Modes
 //!
-//! ```text
-//! start()       -> start listeners once
-//!
-//! run(tasks)    -> start listeners
-//!               -> register one atomic batch
-//!               -> wait for completion or OS signal
-//!
-//! shutdown()    -> close admission
-//!               -> cancel tasks and wait up to grace
-//!               -> abort remaining tasks
-//!               -> join workers and drain subscribers
-//! ```
+//! | Entry point  | Behavior                                                                                                                                 |
+//! |--------------|------------------------------------------------------------------------------------------------------------------------------------------|
+//! | `start()`    | Start subscriber workers, the event relay, and the registry listener once                                                                |
+//! | `run(tasks)` | Start the runtime, register a non-empty task set as one atomic batch, then wait for shared shutdown, an OS signal, or registry emptiness |
+//! | `shutdown()` | Start or join shared cleanup and return its cached result                                                                                |
 //!
 //! ## Rules
 //!
-//! - New task admission closes once shutdown begins.
-//! - Shutdown processes commands accepted before the admission gate closed.
+//! - Management command admission closes once shutdown begins.
+//! - Shutdown processes commands committed before the admission gate closed.
 //! - Explicit, signal, and natural shutdown share one cleanup operation.
 //! - Every shutdown caller receives the same cached result.
-//! - The first shutdown trigger sets the result and request events.
+//! - The first trigger that installs the shared shutdown operation selects its result.
+//!   `ShutdownRequested` is emitted only when an explicit request or received OS signal wins that race.
 //! - Static `run()` tasks are accepted or rejected as one batch.
 //! - Registry membership is keyed by `TaskId`.
 //! - `run()` is single-shot. A second call returns `RuntimeError::AlreadyRunning`.
@@ -161,7 +158,7 @@ impl SupervisorCore {
         &self.settings.task_defaults
     }
 
-    /// Returns the reliable signal that fires when the shared shutdown operation starts.
+    /// Returns the reliable signal fired when shutdown starts, including the last-owner fallback.
     #[cfg(feature = "controller")]
     pub(crate) fn shutdown_started_token(&self) -> CancellationToken {
         self.shutdown.started.clone()

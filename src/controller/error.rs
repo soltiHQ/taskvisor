@@ -2,9 +2,6 @@
 
 use thiserror::Error;
 
-/// Error from controller setup or command admission.
-///
-/// Include a wildcard arm when matching because new errors may be added.
 #[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {

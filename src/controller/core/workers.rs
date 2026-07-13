@@ -68,7 +68,9 @@ impl Controller {
 
     /// Reports a failed removal request without changing slot ownership.
     ///
-    /// Successful claims and already-removing tasks both finish through the reliable completion signal.
+    /// Neither `Ok(true)` nor `Ok(false)` releases the slot.
+    /// The reliable terminal completion signal is the only normal release path.
+    ///
     /// An error is diagnostic only; shutdown cleanup remains authoritative.
     pub(super) async fn handle_removal_result(&self, result: RemovalResult) {
         let Some(slot) = self

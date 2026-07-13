@@ -10,31 +10,34 @@
 //!
 //! ## Runtime Paths
 //!
-//! State changes and observations use different paths:
+//! State changes, final results, and observations use different paths:
 //!
-//! ```text
-//! add / remove / cancel -- reliable command --> Registry
-//! watched task --------- direct result -----> TaskWaiter
-//! lifecycle progress --- best-effort -------> subscribers
-//! ```
+//! | Path                                                                     | Route                                                                           |
+//! |--------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+//! | Direct `add*`, label operations, and identity stops without a controller | `SupervisorHandle` -> registry -> direct reply                                  |
+//! | `submit*` and identity stops with a controller                           | `SupervisorHandle` -> controller -> registry when needed                        |
+//! | Watched final result                                                     | registry or controller -> direct one-shot -> `TaskWaiter`                       |
+//! | Observability                                                            | runtime components -> event bus -> event relay -> alive tracker and subscribers |
 //!
 //! The registry is the source of truth for registered identities and names.
-//! Events are for observability and may be lost when consumers are slow. Alive
-//! snapshots are based on those events, so they are also best-effort.
+//! Events are for observability and may be lost when consumers are slow.
+//! Alive snapshots are based on those events, so they can lag or miss state.
 //!
 //! ## When a Command Returns
 //!
-//! | Operation | What the return value confirms |
-//! |-----------|--------------------------------|
-//! | `add*` | The registry accepted or rejected the task. The first attempt may not have started yet. |
-//! | `remove*` | Whether this caller claimed the stop request. Registered task cleanup may still be running. |
-//! | `cancel*` | Known work reached terminal cleanup, unless the caller's explicit wait timeout expired. |
-//! | `shutdown` | Shared runtime cleanup finished, or returned its final error. |
+//! | Operation  | What the return value confirms                                                              |
+//! |------------|---------------------------------------------------------------------------------------------|
+//! | `add*`     | The registry accepted or rejected the task. The first attempt may not have started yet.     |
+//! | `remove*`  | Whether this caller claimed the stop request. Registered task cleanup may still be running. |
+//! | `cancel*`  | Known work reached terminal cleanup, unless the caller's explicit wait timeout expired.     |
+//! | `shutdown` | Shared runtime cleanup finished. The result reports its final status.                       |
 //!
-//! The regular methods wait for management-queue capacity. Their `try_*`
-//! versions fail fast when that queue is full. [`SupervisorHandle::list`] reads
-//! authoritative registry membership. [`SupervisorHandle::alive_snapshot`] and
-//! [`SupervisorHandle::is_alive`] are best-effort views built from events.
+//! Regular management methods wait for capacity in every bounded queue they use.
+//! Their `try_*` versions fail fast at those queue boundaries.
+//!
+//! After a command is accepted, both forms may still wait for a direct decision or terminal cleanup.
+//! [`SupervisorHandle::list`] reads authoritative registry membership.
+//! [`SupervisorHandle::alive_snapshot`] and [`SupervisorHandle::is_alive`] are best-effort views built from events.
 //!
 //! ## Important Rules
 //!
@@ -43,8 +46,7 @@
 //! - New task admission closes when shutdown starts.
 //! - Explicit shutdown returns after task, listener, and subscriber cleanup.
 //! - Dropping the last public owner only starts best-effort cancellation.
-//! - Event sequence numbers help sort observations, but do not prove causal
-//!   order between concurrent tasks.
+//! - Event sequence numbers help sort observations, but do not prove causal order between concurrent tasks.
 
 mod outcome;
 pub use outcome::{TaskOutcome, TaskWaiter};

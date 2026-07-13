@@ -1,41 +1,26 @@
 //! # Run one task attempt
 //!
-//! [`run_once`] calls [`Task::spawn`], applies one attempt timeout, catches user-task panics, and publishes attempt events.
+//! [`run_once`] calls [`Task::spawn`], applies one attempt timeout, catches
+//! panics while calling or polling the task, and publishes attempt events.
 //! It returns the attempt result to [`TaskActor`](super::actor::TaskActor), which decides whether to restart.
 //!
 //! ## Event Flow
 //!
-//! ```text
-//! Ok(())
-//!   -> TaskStopped
-//!   -> return Ok(())
-//!
-//! Err(TaskError::Canceled)
-//!   -> TaskCanceled
-//!   -> return Err(Canceled)
-//!
-//! Err(TaskError::Fail | TaskError::Fatal)
-//!   -> TaskFailed
-//!   -> return the same error
-//!
-//! panic in spawn() or the task future
-//!   -> TaskFailed(reason="task panicked: ...")
-//!   -> return Err(TaskError::Fail)
-//!
-//! timeout
-//!   -> cancel child token
-//!   -> TimeoutHit
-//!   -> TaskFailed
-//!   -> return Err(TaskError::Timeout)
-//! ```
+//! | Attempt result                                      | Events                          | Returned result      |
+//! |-----------------------------------------------------|---------------------------------|----------------------|
+//! | `Ok(())`                                            | `TaskStopped`                   | `Ok(())`             |
+//! | `TaskError::Canceled`                               | `TaskCanceled`                  | Same error           |
+//! | Task-returned `Fail`, `Fatal`, or `Timeout`         | `TaskFailed`                    | Same error           |
+//! | Panic while calling `spawn()` or polling its future | `TaskFailed`                    | `TaskError::Fail`    |
+//! | Configured attempt timer expires                    | `TimeoutHit`, then `TaskFailed` | `TaskError::Timeout` |
 //!
 //! ## Rules
 //!
-//! - Each call publishes one final attempt event: `TaskStopped`, `TaskCanceled`, or `TaskFailed`.
-//! - `TimeoutHit` adds context before the final `TaskFailed` event.
+//! - Each completed call publishes one final attempt event: `TaskStopped`,`TaskCanceled`, or `TaskFailed`. Force-aborting the actor can drop an in-flight call before that event.
+//! - `TimeoutHit` is published only when the configured attempt timer expires.
 //! - `TaskError::Canceled` is a cooperative stop, not a failure.
 //! - Each attempt gets a child cancellation token. Parent cancellation reaches it, but child cancellation does not affect the parent.
-//! - User-task panics become retryable [`TaskError::Fail`] values.
+//! - Panics while calling `spawn()` or polling its future become retryable [`TaskError::Fail`] values.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -85,7 +70,7 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
 /// ### Steps
 ///
 /// 1. Create a child cancellation token.
-/// 2. Call [`Task::spawn`] and catch panics.
+/// 2. Call [`Task::spawn`] and catch panics while calling or polling it.
 /// 3. Run the future with the optional timeout.
 /// 4. Publish the attempt event.
 /// 5. Return the attempt result.
@@ -93,7 +78,10 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
 /// ### Timeout
 ///
 /// A positive timeout limits this attempt only.
-/// On timeout, the child token is cancelled, `TimeoutHit` is published, and the final event is `TaskFailed` with [`TaskError::Timeout`]. `None` and zero mean no timeout.
+/// When the configured timer expires, the attempt future is dropped and is no longer polled.
+/// The child token is then cancelled so work that cloned it can observe cancellation.
+/// `TimeoutHit` is published before the final `TaskFailed`.
+/// `None` and zero mean no timeout.
 ///
 /// ### Cancellation
 ///

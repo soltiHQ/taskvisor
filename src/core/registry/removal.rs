@@ -40,26 +40,26 @@ struct CancelAction {
 }
 
 impl Registry {
-    /// Waits for detached join reporters to finish.
+    /// Waits up to `grace` for detached join reporters.
     ///
-    /// Join reporters own actor handles for entries in the `Removing` phase.
-    /// Shutdown still needs their final `TaskRemoved` events before the subscriber listener stops.
+    /// A reporter decrements the pending count only after it removes registry membership, attempts
+    /// to send the optional watched outcome, and attempts the final `TaskRemoved` publication.
+    /// It completes the shared `RemovalCompletion` just after that decrement, once the registry state lock is released.
+    /// Therefore, this pending-join barrier is not itself a cancellation-completion barrier.
     ///
-    /// Returns labels for joins still in flight after `grace`.
+    /// Returns labels for reporters still in flight when `grace` expires.
     pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let _ = tokio::time::timeout(grace, self.pending_joins.wait_drained()).await;
         self.pending_joins.pending_labels()
     }
-    /// Cancels all registered tasks and waits for them within one shared grace window.
+
+    /// Claims and cancels every entry still in `Registered`, then joins those actors within one shared grace window.
     ///
-    /// Steps:
-    /// - change every `Registered` entry to `Removing`,
-    /// - cancel every actor token,
-    /// - join each actor until the shared deadline,
-    /// - abort actors that do not finish in time,
-    /// - publish `TaskRemoved` for each drained task.
+    /// Entries already in `Removing` keep their existing join owner.
+    /// This method waits for all pending reporters only until the same deadline.
     ///
-    /// Returns labels of tasks that were force-aborted.
+    /// Returns labels of actors claimed here that had to be force-aborted.
+    /// [`wait_joins_within`](Self::wait_joins_within) reports older join reporters that remain in flight.
     pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
         let handles: Vec<(TaskId, Arc<str>, Handle, RemovalCompletion)> = {
@@ -120,11 +120,14 @@ impl Registry {
         let _ = tokio::time::timeout_at(deadline, self.pending_joins.wait_drained()).await;
         stuck
     }
+
     /// Removes a task by identity.
     ///
-    /// If the task exists, its actor token is cancelled and a detached join reporter publishes the final `TaskRemoved`.
+    /// `Ok(true)` means this command claimed the actor and triggered cancellation.
+    /// Membership remains until terminal join cleanup.
     ///
-    /// If the task is unknown or cleanup already owns it, replies `Ok(false)` without publishing a terminal event.
+    /// `Ok(false)` means the entry is unknown or another cleanup owner already claimed it.
+    /// This command does not create a second join owner or duplicate terminal event; an existing owner can still publish `TaskRemoved` later.
     pub(super) async fn remove_task(&self, id: TaskId, reply: oneshot::Sender<RemoveReply>) {
         if let Some((_label, handle, completion)) = self.claim_task(id).await {
             handle.cancel.cancel();
@@ -138,7 +141,7 @@ impl Registry {
     /// Resolves one label and claims its current owner under the same state lock.
     ///
     /// A missing label returns `Ok(false)` without a request event.
-    /// An owner that is already `Removing` keeps its request event but also returns `Ok(false)`.
+    /// An entry already in `Removing` gets another request event but also returns `Ok(false)`.
     pub(super) async fn remove_task_by_label(
         &self,
         label: Arc<str>,
@@ -319,12 +322,12 @@ impl Registry {
         Some((label, handle, completion))
     }
 
-    /// Joins an actor in a detached task and reports its final result.
+    /// Joins an actor in a detached task and commits its final result.
     ///
     /// If `force_after` is `Some`, the join is bounded by that duration.
-    /// When the actor does not finish in time, it is aborted and watched tasks resolve to [`TaskOutcome::ForceAborted`].
+    /// An actor that misses the deadline is aborted and a watched task resolves to [`TaskOutcome::ForceAborted`].
     ///
-    /// On normal join, this resolves the optional outcome sender and publishes the final `TaskRemoved`.
+    /// Both normal join and force-abort paths remove membership, resolve the optional outcome, and publish one final `TaskRemoved`.
     fn spawn_join_report(
         &self,
         id: TaskId,

@@ -51,7 +51,7 @@ impl Registry {
         })
     }
 
-    /// Spawns one registered actor, optionally held behind a batch start gate.
+    /// Spawns an actor for one new entry, optionally held behind a batch start gate.
     fn spawn_entry(
         &self,
         id: TaskId,
@@ -106,7 +106,11 @@ impl Registry {
         }
     }
 
-    /// Validates and registers a complete static task batch without partial start.
+    /// Checks the complete static batch and registers all entries or none.
+    ///
+    /// Accepted actors wait behind one start gate.
+    /// The gate opens only after every entry is indexed, all `TaskAdded` publications are attempted, and the direct batch reply send is attempted.
+    /// A rejected batch inserts no entries and starts no task bodies.
     pub(super) async fn spawn_and_register_batch(
         &self,
         items: Vec<AddBatchItem>,

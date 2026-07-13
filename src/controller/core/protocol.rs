@@ -14,9 +14,10 @@ use crate::{
 pub(super) enum ControllerCommand {
     /// Apply admission policy for one new submission.
     Submit(Submission),
-    /// Apply one identity operation after all earlier controller submissions.
+    /// Start one identity operation after earlier controller commands are handled.
     ///
-    /// The controller removes queued work itself and owns registry fallback for every other id.
+    /// Queued-work lookup happens inline in command order.
+    /// Registry fallback for every other id runs in a bounded worker and may finish concurrently with later operations.
     ManageIdentity {
         id: TaskId,
         operation: IdentityOperation,

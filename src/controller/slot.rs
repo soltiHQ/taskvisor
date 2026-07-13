@@ -1,9 +1,10 @@
 //! Internal typed slot state for the controller.
 //!
 //! A slot is one controller admission lane.
-//! It may have one current owner and a FIFO queue of submissions waiting behind it.
+//! It may have one current owner and a deque of pending submissions.
+//! `Queue` submissions keep FIFO order; `Replace` may supersede the head.
 //!
-//! SlotPhase owns the current TaskId in every occupied phase;
+//! `SlotPhase` owns the current `TaskId` in every occupied phase;
 //! an idle slot cannot retain an owner and an occupied slot cannot exist without one.
 //! Transition methods reject stale identities without mutating the current owner.
 
@@ -20,7 +21,7 @@ pub(super) struct SlotState {
 
     /// Pending submissions for this slot.
     ///
-    /// The front item is the next submission to admit after the current owner is removed.
+    /// The front item is next after the current admission fails or after terminal cleanup of an accepted owner.
     pub(super) queue: VecDeque<(TaskId, TaskSpec)>,
 }
 
@@ -35,17 +36,18 @@ pub(super) enum SlotPhase {
 
     /// Replacement was requested while Add was pending.
     ///
-    /// No remove command can be sent until the registry accepts the Add.
-    /// Public snapshots expose this phase as Terminating, matching the existing controller contract.
+    /// The replacement path waits for the registry decision.
+    /// It orders removal only after the registry accepts the Add.
+    /// Public snapshots expose this phase as `Terminating`.
     CancelPendingAdmission {
         owner: TaskId,
         requested_at: Instant,
     },
 
-    /// The registry accepted the task and the slot is occupied.
+    /// The registry accepted the task, and terminal cleanup has not yet been applied by the controller.
     Running { owner: TaskId, started_at: Instant },
 
-    /// Runtime removal has been ordered and terminal registry cleanup is pending.
+    /// A replacement-driven runtime removal request has started, and terminal registry cleanup has not yet been applied.
     Terminating {
         owner: TaskId,
         requested_at: Instant,
@@ -59,7 +61,7 @@ pub(super) enum ReplaceAction {
     RemoveNow(TaskId),
     /// The Add reply must arrive before removal can be ordered.
     WaitForAdmission,
-    /// A prior replacement already requested removal.
+    /// Replacement was already recorded; removal is pending or already requested.
     AlreadyRequested,
     /// The slot was idle, so replacement policy does not apply.
     Idle,

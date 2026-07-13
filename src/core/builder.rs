@@ -1,8 +1,9 @@
 //! Build a stopped [`Supervisor`].
 //!
-//! [`SupervisorBuilder::build`] only creates the runtime state and channels. It
-//! does not spawn Tokio tasks. [`Supervisor::run`](crate::Supervisor::run) or
-//! [`Supervisor::serve`](crate::Supervisor::serve) starts the runtime.
+//! [`SupervisorBuilder::build`] only creates the runtime state and channels.
+//! It does not spawn Tokio tasks.
+//!
+//! [`Supervisor::run`](crate::Supervisor::run) or [`Supervisor::serve`](crate::Supervisor::serve) starts the runtime.
 //!
 //! ```rust
 //! use std::num::NonZeroUsize;
@@ -90,6 +91,8 @@ impl SupervisorBuilder {
     }
 
     /// Sets the shared deadline for draining subscriber queues.
+    ///
+    /// The deadline can drop queued events, but it cannot interrupt a subscriber callback already running.
     pub fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.runtime = self.runtime.with_subscriber_shutdown_timeout(timeout);
         self
@@ -106,6 +109,7 @@ impl SupervisorBuilder {
     /// Sets the concurrency limit from a raw integer.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero.
     pub fn try_with_max_concurrent(mut self, max_concurrent: usize) -> Result<Self, ConfigError> {
         self.runtime = self.runtime.try_with_max_concurrent(max_concurrent)?;
@@ -121,6 +125,7 @@ impl SupervisorBuilder {
     /// Sets the event-bus capacity from a raw integer.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero.
     pub fn try_with_bus_capacity(mut self, bus_capacity: usize) -> Result<Self, ConfigError> {
         self.runtime = self.runtime.try_with_bus_capacity(bus_capacity)?;
@@ -138,6 +143,7 @@ impl SupervisorBuilder {
     /// Sets the registry queue capacity from a raw integer.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero.
     pub fn try_with_registry_queue_capacity(
         mut self,
@@ -155,7 +161,9 @@ impl SupervisorBuilder {
         self
     }
 
-    /// Enables slot-based admission through the optional controller.
+    /// Configures slot admission for `SupervisorHandle::submit*` methods.
+    ///
+    /// Direct `add*` methods bypass the controller and register with the runtime.
     #[cfg(feature = "controller")]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
@@ -164,8 +172,8 @@ impl SupervisorBuilder {
 
     /// Builds a stopped supervisor.
     ///
-    /// It is safe to call outside Tokio. The method allocates channels and
-    /// stores configuration, but does not spawn tasks.
+    /// It is safe to call outside Tokio.
+    /// The method allocates channels and stores configuration, but does not spawn tasks.
     #[must_use]
     pub fn build(self) -> Arc<Supervisor> {
         let bus = Bus::new(self.runtime.bus_capacity().get());

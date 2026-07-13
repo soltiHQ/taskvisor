@@ -43,8 +43,9 @@ impl ListenerState {
 }
 
 impl Registry {
-    /// Waits until every management command committed before this call has been processed.
+    /// Waits until every management command committed before this call reaches its direct registry decision.
     ///
+    /// This does not wait for actor joins or terminal membership cleanup.
     /// The control channel is independent of bounded management queue capacity.
     pub(crate) async fn fence(&self) -> Result<(), RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
@@ -63,9 +64,8 @@ impl Registry {
     /// - shutdown fences from the independent control channel,
     /// - actor identity signals from the reliable completion channel.
     ///
-    /// On runtime shutdown, it closes the command receiver, drains commands that
-    /// are already buffered without waiting for uncommitted reservations, cancels
-    /// remaining actors with zero extra grace, and waits for join reporters.
+    /// On runtime cancellation, it closes the command receiver and processes commands already buffered without waiting for uncommitted reservations.
+    /// It then claims entries still in `Registered` with zero additional grace and waits for both existing and newly created join owners to finish.
     pub fn spawn_listener(self: Arc<Self>) {
         let mut cmd_rx = self
             .listener
@@ -233,7 +233,7 @@ impl Registry {
 
     /// Runs one listener operation under a panic boundary.
     ///
-    /// A panic while processing one command/event is reported as a diagnostic event instead of killing the whole registry listener.
+    /// A panic while processing one command or completion is reported as a diagnostic event instead of killing the registry listener.
     async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
         if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
             self.bus.publish(Event::subscriber_panicked(

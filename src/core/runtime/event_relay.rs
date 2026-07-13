@@ -11,13 +11,16 @@ use crate::{
 
 impl SupervisorCore {
     /// Returns a best-effort sorted list of task names currently marked alive.
+    ///
+    /// This is an event-derived activity view, not registry membership.
+    /// A registered actor can be marked not alive while it waits to retry.
     pub(crate) async fn snapshot(&self) -> Vec<Arc<str>> {
         self.alive.snapshot().await
     }
 
     /// Returns true if any task with this name is currently marked alive.
     ///
-    /// This is a best-effort label query from the alive tracker.
+    /// This is a best-effort activity query from the alive tracker, not a registry membership check.
     pub(crate) async fn is_alive(&self, name: &str) -> bool {
         self.alive.is_alive(name).await
     }
@@ -46,9 +49,9 @@ impl SupervisorCore {
         }
     }
 
-    /// Waits for the subscriber listener task to finish.
+    /// Starts the subscriber listener task.
     ///
-    /// If the listener was never started, this is a no-op.
+    /// The listener relays bus events to the alive tracker and subscriber queues.
     pub(super) fn subscriber_listener(&self) {
         let mut rx = self.bus.subscribe();
         let set = Arc::clone(&self.subs);
