@@ -15,15 +15,15 @@
 //!
 //! Internal runtime:
 //!
-//! | File             | Role                                      |
-//! |------------------|-------------------------------------------|
-//! | `runtime.rs`     | Owns Bus, Registry, subscribers, shutdown |
-//! | `registry.rs`    | Owns active task actors and lifecycle ops |
-//! | `actor.rs`       | Runs one task with restart/backoff policy |
-//! | `runner.rs`      | Executes one task attempt                 |
-//! | `alive.rs`       | Best-effort live-task snapshot            |
-//! | `shutdown.rs`    | OS signal handling                        |
-//! | `panic_guard.rs` | Panic boundary for long-lived listeners   |
+//! | File / directory        | Role                                                   |
+//! |-------------------------|--------------------------------------------------------|
+//! | `runtime.rs`, `runtime/`   | Composition, management, events, lifecycle, shutdown |
+//! | `registry.rs`, `registry/` | Membership, admission, joins, removal, listener       |
+//! | `actor.rs`                  | Runs one task with restart/backoff policy             |
+//! | `runner.rs`                 | Executes one task attempt                             |
+//! | `alive.rs`                  | Best-effort live-task snapshot                        |
+//! | `shutdown.rs`               | OS signal handling                                    |
+//! | `panic_guard.rs`            | Panic boundary for long-lived listeners               |
 //!
 //! ## Planes
 //!
