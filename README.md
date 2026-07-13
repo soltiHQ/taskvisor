@@ -294,7 +294,9 @@ The optional `tracing` feature provides `TracingBridge`. The repository also has
 
 The controller groups submissions into named slots. At most one task can occupy a slot. Different slots can run at the same time.
 
-<img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-controller.png" alt="Controller admission: an idle slot tries registry admission; a busy slot queues work when capacity is available, requests owner replacement, or rejects the submission according to its policy" width="1042">
+<p align="center">
+  <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-controller.png" alt="Controller admission: an idle slot tries registry admission; a busy slot queues work when capacity is available, requests owner retirement and sets or replaces the queue head, or rejects the submission according to its policy" width="968">
+</p>
 
 | Policy          | Busy-slot behavior                                                           | Typical use                              |
 |-----------------|------------------------------------------------------------------------------|------------------------------------------|
