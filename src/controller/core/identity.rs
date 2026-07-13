@@ -15,8 +15,8 @@ use super::{Controller, IdentityOperation, IdentityReply};
 impl Controller {
     /// Applies one accepted identity operation after all earlier controller commands.
     ///
-    /// The controller claims still-queued work directly. For every other id, it owns the registry
-    /// fallback in a tracked task so dropping the public caller cannot stop an accepted operation.
+    /// The controller claims still-queued work directly.
+    /// For every other id, it owns the registry fallback in a tracked task so dropping the public caller cannot stop an accepted operation.
     pub(super) async fn handle_identity_operation(
         &self,
         id: TaskId,
@@ -65,8 +65,8 @@ impl Controller {
 
     /// Removes one queued, not-yet-admitted submission by identity.
     ///
-    /// Returns `true` only when this call claimed the queued submission. A claimed watched
-    /// submission resolves as `Rejected("removed_from_queue")` because its task body never ran.
+    /// Returns `true` only when this call claimed the queued submission.
+    /// A claimed watched submission resolves as `Rejected("removed_from_queue")` because its task body never ran.
     async fn remove_queued_submission(
         &self,
         id: TaskId,

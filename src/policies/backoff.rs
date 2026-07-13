@@ -1,8 +1,7 @@
 //! # Delay between failed attempts
 //!
 //! [`BackoffPolicy`] computes how long Taskvisor waits after a retryable failure.
-//! It is not used after success; [`RestartPolicy::Always`](crate::RestartPolicy::Always)
-//! has its own `interval` for that case.
+//! It is not used after success; [`RestartPolicy::Always`](crate::RestartPolicy::Always) has its own `interval` for that case.
 //!
 //! | Field                              | Role                                      |
 //! |------------------------------------|-------------------------------------------|
@@ -24,10 +23,10 @@
 //! delay = max(delay, 1ms) for non-zero base, capped at max
 //! ```
 //!
-//! The final `1ms` safety floor prevents a fast retry loop when jitter returns a
-//! very small value. It applies only when the base delay is not zero. Set
-//! `first` to zero to disable this safety floor. A floor set with
-//! [`with_floor`](BackoffPolicy::with_floor) still applies.
+//! The final `1ms` safety floor prevents a fast retry loop when jitter returns a very small value.
+//! It applies only when the base delay is not zero.
+//! Set `first` to zero to disable this safety floor.
+//! A floor set with [`with_floor`](BackoffPolicy::with_floor) still applies.
 //!
 //! ## Example
 //! ```rust
@@ -58,8 +57,8 @@ use crate::policies::jitter::JitterPolicy;
 
 /// Error returned when backoff settings are invalid.
 ///
-/// Match with a wildcard arm because this enum is non-exhaustive. Its data-carrying
-/// variants are also non-exhaustive, so include `..` when matching their payloads.
+/// Match with a wildcard arm because this enum is non-exhaustive.
+/// Its data-carrying variants are also non-exhaustive, so include `..` when matching their payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 #[non_exhaustive]
 pub enum BackoffError {
@@ -129,8 +128,7 @@ impl BackoffPolicy {
     /// - [`BackoffError::FirstExceedsMax`] if `first > max`.
     ///
     /// The user floor starts at zero. Set it with [`with_floor`](Self::with_floor).
-    /// A separate `1ms` safety floor applies to a non-zero base; see
-    /// [`delay_for_retry`](Self::delay_for_retry).
+    /// A separate `1ms` safety floor applies to a non-zero base; see [`delay_for_retry`](Self::delay_for_retry).
     pub fn new(
         first: Duration,
         max: Duration,
@@ -186,8 +184,8 @@ impl BackoffPolicy {
     /// Change the cap with [`with_max`](Self::with_max).
     /// No jitter by default.
     /// Add it with [`with_jitter`](Self::with_jitter).
-    /// For a non-zero `first` below `1ms`, the safety floor can make early
-    /// delays longer. A zero value disables that floor.
+    /// For a non-zero `first` below `1ms`, the safety floor can make early delays longer.
+    /// A zero value disables that floor.
     ///
     /// ```rust
     /// use std::time::Duration;
@@ -279,8 +277,8 @@ impl BackoffPolicy {
 
     /// Computes the delay before one retry.
     ///
-    /// Attempt numbers in events start at `1`. This index starts at `0`, so the
-    /// delay after event attempt `1` uses `retry_index = 0`.
+    /// Attempt numbers in events start at `1`.
+    /// This index starts at `0`; the delay after event attempt `1` uses `retry_index = 0`.
     ///
     /// The base delay is `first × factor^retry_index`, capped at [`Self::max`].
     /// Jitter is then applied.
@@ -290,17 +288,14 @@ impl BackoffPolicy {
     ///
     /// This method has no memory. One result does not change later results.
     ///
-    /// After jitter, Taskvisor applies the user floor. For a non-zero base, it
-    /// also applies a `1ms` safety floor, capped at `max`. `first = 0` disables
-    /// only this safety floor.
+    /// After jitter, Taskvisor applies the user floor.
+    /// For a non-zero base, it also applies a `1ms` safety floor, capped at `max`.
+    /// `first = 0` disables only this safety floor.
     #[must_use]
     pub fn delay_for_retry(&self, retry_index: u32) -> Duration {
         let clamped_exp = retry_index.min(i32::MAX as u32) as i32;
         let unclamped_secs = self.first.as_secs_f64() * self.factor.powi(clamped_exp);
 
-        // `Duration::MAX.as_secs_f64()` rounds up to a value that cannot be
-        // converted back to `Duration`. Keep the conversion fallible, then
-        // enforce the configured cap after conversion as well.
         let base = if self.first.is_zero() {
             Duration::ZERO
         } else {

@@ -1,19 +1,7 @@
 //! # Manage a running supervisor
 //!
-//! [`Supervisor::serve`](crate::Supervisor::serve) returns a
-//! [`SupervisorHandle`]. Use it to add, inspect, stop, and watch tasks while the
-//! service is running.
-//!
-//! ```text
-//! Supervisor::serve()
-//!         |
-//!         v
-//! SupervisorHandle
-//!   | add / add_and_watch
-//!   | list / alive_snapshot
-//!   | remove / cancel
-//!   + shutdown
-//! ```
+//! [`Supervisor::serve`](crate::Supervisor::serve) returns a [`SupervisorHandle`].
+//! Use it to add, inspect, stop, and watch tasks while the service is running.
 //!
 //! For state changes, the regular method waits for management-queue capacity.
 //! Its `try_*` form returns a queue-full error instead. After queue admission,

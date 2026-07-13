@@ -1,8 +1,7 @@
 //! # Authoritative task registry
 //!
-//! The registry owns active task identities, names, actor handles, and final
-//! cleanup. A task remains registered until its actor is joined and both
-//! indexes are released.
+//! The registry owns active task identities, names, actor handles, and final cleanup.
+//! A task remains registered until its actor is joined and both indexes are released.
 //!
 //! ## Internal Layout
 //!
@@ -13,22 +12,47 @@
 //! - `removal`: removal claims, actor joins, outcomes, and cleanup.
 //! - `listener`: command and completion dispatch.
 //!
-//! ## Paths
+//! ## Data Flow
 //!
 //! ```text
-//! commands:    SupervisorCore -- bounded queue --> Registry
-//!                                <-- direct reply --
-//! completion: TaskActor ------ reliable signal ---> Registry
-//!             Registry ------- final result ------> waiters/controller
-//! events:     runtime parts --- best-effort ------> subscribers
+//! Management command
+//! ------------------
+//! SupervisorCore
+//!       │ RegistryCommand (bounded channel)
+//!       ▼
+//! Registry listener
+//!       │ decision (oneshot reply)
+//!       ▼
+//! Calling method
+//!
+//! Terminal cleanup
+//! ----------------
+//! Managed actor task ends
+//!       │ TaskId (internal completion channel)
+//!       ▼
+//! Registry listener
+//!       │ claim actor handle, then join
+//!       ▼
+//! Remove TaskId and name from both indexes
+//!       ├── TaskOutcome ─────────► TaskWaiter
+//!       └── RemovalCompletion ───► cancel callers / controller
+//!
+//! Observability
+//! -------------
+//! Runtime components ── Event (best-effort) ──► event bus
+//!                                                   │
+//!                                                   ▼
+//!                                            subscriber queues
 //! ```
+//!
+//! Commands and completion signals drive registry state. Events only describe
+//! that work; losing an event cannot block cleanup or keep a slot occupied.
 //!
 //! ## Invariants
 //!
 //! - Both identity indexes change under one write lock.
 //! - A name stays reserved while its entry is registered or being removed.
-//! - One removal claim owns the actor join handle. Later cancellation calls can
-//!   wait on the same completion signal.
+//! - One removal claim owns the actor join handle. Later cancellation calls can wait on the same completion signal.
 //! - A static batch starts only after every name is validated and indexed.
 //! - Only terminal join cleanup removes membership. Best-effort events cannot do it.
 //! - Shutdown processes accepted management commands before task drain starts.
@@ -65,8 +89,8 @@ use state::{Entry, EntryState, Handle};
 
 /// Owns registered tasks and their membership state.
 ///
-/// It accepts management commands, receives actor completion signals, joins
-/// actors, resolves watched outcomes, and publishes registry lifecycle events.
+/// It accepts management commands, receives actor completion signals, joins actors,
+/// resolves watched outcomes, and publishes registry lifecycle events.
 ///
 /// # Also
 ///

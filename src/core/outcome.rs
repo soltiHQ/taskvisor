@@ -1,24 +1,29 @@
 //! # Reliable final task results
 //!
-//! Lifecycle events show live progress, but they are best-effort. Use a
-//! [`TaskWaiter`] when application logic needs the final [`TaskOutcome`].
+//! Lifecycle events show live progress, but they are best-effort.
+//! Use a [`TaskWaiter`] when application logic needs the final [`TaskOutcome`].
 //!
-//! A waiter uses a direct one-shot channel. Event-bus lag does not affect it.
+//! A waiter uses a direct one-shot channel.
+//! Event-bus lag does not affect it.
 //!
-//! ## Flow
+//! ## Successful Direct-Add Flow
 //!
 //! ```text
-//! add_and_watch(spec) -> (TaskId, TaskWaiter)
-//!                                |
-//! task runs -> retries end -> actor joined + membership removed
-//!                                |
-//!                                v
-//!                          TaskOutcome
+//! Caller                         Runtime                         Task actor
+//!   │                               │                                │
+//!   │ add_and_watch(spec)           │                                │
+//!   ├──────────────────────────────►│ register and spawn             │
+//!   │                               ├───────────────────────────────►│
+//!   │◄──────────────────────────────┤ (TaskId, TaskWaiter)           │
+//!   │                               │                                │ attempts / retries
+//!   │ await waiter.wait()           │◄───────────────────────────────┤ terminal signal
+//!   │                               │ join actor                     │
+//!   │                               │ remove TaskId and name         │
+//!   │◄──────────────────────────────┤ TaskOutcome (oneshot)          │
 //! ```
 //!
-//! With the `controller` feature, `submit_and_watch` can also return a waiter
-//! before slot admission. If the controller rejects the submission, the final
-//! outcome is [`TaskOutcome::Rejected`] and the task body never runs.
+//! With the `controller` feature, `submit_and_watch` can also return a waiter before slot admission.
+//! If the controller rejects the submission, the final outcome is [`TaskOutcome::Rejected`] and the task body never runs.
 //!
 //! ## Guarantees
 //!
@@ -46,24 +51,25 @@ use crate::identity::TaskId;
 /// joined, and registry membership is removed. A controller can instead return
 /// [`Rejected`](Self::Rejected) before the task starts.
 ///
-/// This enum is non-exhaustive. Include a fallback arm when matching it. The
-/// data-carrying variants are also non-exhaustive, so match their fields with
-/// `..`.
+/// This enum is non-exhaustive.
+/// Include a fallback arm when matching it.
+/// The data-carrying variants are also non-exhaustive, so match their fields with `..`.
 ///
 /// ## Outcome vs Events
 ///
-/// Events are best-effort and may be missing. Do not rebuild a final outcome by
-/// collecting event kinds. A waiter uses a separate, reliable runtime channel.
+/// Events are best-effort and may be missing.
+/// Do not rebuild a final outcome by collecting event kinds.
+/// A waiter uses a separate, reliable runtime channel.
 ///
-/// | Outcome | Meaning |
-/// |---------|---------|
-/// | [`Completed`](Self::Completed) | Final attempt succeeded and policy stopped |
-/// | [`Failed`](Self::Failed) | Retryable failure reached a stop condition |
-/// | [`Fatal`](Self::Fatal) | Task reported a permanent failure |
-/// | [`Canceled`](Self::Canceled) | Cooperative cancellation |
-/// | [`ForceAborted`](Self::ForceAborted) | Task did not stop before the grace period |
-/// | [`Panicked`](Self::Panicked) | Internal actor panicked |
-/// | [`Rejected`](Self::Rejected) | Task body never ran |
+/// | Outcome                              | Meaning                                    |
+/// |--------------------------------------|--------------------------------------------|
+/// | [`Completed`](Self::Completed)       | Final attempt succeeded and policy stopped |
+/// | [`Failed`](Self::Failed)             | Retryable failure reached a stop condition |
+/// | [`Fatal`](Self::Fatal)               | Task reported a permanent failure          |
+/// | [`Canceled`](Self::Canceled)         | Cooperative cancellation                   |
+/// | [`ForceAborted`](Self::ForceAborted) | Task did not stop before the grace period  |
+/// | [`Panicked`](Self::Panicked)         | Internal actor panicked                    |
+/// | [`Rejected`](Self::Rejected)         | Task body never ran                        |
 ///
 /// ## See Also
 ///
@@ -112,8 +118,7 @@ pub enum TaskOutcome {
 
     /// Task stopped because cancellation was requested or reported.
     ///
-    /// This can come from shutdown, explicit removal, or the task returning
-    /// [`TaskError::Canceled`](crate::TaskError::Canceled).
+    /// This can come from shutdown, explicit removal, or the task returning [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
     /// Task ignored cooperative cancellation and was aborted after the grace period.
@@ -121,8 +126,8 @@ pub enum TaskOutcome {
 
     /// The internal actor panicked.
     ///
-    /// This guards against a runtime bug. Panics inside the user task are caught
-    /// earlier and become retryable failures instead.
+    /// This guards against a runtime bug.
+    /// Panics inside the user task are caught earlier and become retryable failures instead.
     Panicked,
 
     /// The task body never ran.
@@ -151,8 +156,7 @@ impl TaskOutcome {
     /// Creates a [`Failed`](Self::Failed) outcome for tests.
     ///
     /// Real outcomes normally come from the runtime.
-    /// The `Failed`, `Fatal`, and `Rejected` variants are `#[non_exhaustive]`;
-    /// other crates cannot build them directly.
+    /// The `Failed`, `Fatal`, and `Rejected` variants are `#[non_exhaustive]`; other crates cannot build them directly.
     ///
     /// This helper lets tests cover code that handles failed outcomes; `source` is `None`.
     ///
@@ -250,9 +254,8 @@ impl TaskOutcome {
     doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)"
 )]
 ///
-/// [`wait`](Self::wait) consumes the waiter. It normally resolves after the task
-/// or submission reaches a final outcome. Dropping the waiter does not cancel
-/// the task.
+/// [`wait`](Self::wait) consumes the waiter.
+/// It normally resolves after the task or submission reaches a final outcome. Dropping the waiter does not cancel the task.
 ///
 /// ## Example
 ///
@@ -296,13 +299,11 @@ impl TaskWaiter {
 
     /// Waits for the final outcome.
     ///
-    /// Normal shutdown resolves registered tasks as
-    /// [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
+    /// Normal shutdown resolves registered tasks as [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops its sender
-    /// before producing an outcome. No final result is available in that case.
+    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops its sender before producing an outcome. No final result is available in that case.
     pub async fn wait(self) -> Result<TaskOutcome, RuntimeError> {
         self.rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }

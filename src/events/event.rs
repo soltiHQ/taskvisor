@@ -1,8 +1,8 @@
 //! # Event data model
 //!
-//! [`Event`] is a flat record. [`EventKind`] tells you what happened, and the
-//! optional fields give details. Delivery is best-effort; events are not durable
-//! storage and are not a reliable completion signal.
+//! [`Event`] is a flat record.
+//! [`EventKind`] tells you what happened, and the optional fields give details.
+//! Delivery is best-effort; events are not durable storage and are not a reliable completion signal.
 //!
 //! | Type              | Role                                       |
 //! |-------------------|--------------------------------------------|
@@ -12,14 +12,12 @@
 //!
 //! ## Sequence numbers
 //!
-//! [`Event::new`] gives each event a process-local increasing `seq`. Use it to
-//! sort observed events and detect gaps. It is not stored across process
-//! restarts. Like any `u64` counter, it wraps after `2^64` allocations;
-//! Taskvisor does not guard this theoretical limit.
+//! [`Event::new`] gives each event a process-local increasing `seq`.
+//! Use it to sort observed events and detect gaps.
+//! It is not stored across process restarts.
 //!
-//! `seq` is not a causal clock. With concurrent publishers, it shows event
-//! construction order, not a guaranteed order of runtime effects or subscriber
-//! callbacks.
+//! `seq` is not a causal clock.
+//! With concurrent publishers, it shows event construction order, not a guaranteed order of runtime effects or subscriber callbacks.
 //!
 //! ## Fields
 //!
@@ -33,15 +31,13 @@
 //! Present when relevant:
 //! - `id`: the stable [`TaskId`] for one submission and run.
 //! - `attempt`: task attempt number, starting from 1.
-//! - `task`: usually a task name. Subscriber diagnostics use it for the
-//!   subscriber name, and controller events use it for the slot name.
+//! - `task`: usually a task name. Subscriber diagnostics use it for the subscriber name, and controller events use it for the slot name.
 //!
-//! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds. Values
-//! above `u32::MAX` milliseconds are stored as `u32::MAX`.
+//! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
+//! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
-//! Treat `reason` as human-readable text unless the event points to a constant
-//! in [`reasons`](crate::reasons). Use [`EventKind::as_label`] for a stable event
-//! label.
+//! Treat `reason` as human-readable text unless the event points to a constant in [`reasons`](crate::reasons).
+//! Use [`EventKind::as_label`] for a stable event label.
 //!
 //! ## Example
 //!
@@ -152,8 +148,8 @@ pub enum EventKind {
 
     /// A task attempt returned a failure.
     ///
-    /// This includes retryable failures, timeouts, and fatal errors. A later
-    /// event shows whether Taskvisor retries or reaches a terminal state.
+    /// This includes retryable failures, timeouts, and fatal errors.
+    /// A later event shows whether Taskvisor retries or reaches a terminal state.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -191,8 +187,8 @@ pub enum EventKind {
 
     /// An add request was published before Taskvisor processed it.
     ///
-    /// This does not confirm admission. For an all-or-nothing batch, Taskvisor publishes
-    /// one request event per item before it sends the whole batch command.
+    /// This does not confirm admission.
+    /// For an all-or-nothing batch, Taskvisor publishes one request event per item before it sends the whole batch command.
     ///
     /// Sets:
     /// - `id`: task run identity (pre-allocated for this add request)
@@ -212,8 +208,8 @@ pub enum EventKind {
 
     /// A task was not added because its name conflicted or its all-or-nothing batch was rejected.
     ///
-    /// No task runner is spawned for a rejected dynamic add. If an
-    /// all-or-nothing batch is rejected, no task runner is spawned for any item.
+    /// No task runner is spawned for a rejected dynamic add.
+    /// If an all-or-nothing batch is rejected, no task runner is spawned for any item.
     ///
     /// Sets:
     /// - `id`: task run identity of the rejected add request
@@ -225,8 +221,8 @@ pub enum EventKind {
 
     /// A remove request was published before Taskvisor completed it.
     ///
-    /// This is not proof of removal. Use the management method's result or a
-    /// waiter when you need a reliable answer.
+    /// This is not proof of removal.
+    /// Use the management method's result or a waiter when you need a reliable answer.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -294,8 +290,8 @@ pub enum EventKind {
     #[cfg(feature = "controller")]
     /// The controller accepted a submission.
     ///
-    /// The task may still be queued or waiting for runtime registration. This
-    /// event does not mean that the task body has started.
+    /// The task may still be queued or waiting for runtime registration.
+    /// This event does not mean that the task body has started.
     ///
     /// Sets:
     /// - `task`: slot name
@@ -391,8 +387,7 @@ impl BackoffSource {
 /// - `seq`: process-local construction sequence; see the module-level limits
 /// - other optional fields are set depending on the [`EventKind`]
 ///
-/// Fields are public for reading. Create an event with [`Event::new`] and add
-/// optional values with the `with_*` builders.
+/// Fields are public for reading. Create an event with [`Event::new`] and add optional values with the `with_*` builders.
 /// Use `..` when matching the struct because more fields may be added.
 ///
 /// # Also
@@ -405,8 +400,7 @@ impl BackoffSource {
 pub struct Event {
     /// Process-local sequence number allocated when the event was created.
     ///
-    /// It increases until the `u64` counter wraps and is not stored across
-    /// process restarts.
+    /// It increases until the `u64` counter wraps and is not stored across process restarts.
     pub seq: u64,
     /// Wall-clock timestamp captured when the event was created.
     ///
@@ -419,22 +413,19 @@ pub struct Event {
     pub delay_ms: Option<u32>,
     /// Elapsed duration of the attempt in milliseconds.
     pub duration_ms: Option<u32>,
-    /// Human-readable reason.
-    ///
     /// Only values documented in [`reasons`](crate::reasons) are stable.
     pub reason: Option<Arc<str>>,
     /// Attempt count (starting from 1).
     pub attempt: Option<u32>,
-    /// Human-readable name, not an identity.
-    ///
-    /// This is normally a task name. Subscriber diagnostics use it for a
-    /// subscriber name, and controller events use it for a slot name.
+    /// This is normally a task name. Subscriber diagnostics use it for a subscriber name, and controller events use it for a slot name.
     pub task: Option<Arc<str>>,
     /// Submission/run identity this event belongs to, if applicable.
     ///
-    /// This is the canonical correlation key. Unlike [`task`](Self::task), it
-    /// does not change during one submission. Controller events may carry it
-    /// before runtime admission. See [`TaskId`] for process and counter limits.
+    /// This is the canonical correlation key.
+    /// Unlike [`task`](Self::task), it does not change during one submission.
+    /// Controller events may carry it before runtime admission.
+    ///
+    /// See [`TaskId`] for process and counter limits.
     pub id: Option<TaskId>,
     /// Numeric exit code, from a process-like runtime.
     /// `None` for events that have no process behind them.

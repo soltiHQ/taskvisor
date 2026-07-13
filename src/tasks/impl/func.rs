@@ -10,8 +10,8 @@ use crate::{
 
 /// A named task backed by an async closure.
 ///
-/// This is the simplest way to define a task. The supervisor calls the closure
-/// for every attempt, so each call creates a fresh future.
+/// This is the simplest way to define a task.
+/// The supervisor calls the closure for every attempt, so each call creates a fresh future.
 ///
 /// ## Long-Running Worker
 ///
@@ -34,8 +34,8 @@ use crate::{
 ///
 /// ## Task With Shared State
 ///
-/// The closure can run more than once. Clone shared state into the closure, then
-/// clone it again into each returned future:
+/// The closure can run more than once.
+/// Clone shared state into the closure, then clone it again into each returned future:
 ///
 /// ```rust
 /// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
@@ -61,7 +61,7 @@ use crate::{
 ///
 /// ## See Also
 ///
-/// - See the [`Task`](crate::Task) trait documentation.
+/// - See the [`Task`] trait documentation.
 /// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 pub struct TaskFn<F> {
     name: Arc<str>,
@@ -91,7 +91,7 @@ where
         }
     }
 
-    /// Creates a task inside an [`Arc`](std::sync::Arc).
+    /// Creates a task inside an [`Arc`].
     ///
     /// The result converts to [`TaskRef`](crate::TaskRef) where needed.
     pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {

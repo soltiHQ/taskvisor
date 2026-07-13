@@ -179,7 +179,7 @@ impl Registry {
     ///
     /// Duplicate task names are rejected.
     ///
-    /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) because registration confirmation fails before the waiter is returned.
+    /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`] because registration confirmation fails before the waiter is returned.
     pub(super) async fn spawn_and_register(
         &self,
         id: TaskId,

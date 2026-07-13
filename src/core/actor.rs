@@ -1,8 +1,7 @@
 //! # Restart loop for one task
 //!
-//! [`TaskActor`] runs attempts in order and applies restart, backoff, timeout,
-//! retry-limit, and cancellation rules. One actor belongs to one registered
-//! [`TaskId`](crate::TaskId).
+//! [`TaskActor`] runs attempts in order and applies restart, backoff, timeout, retry-limit, and cancellation rules.
+//! One actor belongs to one registered [`TaskId`].
 //!
 //! ## Flow
 //!
@@ -16,23 +15,21 @@
 //!           stop or repeat       backoff or stop           stop
 //! ```
 //!
-//! [`run_once`](super::runner::run_once) handles one attempt, including timeout,
-//! panic capture, and attempt events. The actor then decides whether to stop,
-//! wait, or start another attempt.
+//! [`run_once`] handles one attempt, including timeout, panic capture, and attempt events.
+//! The actor then decides whether to stop, wait, or start another attempt.
 //!
 //! ## Events and Final State
 //!
 //! `TaskStopped`, `TaskCanceled`, and `TaskFailed` describe one attempt.
-//! `BackoffScheduled`, `ActorExhausted`, and `ActorDead` describe the actor's
-//! decision. A `TaskFailed` event is not a final outcome; another attempt may
-//! follow it.
+//! `BackoffScheduled`, `ActorExhausted`, and `ActorDead` describe the actor's decision.
+//!
+//! A `TaskFailed` event is not a final outcome; another attempt may follow it.
 //!
 //! ## Rules
 //!
 //! - Attempts are sequential inside one actor.
 //! - Attempt numbers start at 1.
 //! - `max_retries` counts retries in one failure streak. A success resets it.
-//!   For example, `Some(1)` allows one failed attempt plus one retry.
 //! - A concurrency permit is held only while an attempt runs, not during delays.
 //! - Cancellation can stop permit waits and retry delays.
 //! - Instant successful repeats have a small delay to prevent a hot loop.

@@ -1,9 +1,7 @@
 //! # Run one task attempt
 //!
-//! [`run_once`] calls [`Task::spawn`](crate::Task::spawn), applies one attempt
-//! timeout, catches user-task panics, and publishes attempt events. It returns
-//! the attempt result to [`TaskActor`](super::actor::TaskActor), which decides
-//! whether to restart.
+//! [`run_once`] calls [`Task::spawn`], applies one attempt timeout, catches user-task panics, and publishes attempt events.
+//! It returns the attempt result to [`TaskActor`](super::actor::TaskActor), which decides whether to restart.
 //!
 //! ## Event Flow
 //!
@@ -33,12 +31,10 @@
 //!
 //! ## Rules
 //!
-//! - Each call publishes one final attempt event: `TaskStopped`, `TaskCanceled`,
-//!   or `TaskFailed`.
+//! - Each call publishes one final attempt event: `TaskStopped`, `TaskCanceled`, or `TaskFailed`.
 //! - `TimeoutHit` adds context before the final `TaskFailed` event.
 //! - `TaskError::Canceled` is a cooperative stop, not a failure.
-//! - Each attempt gets a child cancellation token. Parent cancellation reaches
-//!   it, but child cancellation does not affect the parent.
+//! - Each attempt gets a child cancellation token. Parent cancellation reaches it, but child cancellation does not affect the parent.
 //! - User-task panics become retryable [`TaskError::Fail`] values.
 
 use std::future::Future;
@@ -60,8 +56,7 @@ use crate::{
 /// Catches panics while polling a task future.
 ///
 /// A panic is converted to a retryable [`TaskError::Fail`].
-/// This keeps user panics on the normal failure path instead of unwinding
-/// through the actor.
+/// This keeps user panics on the normal failure path instead of unwinding through the actor.
 struct CatchPanic(BoxTaskFuture);
 
 impl Future for CatchPanic {
@@ -90,27 +85,25 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
 /// ### Steps
 ///
 /// 1. Create a child cancellation token.
-/// 2. Call [`Task::spawn`](crate::Task::spawn) and catch panics.
+/// 2. Call [`Task::spawn`] and catch panics.
 /// 3. Run the future with the optional timeout.
 /// 4. Publish the attempt event.
 /// 5. Return the attempt result.
 ///
 /// ### Timeout
 ///
-/// A positive timeout limits this attempt only. On timeout, the child token is
-/// cancelled, `TimeoutHit` is published, and the final event is `TaskFailed`
-/// with [`TaskError::Timeout`]. `None` and zero mean no timeout.
+/// A positive timeout limits this attempt only.
+/// On timeout, the child token is cancelled, `TimeoutHit` is published, and the final event is `TaskFailed` with [`TaskError::Timeout`]. `None` and zero mean no timeout.
 ///
 /// ### Cancellation
 ///
-/// Parent cancellation reaches the attempt context. A cooperative task should
-/// observe [`TaskContext::cancelled`](crate::TaskContext::cancelled) and return
-/// [`TaskError::Canceled`]. This publishes `TaskCanceled`, not `TaskFailed`.
+/// Parent cancellation reaches the attempt context.
+/// A cooperative task should observe [`TaskContext::cancelled`](crate::TaskContext::cancelled) and return [`TaskError::Canceled`].
+/// This publishes `TaskCanceled`, not `TaskFailed`.
 ///
 /// ### Panic Handling
 ///
-/// Panics from `spawn()` or from polling its future become retryable
-/// [`TaskError::Fail`] values with reason `task panicked: ...`.
+/// Panics from `spawn()` or from polling its future become retryable [`TaskError::Fail`] values with reason `task panicked: ...`.
 pub async fn run_once<T: Task + ?Sized>(
     task: &T,
     parent: &CancellationToken,

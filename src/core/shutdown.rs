@@ -1,11 +1,10 @@
 //! # OS shutdown signal helper
 //!
-//! [`Supervisor::run`](crate::Supervisor::run) uses
-//! [`wait_for_shutdown_signal`] in static mode. Dynamic mode through
-//! [`Supervisor::serve`](crate::Supervisor::serve) does not install this wait;
-//! the application decides when to call `shutdown`.
+//! [`Supervisor::run`](crate::Supervisor::run) uses [`wait_for_shutdown_signal`] in static mode.
+//! Dynamic mode through [`Supervisor::serve`](crate::Supervisor::serve) does not install this wait; the application decides when to call `shutdown`.
 //!
-//! This helper only waits. It does not publish events or cancel tasks.
+//! This helper only waits.
+//! It does not publish events or cancel tasks.
 //!
 //! ## Unix Signals
 //!
@@ -20,7 +19,8 @@
 //!
 //! ## Errors
 //!
-//! An error means signal setup or waiting failed. It is not a shutdown signal.
+//! An error means signal setup or waiting failed.
+//! It is not a shutdown signal.
 
 /// Waits for a supported process shutdown signal.
 ///

@@ -1,10 +1,9 @@
 //! # taskvisor
 //!
-//! Taskvisor supervises long-running Tokio tasks. It can restart failed work,
-//! slow down retries, time out each attempt, and stop tasks during shutdown.
+//! Taskvisor supervises long-running Tokio tasks.
+//! It can restart failed work, slow down retries, time out each attempt, and stop tasks during shutdown.
 //!
-//! Use it for workers, consumers, connection loops, and other background work
-//! that should have a clear lifecycle.
+//! Use it for workers, consumers, connection loops, and other background work that should have a clear lifecycle.
 //!
 //! ## Start Here
 //!
@@ -15,28 +14,25 @@
 //!
 //! ```text
 //! TaskFn or impl Task
-//!          |
 //!          v
 //!       TaskSpec  -- fills missing values from --> TaskDefaults
-//!          |
 //!          v
 //!      Supervisor
 //!       |       |
 //!       |       +-- best-effort events --> Subscribe
 //!       |
-//!       +-- watched final result -------> TaskWaiter
+//!       +-- watched final result --------> TaskWaiter
 //! ```
 //!
 //! ## Choose a Mode
 //!
-//! - **Static:** call [`Supervisor::run`] with a known task set. It waits for
-//!   all tasks to finish or for an OS shutdown signal.
-//! - **Dynamic:** call [`Supervisor::serve`]. It returns a
-//!   [`SupervisorHandle`] that can add, remove, cancel, and list tasks while the
-//!   service is running.
+//! - **Static:** call [`Supervisor::run`] with a known task set.
+//!   It waits for all tasks to finish or for an OS shutdown signal.
+//! - **Dynamic:** call [`Supervisor::serve`].
+//!   It returns a [`SupervisorHandle`] that can add, remove, cancel, and list tasks while the service is running.
 //!
-//! `run` registers its initial task list as one batch. If a name is repeated or
-//! already in use, no task from that batch starts.
+//! `run` registers its initial task list as one batch.
+//! If a name is repeated or already in use, no task from that batch starts.
 //!
 //! ## One Task, Many Attempts
 //!
@@ -44,41 +40,42 @@
 //!
 //! ```text
 //! register
-//!    |
 //!    v
 //! attempt 1 -- failure --> backoff --> attempt 2 -- success --> finish
-//!                                                       |
 //!                                                       v
 //!                                                 TaskOutcome
 //! ```
 //!
-//! Attempts for one task never overlap. [`RestartPolicy`] decides whether a new
-//! attempt is allowed. [`BackoffPolicy`] sets the delay after a retryable
-//! failure. A timeout applies to one attempt, not to the full task lifetime.
+//! Attempts for one task never overlap.
+//! [`RestartPolicy`] decides whether a new attempt is allowed.
+//! [`BackoffPolicy`] sets the delay after a retryable failure.
+//! A timeout applies to one attempt, not to the full task lifetime.
 //!
 //! ## Cancellation and Shutdown
 //!
-//! Cancellation is cooperative first. A long-running task should await
-//! [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`], then
-//! return [`TaskError::Canceled`]. During shutdown, taskvisor waits for the
-//! configured grace period. It aborts tasks that still have not stopped.
+//! Cancellation is cooperative first.
+//! A long-running task should await [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`], then return [`TaskError::Canceled`].
+//! During shutdown, taskvisor waits for the configured grace period.
+//! It aborts tasks that still have not stopped.
 //!
-//! Dropping one supervisor or handle clone does not stop the runtime. Dropping
-//! the last public owner sends best-effort cancellation, but cannot wait for
-//! cleanup. Call [`SupervisorHandle::shutdown`] when cleanup must be complete
-//! before your code continues.
+//! Dropping one supervisor or handle clone does not stop the runtime.
+//! Dropping the last public owner sends best-effort cancellation, but cannot wait for cleanup.
+//! Call [`SupervisorHandle::shutdown`] when cleanup must be complete before your code continues.
 //!
 //! ## Events or Final Outcomes?
 //!
-//! Lifecycle [`Event`] values are **best-effort**. They are suitable for logs,
-//! metrics, and live status. A slow subscriber can miss events.
+//! Lifecycle [`Event`] values are **best-effort**.
+//! They are suitable for logs, metrics, and live status.
+//! A slow subscriber can miss events.
 //!
-//! A [`TaskWaiter`] uses a direct completion channel. Event-bus lag does not
-//! affect it. It normally returns the final [`TaskOutcome`] after retries and
-//! registry cleanup; it returns a runtime error if the completion channel closes
-//! first. Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast
-//! `try_*` form. With the `controller` feature, use `submit_and_watch` or
-//! `try_submit_and_watch`.
+//! A [`TaskWaiter`] uses a direct completion channel.
+//! Event-bus lag does not affect it.
+//!
+//! It normally returns the final [`TaskOutcome`] after retries and registry cleanup;
+//! it returns a runtime error if the completion channel closes first.
+//!
+//! Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast `try_*` form.
+//! With the `controller` feature, use `submit_and_watch` or `try_submit_and_watch`.
 //!
 //! ## Quick Start
 //!
@@ -101,34 +98,33 @@
 //!
 //! ## Main Types
 //!
-//! | Need | Types |
-//! |------|-------|
-//! | Define work | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`] |
-//! | Run work | [`Supervisor`], [`SupervisorHandle`] |
-//! | Set defaults | [`SupervisorConfig`], [`TaskDefaults`] |
-//! | Control retries | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`] |
-//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`] |
-//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`] |
-//! | Handle errors | [`Error`], [`TaskError`], [`RuntimeError`] |
+//! | Need             | Types                                                  |
+//! |------------------|--------------------------------------------------------|
+//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]    |
+//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                   |
+//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                 |
+//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`] |
+//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                |
+//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`]                        |
+//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]             |
 //!
-//! Main types are re-exported at the crate root. The module pages explain each
-//! area in more detail: [`tasks`], [`policies`], [`events`], [`subscribers`],
-//! [`core`], and [`identity`].
+//! Main types are re-exported at the crate root.
+//! The module pages explain each area in more detail:
+//! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], and [`identity`].
 //!
 //! ## Optional Features
 //!
-//! - `controller`: slot-based admission with queue, replace, and reject rules.
 //! - `tracing`: forwards lifecycle events to `tracing`.
 //! - `logging`: simple event logging for examples and development.
 //! - `tokio-util-interop`: exposes the underlying Tokio cancellation token.
+//! - `controller`: slot-based admission with queue, replace, and reject rules.
 //! - `test-util`: constructors for task contexts, identities, and outcomes in tests.
 //!
 //! ## Examples
 //!
-//! Repository examples go from simple to advanced
-//! ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
+//! Repository examples go from simple to advanced ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
 //!
-//! | Example | What it shows |
+//! | Example                                                                                     | What it shows                                                     |
 //! |---------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
 //! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                   | Run one task and exit — the minimal wiring                        |
 //! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)                 | A long-running worker that stops cleanly on Ctrl+C                |
@@ -153,13 +149,6 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod prelude;
-
-pub mod identity;
-pub use identity::TaskId;
-
-pub mod reasons;
-
 pub mod core;
 pub use core::{
     ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
@@ -180,6 +169,13 @@ pub use events::{BackoffSource, Event, EventKind};
 
 pub mod subscribers;
 pub use subscribers::Subscribe;
+
+pub mod identity;
+pub use identity::TaskId;
+
+pub mod prelude;
+
+pub mod reasons;
 
 #[cfg(feature = "controller")]
 pub mod controller;

@@ -1,17 +1,4 @@
 //! # Error model
-//!
-//! Taskvisor separates errors by where they happen:
-//!
-//! ```text
-//! task attempt ----------------------> TaskError
-//! add / cancel / shutdown / run ----> RuntimeError
-//! controller command path ----------> ControllerError (feature `controller`)
-//! mixed runtime + controller API ---> Error
-//! ```
-//!
-//! [`TaskError`] is part of task behavior. It tells the supervisor whether a
-//! failed attempt may be retried. [`RuntimeError`] and controller errors report
-//! that a management operation could not complete.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +12,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Shared source error stored in final task outcomes.
 ///
-/// It uses [`Arc`] so a [`TaskOutcome`](crate::TaskOutcome) can be cloned without
-/// requiring the original source error to implement `Clone`.
+/// [`TaskOutcome`](crate::TaskOutcome) can be cloned without requiring the original source error to implement `Clone`.
 pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Errors from supervisor lifecycle and management operations.
@@ -34,8 +20,8 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 /// These errors come from add, remove, cancel, shutdown, and run operations.
 /// They are separate from [`TaskError`], which comes from a task attempt.
 ///
-/// Match with a wildcard arm because this enum is non-exhaustive. Data-carrying
-/// variants are also non-exhaustive, so include `..` when matching their fields.
+/// Match with a wildcard arm because this enum is non-exhaustive.
+/// Data-carrying variants are also non-exhaustive; include `..` when matching their fields.
 ///
 /// # Also
 ///
@@ -74,8 +60,8 @@ pub enum RuntimeError {
 
     /// Timed out while waiting for terminal registry cleanup.
     ///
-    /// The stop request remains active. This error only ends the caller's wait;
-    /// it does not undo cancellation or change the supervisor grace period.
+    /// The stop request remains active.
+    /// This error only ends the caller's wait; it does not undo cancellation or change the supervisor grace period.
     #[error("timeout waiting for task {id} termination after {timeout:?}")]
     #[non_exhaustive]
     TaskTerminationTimeout {
@@ -87,8 +73,8 @@ pub enum RuntimeError {
 
     /// Compatibility spelling for [`TaskTerminationTimeout`](Self::TaskTerminationTimeout).
     ///
-    /// The runtime no longer returns this variant. Match
-    /// [`TaskTerminationTimeout`](Self::TaskTerminationTimeout) for cancellation timeouts.
+    /// The runtime no longer returns this variant.
+    /// Match [`TaskTerminationTimeout`](Self::TaskTerminationTimeout) for cancellation timeouts.
     #[deprecated(
         note = "renamed to TaskTerminationTimeout; this compatibility variant is never returned"
     )]
@@ -104,8 +90,7 @@ pub enum RuntimeError {
     /// OS signal listener setup failed.
     ///
     /// Signal-based shutdown is unavailable.
-    /// The I/O error kind, message, and source chain are preserved for callers
-    /// that join the shared shutdown operation.
+    /// The I/O error kind, message, and source chain are preserved for callers that join the shared shutdown operation.
     #[error("failed to install shutdown signal handlers: {source}")]
     #[non_exhaustive]
     SignalSetupFailed {
@@ -149,20 +134,15 @@ impl RuntimeError {
 ///
 /// A task returns `Result<(), TaskError>` from [`Task::spawn`](crate::Task::spawn).
 ///
-/// | Variant                    | Retry category | Meaning                              |
-/// |----------------------------|----------------|--------------------------------------|
+/// | Variant                      | Retry category | Meaning                              |
+/// |------------------------------|----------------|--------------------------------------|
 /// | [`Canceled`](Self::Canceled) | never          | cooperative stop                     |
 /// | [`Fatal`](Self::Fatal)       | never          | permanent failure                    |
 /// | [`Timeout`](Self::Timeout)   | eligible       | per-attempt time limit was exceeded  |
 /// | [`Fail`](Self::Fail)         | eligible       | temporary or unknown failure         |
 ///
-/// "Eligible" does not guarantee a retry. The restart policy and retry limit
-/// must also allow it. In builds that unwind panics, a panic in the task body is
-/// caught and converted to [`Fail`](Self::Fail). A build with `panic = "abort"`
-/// exits the process instead.
-///
-/// Match with a wildcard arm because this enum is non-exhaustive. Data-carrying
-/// variants are also non-exhaustive, so include `..` when matching their fields.
+/// Match with a wildcard arm because this enum is non-exhaustive.
+/// Data-carrying variants are also non-exhaustive; include `..` when matching their fields.
 ///
 /// # Also
 ///
@@ -198,8 +178,7 @@ pub enum TaskError {
 
     /// Retryable task failure.
     ///
-    /// Taskvisor may restart after this error if the restart policy and retry
-    /// limit allow it.
+    /// Taskvisor may restart after this error if the restart policy and retry limit allow it.
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
@@ -216,8 +195,7 @@ pub enum TaskError {
 
     /// Cooperative cancellation.
     ///
-    /// Tasks should return this when they stop because [`TaskContext`](crate::TaskContext)
-    /// was cancelled.
+    /// Tasks should return this when they stop because [`TaskContext`](crate::TaskContext) was cancelled.
     #[error("context canceled")]
     Canceled,
 }
@@ -279,8 +257,7 @@ impl TaskError {
 
     /// Sets or clears the process-style exit code on `Fail` or `Fatal`.
     ///
-    /// Pass an integer to set it or `None` to clear it. This has no effect on
-    /// `Timeout` or `Canceled`.
+    /// Pass an integer to set it or `None` to clear it. This has no effect on `Timeout` or `Canceled`.
     #[must_use]
     pub fn with_exit_code(mut self, code: impl Into<Option<i32>>) -> Self {
         let code = code.into();

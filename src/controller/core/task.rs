@@ -20,7 +20,7 @@ impl ControllerTask {
         }
     }
 
-    /// Joins the stored task without taking it out of shared state before the await.
+    /// Joins the stored task without taking it out of shared state before to await.
     ///
     /// If this future is dropped, a later caller can continue polling the same `JoinHandle`.
     /// Returns `false` when Tokio reports that the controller task did not join cleanly.

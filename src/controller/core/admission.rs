@@ -24,9 +24,8 @@ impl Controller {
     ///
     /// Policy behavior:
     /// - idle slot: admit immediately and enter `Admitting`,
+    /// - busy + `Replace`: retire the current owner if needed and keep this submission as the next queued owner,
     /// - busy + `Queue`: append to the slot queue, unless the queue is full,
-    /// - busy + `Replace`: retire the current owner if needed and keep this
-    ///   submission as the next queued owner,
     /// - busy + `DropIfRunning`: reject immediately.
     ///
     /// A slot becomes `Running` only after the direct registry Add reply succeeds.
@@ -194,8 +193,7 @@ impl Controller {
 
     /// Applies one authoritative registry registration decision.
     ///
-    /// Correlation by both slot and [`TaskId`] makes a late result harmless after a fast task
-    /// has already completed or a different owner has entered the slot.
+    /// Correlation by both slot and [`TaskId`] makes a late result harmless after a fast task has already completed or a different owner has entered the slot.
     pub(super) async fn handle_admission_result(
         &self,
         result: AdmissionResult,
@@ -236,9 +234,6 @@ impl Controller {
                 if !slot.reject_admission(id) {
                     return;
                 }
-
-                // After commit, the registry owns any watched outcome and lifecycle diagnostics.
-                // The direct reply only drives controller state here.
 
                 if !self.is_shutting_down()
                     && let Some(sup) = self.supervisor.upgrade()
@@ -284,7 +279,6 @@ impl Controller {
     /// Hands a submission to the runtime under its pre-minted id.
     ///
     /// On success, the slot enters `Admitting` and the watcher is owned by the runtime registry.
-    ///
     /// On failure, the watcher is put back into `watchers` so the caller can reject it normally instead of dropping the oneshot.
     fn start_in_slot(
         &self,

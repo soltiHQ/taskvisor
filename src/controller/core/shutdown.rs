@@ -1,13 +1,10 @@
 //! Controller shutdown drain.
 //!
-//! When the controller loop exits, submissions and control callers may still be waiting for a
-//! terminal decision.
+//! When the controller loop exits, submissions and control callers may still be waiting for a terminal decision.
 //!
 //! They can be in two places:
 //! - `watchers`: submissions already seen by the controller, with a parked waiter,
 //! - `rx`: commands accepted by the controller channel but not processed yet.
-//!
-//! This module rejects pending submissions and resolves pending control replies as shutting down.
 
 use std::sync::Arc;
 

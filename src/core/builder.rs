@@ -1,4 +1,4 @@
-//! Build a stopped [`Supervisor`](crate::Supervisor).
+//! Build a stopped [`Supervisor`].
 //!
 //! [`SupervisorBuilder::build`] only creates the runtime state and channels. It
 //! does not spawn Tokio tasks. [`Supervisor::run`](crate::Supervisor::run) or
@@ -37,7 +37,7 @@ use crate::{
     subscribers::{Subscribe, SubscriberSet},
 };
 
-/// Builder for a [`Supervisor`](crate::Supervisor).
+/// Builder for a [`Supervisor`].
 ///
 /// Runtime limits and task defaults are separate:
 ///

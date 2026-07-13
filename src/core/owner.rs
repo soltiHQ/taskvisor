@@ -6,8 +6,8 @@ use super::SupervisorCore;
 
 /// Shared ownership held by `Supervisor` and every management handle.
 ///
-/// Internal workers do not hold this value. Its destructor therefore runs when
-/// the last public owner disappears and starts best-effort runtime cancellation.
+/// Internal workers do not hold this value.
+/// Its destructor therefore runs when the last public owner disappears and starts best-effort runtime cancellation.
 pub(crate) struct RuntimeOwner {
     core: Arc<SupervisorCore>,
 }

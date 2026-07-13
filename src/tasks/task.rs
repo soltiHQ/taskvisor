@@ -17,12 +17,11 @@ pub type TaskRef = Arc<dyn Task>;
 ///
 /// ## Attempt Contract
 ///
-/// The supervisor calls [`spawn`](Task::spawn) once for every attempt. `spawn`
-/// **must return a new future on every call**. Never store and reuse a future.
+/// The supervisor calls [`spawn`](Task::spawn) once for every attempt.
+/// `spawn` **must return a new future on every call**.
+/// Never store and reuse a future.
 ///
-/// The task object may keep shared state between attempts. Attempts for one
-/// registered task are sequential, so two calls for that task do not run at the
-/// same time.
+/// The task object may keep shared state between attempts.
 ///
 /// ```text
 /// spawn(ctx) -> attempt 1 -> retry delay -> spawn(ctx) -> attempt 2
@@ -30,24 +29,24 @@ pub type TaskRef = Arc<dyn Task>;
 ///
 /// ## Cancellation
 ///
-/// Long-running tasks should listen to [`TaskContext::cancelled`] or use
-/// [`TaskContext::run_until_cancelled`]. Return [`TaskError::Canceled`] when the
-/// task stops for that reason. This is a normal stop and is never retried.
+/// Long-running tasks should listen to [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`].
+/// Return [`TaskError::Canceled`] when the task stops for that reason.
+/// This is a normal stop and is never retried.
 ///
-/// Short tasks may ignore cancellation if they finish quickly. During shutdown,
-/// a task that does not stop before the grace period is aborted. Dropping its
-/// future does not roll back external side effects.
+/// Short tasks may ignore cancellation if they finish quickly.
+/// During shutdown, a task that does not stop before the grace period is aborted.
+/// Dropping its future does not roll back external side effects.
 ///
-/// | Result | Meaning | Can restart? |
-/// |--------|---------|--------------|
-/// | `Ok(())` | Attempt succeeded | Only with [`RestartPolicy::Always`](crate::RestartPolicy::Always) |
-/// | [`TaskError::Fail`] | Retryable failure | If policy and retry limit allow it |
-/// | [`TaskError::Timeout`] | Attempt timed out | If policy and retry limit allow it |
-/// | [`TaskError::Canceled`] | Cooperative stop | No |
-/// | [`TaskError::Fatal`] | Permanent failure | No |
+/// | Result                  | Meaning           | Can restart?                                                      |
+/// |-------------------------|-------------------|-------------------------------------------------------------------|
+/// | `Ok(())`                | Attempt succeeded | Only with [`RestartPolicy::Always`](crate::RestartPolicy::Always) |
+/// | [`TaskError::Fail`]     | Retryable failure | If policy and retry limit allow it                                |
+/// | [`TaskError::Timeout`]  | Attempt timed out | If policy and retry limit allow it                                |
+/// | [`TaskError::Canceled`] | Cooperative stop  | No                                                                |
+/// | [`TaskError::Fatal`]    | Permanent failure | No                                                                |
 ///
-/// A panic in `spawn` or in the returned future is caught and treated as a
-/// retryable failure. Do not use panic for normal error handling.
+/// A panic in `spawn` or in the returned future is caught and treated as a retryable failure.
+/// Do not use panic for normal error handling.
 ///
 /// ## See Also
 ///
@@ -56,12 +55,13 @@ pub type TaskRef = Arc<dyn Task>;
 pub trait Task: Send + Sync + 'static {
     /// Returns the stable name used for registration and observability.
     ///
-    /// Names must be unique among registered tasks. A name can be used again
-    /// after the previous task has finished removal and released it.
+    /// Names must be unique among registered tasks.
+    /// A name can be used again after the previous task has finished removal and released it.
     fn name(&self) -> &str;
 
     /// Creates a new future for one attempt.
     ///
-    /// Each call must return a fresh future. Use `ctx` to stop cooperatively.
+    /// Each call must return a fresh future.
+    /// Use `ctx` to stop cooperatively.
     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture;
 }

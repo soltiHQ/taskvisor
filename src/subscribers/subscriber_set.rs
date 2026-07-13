@@ -3,7 +3,6 @@
 //! [`SubscriberSet`] sends each event to every registered subscriber.
 //!
 //! Each subscriber has its own bounded queue and one async queue worker.
-//! `emit_arc` uses `try_send`, so it does not wait for subscriber code.
 //!
 //! ## Flow
 //!
@@ -78,8 +77,8 @@ enum SubscriberState {
 /// - snapshotted subscriber names for diagnostics.
 ///
 /// Delivery is best-effort.
-/// Slow subscribers may lose events from their own queues. Their callbacks run
-/// on Tokio's blocking pool instead of Tokio async workers.
+/// Slow subscribers may lose events from their own queues.
+/// Their callbacks run on Tokio's blocking pool instead of Tokio async workers.
 ///
 /// ## Shutdown
 ///
@@ -90,12 +89,11 @@ enum SubscriberState {
 /// ## Also
 ///
 /// - See [`Subscribe`] for the subscriber trait contract.
-/// - See [`Event`](crate::Event) for the event structure delivered to subscribers.
+/// - See [`Event`] for the event structure delivered to subscribers.
 pub(crate) struct SubscriberSet {
     /// One synchronized lifecycle prevents `start` and `close` from crossing.
     ///
-    /// The lock is uncontended in the hot path - `emit_arc` is called from a single task
-    /// (`subscriber_listener`).
+    /// The lock is uncontended in the hot path - `emit_arc` is called from a single task (`subscriber_listener`).
     state: std::sync::Mutex<SubscriberState>,
 
     /// One shared deadline for draining all subscriber workers.
@@ -223,11 +221,6 @@ impl SubscriberSet {
     ///
     /// This method does not wait for subscribers.
     /// It tries once to enqueue the event for each subscriber, then returns.
-    ///
-    /// Ordinary events that cannot be queued are dropped for that subscriber.
-    /// Taskvisor then publishes a `SubscriberOverflow` diagnostic event.
-    /// Internal diagnostic events (`SubscriberOverflow` and `SubscriberPanicked`) are not re-reported if they overflow.
-    /// This avoids diagnostic feedback loops.
     pub(crate) fn emit_arc(&self, event: Arc<Event>) {
         let is_internal_event = event.is_internal_diagnostic();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -260,10 +253,8 @@ impl SubscriberSet {
 
     /// Closes subscriber queues and waits for workers until the shared shutdown deadline.
     ///
-    /// Safe to call more than once. Later calls are no-ops.
-    ///
-    /// When the timeout expires, unfinished async queue workers are aborted.
-    /// Callbacks already running on Tokio's blocking pool cannot be aborted and may finish later.
+    /// Safe to call more than once.
+    /// Later calls are no-ops.
     pub(crate) async fn close(&self) {
         let mut workers = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());

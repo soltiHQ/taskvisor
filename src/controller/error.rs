@@ -1,10 +1,4 @@
 //! # Controller API errors
-//!
-//! Most of these errors mean that a request was not accepted by the controller
-//! command path. [`ControllerError::AlreadyStarted`] is a controller lifecycle
-//! guard. These errors are not task outcomes. A request accepted by the
-//! controller can still be rejected later by a slot policy; use
-//! `submit_and_watch` when you need that final result.
 
 use thiserror::Error;
 
@@ -22,8 +16,8 @@ pub enum ControllerError {
 
     /// The ordered controller command queue is full.
     ///
-    /// Returned only by `try_submit` and `try_submit_and_watch`. Use async
-    /// `submit` or `submit_and_watch` to wait for command capacity.
+    /// Returned only by `try_submit` and `try_submit_and_watch`.
+    /// Use async `submit` or `submit_and_watch` to wait for command capacity.
     #[error("submission queue full")]
     Full,
 

@@ -1,9 +1,9 @@
 //! # Simple stdout event printer
 //!
-//! [`LogWriter`] prints incoming [`Event`] values to standard output. It is
-//! useful for examples, local development, and debugging. For production
-//! structured logs, prefer [`TracingBridge`](crate::TracingBridge) with the
-//! `tracing` feature.
+//! [`LogWriter`] prints incoming [`Event`] values to standard output.
+//! It is useful for examples, local development, and debugging.
+//!
+//! For production structured logs, prefer [`TracingBridge`](crate::TracingBridge) with the`tracing` feature.
 //!
 //! Each line starts with the event's stable label from [`EventKind::as_label`].
 //!
@@ -43,7 +43,7 @@ use crate::subscribers::Subscribe;
 /// ## Also
 ///
 /// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
-/// - See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for event structure.
+/// - See [`Event`] and [`EventKind`] for event structure.
 #[derive(Default)]
 pub struct LogWriter;
 

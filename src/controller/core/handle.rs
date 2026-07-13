@@ -85,8 +85,7 @@ impl ControllerHandle {
     /// Tries to send a watched submission without waiting for command-channel capacity.
     ///
     /// The returned receiver has the same completion semantics as [`submit_and_watch`](Self::submit_and_watch).
-    /// `ControllerError::Full` means the controller command channel is full, not that the target
-    /// slot rejected the submission.
+    /// `ControllerError::Full` means the controller command channel is full, not that the target slot rejected the submission.
     pub fn try_submit_and_watch(
         &self,
         spec: ControllerSpec,

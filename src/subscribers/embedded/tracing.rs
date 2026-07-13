@@ -1,8 +1,7 @@
 //! # Bridge to `tracing`
 //!
-//! [`TracingBridge`] converts every event it receives into one structured
-//! [`tracing`] event. Subscriber delivery is best-effort, so this bridge does
-//! not make event delivery reliable.
+//! [`TracingBridge`] converts every event it receives into one structured [`tracing`] event.
+//! Subscriber delivery is best-effort, so this bridge does not make event delivery reliable.
 //!
 //! Each tracing event uses target `taskvisor` and contains:
 //! - a level based on the event severity (see [`TracingBridge`]),
@@ -131,7 +130,6 @@ mod tests {
 
     type Captured = (Level, HashMap<String, String>);
 
-    /// Minimal collector: stores (level, fields) for every tracing event.
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Captured>>>);
 

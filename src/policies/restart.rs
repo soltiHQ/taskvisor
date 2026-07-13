@@ -1,8 +1,7 @@
 //! # When a task runs again
 //!
-//! [`RestartPolicy`] decides if Taskvisor starts another attempt. It does not
-//! decide the delay after a failure; [`BackoffPolicy`](crate::BackoffPolicy)
-//! does that.
+//! [`RestartPolicy`] decides if Taskvisor starts another attempt.
+//! It does not decide the delay after a failure; [`BackoffPolicy`](crate::BackoffPolicy) does that.
 //!
 //! | Policy                                  | On `Ok(())`                     | On retryable error        |
 //! |-----------------------------------------|---------------------------------|---------------------------|
@@ -10,8 +9,7 @@
 //! | [`OnFailure`](RestartPolicy::OnFailure) | Stop                            | Restart with backoff      |
 //! | [`Always`](RestartPolicy::Always)       | Restart after optional interval | Restart with backoff      |
 //!
-//! [`TaskError::Fatal`](crate::TaskError::Fatal) and
-//! [`TaskError::Canceled`](crate::TaskError::Canceled) always stop the task.
+//! [`TaskError::Fatal`](crate::TaskError::Fatal) and [`TaskError::Canceled`](crate::TaskError::Canceled) always stop the task.
 //!
 //! ## Choosing a policy
 //!
@@ -47,17 +45,15 @@ pub enum RestartPolicy {
     /// - `Some(duration)` waits at least that long after the attempt completes.
     /// - `None` has no configured wait.
     ///
-    /// Taskvisor also limits very fast successful restart loops. This safety
-    /// limit applies even when `interval` is `None` or zero.
+    /// Taskvisor also limits very fast successful restart loops.
+    /// This safety limit applies even when `interval` is `None` or zero.
     ///
     /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
     /// Fatal errors and cooperative cancellation stop the task.
-    ///
     Always {
         /// Wait time between a successful completion and the next run.
         ///
-        /// `None` means there is no configured wait. The fast-loop safety limit
-        /// still applies.
+        /// `None` means there is no configured wait. The fast-loop safety limit still applies.
         interval: Option<std::time::Duration>,
     },
 }

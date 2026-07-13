@@ -6,12 +6,8 @@
 //! use taskvisor::prelude::*;
 //! ```
 //!
-//! The prelude includes the main runtime, task, policy, event, subscriber,
-//! error, and identity types. It does not change behavior or enable features.
-//!
-//! Feature-gated types appear only when their Cargo feature is enabled. In
-//! public libraries, explicit imports can make your own API dependencies easier
-//! to see. The prelude is most useful in applications and examples.
+//! The prelude includes the main runtime, task, policy, event, subscriber, error, and identity types.
+//! It does not change behavior or enable features.
 
 /// Core supervisor runtime.
 pub use crate::core::{

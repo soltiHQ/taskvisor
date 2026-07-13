@@ -14,17 +14,16 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 
 /// Default settings applied when a supervisor accepts a [`TaskSpec`](crate::TaskSpec).
 ///
-/// An explicit value in `TaskSpec` always wins. For example,
-/// [`TaskSpec::restartable`](crate::TaskSpec::restartable) sets the restart
-/// policy but inherits backoff, timeout, and retry limit.
+/// An explicit value in `TaskSpec` always wins.
+///
+/// For example, [`TaskSpec::restartable`](crate::TaskSpec::restartable) sets the restart policy but inherits backoff, timeout, and retry limit.
 ///
 /// ```text
 /// TaskSpec field is inherited  -> use TaskDefaults value
 /// TaskSpec field is explicit   -> use TaskSpec value
 /// ```
 ///
-/// The built-in defaults restart after retryable failures, use exponential
-/// backoff with jitter, set no attempt timeout, and allow unlimited retries.
+/// The built-in defaults restart after retryable failures, use exponential backoff with jitter, set no attempt timeout, and allow unlimited retries.
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct TaskDefaults {
@@ -77,7 +76,8 @@ impl TaskDefaults {
 
     /// Sets the default timeout for each task attempt.
     ///
-    /// Pass a [`Duration`] to enable it. Pass `None` or zero for no timeout.
+    /// Pass a [`Duration`] to enable it.
+    /// Pass `None` or zero for no timeout.
     pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
         self.timeout = normalize_timeout(timeout.into());
         self
@@ -85,9 +85,9 @@ impl TaskDefaults {
 
     /// Sets the default number of retries in one failure streak.
     ///
-    /// Pass a [`NonZeroU32`] for a limit or `None` for unlimited retries. A
-    /// limit of three allows one failed attempt and three retries. A successful
-    /// attempt resets the count.
+    /// Pass a [`NonZeroU32`] for a limit or `None` for unlimited retries.
+    /// A limit of three allows one failed attempt and three retries.
+    /// A successful attempt resets the count.
     pub fn with_max_retries(mut self, max_retries: impl Into<Option<NonZeroU32>>) -> Self {
         self.max_retries = max_retries.into();
         self
@@ -96,8 +96,8 @@ impl TaskDefaults {
     /// Sets the default retry limit from a raw integer.
     ///
     /// # Errors
-    /// Returns [`ConfigError::Zero`] when `max_retries` is zero. Use
-    /// [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
+    /// Returns [`ConfigError::Zero`] when `max_retries` is zero.
+    /// Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
     pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
         let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
             field: "max_retries",
@@ -110,10 +110,10 @@ impl Default for TaskDefaults {
     /// Returns the default task execution settings.
     ///
     /// Defaults:
-    /// - restart after failure,
     /// - exponential backoff from 200 ms to 30 seconds with equal jitter,
-    /// - no attempt timeout,
-    /// - unlimited failure retries.
+    /// - unlimited failure retries,
+    /// - restart after failure,
+    /// - no attempt timeout.
     fn default() -> Self {
         Self {
             restart: RestartPolicy::default(),

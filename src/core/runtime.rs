@@ -1,19 +1,18 @@
 //! # Runtime coordinator
 //!
-//! [`SupervisorCore`] connects the registry, event bus, subscribers, alive
-//! tracker, and shutdown state behind the public
-//! [`Supervisor`](super::supervisor::Supervisor).
+//! [`SupervisorCore`] connects the registry, event bus, subscribers, alive tracker, and shutdown state behind the public [`Supervisor`](super::supervisor::Supervisor).
 //!
 //! ## Data Paths
 //!
 //! ```text
-//! management: Handle -> SupervisorCore -> command queue -> Registry
-//! events:     runtime parts -> event bus -> alive tracker + subscribers
-//! shutdown:   signal / Handle -> cancel tasks -> join workers -> drain subscribers
+//! management: Handle          -> SupervisorCore -> command queue -> Registry
+//! events:     runtime parts   -> event bus      -> alive tracker +  subscribers
+//! shutdown:   signal / Handle -> cancel tasks   -> join workers  -> drain subscribers
 //! ```
 //!
-//! Management commands use direct replies. They do not depend on the
-//! best-effort event bus. Alive snapshots do use the event bus and may lag.
+//! Management commands use direct replies.
+//! They do not depend on the best-effort event bus.
+//! Alive snapshots do use the event bus and may lag.
 //!
 //! ## Modes
 //!

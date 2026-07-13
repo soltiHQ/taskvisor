@@ -17,17 +17,16 @@
 //!
 //! ## Policy Summary
 //!
-//! | Policy                                            | Busy slot behavior                                   | Common use                           |
-//! |---------------------------------------------------|------------------------------------------------------|--------------------------------------|
-//! | [`Queue`](AdmissionPolicy::Queue)                 | Wait behind older queued work                        | Job queue, ordered pipeline          |
-//! | [`Replace`](AdmissionPolicy::Replace)             | Retire owner; keep latest next task                  | Debounce, latest deploy              |
-//! | [`DropIfRunning`](AdmissionPolicy::DropIfRunning) | Reject while busy                                    | Periodic checks, skip duplicate work |
+//! | Policy                                            | Busy slot behavior                    | Common use                           |
+//! |---------------------------------------------------|---------------------------------------|--------------------------------------|
+//! | [`Queue`](AdmissionPolicy::Queue)                 | Wait behind older queued work         | Job queue, ordered pipeline          |
+//! | [`Replace`](AdmissionPolicy::Replace)             | Retire owner; keep latest next task   | Debounce, latest deploy              |
+//! | [`DropIfRunning`](AdmissionPolicy::DropIfRunning) | Reject while busy                     | Periodic checks, skip duplicate work |
 //!
 //! ## Rejection
 //!
-//! Rejected submissions emit a best-effort `ControllerRejected` event. A
-//! `submit_and_watch` waiter uses a separate terminal channel and normally
-//! resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
+//! Rejected submissions emit a best-effort `ControllerRejected` event.
+//! A `submit_and_watch` waiter uses a separate terminal channel and normally resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
 
 /// Policy for handling a submission when its target slot is busy.
 ///
@@ -51,8 +50,8 @@ pub enum AdmissionPolicy {
     /// If the slot is running, the controller asks the runtime to remove the current owner.
     /// The replacement starts only after terminal registry cleanup is confirmed.
     ///
-    /// Repeated `Replace` submissions replace the queue head, so the latest one
-    /// is next. Other FIFO items already behind the head remain queued.
+    /// Repeated `Replace` submissions replace the queue head, so the latest one is next.
+    /// Other FIFO items already behind the head remain queued.
     /// Use this when newer work makes older work obsolete.
     /// Good fits:
     /// - latest deployment for an environment,

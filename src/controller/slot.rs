@@ -1,11 +1,11 @@
 //! Internal typed slot state for the controller.
 //!
-//! A slot is one controller admission lane. It may have one current owner and a FIFO queue of
-//! submissions waiting behind it.
+//! A slot is one controller admission lane.
+//! It may have one current owner and a FIFO queue of submissions waiting behind it.
 //!
-//! SlotPhase owns the current TaskId in every occupied phase, so an idle slot cannot retain an
-//! owner and an occupied slot cannot exist without one. Transition methods reject stale identities
-//! without mutating the current owner.
+//! SlotPhase owns the current TaskId in every occupied phase;
+//! an idle slot cannot retain an owner and an occupied slot cannot exist without one.
+//! Transition methods reject stale identities without mutating the current owner.
 
 use std::collections::VecDeque;
 
@@ -35,8 +35,8 @@ pub(super) enum SlotPhase {
 
     /// Replacement was requested while Add was pending.
     ///
-    /// No remove command can be sent until the registry accepts the Add. Public snapshots expose
-    /// this phase as Terminating, matching the existing controller contract.
+    /// No remove command can be sent until the registry accepts the Add.
+    /// Public snapshots expose this phase as Terminating, matching the existing controller contract.
     CancelPendingAdmission {
         owner: TaskId,
         requested_at: Instant,

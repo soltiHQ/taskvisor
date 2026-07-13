@@ -8,23 +8,24 @@
 //! - the per-slot state map,
 //! - watched submission senders until they are handed to the runtime or rejected.
 //!
-//! ## Per-slot Flow
+//! ## Authoritative inputs
+//!
+//! One serialized loop applies all state changes. Its control inputs are
+//! separate from the best-effort event path:
 //!
 //! ```text
-//! Idle -- submit --> Admitting
-//! Admitting -- Add reply Ok --> Running
-//! Admitting -- Add reply Err --> Idle or next queued submission
-//! Admitting -- Replace --> CancelPendingAdmission
-//! CancelPendingAdmission -- Add reply Ok --> Terminating
-//! CancelPendingAdmission -- Add reply Err --> Idle or next queued submission
-//! Running -- Replace --> Terminating
-//! Running -- registry completion --> Idle or next queued submission
-//! Terminating -- registry completion --> Idle or next queued submission
+//! Ordered controller commands ────────┐
+//! Registry add decisions ─────────────┤
+//! Terminal registry completions ──────┼──► controller loop ───► slot state
+//! Runtime shutdown-start signal ──────┘
+//!
+//! controller loop ── Event (best-effort) ──► event bus
 //! ```
 //!
-//! The controller advances admission from direct registry replies.
-//! It starts queued work only after the registry confirms that the previous actor is joined and
-//! its id and label are removed. Lifecycle events are observability only.
+//! A successful removal request does not release a slot. The controller starts
+//! queued work only after the terminal completion confirms that the previous
+//! actor is joined and its ID and label are removed. Task lifecycle events are
+//! observability only and never decide slot state.
 //!
 //! ## Submission Outcomes
 //!

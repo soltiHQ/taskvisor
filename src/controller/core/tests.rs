@@ -61,8 +61,6 @@ async fn abort_and_drain<T: 'static>(workers: &mut JoinSet<T>) {
     while workers.join_next().await.is_some() {}
 }
 
-// Queue and slot primitives.
-
 #[test]
 fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
     let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
@@ -142,8 +140,6 @@ fn get_or_create_slot_preserves_name_identity_and_initial_state() {
         "different slot names must not share state"
     );
 }
-
-// Stale-result and state-transition invariants.
 
 #[tokio::test]
 async fn stale_completion_does_not_free_current_owner() {
@@ -534,8 +530,6 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
     abort_and_drain(&mut completions).await;
     abort_and_drain(&mut removals).await;
 }
-
-// Shutdown finalization and controller-task lifetime.
 
 #[tokio::test]
 async fn shutdown_finalizes_buffered_submission_as_rejected() {
@@ -991,8 +985,6 @@ async fn natural_run_waits_for_controller_join() {
     assert!(ctrl.is_joined().await);
 }
 
-// Identity-operation ordering and backpressure.
-
 #[tokio::test(flavor = "current_thread")]
 async fn accepted_cancel_continues_after_caller_future_is_dropped() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
@@ -1229,8 +1221,6 @@ async fn identity_operation_limit_preserves_command_backpressure() {
     let _ = runtime_handle.shutdown().await;
 }
 
-// Reliable registry/controller coordination.
-
 #[tokio::test(flavor = "current_thread")]
 async fn registry_reply_marks_slot_running_without_task_added() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
@@ -1360,8 +1350,6 @@ async fn replace_stays_responsive_under_registry_backpressure() {
     ctrl.slots
         .insert(Arc::clone(&slot_name), Arc::new(Mutex::new(slot)));
 
-    // On a current-thread runtime the registry cannot consume this command until this test
-    // yields, so it occupies the only queue slot while both Replace commands are handled.
     let filler_id = TaskId::next();
     let (filler_reply, _filler_completion) = sup
         .core()
@@ -1444,7 +1432,6 @@ async fn replace_stays_responsive_under_registry_backpressure() {
 async fn queued_cancel_is_ordered_without_runtime_bus_events() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let runtime_handle = sup.serve();
-    // Runtime lifecycle and removal events cannot reach this controller.
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));
     let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
         .with_controller(Some(Arc::clone(&ctrl)));
@@ -1573,7 +1560,6 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
 async fn reliable_completion_reuses_task_name_without_task_removed() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let handle = sup.serve();
-    // Registry lifecycle events cannot reach this controller.
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));
     let token = CancellationToken::new();
     let runner = start_controller_loop(&ctrl, &token).await;
@@ -1674,7 +1660,6 @@ async fn duplicate_reply_frees_slot_without_task_add_failed() {
         .await
         .expect("the existing task must register");
 
-    // The controller listens to a different bus, so TaskAddFailed cannot drive its state.
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));
     let token = CancellationToken::new();
     let runner = start_controller_loop(&ctrl, &token).await;
@@ -1761,8 +1746,6 @@ async fn queued_admission_skips_registry_rejected_head() {
 
     let _ = handle.shutdown().await;
 }
-
-// Shutdown and public snapshot state contracts.
 
 #[tokio::test]
 async fn no_queue_advancement_after_shutdown_starts() {
@@ -1926,17 +1909,17 @@ async fn snapshot_maps_every_internal_slot_phase_and_owner() {
     }
 }
 
-async fn poll_until<F, Fut>(within: std::time::Duration, mut cond: F) -> bool
+async fn poll_until<F, Fut>(within: Duration, mut cond: F) -> bool
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let deadline = tokio::time::Instant::now() + within;
+    let deadline = Instant::now() + within;
     loop {
         if cond().await {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

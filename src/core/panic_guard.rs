@@ -1,18 +1,16 @@
 //! # Panic boundary for runtime listeners
 //!
-//! [`guarded`] catches a panic while one listener item is processed. This stops
-//! a bad command or event from silently killing a long-running registry or
-//! subscriber listener.
+//! [`guarded`] catches a panic while one listener item is processed.
+//! This stops a bad command or event from silently killing a long-running registry or subscriber listener.
 //!
 //! ## What This Guard Does
 //!
-//! It catches panics while polling the future and returns the panic text as
-//! `Err(message)`.
+//! It catches panics while polling the future and returns the panic text as `Err(message)`.
 //!
 //! ## What This Guard Does Not Do
 //!
-//! It does not repair partially changed state or restart a loop. User task
-//! bodies use a separate panic boundary in the attempt runner.
+//! It does not repair partially changed state or restart a loop.
+//! User task bodies use a separate panic boundary in the attempt runner.
 //!
 //! The caller normally publishes a diagnostic event and continues the loop.
 
