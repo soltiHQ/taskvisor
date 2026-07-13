@@ -93,7 +93,7 @@ Four types form the main API:
 | `Supervisor`       | Owns task lifecycle, shutdown, and event delivery.         |
 | `SupervisorHandle` | Adds, removes, cancels, and watches tasks at runtime.      |
 
-<img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="Taskvisor core lifecycle: runtime components execute attempts, repeat them after failure backoff or an optional success interval, publish best-effort events, and deliver one final outcome to watched tasks; cancellation can end any phase" width="803">
+<img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="Taskvisor core lifecycle: the Supervisor runs one task attempt, either schedules another after failure backoff or an optional interval, or produces a final outcome; best-effort events go to subscribers and watched outcomes go to TaskWaiter" width="649">
 
 Retries for one task run in sequence. Two attempts for the same `TaskId` do not run at the same time. A global concurrency limit can restrict attempts across the whole supervisor.
 
