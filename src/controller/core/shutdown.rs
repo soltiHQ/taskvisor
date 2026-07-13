@@ -79,7 +79,6 @@ impl Controller {
 
         self.finalize_remaining_watchers();
         self.slots.clear();
-        self.running.clear();
     }
 
     /// Waits until every already-aborted controller worker has finished cancellation.

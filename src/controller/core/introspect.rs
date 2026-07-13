@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::controller::slot::SlotStatus;
+use crate::controller::slot::SlotPhase;
 use crate::controller::view::{ControllerSnapshot, SlotStatusKind, SlotView};
 
 use super::Controller;
@@ -29,21 +29,23 @@ impl Controller {
             };
 
             let slot = slot_arc.lock().await;
-            let (status, status_for) = match slot.status {
-                SlotStatus::Idle => (SlotStatusKind::Idle, Duration::ZERO),
-                SlotStatus::Admitting { since } => (SlotStatusKind::Admitting, since.elapsed()),
-                SlotStatus::Running { started_at } => {
+            let phase = slot.phase();
+            let (status, status_for) = match phase {
+                SlotPhase::Idle => (SlotStatusKind::Idle, Duration::ZERO),
+                SlotPhase::Admitting { since, .. } => (SlotStatusKind::Admitting, since.elapsed()),
+                SlotPhase::Running { started_at, .. } => {
                     (SlotStatusKind::Running, started_at.elapsed())
                 }
-                SlotStatus::Terminating { cancelled_at } => {
-                    (SlotStatusKind::Terminating, cancelled_at.elapsed())
+                SlotPhase::CancelPendingAdmission { requested_at, .. }
+                | SlotPhase::Terminating { requested_at, .. } => {
+                    (SlotStatusKind::Terminating, requested_at.elapsed())
                 }
             };
 
             slots.push(SlotView {
                 slot: Arc::clone(&key),
                 status,
-                running: slot.running_id,
+                running: phase.owner_id(),
                 queue_depth: slot.queue.len(),
                 status_for,
             });

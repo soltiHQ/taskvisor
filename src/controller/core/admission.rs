@@ -9,7 +9,7 @@ use crate::{
     RuntimeError, TaskSpec,
     controller::{
         admission::AdmissionPolicy,
-        slot::{SlotState, SlotStatus},
+        slot::{AdmissionTransition, ReplaceAction, SlotPhase, SlotState},
     },
     events::{Event, EventKind},
     identity::TaskId,
@@ -71,8 +71,8 @@ impl Controller {
             return;
         }
 
-        match (&slot.status, admission) {
-            (SlotStatus::Idle, _) => {
+        match (slot.phase(), admission) {
+            (SlotPhase::Idle, _) => {
                 match self.start_in_slot(&sup, &mut slot, &slot_name, id, task_spec, admissions) {
                     Ok(()) => {
                         let reason: &'static str = match admission {
@@ -102,14 +102,13 @@ impl Controller {
                     }
                 }
             }
-            (SlotStatus::Running { .. }, AdmissionPolicy::Replace) => {
+            (SlotPhase::Running { .. }, AdmissionPolicy::Replace) => {
                 self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
-                slot.status = SlotStatus::Terminating {
-                    cancelled_at: Instant::now(),
+                let ReplaceAction::RemoveNow(owner) = slot.request_replacement(Instant::now())
+                else {
+                    unreachable!("a running slot must start removal on replace")
                 };
-                if let Some(rid) = slot.running_id {
-                    Self::track_removal(removals, Arc::clone(&sup), rid, Arc::clone(&slot_name));
-                }
+                Self::track_removal(removals, Arc::clone(&sup), owner, Arc::clone(&slot_name));
                 self.bus.publish(
                     Event::new(EventKind::ControllerSlotTransition)
                         .with_task(Arc::clone(&slot_name))
@@ -122,11 +121,10 @@ impl Controller {
                         .with_reason(format!("admission=Replace depth={}", slot.queue.len())),
                 );
             }
-            (SlotStatus::Admitting { .. }, AdmissionPolicy::Replace) => {
+            (SlotPhase::Admitting { .. }, AdmissionPolicy::Replace) => {
                 self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
-                slot.status = SlotStatus::Terminating {
-                    cancelled_at: Instant::now(),
-                };
+                let action = slot.request_replacement(Instant::now());
+                debug_assert_eq!(action, ReplaceAction::WaitForAdmission);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSlotTransition)
                         .with_task(Arc::clone(&slot_name))
@@ -142,7 +140,10 @@ impl Controller {
                         )),
                 );
             }
-            (SlotStatus::Terminating { .. }, AdmissionPolicy::Replace) => {
+            (
+                SlotPhase::CancelPendingAdmission { .. } | SlotPhase::Terminating { .. },
+                AdmissionPolicy::Replace,
+            ) => {
                 self.replace_head_or_push(&mut slot, &slot_name, id, task_spec);
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
@@ -155,9 +156,10 @@ impl Controller {
                 );
             }
             (
-                SlotStatus::Admitting { .. }
-                | SlotStatus::Running { .. }
-                | SlotStatus::Terminating { .. },
+                SlotPhase::Admitting { .. }
+                | SlotPhase::CancelPendingAdmission { .. }
+                | SlotPhase::Running { .. }
+                | SlotPhase::Terminating { .. },
                 AdmissionPolicy::Queue,
             ) => {
                 if self.reject_if_full(&slot_name, id, slot.queue.len()) {
@@ -172,12 +174,13 @@ impl Controller {
                 );
             }
             (
-                SlotStatus::Admitting { .. }
-                | SlotStatus::Running { .. }
-                | SlotStatus::Terminating { .. },
+                SlotPhase::Admitting { .. }
+                | SlotPhase::CancelPendingAdmission { .. }
+                | SlotPhase::Running { .. }
+                | SlotPhase::Terminating { .. },
                 AdmissionPolicy::DropIfRunning,
             ) => {
-                let reason = format!("dropped: slot busy ({})", slot.status.label());
+                let reason = format!("dropped: slot busy ({})", slot.status_label());
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
@@ -205,47 +208,34 @@ impl Controller {
             slot_name,
             decision,
         } = result;
-        let Some(indexed_slot) = self.running.get(&id).map(|entry| entry.clone()) else {
-            return;
-        };
-        if indexed_slot.as_ref() != slot_name.as_ref() {
-            return;
-        }
         let Some(slot_arc) = self.slots.get(&*slot_name).map(|entry| entry.clone()) else {
             return;
         };
         let mut slot = slot_arc.lock().await;
-        if slot.running_id != Some(id) {
-            return;
-        }
 
         match decision {
-            Ok(completion) => {
-                Self::track_completion(completions, id, Arc::clone(&slot_name), completion);
-                match slot.status {
-                    SlotStatus::Admitting { .. } => {
-                        slot.status = SlotStatus::Running {
-                            started_at: Instant::now(),
-                        };
-                        self.bus.publish(
-                            Event::new(EventKind::ControllerSlotTransition)
-                                .with_task(slot_name)
-                                .with_reason("admitting→running"),
-                        );
-                    }
-                    SlotStatus::Terminating { .. } => {
-                        let Some(sup) = self.supervisor.upgrade() else {
-                            return;
-                        };
-                        Self::track_removal(removals, sup, id, slot_name);
-                    }
-                    SlotStatus::Idle | SlotStatus::Running { .. } => {}
+            Ok(completion) => match slot.confirm_admission(id, Instant::now()) {
+                AdmissionTransition::Running => {
+                    Self::track_completion(completions, id, Arc::clone(&slot_name), completion);
+                    self.bus.publish(
+                        Event::new(EventKind::ControllerSlotTransition)
+                            .with_task(slot_name)
+                            .with_reason("admitting→running"),
+                    );
                 }
-            }
+                AdmissionTransition::RemoveNow(owner) => {
+                    Self::track_completion(completions, id, Arc::clone(&slot_name), completion);
+                    let Some(sup) = self.supervisor.upgrade() else {
+                        return;
+                    };
+                    Self::track_removal(removals, sup, owner, slot_name);
+                }
+                AdmissionTransition::Stale => {}
+            },
             Err(_) => {
-                self.running.remove(&id);
-                slot.running_id = None;
-                slot.status = SlotStatus::Idle;
+                if !slot.reject_admission(id) {
+                    return;
+                }
 
                 // After commit, the registry owns any watched outcome and lifecycle diagnostics.
                 // The direct reply only drives controller state here.
@@ -269,48 +259,31 @@ impl Controller {
         result: CompletionResult,
         admissions: &mut JoinSet<AdmissionResult>,
     ) {
-        let Some(indexed_slot) = self.running.get(&result.id).map(|entry| entry.clone()) else {
-            return;
-        };
-        if indexed_slot.as_ref() != result.slot_name.as_ref() {
-            return;
-        }
-        self.free_and_advance(result.id, admissions).await;
-    }
-
-    /// Frees a slot after terminal registry cleanup is confirmed.
-    ///
-    /// The completed id must match the current slot owner.
-    /// If it does, the slot is reset to `Idle` and, unless shutdown is active, the next queued submission is started.
-    async fn free_and_advance(&self, id: TaskId, admissions: &mut JoinSet<AdmissionResult>) {
         let Some(sup) = self.supervisor.upgrade() else {
             return;
         };
-        let Some(slot_name) = self.running.get(&id).map(|entry| entry.clone()) else {
-            return;
-        };
-        let Some(slot_arc) = self.slots.get(&*slot_name).map(|e| e.clone()) else {
+        let Some(slot_arc) = self
+            .slots
+            .get(&*result.slot_name)
+            .map(|entry| entry.clone())
+        else {
             return;
         };
         let mut slot = slot_arc.lock().await;
-        if slot.running_id != Some(id) {
+        if !slot.complete_owner(result.id) {
             return;
         }
 
-        self.running.remove(&id);
-        slot.running_id = None;
-        slot.status = SlotStatus::Idle;
-
         if !self.is_shutting_down() {
-            self.start_next_from_queue(&sup, &mut slot, &slot_name, admissions);
+            self.start_next_from_queue(&sup, &mut slot, &result.slot_name, admissions);
         }
 
-        self.gc_if_idle(&slot_name, slot);
+        self.gc_if_idle(&result.slot_name, slot);
     }
 
     /// Hands a submission to the runtime under its pre-minted id.
     ///
-    /// On success, the slot enters `Admitting`, `running` is updated, and the watcher is owned by the runtime registry.
+    /// On success, the slot enters `Admitting` and the watcher is owned by the runtime registry.
     ///
     /// On failure, the watcher is put back into `watchers` so the caller can reject it normally instead of dropping the oneshot.
     fn start_in_slot(
@@ -322,14 +295,12 @@ impl Controller {
         task_spec: TaskSpec,
         admissions: &mut JoinSet<AdmissionResult>,
     ) -> Result<(), RuntimeError> {
+        assert!(slot.is_idle(), "start_in_slot requires an idle slot");
         let done = self.watchers.remove(&id).map(|(_, tx)| tx);
         match sup.add_task_with_id_watched(id, task_spec, done) {
             Ok((reply, completion)) => {
-                slot.status = SlotStatus::Admitting {
-                    since: Instant::now(),
-                };
-                slot.running_id = Some(id);
-                self.running.insert(id, Arc::clone(slot_name));
+                let started = slot.begin_admission(id, Instant::now());
+                debug_assert!(started);
                 Self::track_admission(admissions, id, Arc::clone(slot_name), reply, completion);
                 Ok(())
             }
@@ -355,6 +326,10 @@ impl Controller {
         slot_name: &Arc<str>,
         admissions: &mut JoinSet<AdmissionResult>,
     ) {
+        debug_assert!(slot.is_idle());
+        if !slot.is_idle() {
+            return;
+        }
         while let Some((next_id, next_spec)) = slot.queue.pop_front() {
             match self.start_in_slot(sup, slot, slot_name, next_id, next_spec, admissions) {
                 Ok(()) => {

@@ -70,12 +70,15 @@ impl Controller {
     ///
     /// Successful claims and already-removing tasks both finish through the reliable completion
     /// signal. An error is diagnostic only; shutdown cleanup remains authoritative.
-    pub(super) fn handle_removal_result(&self, result: RemovalResult) {
-        let is_current = self
-            .running
-            .get(&result.id)
-            .is_some_and(|slot| slot.as_ref() == result.slot_name.as_ref());
-        if !is_current {
+    pub(super) async fn handle_removal_result(&self, result: RemovalResult) {
+        let Some(slot) = self
+            .slots
+            .get(&*result.slot_name)
+            .map(|entry| entry.clone())
+        else {
+            return;
+        };
+        if slot.lock().await.owner_id() != Some(result.id) {
             return;
         }
         if let Err(error) = result.decision {

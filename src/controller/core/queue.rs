@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::{
-    controller::slot::{SlotState, SlotStatus},
+    controller::slot::SlotState,
     events::{Event, EventKind},
     identity::TaskId,
 };
@@ -34,7 +34,7 @@ impl Controller {
         slot_name: &Arc<str>,
         slot: tokio::sync::MutexGuard<'_, SlotState>,
     ) {
-        let collect = matches!(slot.status, SlotStatus::Idle) && slot.queue.is_empty();
+        let collect = slot.is_idle() && slot.queue.is_empty();
         drop(slot);
         if collect {
             self.slots.remove(&**slot_name);

@@ -49,7 +49,6 @@ impl Controller {
         self.mark_shutting_down();
         self.finalize_remaining_watchers();
         self.slots.clear();
-        self.running.clear();
     }
 
     /// Waits for the owned controller loop exactly once.
@@ -178,7 +177,14 @@ impl Controller {
                 }
                 result = removals.join_next(), if !removals.is_empty() => {
                     match result {
-                        Some(Ok(result)) => self.handle_removal_result(result),
+                        Some(Ok(result)) => {
+                            let _ = self
+                                .guarded(
+                                    "handle_removal_result",
+                                    self.handle_removal_result(result),
+                                )
+                                .await;
+                        }
                         Some(Err(error)) => {
                             self.bus.publish(
                                 Event::new(EventKind::ControllerRejected)

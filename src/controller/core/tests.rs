@@ -32,6 +32,35 @@ fn slot_arc_name() -> Arc<str> {
     Arc::from("s")
 }
 
+fn admitting_slot(owner: TaskId) -> SlotState {
+    let mut slot = SlotState::new();
+    assert!(slot.begin_admission(owner, Instant::now()));
+    slot
+}
+
+fn running_slot(owner: TaskId) -> SlotState {
+    let mut slot = admitting_slot(owner);
+    assert_eq!(
+        slot.confirm_admission(owner, Instant::now()),
+        AdmissionTransition::Running
+    );
+    slot
+}
+
+fn terminating_slot(owner: TaskId) -> SlotState {
+    let mut slot = running_slot(owner);
+    assert_eq!(
+        slot.request_replacement(Instant::now()),
+        crate::controller::slot::ReplaceAction::RemoveNow(owner)
+    );
+    slot
+}
+
+async fn abort_and_drain<T: 'static>(workers: &mut JoinSet<T>) {
+    workers.abort_all();
+    while workers.join_next().await.is_some() {}
+}
+
 #[test]
 fn replace_head_or_push_into_empty_queue() {
     let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
@@ -114,7 +143,7 @@ fn get_or_create_slot_creates_idle_slot() {
 
     let slot_arc = ctrl.get_or_create_slot("my-slot");
     let slot = slot_arc.blocking_lock();
-    assert_eq!(slot.status, SlotStatus::Idle);
+    assert_eq!(slot.phase(), SlotPhase::Idle);
     assert!(slot.queue.is_empty());
 }
 
@@ -146,12 +175,8 @@ async fn stale_completion_does_not_free_current_owner() {
     let slot_arc = ctrl.get_or_create_slot("s");
     {
         let mut slot = slot_arc.lock().await;
-        slot.status = SlotStatus::Running {
-            started_at: Instant::now(),
-        };
-        slot.running_id = Some(current_id);
+        *slot = running_slot(current_id);
     }
-    ctrl.running.insert(current_id, Arc::from("s"));
 
     let mut admissions = JoinSet::new();
     ctrl.handle_completion_result(
@@ -164,9 +189,372 @@ async fn stale_completion_does_not_free_current_owner() {
     .await;
 
     let slot = slot_arc.lock().await;
-    assert_eq!(slot.running_id, Some(current_id));
-    assert!(matches!(slot.status, SlotStatus::Running { .. }));
-    assert!(ctrl.running.contains_key(&current_id));
+    assert_eq!(slot.owner_id(), Some(current_id));
+    assert!(matches!(slot.phase(), SlotPhase::Running { .. }));
+}
+
+#[tokio::test]
+async fn removal_not_claimed_keeps_terminating_until_reliable_completion() {
+    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = Controller::new(ControllerConfig::default(), sup.core(), bus);
+    let owner = TaskId::next();
+    let queued = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = terminating_slot(owner);
+        slot.queue
+            .push_back((queued, waiting_spec("after-unclaimed-removal")));
+    }
+
+    ctrl.handle_removal_result(RemovalResult {
+        id: owner,
+        slot_name: Arc::from("s"),
+        decision: Ok(false),
+    })
+    .await;
+
+    {
+        let slot = slot_arc.lock().await;
+        assert_eq!(slot.owner_id(), Some(owner));
+        assert!(matches!(slot.phase(), SlotPhase::Terminating { .. }));
+        assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(queued));
+    }
+    assert!(
+        events.try_recv().is_err(),
+        "Ok(false) is not a removal failure diagnostic"
+    );
+
+    let mut admissions = JoinSet::new();
+    ctrl.handle_completion_result(
+        CompletionResult {
+            id: owner,
+            slot_name: Arc::from("s"),
+        },
+        &mut admissions,
+    )
+    .await;
+
+    {
+        let slot = slot_arc.lock().await;
+        assert_eq!(slot.owner_id(), Some(queued));
+        assert!(matches!(
+            slot.phase(),
+            SlotPhase::Admitting { owner, .. } if owner == queued
+        ));
+        assert!(slot.queue.is_empty());
+    }
+    assert_eq!(admissions.len(), 1);
+    abort_and_drain(&mut admissions).await;
+}
+
+#[tokio::test]
+async fn removal_error_preserves_owner_and_queue_and_emits_one_diagnostic() {
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = make_controller(ControllerConfig::default(), bus);
+    let owner = TaskId::next();
+    let queued = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = terminating_slot(owner);
+        slot.queue
+            .push_back((queued, waiting_spec("after-failed-removal")));
+    }
+
+    ctrl.handle_removal_result(RemovalResult {
+        id: owner,
+        slot_name: Arc::from("s"),
+        decision: Err(RuntimeError::CommandQueueFull),
+    })
+    .await;
+
+    let event = events
+        .try_recv()
+        .expect("the current owner's removal error must be observable");
+    assert_eq!(event.kind, EventKind::ControllerRejected);
+    assert_eq!(event.id, Some(owner));
+    assert_eq!(event.task.as_deref(), Some("s"));
+    assert!(event.reason.as_deref().is_some_and(|reason| {
+        reason.starts_with("remove_failed:") && reason.contains("queue is full")
+    }));
+    assert!(
+        events.try_recv().is_err(),
+        "one failed result must publish exactly one diagnostic"
+    );
+
+    let slot = slot_arc.lock().await;
+    assert_eq!(slot.owner_id(), Some(owner));
+    assert!(matches!(slot.phase(), SlotPhase::Terminating { .. }));
+    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(queued));
+}
+
+#[tokio::test]
+async fn stale_removal_error_does_not_publish_or_mutate_new_owner() {
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = make_controller(ControllerConfig::default(), bus);
+    let stale = TaskId::next();
+    let current = TaskId::next();
+    let queued = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = running_slot(current);
+        slot.queue
+            .push_back((queued, waiting_spec("new-owner-queued")));
+    }
+
+    ctrl.handle_removal_result(RemovalResult {
+        id: stale,
+        slot_name: Arc::from("s"),
+        decision: Err(RuntimeError::CommandQueueFull),
+    })
+    .await;
+
+    assert!(events.try_recv().is_err());
+    let slot = slot_arc.lock().await;
+    assert_eq!(slot.owner_id(), Some(current));
+    assert!(matches!(slot.phase(), SlotPhase::Running { .. }));
+    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(queued));
+}
+
+#[tokio::test]
+async fn stale_admission_ok_and_err_do_not_mutate_new_owner() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let stale_id = TaskId::next();
+    let current_id = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = admitting_slot(current_id);
+    }
+
+    let mut admissions = JoinSet::new();
+    let mut completions = JoinSet::new();
+    let mut removals = JoinSet::new();
+    ctrl.handle_admission_result(
+        AdmissionResult {
+            id: stale_id,
+            slot_name: Arc::from("s"),
+            decision: Ok(crate::core::RemovalCompletion::new()),
+        },
+        &mut admissions,
+        &mut completions,
+        &mut removals,
+    )
+    .await;
+    ctrl.handle_admission_result(
+        AdmissionResult {
+            id: stale_id,
+            slot_name: Arc::from("s"),
+            decision: Err(RuntimeError::ShuttingDown),
+        },
+        &mut admissions,
+        &mut completions,
+        &mut removals,
+    )
+    .await;
+
+    let slot = slot_arc.lock().await;
+    assert_eq!(slot.owner_id(), Some(current_id));
+    assert!(matches!(
+        slot.phase(),
+        SlotPhase::Admitting { owner, .. } if owner == current_id
+    ));
+    assert!(completions.is_empty());
+    assert!(removals.is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_completion_does_not_start_queued_owner_twice() {
+    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+    let completed_id = TaskId::next();
+    let next_id = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = running_slot(completed_id);
+        slot.queue
+            .push_back((next_id, waiting_spec("duplicate-completion-next")));
+    }
+
+    let mut admissions = JoinSet::new();
+    for _ in 0..2 {
+        ctrl.handle_completion_result(
+            CompletionResult {
+                id: completed_id,
+                slot_name: Arc::from("s"),
+            },
+            &mut admissions,
+        )
+        .await;
+    }
+
+    let slot = slot_arc.lock().await;
+    assert_eq!(slot.owner_id(), Some(next_id));
+    assert!(matches!(
+        slot.phase(),
+        SlotPhase::Admitting { owner, .. } if owner == next_id
+    ));
+    assert!(slot.queue.is_empty());
+    assert_eq!(
+        admissions.len(),
+        1,
+        "a duplicate completion must not commit the queued Add twice"
+    );
+    drop(slot);
+    abort_and_drain(&mut admissions).await;
+}
+
+#[tokio::test]
+async fn replace_pending_admission_then_add_err_starts_replacement_without_removal() {
+    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+    let owner = TaskId::next();
+    let replacement = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = admitting_slot(owner);
+    }
+
+    let mut admissions = JoinSet::new();
+    let mut completions = JoinSet::new();
+    let mut removals = JoinSet::new();
+    ctrl.handle_submission(
+        Submission {
+            id: replacement,
+            spec: ControllerSpec::replace(waiting_spec("replacement-after-add-err")).with_slot("s"),
+            done: None,
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+    assert!(removals.is_empty());
+
+    ctrl.handle_admission_result(
+        AdmissionResult {
+            id: owner,
+            slot_name: Arc::from("s"),
+            decision: Err(RuntimeError::TaskAlreadyExists {
+                name: Arc::from("rejected-owner"),
+            }),
+        },
+        &mut admissions,
+        &mut completions,
+        &mut removals,
+    )
+    .await;
+
+    let slot = slot_arc.lock().await;
+    assert_eq!(slot.owner_id(), Some(replacement));
+    assert!(matches!(
+        slot.phase(),
+        SlotPhase::Admitting { owner, .. } if owner == replacement
+    ));
+    assert!(slot.queue.is_empty());
+    assert_eq!(admissions.len(), 1);
+    assert!(
+        removals.is_empty(),
+        "a rejected Add means there was no owner to remove"
+    );
+    drop(slot);
+    abort_and_drain(&mut admissions).await;
+    abort_and_drain(&mut completions).await;
+    abort_and_drain(&mut removals).await;
+}
+
+#[tokio::test]
+async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_ok() {
+    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+    let owner = TaskId::next();
+    let first = TaskId::next();
+    let latest = TaskId::next();
+    let slot_arc = ctrl.get_or_create_slot("s");
+    {
+        let mut slot = slot_arc.lock().await;
+        *slot = admitting_slot(owner);
+    }
+
+    let mut admissions = JoinSet::new();
+    let mut completions = JoinSet::new();
+    let mut removals = JoinSet::new();
+    let (first_done, first_outcome) = oneshot::channel();
+    ctrl.handle_submission(
+        Submission {
+            id: first,
+            spec: ControllerSpec::replace(waiting_spec("pending-replace-first")).with_slot("s"),
+            done: Some(first_done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+    ctrl.handle_submission(
+        Submission {
+            id: latest,
+            spec: ControllerSpec::replace(waiting_spec("pending-replace-latest")).with_slot("s"),
+            done: None,
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+
+    assert!(matches!(
+        first_outcome.await,
+        Ok(TaskOutcome::Rejected { reason })
+            if reason.as_ref() == crate::reasons::SUPERSEDED_BY_REPLACE
+    ));
+
+    {
+        let slot = slot_arc.lock().await;
+        assert!(matches!(
+            slot.phase(),
+            SlotPhase::CancelPendingAdmission { owner: id, .. } if id == owner
+        ));
+        assert_eq!(slot.queue.len(), 1);
+        assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(latest));
+    }
+    assert!(removals.is_empty());
+
+    for _ in 0..2 {
+        ctrl.handle_admission_result(
+            AdmissionResult {
+                id: owner,
+                slot_name: Arc::from("s"),
+                decision: Ok(crate::core::RemovalCompletion::new()),
+            },
+            &mut admissions,
+            &mut completions,
+            &mut removals,
+        )
+        .await;
+    }
+
+    let slot = slot_arc.lock().await;
+    assert!(matches!(
+        slot.phase(),
+        SlotPhase::Terminating { owner: id, .. } if id == owner
+    ));
+    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(latest));
+    assert_eq!(completions.len(), 1, "duplicate Add Ok must be stale");
+    assert_eq!(
+        removals.len(),
+        1,
+        "only the first authoritative Add Ok may order removal"
+    );
+    drop(slot);
+    abort_and_drain(&mut admissions).await;
+    abort_and_drain(&mut completions).await;
+    abort_and_drain(&mut removals).await;
 }
 
 #[tokio::test]
@@ -207,16 +595,12 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     let slot = ctrl.get_or_create_slot("shutdown-slot");
     {
         let mut slot = slot.lock().await;
-        slot.status = SlotStatus::Running {
-            started_at: Instant::now(),
-        };
-        slot.running_id = Some(running_id);
+        *slot = running_slot(running_id);
         slot.queue
             .push_back((watched_id, waiting_spec("watched-shutdown-queue")));
         slot.queue
             .push_back((unwatched_id, waiting_spec("plain-shutdown-queue")));
     }
-    ctrl.running.insert(running_id, Arc::from("shutdown-slot"));
 
     ctrl.finalize_slot_state_on_shutdown().await;
 
@@ -227,7 +611,6 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     ));
     assert!(ctrl.watchers.is_empty());
     assert!(ctrl.slots.is_empty());
-    assert!(ctrl.running.is_empty());
 }
 
 #[tokio::test]
@@ -346,7 +729,6 @@ fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
         bus,
         shutdown_token: CancellationToken::new(),
         slots: DashMap::new(),
-        running: DashMap::new(),
         watchers: DashMap::new(),
         tx,
         rx: RwLock::new(Some(rx)),
@@ -524,7 +906,6 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
     ));
     assert!(ctrl.is_joined().await);
     assert!(ctrl.slots.is_empty());
-    assert!(ctrl.running.is_empty());
     assert!(ctrl.watchers.is_empty());
     let queued_outcome = tokio::time::timeout(Duration::from_millis(50), queued_waiter.wait())
         .await
@@ -846,7 +1227,7 @@ async fn registry_reply_marks_slot_running_without_task_added() {
             return false;
         };
         let slot = slot.lock().await;
-        slot.running_id == Some(id) && matches!(slot.status, SlotStatus::Running { .. })
+        slot.owner_id() == Some(id) && matches!(slot.phase(), SlotPhase::Running { .. })
     })
     .await;
 
@@ -854,13 +1235,7 @@ async fn registry_reply_marks_slot_running_without_task_added() {
         reached_running,
         "the direct registry reply must confirm admission without TaskAdded"
     );
-    assert_eq!(
-        ctrl.running.get(&id).as_deref().map(AsRef::as_ref),
-        Some("s")
-    );
-
     stop_controller_loop(token, runner).await;
-    assert!(ctrl.running.is_empty());
     assert!(ctrl.slots.is_empty());
 
     let _ = handle.shutdown().await;
@@ -887,7 +1262,7 @@ async fn replace_is_processed_while_registry_reply_is_pending() {
                 return false;
             };
             let slot = slot.lock().await;
-            slot.running_id == Some(first_id) && matches!(slot.status, SlotStatus::Admitting { .. })
+            slot.owner_id() == Some(first_id) && matches!(slot.phase(), SlotPhase::Admitting { .. })
         })
         .await,
         "the first Add must remain in flight until the registry starts"
@@ -904,7 +1279,7 @@ async fn replace_is_processed_while_registry_reply_is_pending() {
                 return false;
             };
             let slot = slot.lock().await;
-            matches!(slot.status, SlotStatus::Terminating { .. })
+            matches!(slot.phase(), SlotPhase::CancelPendingAdmission { .. })
                 && slot.queue.front().map(|(id, _)| *id) == Some(replacement_id)
         })
         .await,
@@ -924,8 +1299,8 @@ async fn replace_is_processed_while_registry_reply_is_pending() {
                 return false;
             };
             let slot = slot.lock().await;
-            slot.running_id == Some(replacement_id)
-                && matches!(slot.status, SlotStatus::Running { .. })
+            slot.owner_id() == Some(replacement_id)
+                && matches!(slot.phase(), SlotPhase::Running { .. })
         })
         .await,
         "the replacement must start from reliable completion without TaskRemoved"
@@ -950,17 +1325,9 @@ async fn replace_stays_responsive_under_registry_backpressure() {
 
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
     let slot_name: Arc<str> = Arc::from("s");
-    ctrl.slots.insert(
-        Arc::clone(&slot_name),
-        Arc::new(Mutex::new(SlotState {
-            status: SlotStatus::Running {
-                started_at: Instant::now(),
-            },
-            running_id: Some(owner_id),
-            queue: std::collections::VecDeque::new(),
-        })),
-    );
-    ctrl.running.insert(owner_id, Arc::clone(&slot_name));
+    let slot = running_slot(owner_id);
+    ctrl.slots
+        .insert(Arc::clone(&slot_name), Arc::new(Mutex::new(slot)));
 
     // On a current-thread runtime the registry cannot consume this command until this test
     // yields, so it occupies the only queue slot while both Replace commands are handled.
@@ -1013,7 +1380,7 @@ async fn replace_stays_responsive_under_registry_backpressure() {
         .map(|entry| entry.clone())
         .expect("the slot must remain tracked");
     let slot = slot.lock().await;
-    assert!(matches!(slot.status, SlotStatus::Terminating { .. }));
+    assert!(matches!(slot.phase(), SlotPhase::Terminating { .. }));
     assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(second_id));
     drop(slot);
     assert_eq!(
@@ -1063,7 +1430,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
                 return false;
             };
             let slot = slot.lock().await;
-            slot.running_id == Some(owner_id) && matches!(slot.status, SlotStatus::Running { .. })
+            slot.owner_id() == Some(owner_id) && matches!(slot.phase(), SlotPhase::Running { .. })
         })
         .await,
         "the first task must own the slot"
@@ -1131,9 +1498,6 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
     assert!(
         poll_until(Duration::from_secs(2), || async {
             ctrl.slots.get("s").is_none()
-                && !ctrl.running.contains_key(&owner_id)
-                && !ctrl.running.contains_key(&victim_id)
-                && !ctrl.running.contains_key(&try_id)
         })
         .await,
         "the slot must settle after its owner completes"
@@ -1194,7 +1558,7 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
                 return false;
             };
             let slot = slot.lock().await;
-            slot.running_id == Some(first_id) && matches!(slot.status, SlotStatus::Running { .. })
+            slot.owner_id() == Some(first_id) && matches!(slot.phase(), SlotPhase::Running { .. })
         })
         .await,
         "the first task must own the slot before queueing the second"
@@ -1234,8 +1598,6 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
     assert!(
         poll_until(Duration::from_secs(2), || async {
             ctrl.slots.get("s").is_none()
-                && !ctrl.running.contains_key(&first_id)
-                && !ctrl.running.contains_key(&second_id)
         })
         .await,
         "the empty slot must be collected after the second completion"
@@ -1273,7 +1635,7 @@ async fn duplicate_reply_frees_slot_without_task_add_failed() {
     );
     assert!(
         poll_until(Duration::from_secs(2), || async {
-            !ctrl.running.contains_key(&id) && !ctrl.watchers.contains_key(&id)
+            ctrl.slots.get("s").is_none() && !ctrl.watchers.contains_key(&id)
         })
         .await,
         "the rejected admission must release its slot ownership"
@@ -1334,15 +1696,10 @@ async fn queued_admission_skips_registry_rejected_head() {
         matches!(duplicate_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::ALREADY_EXISTS)
     );
     let slot = slot_arc.lock().await;
-    assert_eq!(slot.running_id, Some(accepted_id));
-    assert!(matches!(slot.status, SlotStatus::Running { .. }));
+    assert_eq!(slot.owner_id(), Some(accepted_id));
+    assert!(matches!(slot.phase(), SlotPhase::Running { .. }));
     assert!(slot.queue.is_empty());
-    drop(slot);
-    assert!(!ctrl.running.contains_key(&duplicate_id));
-    assert_eq!(
-        ctrl.running.get(&accepted_id).as_deref().map(AsRef::as_ref),
-        Some("s")
-    );
+    assert_ne!(slot.owner_id(), Some(duplicate_id));
 
     let _ = handle.shutdown().await;
 }
@@ -1372,17 +1729,10 @@ async fn no_queue_advancement_after_shutdown_starts() {
     });
     let mut queue = std::collections::VecDeque::new();
     queue.push_back((TaskId::next(), TaskSpec::restartable(queued)));
-    ctrl.slots.insert(
-        Arc::from("s"),
-        Arc::new(Mutex::new(SlotState {
-            status: SlotStatus::Running {
-                started_at: Instant::now(),
-            },
-            running_id: Some(id),
-            queue,
-        })),
-    );
-    ctrl.running.insert(id, Arc::from("s"));
+    let mut slot = running_slot(id);
+    slot.queue = queue;
+    ctrl.slots
+        .insert(Arc::from("s"), Arc::new(Mutex::new(slot)));
     let mut admissions = JoinSet::new();
     ctrl.mark_shutting_down();
     ctrl.handle_completion_result(
@@ -1447,16 +1797,10 @@ async fn snapshot_reports_status_running_and_queue_depth() {
     });
     let mut queue = std::collections::VecDeque::new();
     queue.push_back((TaskId::next(), TaskSpec::restartable(queued)));
-    ctrl.slots.insert(
-        Arc::from("s"),
-        Arc::new(Mutex::new(SlotState {
-            status: SlotStatus::Running {
-                started_at: Instant::now(),
-            },
-            running_id: Some(id),
-            queue,
-        })),
-    );
+    let mut slot = running_slot(id);
+    slot.queue = queue;
+    ctrl.slots
+        .insert(Arc::from("s"), Arc::new(Mutex::new(slot)));
 
     let snap = ctrl.snapshot().await;
     assert_eq!(snap.len(), 1, "one slot tracked");
@@ -1469,6 +1813,129 @@ async fn snapshot_reports_status_running_and_queue_depth() {
     assert_eq!(view.running, Some(id));
 
     let _ = handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn snapshot_maps_every_internal_slot_phase_and_owner() {
+    use crate::controller::{SlotStatusKind, slot::ReplaceAction};
+
+    let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
+    let admitting_id = TaskId::next();
+    let cancel_pending_id = TaskId::next();
+    let running_id = TaskId::next();
+    let terminating_id = TaskId::next();
+    let now = Instant::now();
+
+    let mut admitting = SlotState::new();
+    assert!(admitting.begin_admission(admitting_id, now - Duration::from_secs(4)));
+    let mut cancel_pending = SlotState::new();
+    assert!(cancel_pending.begin_admission(cancel_pending_id, now - Duration::from_secs(5)));
+    assert_eq!(
+        cancel_pending.request_replacement(now - Duration::from_secs(3)),
+        ReplaceAction::WaitForAdmission
+    );
+    let mut running = SlotState::new();
+    assert!(running.begin_admission(running_id, now - Duration::from_secs(5)));
+    assert_eq!(
+        running.confirm_admission(running_id, now - Duration::from_secs(2)),
+        AdmissionTransition::Running
+    );
+    let mut terminating = SlotState::new();
+    assert!(terminating.begin_admission(terminating_id, now - Duration::from_secs(5)));
+    assert_eq!(
+        terminating.confirm_admission(terminating_id, now - Duration::from_secs(4)),
+        AdmissionTransition::Running
+    );
+    assert_eq!(
+        terminating.request_replacement(now - Duration::from_secs(1)),
+        ReplaceAction::RemoveNow(terminating_id)
+    );
+
+    let with_queue = |mut slot: SlotState, depth: usize| {
+        for _ in 0..depth {
+            slot.queue
+                .push_back((TaskId::next(), make_spec("snapshot-queued")));
+        }
+        slot
+    };
+    for (name, slot) in [
+        ("terminating", with_queue(terminating, 4)),
+        ("running", with_queue(running, 3)),
+        ("idle", SlotState::new()),
+        ("cancel-pending", with_queue(cancel_pending, 2)),
+        ("admitting", with_queue(admitting, 1)),
+    ] {
+        ctrl.slots
+            .insert(Arc::from(name), Arc::new(Mutex::new(slot)));
+    }
+
+    let snap = ctrl.snapshot().await;
+    assert_eq!(snap.len(), 5);
+    assert_eq!(snap.total_queued(), 10);
+    assert_eq!(snap.running_count(), 1);
+    assert_eq!(
+        snap.slots
+            .iter()
+            .map(|slot| slot.slot.as_ref())
+            .collect::<Vec<_>>(),
+        [
+            "admitting",
+            "cancel-pending",
+            "idle",
+            "running",
+            "terminating"
+        ]
+    );
+
+    for (name, status, owner, queue_depth, minimum_age) in [
+        ("idle", SlotStatusKind::Idle, None, 0, Duration::ZERO),
+        (
+            "admitting",
+            SlotStatusKind::Admitting,
+            Some(admitting_id),
+            1,
+            Duration::from_secs(4),
+        ),
+        (
+            "cancel-pending",
+            SlotStatusKind::Terminating,
+            Some(cancel_pending_id),
+            2,
+            Duration::from_secs(3),
+        ),
+        (
+            "running",
+            SlotStatusKind::Running,
+            Some(running_id),
+            3,
+            Duration::from_secs(2),
+        ),
+        (
+            "terminating",
+            SlotStatusKind::Terminating,
+            Some(terminating_id),
+            4,
+            Duration::from_secs(1),
+        ),
+    ] {
+        let view = snap.slot(name).expect("the inserted slot must be visible");
+        assert_eq!(view.status, status, "wrong public status for {name}");
+        assert_eq!(view.running, owner, "wrong phase-owned id for {name}");
+        assert_eq!(
+            view.queue_depth, queue_depth,
+            "wrong queue depth for {name}"
+        );
+        if status == SlotStatusKind::Idle {
+            assert_eq!(view.status_for, Duration::ZERO);
+        } else {
+            assert!(
+                view.status_for >= minimum_age,
+                "wrong status timestamp selected for {name}: {:?}",
+                view.status_for
+            );
+        }
+    }
 }
 
 async fn poll_until<F, Fut>(within: std::time::Duration, mut cond: F) -> bool

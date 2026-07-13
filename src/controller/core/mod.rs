@@ -6,21 +6,20 @@
 //!
 //! - the bounded ordered channel for submissions and identity operations,
 //! - the per-slot state map,
-//! - the reverse index from running [`TaskId`] to slot,
 //! - watched submission senders until they are handed to the runtime or rejected.
 //!
 //! ## Per-slot Flow
 //!
 //! ```text
-//! Idle
-//!   submit
-//!   |
-//!   v
-//! Admitting -- Add reply Ok --> Running -- registry completion --> Idle or next queued submission
-//!   |                           |
-//!   | Add reply Err             | Replace
-//!   v                           v
-//! Idle or next queued         Terminating -- registry completion --> Idle or next queued submission
+//! Idle -- submit --> Admitting
+//! Admitting -- Add reply Ok --> Running
+//! Admitting -- Add reply Err --> Idle or next queued submission
+//! Admitting -- Replace --> CancelPendingAdmission
+//! CancelPendingAdmission -- Add reply Ok --> Terminating
+//! CancelPendingAdmission -- Add reply Err --> Idle or next queued submission
+//! Running -- Replace --> Terminating
+//! Running -- registry completion --> Idle or next queued submission
+//! Terminating -- registry completion --> Idle or next queued submission
 //! ```
 //!
 //! The controller advances admission from direct registry replies.
@@ -78,7 +77,11 @@ mod introspect;
 mod shutdown;
 
 #[cfg(test)]
-use super::{error::ControllerError, slot::SlotStatus, spec::ControllerSpec};
+use super::{
+    error::ControllerError,
+    slot::{AdmissionTransition, SlotPhase},
+    spec::ControllerSpec,
+};
 #[cfg(test)]
 use crate::RuntimeError;
 #[cfg(test)]
@@ -107,8 +110,6 @@ pub(crate) struct Controller {
     shutdown_token: CancellationToken,
     /// Per-slot mutable state.
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
-    /// Reverse index from current runtime task id to slot name.
-    running: DashMap<TaskId, Arc<str>>,
     /// Watched submissions not yet handed to the runtime registry.
     watchers: DashMap<TaskId, OutcomeTx>,
     /// Ordered command sender cloned into `ControllerHandle`.
@@ -135,7 +136,6 @@ impl Controller {
             bus,
             shutdown_token,
             slots: DashMap::new(),
-            running: DashMap::new(),
             watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),

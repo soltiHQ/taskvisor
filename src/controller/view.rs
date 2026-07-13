@@ -27,7 +27,8 @@ pub enum SlotStatusKind {
     Running,
     /// The current slot owner is being retired.
     ///
-    /// The controller is waiting for reliable terminal registry cleanup.
+    /// The controller is either waiting for an in-flight Add decision before it can order removal,
+    /// or waiting for reliable terminal registry cleanup after removal was ordered.
     Terminating,
 }
 
