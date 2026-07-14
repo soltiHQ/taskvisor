@@ -1,84 +1,52 @@
-//! # Runtime core.
+//! # Runtime API
 //!
-//! This module contains the taskvisor runtime implementation.
+//! This module contains the public runtime types:
 //!
-//! Public API:
+//! - [`Supervisor`] and [`SupervisorBuilder`] create and start a runtime.
+//! - [`SupervisorHandle`] manages tasks in dynamic mode.
+//! - [`SupervisorConfig`] sets runtime limits.
+//! - [`TaskDefaults`] sets inherited task behavior.
+//! - [`TaskWaiter`] returns a final [`TaskOutcome`].
 //!
-//! | File            | Role                                      |
-//! |-----------------|-------------------------------------------|
-//! | `supervisor.rs` | Public facade and composition root        |
-//! | `handle.rs`     | Dynamic task management API               |
-//! | `config.rs`     | Runtime defaults and limits               |
-//! | `outcome.rs`    | Guaranteed task completion results        |
-//! | `builder.rs`    | Runtime construction                      |
+//! ## Runtime Paths
 //!
-//! Internal runtime:
+//! State changes, final results, and observations use different paths:
 //!
-//! | File             | Role                                      |
-//! |------------------|-------------------------------------------|
-//! | `runtime.rs`     | Owns Bus, Registry, subscribers, shutdown |
-//! | `registry.rs`    | Owns active task actors and lifecycle ops |
-//! | `actor.rs`       | Runs one task with restart/backoff policy |
-//! | `runner.rs`      | Executes one task attempt                 |
-//! | `alive.rs`       | Best-effort live-task snapshot            |
-//! | `shutdown.rs`    | OS signal handling                        |
-//! | `panic_guard.rs` | Panic boundary for long-lived listeners   |
+//! | Path                                                                     | Route                                                                           |
+//! |--------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+//! | Direct `add*`, label operations, and identity stops without a controller | `SupervisorHandle` -> registry -> direct reply                                  |
+//! | `submit*` and identity stops with a controller                           | `SupervisorHandle` -> controller -> registry when needed                        |
+//! | Watched final result                                                     | registry or controller -> direct one-shot -> `TaskWaiter`                       |
+//! | Observability                                                            | runtime components -> event bus -> event relay -> alive tracker and subscribers |
 //!
-//! ## Planes
+//! The registry is the source of truth for registered identities and names.
+//! Events are for observability and may be lost when consumers are slow.
+//! Alive snapshots are based on those events. They can lag or miss state.
 //!
-//! taskvisor has three important runtime planes:
+//! ## When a Command Returns
 //!
-//! ```text
-//! Management plane:
-//!   SupervisorHandle ──► SupervisorCore ──mpsc──► Registry
+//! | Operation  | What the return value confirms                                                              |
+//! |------------|---------------------------------------------------------------------------------------------|
+//! | `add*`     | The registry accepted or rejected the task. The first attempt may not have started yet.     |
+//! | `remove*`  | Whether this caller claimed the stop request. Registered task cleanup may still be running. |
+//! | `cancel*`  | Known work reached terminal cleanup, unless the caller's explicit wait timeout expired.     |
+//! | `shutdown` | Shared runtime cleanup finished. The result reports its final status.                       |
 //!
-//! Event plane:
-//!   runtime components ──broadcast──► subscriber_listener ──► Subscribe impls
+//! Regular management methods wait for capacity in every bounded queue they use.
+//! Their `try_*` versions fail fast at those queue boundaries.
 //!
-//! Completion plane:
-//!   Registry ──oneshot outcome──► TaskWaiter
-//!            └─shared terminal──► cancel callers / controller slots
-//!   SupervisorCore ──shared result──► shutdown callers
-//! ```
+//! After a command is accepted, both forms may still wait for a direct decision or terminal cleanup.
+//! [`SupervisorHandle::list`] reads authoritative registry membership.
+//! [`SupervisorHandle::alive_snapshot`] and [`SupervisorHandle::is_alive`] are best-effort views built from events.
 //!
-//! The management plane uses an mpsc command channel. Add, remove, and cancel commands are not delivered through the lossy event bus.
-//! The event plane is best-effort and used for logs, metrics, snapshots, and subscriber integrations. Slow consumers can lag and miss events.
-//! The completion plane provides watched task outcomes, terminal registry cleanup for cancellation
-//! and controller slots, and one cached shutdown result.
+//! ## Important Rules
 //!
-//! ## Main Flow
-//!
-//! ```text
-//! Supervisor::run(tasks)
-//!   ├─ start subscriber listener
-//!   ├─ start registry listener
-//!   ├─ send one initial AddBatch command
-//!   ├─ wait for the direct registry decision
-//!   └─ wait for OS shutdown signal or natural completion
-//!
-//! Supervisor::serve()
-//!   ├─ start listeners
-//!   └─ return SupervisorHandle
-//! ```
-//!
-//! ## Events
-//!
-//! Events are published by:
-//!
-//! - `SupervisorCore`: add/remove/shutdown requests and final runtime verdicts.
-//! - `TaskActor`: attempt starts, retry scheduling, actor terminal state.
-//! - `SubscriberSet`: subscriber overflow and panic diagnostics.
-//! - `Registry`: task added/removed confirmations.
-//! - `runner`: per-attempt result events.
-//!
-//! `AllStoppedWithinGrace` can be emitted after explicit shutdown or after natural completion when all cleanup joins finish within the grace period.
-//!
-//! ## Notes
-//!
-//! - `Supervisor::run` is single-shot for one supervisor instance.
-//! - Attempts within one `TaskActor` are sequential; the same actor never runs two attempts in parallel.
-//! - Event sequence numbers are useful for stale-event filtering and sorting, but they are not a causal ordering guarantee across concurrent producers.
-//! - A panic in a long-lived listener is caught and reported as a diagnostic event instead of silently killing the control loop.
+//! - [`Supervisor::run`] is single-shot and registers its initial tasks as one batch.
+//! - Attempts for one registered task are sequential.
+//! - New task admission closes when shutdown starts.
+//! - Explicit shutdown returns after task, listener, and subscriber cleanup.
+//! - Dropping the last public owner only starts best-effort cancellation.
+//! - Event sequence numbers help sort observations, but do not prove causal order between concurrent tasks.
 
 mod outcome;
 pub use outcome::{TaskOutcome, TaskWaiter};
@@ -90,13 +58,19 @@ mod builder;
 pub use builder::SupervisorBuilder;
 
 mod config;
-pub use config::SupervisorConfig;
+pub use config::{ConfigError, SupervisorConfig};
+
+mod task_defaults;
+pub use task_defaults::TaskDefaults;
 
 mod handle;
 pub use handle::SupervisorHandle;
 
 mod supervisor;
 pub use supervisor::Supervisor;
+
+mod owner;
+pub(crate) use owner::RuntimeOwner;
 
 pub(crate) mod panic_guard;
 

@@ -1,47 +1,41 @@
-//! # Task completion outcomes.
+//! # Reliable final task results
 //!
-//! This module defines:
-//! - [`TaskOutcome`]: the final result of one supervised task run,
-//! - [`TaskWaiter`]: an awaitable receiver for that result.
+//! Lifecycle events show live progress, but they are best-effort.
+//! Use a [`TaskWaiter`] when application logic needs the final [`TaskOutcome`].
 //!
-//! Outcomes are delivered on the completion plane, not through the event bus.
-//! This means they are not affected by broadcast lag or dropped subscriber events.
+//! A waiter uses a direct one-shot channel.
+//! Event-bus lag does not affect it.
 //!
-//! ## Completion Plane
+//! ## Successful Direct-Add Flow
 //!
 //! ```text
-//! add_and_watch(spec)
-//!   creates oneshot
-//!   sends Add(id, spec, done) to registry
-//!   returns TaskWaiter after registration is confirmed
-//!
-//! submit_and_watch(spec)
-//!   creates oneshot
-//!   parks sender in controller until admission or rejection
-//!   returns TaskWaiter immediately after controller accepts the submission
-//!
-//! actor finishes
-//!   registry joins actor
-//!   registry maps actor exit to TaskOutcome
-//!   registry resolves oneshot
+//! Caller                         Runtime                         Task actor
+//!   │                               │                                │
+//!   ├── add_and_watch(spec) ───────►│                                │
+//!   │                               ├── register and spawn ─────────►│
+//!   │◄──── (TaskId, TaskWaiter) ────┤                                │
+//!   │                               │                                │ attempts / retries
+//!   │ await waiter.wait()           │                                │
+//!   │                               │◄─────── terminal signal ───────┤
+//!   │                               │ join actor                     │
+//!   │                               │ remove TaskId and name         │
+//!   │◄──── TaskOutcome (oneshot) ───┤                                │
 //! ```
 //!
-//! ## Resolution Rules
+//! With the `controller` feature, `submit_and_watch` can also return a waiter before slot admission.
+//! If the controller rejects the submission, the final outcome is [`TaskOutcome::Rejected`] and the task body never runs.
 //!
-//! - One waiter observes one task identity.
-//! - The outcome is resolved through a `oneshot` channel.
-//! - The sender has one owner at a time.
-//! - Dropping [`TaskWaiter`] is safe. Sending the outcome then becomes a no-op.
-//! - The outcome describes the final actor result, after retries are finished.
-//! - Per-attempt progress is reported by lifecycle events.
+//! ## Guarantees
 //!
-//! ## Rejection
+//! - One waiter follows one [`TaskId`].
+//! - For admitted work, it resolves after all retries end and the registry joins the task actor.
+//! - Dropping a waiter is safe and does not cancel the task.
+//! - If the runtime drops the sender before it creates an outcome,
+//!   [`TaskWaiter::wait`] returns an error instead of inventing a result.
 //!
-//! [`TaskOutcome::Rejected`] means the task body never ran.
-//!
-//! It is normally observed from `submit_and_watch` (feature = `controller`), when the controller rejects a submission before it becomes a running task.
-//! A duplicate-name registration failure is also resolved as `Rejected` inside the registry, but direct [`add_and_watch`](crate::SupervisorHandle::add_and_watch)
-//! returns [`RuntimeError::TaskAlreadyExists`](crate::RuntimeError::TaskAlreadyExists) before handing the waiter to the caller.
+//! Direct [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
+//! returns registration errors such as a duplicate name before it gives the
+//! caller a waiter.
 
 use std::sync::Arc;
 
@@ -50,48 +44,48 @@ use tokio::sync::oneshot;
 use crate::error::{RuntimeError, SharedError};
 use crate::identity::TaskId;
 
-/// Final result of a supervised task run.
+/// Final result of one watched task or controller submission.
 ///
-/// This is the authoritative terminal result for a watched task.
-/// It is delivered after the actor retry loop has ended and the registry has joined the actor.
+/// For admitted work, this value is sent after the retry loop ends, the actor is joined, and registry membership is removed.
+/// A controller can instead return [`Rejected`](Self::Rejected) before the task starts.
 ///
-/// Use events for live progress.
-/// Use `TaskOutcome` when you need the final result.
+/// This enum is non-exhaustive.
+/// Include a fallback arm when matching it.
+/// The data-carrying variants are also non-exhaustive. Match their fields with `..`.
 ///
 /// ## Outcome vs Events
 ///
-/// Events are best-effort observability.
-/// They may be dropped under load, and one event kind can represent several final outcomes.
-/// For example,
-/// `ActorExhausted` can mean success, retry exhaustion, or task-reported cancellation depending on its reason.
-/// `TaskOutcome` is delivered through a `oneshot` channel and is not affected by event-bus lag.
+/// Events are best-effort and may be missing.
+/// Do not rebuild a final outcome by collecting event kinds.
+/// A waiter uses a separate, reliable runtime channel.
 ///
-/// | Outcome                              | Typical event path | Meaning |
-/// |--------------------------------------|------------------------------------------------------|------------------------------------------------------|
-/// | [`Completed`](Self::Completed)       | `TaskStopped`, `ActorExhausted`, `TaskRemoved`       | success under `Never` or `OnFailure`                 |
-/// | [`Failed`](Self::Failed)             | `TaskFailed`, `ActorExhausted`, `TaskRemoved`        | retryable/non-fatal error stopped after policy limit |
-/// | [`Fatal`](Self::Fatal)               | `TaskFailed`, `ActorDead`, `TaskRemoved`             | fatal task error stopped immediately                 |
-/// | [`Canceled`](Self::Canceled)         | `TaskCanceled`, `TaskRemoved`                        | cooperative cancellation                             |
-/// | [`ForceAborted`](Self::ForceAborted) | `TaskRemoved(reason="force_terminated_after_grace")` | task did not stop in time                            |
-/// | [`Panicked`](Self::Panicked)         | `ActorDead(reason="actor_panic")`, `TaskRemoved`     | actor task panicked                                  |
-/// | [`Rejected`](Self::Rejected)         | `ControllerRejected` or `TaskAddFailed`              | task body never ran                                  |
+/// | Outcome                              | Meaning                                    |
+/// |--------------------------------------|--------------------------------------------|
+/// | [`Completed`](Self::Completed)       | Final attempt succeeded and policy stopped |
+/// | [`Failed`](Self::Failed)             | Retryable failure reached a stop condition |
+/// | [`Fatal`](Self::Fatal)               | Task reported a permanent failure          |
+/// | [`Canceled`](Self::Canceled)         | Cooperative cancellation                   |
+/// | [`ForceAborted`](Self::ForceAborted) | Runtime aborted before cooperative stop    |
+/// | [`Panicked`](Self::Panicked)         | Internal actor panicked                    |
+/// | [`Rejected`](Self::Rejected)         | Task body never ran                        |
 ///
-/// # Also
+/// ## See Also
 ///
-/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) - direct watched task add
+/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) and
+///   [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch) - direct watched task add
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - controller watched submission"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
 )]
 /// - [`TaskWaiter`] - awaitable handle that returns this outcome
 /// - [`EventKind`](crate::EventKind) - live observability events
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
-    /// Final attempt succeeded and restart policy stopped the actor.
+    /// Final attempt succeeded and the restart policy stopped the task.
     Completed,
 
-    /// Final attempt failed and the actor stopped without a fatal error.
+    /// A retryable failure reached a policy or retry-limit stop condition.
     ///
     /// Occurs when:
     /// - `RestartPolicy::Never` does not allow a retry,
@@ -120,29 +114,33 @@ pub enum TaskOutcome {
         source: Option<SharedError>,
     },
 
-    /// Task stopped because of cooperative cancellation.
+    /// Task stopped because cancellation was requested or reported.
     ///
-    /// This can come from shutdown, explicit remove/cancel, or the task itself returning [`TaskError::Canceled`](crate::TaskError::Canceled).
+    /// This can come from shutdown, explicit removal, or the task returning [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
-    /// Task ignored cooperative cancellation and was aborted after the grace period.
+    /// The runtime aborted the actor before cooperative stop completed.
+    ///
+    /// This normally happens after the configured grace period. Last-owner
+    /// fallback and signal-setup failure cleanup cannot wait for that period.
     ForceAborted,
 
-    /// The actor itself panicked.
+    /// The internal actor panicked.
     ///
-    /// This is a runtime bug guard.
-    /// Panics inside the task body are caught by `run_once` and become retryable task failures instead.
+    /// This guards against a runtime bug.
+    /// Panics inside the user task are caught earlier and become retryable failures instead.
     Panicked,
 
     /// The task body never ran.
     ///
-    /// Common reasons:
+    /// For controller submissions, common reasons are:
     /// - controller slot was busy under `DropIfRunning`,
-    /// - controller queue was full,
+    /// - controller slot queue was full,
     /// - queued submission was replaced,
     /// - queued submission was removed,
     /// - controller was shutting down,
     /// - registration failed because the task name already existed.
+    #[non_exhaustive]
     Rejected {
         /// Why the submission was rejected.
         reason: Arc<str>,
@@ -159,8 +157,7 @@ impl TaskOutcome {
     /// Creates a [`Failed`](Self::Failed) outcome for tests.
     ///
     /// Real outcomes normally come from the runtime.
-    /// The `Failed` and `Fatal` variants are `#[non_exhaustive]`;
-    /// other crates cannot build them directly.
+    /// The `Failed`, `Fatal`, and `Rejected` variants are `#[non_exhaustive]`; other crates cannot build them directly.
     ///
     /// This helper lets tests cover code that handles failed outcomes; `source` is `None`.
     ///
@@ -195,10 +192,29 @@ impl TaskOutcome {
         }
     }
 
+    /// Creates a [`Rejected`](Self::Rejected) outcome for tests.
+    ///
+    /// See [`failed_for_tests`](Self::failed_for_tests) for why this helper exists.
+    ///
+    /// ```rust
+    /// use taskvisor::TaskOutcome;
+    ///
+    /// let outcome = TaskOutcome::rejected_for_tests("queue_full");
+    /// assert_eq!(outcome.as_label(), "outcome_rejected");
+    /// ```
+    #[cfg(feature = "test-util")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+    #[must_use]
+    pub fn rejected_for_tests(reason: impl Into<Arc<str>>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
+        }
+    }
+
     /// Returns the original error source for [`Failed`](Self::Failed) or [`Fatal`](Self::Fatal).
     ///
     /// Returns `None` when the outcome has no source error.
-    /// This allows callers to use `downcast_ref` or error-reporting crates on the completion plane.
+    /// Callers can use `downcast_ref` or pass it to an error-reporting library.
     #[must_use]
     pub fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -229,17 +245,18 @@ impl TaskOutcome {
     }
 }
 
-/// Awaitable handle for one task outcome.
+/// One-shot receiver for a final [`TaskOutcome`].
 ///
 /// Created by:
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
+/// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)"
 )]
 ///
-/// A waiter is consumed by [`wait`](Self::wait).
-/// It resolves once the watched task reaches a terminal outcome, or returns an error if the sender is dropped before an outcome is produced.
+/// [`wait`](Self::wait) consumes the waiter.
+/// It normally resolves after the task or submission reaches a final outcome. Dropping the waiter does not cancel the task.
 ///
 /// ## Example
 ///
@@ -275,21 +292,20 @@ impl TaskWaiter {
         Self { id, rx }
     }
 
-    /// Returns the task identity observed by this waiter.
+    /// Returns the task or submission identity followed by this waiter.
     #[must_use]
     pub fn id(&self) -> TaskId {
         self.id
     }
 
-    /// Waits until the task reaches a final outcome.
+    /// Waits for the final outcome.
     ///
-    /// During normal operation, this returns a [`TaskOutcome`].
-    /// During normal shutdown, tasks resolve to [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
+    /// A registered task stopped by shutdown normally resolves as [`TaskOutcome::Canceled`] or [`TaskOutcome::ForceAborted`].
+    /// Work that was already finishing can keep its own terminal outcome.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops the sending half before producing an outcome.
-    /// This means the watched task was never resolved by the registry/controller path.
+    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops its sender before producing an outcome. No final result is available in that case.
     pub async fn wait(self) -> Result<TaskOutcome, RuntimeError> {
         self.rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }
@@ -301,7 +317,7 @@ mod tests {
 
     #[cfg(feature = "test-util")]
     #[test]
-    fn test_constructors_build_the_terminal_failure_variants() {
+    fn test_constructors_build_the_terminal_failure_and_rejection_variants() {
         let failed = TaskOutcome::failed_for_tests("boom", Some(3));
         assert!(matches!(
             &failed,
@@ -314,39 +330,58 @@ mod tests {
             &fatal,
             TaskOutcome::Fatal { reason, exit_code: None, .. } if reason.as_ref() == "bad config"
         ));
+
+        let rejected = TaskOutcome::rejected_for_tests("queue_full");
+        assert!(matches!(
+            &rejected,
+            TaskOutcome::Rejected { reason, .. } if reason.as_ref() == "queue_full"
+        ));
+        assert!(rejected.source().is_none());
     }
 
     #[test]
-    fn labels_are_stable_and_distinct() {
-        let outcomes = [
-            TaskOutcome::Completed,
-            TaskOutcome::Failed {
-                reason: Arc::from("x"),
-                exit_code: None,
-                source: None,
-            },
-            TaskOutcome::Fatal {
-                reason: Arc::from("x"),
-                exit_code: Some(1),
-                source: None,
-            },
-            TaskOutcome::Canceled,
-            TaskOutcome::ForceAborted,
-            TaskOutcome::Panicked,
-            TaskOutcome::Rejected {
-                reason: Arc::from("x"),
-            },
+    fn labels_and_success_flags_are_stable_for_every_variant() {
+        let cases = [
+            (TaskOutcome::Completed, "outcome_completed", true),
+            (
+                TaskOutcome::Failed {
+                    reason: Arc::from("x"),
+                    exit_code: None,
+                    source: None,
+                },
+                "outcome_failed",
+                false,
+            ),
+            (
+                TaskOutcome::Fatal {
+                    reason: Arc::from("x"),
+                    exit_code: Some(1),
+                    source: None,
+                },
+                "outcome_fatal",
+                false,
+            ),
+            (TaskOutcome::Canceled, "outcome_canceled", false),
+            (TaskOutcome::ForceAborted, "outcome_force_aborted", false),
+            (TaskOutcome::Panicked, "outcome_panicked", false),
+            (
+                TaskOutcome::Rejected {
+                    reason: Arc::from("x"),
+                },
+                "outcome_rejected",
+                false,
+            ),
         ];
-        let labels: std::collections::HashSet<&str> =
-            outcomes.iter().map(|o| o.as_label()).collect();
-        assert_eq!(labels.len(), outcomes.len(), "labels must be distinct");
-    }
 
-    #[test]
-    fn only_completed_is_success() {
-        assert!(TaskOutcome::Completed.is_success());
-        assert!(!TaskOutcome::Canceled.is_success());
-        assert!(!TaskOutcome::Panicked.is_success());
+        let labels: std::collections::HashSet<_> = cases
+            .iter()
+            .map(|(outcome, expected_label, expected_success)| {
+                assert_eq!(outcome.as_label(), *expected_label);
+                assert_eq!(outcome.is_success(), *expected_success, "{expected_label}");
+                outcome.as_label()
+            })
+            .collect();
+        assert_eq!(labels.len(), cases.len(), "labels must remain distinct");
     }
 
     #[test]
@@ -382,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn waiter_resolves_with_sent_outcome() {
+    async fn waiter_resolves_sent_outcome_and_maps_a_dropped_sender() {
         let (tx, rx) = oneshot::channel();
         let waiter = TaskWaiter::new(TaskId::next(), rx);
         tx.send(TaskOutcome::Completed).unwrap();
@@ -390,10 +425,7 @@ mod tests {
             waiter.wait().await.unwrap(),
             TaskOutcome::Completed
         ));
-    }
 
-    #[tokio::test]
-    async fn waiter_maps_dropped_sender_to_shutting_down() {
         let (tx, rx) = oneshot::channel::<TaskOutcome>();
         let waiter = TaskWaiter::new(TaskId::next(), rx);
         drop(tx);

@@ -5,429 +5,438 @@
 [![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
-> Task supervisor for Tokio with backoff, graceful shutdown, and lifecycle events.
+> In-process task supervision for Tokio - from long-running workers to one-shot jobs.
 
-You write the task as a plain async fn. Taskvisor keeps it alive: it restarts tasks on failure with backoff, stops everything cleanly on shutdown, and emits typed lifecycle events for observability.
+Write ordinary async code. Taskvisor adds restart and backoff, cooperative shutdown, dynamic task management, typed lifecycle events, reliable final outcomes, and optional per-slot admission control.
+
+[Quick start](#quick-start) - [Examples](#examples) - [Production limits](#production-limits)
 
 ## The loop you stop writing
 
-Every long-running service has this code somewhere:
+Long-running services often grow a loop like this:
 
 ```rust,ignore
-// The hand-rolled way: tokio::spawn + retry loop.
 tokio::spawn(async move {
     loop {
         match run_worker().await {
             Ok(()) => break,
-            Err(e) => {
-                eprintln!("worker failed: {e}; retrying in 1s");
+            Err(error) => {
+                eprintln!("worker failed: {error}; retrying in 1s");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
 });
-// No backoff. No jitter. No graceful shutdown. No visibility.
 ```
 
-With taskvisor, the same worker needs one line:
+It has a fixed retry delay, no jitter, no graceful shutdown, and no typed lifecycle observability.
+
+Once the task is defined, its supervision policy becomes one declaration:
 
 ```rust,ignore
-sup.run(vec![TaskSpec::restartable(worker)]).await?;
-// Restart on failure, backoff, Ctrl+C handling: included.
+supervisor
+    .run(vec![TaskSpec::restartable(worker)])
+    .await?;
 ```
+
+Taskvisor owns the lifecycle machinery. Your task keeps the application logic.
 
 ## Quick start
 
 ```toml
 [dependencies]
-taskvisor = "0.5"
+taskvisor = "0.6"
 tokio = { version = "1", features = ["full"] }
 ```
 
-A worker that polls every 5 seconds and stops cleanly on Ctrl+C. If it returns a retryable error, taskvisor restarts it:
+Put this in `src/main.rs`, then run `cargo run`. The task fails twice, Taskvisor retries it with backoff, and the third attempt succeeds.
 
-```rust,no_run
-use std::time::Duration;
-use taskvisor::prelude::*;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let worker = TaskFn::arc("worker", |ctx| async move {
-        loop {
-            // Resolves to Err(TaskError::Canceled) on shutdown.
-            // Canceled is a clean stop, not a failure.
-            ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
-                .await?;
-            println!("[worker] polling...");
-        }
-    });
-
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    sup.run(vec![TaskSpec::restartable(worker)]).await?;
-    Ok(())
-}
-```
-
-No signal handling, no retry loop, no type annotations on the closure.
-
-## See it recover from failure
-
-A task fails twice, then succeeds. Taskvisor retries it with backoff and publishes an event for every step. A small subscriber prints each event:
-
-```rust,no_run
+```rust
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use taskvisor::prelude::*;
 
-/// Prints every lifecycle event, using stable machine-readable labels.
-struct Printer;
-impl Subscribe for Printer {
-    fn on_event(&self, ev: &Event) {
-        if let Some(task) = ev.task.as_deref() {
-            println!("  {} (task={task})", ev.kind.as_label());
-        }
-    }
-}
-
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let attempts = Arc::new(AtomicU32::new(0));
     let flaky = TaskFn::arc("flaky", move |_ctx| {
         let attempts = Arc::clone(&attempts);
         async move {
-            let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
-            if n < 3 {
-                return Err(TaskError::fail(format!("boom #{n}")));
+            let attempt = attempts.fetch_add(1, Ordering::Relaxed) + 1;
+            println!("attempt {attempt}");
+
+            if attempt < 3 {
+                Err(TaskError::fail(format!("temporary failure #{attempt}")))
+            } else {
+                Ok(())
             }
-            Ok(()) // third attempt succeeds
         }
     });
 
     let spec = TaskSpec::restartable(flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(50)));
 
-    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Printer)];
-    Supervisor::new(SupervisorConfig::default(), subs)
-        .run(vec![spec])
-        .await?;
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    supervisor.run(vec![spec]).await?;
     Ok(())
 }
 ```
 
 ```text
-# output:
-  task_add_requested (task=flaky)
-  task_added (task=flaky)
-  task_starting (task=flaky)        # attempt 1
-  task_failed (task=flaky)
-  backoff_scheduled (task=flaky)    # wait 50ms, then retry
-  task_starting (task=flaky)        # attempt 2
-  task_failed (task=flaky)
-  backoff_scheduled (task=flaky)
-  task_starting (task=flaky)        # attempt 3
-  task_stopped (task=flaky)         # success
-  actor_exhausted (task=flaky)      # task succeeded, no more restarts
-  task_removed (task=flaky)
+attempt 1
+attempt 2
+attempt 3
 ```
 
-In the output, `actor` means taskvisor's internal per-task runner, not an actor-model actor.
+Every attempt gets a fresh future. A retryable failure follows the configured backoff; a successful `restartable` task stops. `Supervisor::run` returns only after lifecycle cleanup finishes.
 
-## Why taskvisor?
+For a resident worker that runs until Ctrl+C, see [worker.rs](examples/worker.rs). For a reconnecting queue consumer, see [queue_consumer.rs](examples/queue_consumer.rs).
 
-Restart and backoff are the baseline. Taskvisor also gives you:
+## Why Taskvisor?
 
-- **A final answer for watched tasks.** Await one result: done, failed, or canceled. Delivered even when events are dropped under load.
-- **Typed lifecycle events.** Lifecycle transitions are emitted to a best-effort event bus. A `tracing` bridge is built in.
-- **Admission control.** Tasks can share a named slot. A rule decides what happens when the slot is busy: queue, replace, or drop the new task.
-- **Task modes and restart policies.** Run once, on failure, always, or periodically.
-- **Backoff with jitter.** Exponential or constant, with a cap and a floor.
-- **Limits.** Per-attempt timeout, retry budget, global concurrency cap.
+Restart and backoff are the baseline. Taskvisor also provides:
 
-Taskvisor is not a replacement for Tokio or Tower.
-It works one level higher: you write the task, taskvisor runs it and tells you what happened.
+- **Cooperative shutdown with a deadline.** Tasks observe `TaskContext`; tasks that miss the grace period are force-aborted.
+- **Reliable final outcomes.** `TaskWaiter` reports how watched work ended even when best-effort events are dropped.
+- **Typed lifecycle events.** Logs, metrics, traces, and live status consume one structured event model.
+- **Dynamic management.** Add, list, cancel, remove, and watch tasks through `SupervisorHandle`.
+- **Admission control.** The optional controller applies `Queue`, `Replace`, or `DropIfRunning` per named slot.
+- **Explicit limits.** Configure per-attempt timeout, retry budget, global concurrency, and bounded queues.
 
-It is also not an actor framework: no addressable actors, no mailboxes, no message passing.
-Your existing `async fn` is the unit of supervision.
+`JoinSet` and `TaskTracker` help own and join spawned futures. Taskvisor owns the restart policy and the task's complete lifecycle contract.
 
-## When to use taskvisor
+It is a good fit for queue consumers, pollers, sync loops, connection keepers, periodic work, and one-shot in-process jobs that need admission or a reliable outcome.
 
-Use it when you have **resident background tasks** that must stay up for the life of the process: queue consumers, pollers, sync loops, connection keepers, periodic jobs.
-Taskvisor restarts them on failure and emits lifecycle events for observability. You can add, remove, and await tasks at runtime.
+When the primary requirement is different, use a more specialized tool:
 
-**Not the right tool if:**
+| You need                                        | Better fit                                                                                       |
+|-------------------------------------------------|--------------------------------------------------------------------------------------------------|
+| Retry one future                                | [backon](https://crates.io/crates/backon) or [tokio-retry](https://crates.io/crates/tokio-retry) |
+| Persist and recover jobs after a process restart | [apalis](https://crates.io/crates/apalis)                                                        |
+| Actors with addresses and mailboxes             | [ractor](https://crates.io/crates/ractor) or [kameo](https://crates.io/crates/kameo)             |
+| Structured subsystem shutdown without restarts  | [tokio-graceful-shutdown](https://crates.io/crates/tokio-graceful-shutdown)                      |
 
-| You want…                                  | Use instead                                                                                     |
-|--------------------------------------------|-------------------------------------------------------------------------------------------------|
-| To retry a single future                   | [backon](https://crates.io/crates/backon) / [tokio-retry](https://crates.io/crates/tokio-retry) |
-| Durable, distributed jobs with storage     | [apalis](https://crates.io/crates/apalis)                                                       |
-| The actor model (addresses, mailboxes)     | [ractor](https://crates.io/crates/ractor) / [kameo](https://crates.io/crates/kameo)             |
-| Structured subsystem shutdown, no restarts | [tokio-graceful-shutdown](https://crates.io/crates/tokio-graceful-shutdown)                     |
+## Core model
 
-## Two modes
+Four types form the main API:
 
-| Mode             | When to use            | Lifecycle                                        |
-|------------------|------------------------|--------------------------------------------------|
-| `sup.run(specs)` | Tasks known upfront    | Blocks until all done or Ctrl+C                  |
-| `sup.serve()`    | Tasks added at runtime | Returns a handle. You control shutdown           |
+| Type               | Purpose                                                    |
+|--------------------|------------------------------------------------------------|
+| `TaskFn` or `Task` | The async work. A new future is created for every attempt. |
+| `TaskSpec`         | Restart policy, backoff, timeout, and retry limit.         |
+| `Supervisor`       | Owns task lifecycle, shutdown, and event delivery.         |
+| `SupervisorHandle` | Adds, removes, cancels, and watches tasks at runtime.      |
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="Taskvisor core lifecycle: the Supervisor runs one task attempt, then either schedules another after failure backoff or an optional interval, or produces a final outcome for watched tasks" width="556">
+</p>
+
+Retries for one task run in sequence. Two attempts for the same `TaskId` never run at the same time. Active task names must be unique; the name can be reused after terminal cleanup, with a new `TaskId`.
+
+There are two runtime modes:
+
+| Mode                    | Use it when                | Shutdown owner                                  |
+|-------------------------|----------------------------|-------------------------------------------------|
+| `supervisor.run(specs)` | Tasks are known at startup | Taskvisor waits for completion or an OS signal. |
+| `supervisor.serve()`    | Tasks are added at runtime | Your code calls `handle.shutdown().await`.      |
+
+`Supervisor::run(...).await == Ok(())` means the supervisor lifecycle and cleanup completed successfully. It does not mean that every task succeeded. Use a watched outcome when application logic needs that answer.
+
+## Choose task behavior
+
+The named constructors cover the common cases:
+
+| Constructor                       | After `Ok(())`               | After a retryable failure |
+|-----------------------------------|------------------------------|---------------------------|
+| `TaskSpec::once(task)`            | Stop                         | Stop                      |
+| `TaskSpec::restartable(task)`     | Stop                         | Retry with backoff        |
+| `TaskSpec::periodic(task, every)` | Wait `every`, then run again | Retry with backoff        |
+
+Fatal errors and cancellation always stop the task. A periodic interval begins after a successful attempt finishes; it is not a wall-clock or cron schedule.
+
+| Task result                            | Meaning                                                                  |
+|----------------------------------------|--------------------------------------------------------------------------|
+| `Ok(())`                               | The attempt succeeded. The restart policy decides what follows.          |
+| `Err(TaskError::fail(reason))`         | Retryable failure. Use `fail_from(error)` to preserve the source error.  |
+| `Err(TaskError::fatal(reason))`        | Permanent failure. Do not restart.                                       |
+| `Err(TaskError::Canceled)`             | Cooperative stop. Treat it as cancellation, not failure.                 |
+| Attempt timeout                        | Taskvisor creates a retryable `TaskError::Timeout`.                      |
+| Panic with panic unwinding enabled     | Taskvisor catches it and creates a retryable failure.                    |
+
+A retry limit counts retries after the first failed attempt. `max_retries = 3` therefore allows at most four attempts when every attempt fails.
+
+```rust
+use std::num::NonZeroU32;
+use std::time::Duration;
+use taskvisor::{BackoffPolicy, JitterPolicy, TaskRef, TaskSpec};
+
+fn supervised(task: TaskRef) -> TaskSpec {
+    TaskSpec::restartable(task)
+        .with_backoff(
+            BackoffPolicy::exponential(Duration::from_millis(200))
+                .with_max(Duration::from_secs(30))
+                .with_jitter(JitterPolicy::Equal),
+        )
+        .with_timeout(Duration::from_secs(10))
+        .with_max_retries(NonZeroU32::new(3).unwrap())
+}
+```
+
+Equal jitter chooses a real delay between half of the current base delay and the full base delay, spreading simultaneous retries over time. Per-task settings override values inherited from `TaskDefaults`.
+
+## Cancellation and shutdown
+
+Cancellation is cooperative first. A long-running task must observe `TaskContext`:
+
+```rust
+use taskvisor::{TaskContext, TaskError};
+
+async fn do_work() -> Result<(), TaskError> {
+    // Application work goes here.
+    Ok(())
+}
+
+async fn run_one_operation(ctx: &TaskContext) -> Result<(), TaskError> {
+    ctx.run_until_cancelled(do_work()).await?
+}
+
+async fn run_with_more_branches(ctx: &TaskContext) -> Result<(), TaskError> {
+    tokio::select! {
+        _ = ctx.cancelled() => Err(TaskError::Canceled),
+        result = do_work() => result,
+    }
+}
+```
+
+The joined shutdown path:
+
+1. Closes admission for new work.
+2. Sends cancellation to active tasks.
+3. Waits for the configured grace period.
+4. Force-aborts tasks that did not stop.
+5. Drains subscriber queues for their separate shutdown timeout.
+
+Call `handle.shutdown().await` to wait for cleanup and receive its result. Dropping the last public owner starts non-blocking cancellation but cannot report cleanup errors.
+
+Dynamic management uses `TaskId`:
 
 ```rust,ignore
-// Dynamic mode
-let handle = sup.serve();
+let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+let handle = supervisor.serve();
 
-let id = handle.add(spec).await?;                 // registry accepted this TaskId
-handle.cancel(id).await?;                         // cancel by identity and wait for cleanup
-// Alternative: handle.cancel_by_label("task-name").await?;
-let tasks = handle.list().await;                  // Vec<(TaskId, name)>
+let id = handle.add(TaskSpec::restartable(worker)).await?;
+let registered = handle.list().await;
+let stopped = handle.cancel(id).await?;
 
+println!("registered={}, stopped={stopped}", registered.len());
 handle.shutdown().await?;
 ```
 
-## How it works
+`add().await?` means the registry accepted the task, not that the task completed. Regular management methods wait for bounded queue capacity; their `try_*` forms fail fast when a queue is full. See [dynamic.rs](examples/dynamic.rs) for a complete program.
 
-<img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="How taskvisor works: TaskSpec wraps your async fn, the Supervisor runs and restarts it, lifecycle events go to the event bus, the final outcome is delivered once per task" width="640">
+## Events and outcomes
 
-Two separate channels report what happened. The event bus is best-effort (dashed lines).
-The final outcome is delivered once per task (bold line). It does not go through the bus.
+Taskvisor has two result paths with different contracts:
 
-Each subscriber gets its own bounded queue. Callbacks run on Tokio's blocking pool, a slow callback does not occupy async worker threads or block event publishers.
-Module-level concepts are documented in depth on [docs.rs](https://docs.rs/taskvisor).
+| Path                               | Delivery                                      | Use it for                                              |
+|------------------------------------|-----------------------------------------------|---------------------------------------------------------|
+| `Event` through `Subscribe`        | Best-effort                                   | Logs, metrics, traces, and live status.                 |
+| `TaskOutcome` through `TaskWaiter` | One final result, separate from the event bus | Business logic that must know how a watched task ended. |
 
-## Error handling
+Use `add_and_watch` when the final result matters:
 
-Return these from your task to control what happens next:
+```rust
+use taskvisor::{RuntimeError, SupervisorHandle, TaskOutcome, TaskRef, TaskSpec};
 
-| Return                           | Retryable | What happens                                                                |
-|----------------------------------|-----------|-----------------------------------------------------------------------------|
-| `Ok(())`                         | —         | Task completed. `RestartPolicy` decides the next step.                      |
-| `Err(TaskError::fail(reason))`   | Yes       | Retryable failure. Backoff, then retry. Wrap a cause with `fail_from(err)`. |
-| `panic!` in the task body        | Yes       | Caught and converted to a retryable failure.                                |
-| `Err(TaskError::Timeout { .. })` | Yes       | Set automatically when the per-attempt timeout is exceeded.                 |
-| `Err(TaskError::fatal(reason))`  | No        | Permanent failure. The task stops and will not restart.                     |
-| `Err(TaskError::Canceled)`       | No        | Clean stop on shutdown. Not an error.                                       |
+async fn wait_for_task(
+    handle: &SupervisorHandle,
+    job: TaskRef,
+) -> Result<(), RuntimeError> {
+    let (id, waiter) = handle
+        .add_and_watch(TaskSpec::once(job))
+        .await?;
 
-### Cancellation
-
-Long-running tasks must observe cancellation through their `TaskContext`:
-
-```rust,ignore
-// Pattern 1: wrap fallible work (recommended)
-let work_result = ctx.run_until_cancelled(do_work()).await?;
-work_result?;
-
-// Pattern 2: select! for manual control
-tokio::select! {
-    _ = ctx.cancelled() => Err(TaskError::Canceled),
-    result = do_work() => result,
+    match waiter.wait().await? {
+        TaskOutcome::Completed => println!("{id} completed"),
+        TaskOutcome::Failed { reason, .. } => eprintln!("{id} failed: {reason}"),
+        TaskOutcome::Canceled => eprintln!("{id} was canceled"),
+        other => eprintln!("{id} ended with {other:?}"),
+    }
+    Ok(())
 }
 ```
 
-## Recipes
+Events carry a process-local sequence number and, where relevant, task identity, attempt, duration, reason, timeout, delay, and exit code. Stable string labels are available for telemetry.
 
-### Restart tasks on failure with exponential backoff
+Each subscriber has its own bounded FIFO queue. Its synchronous callback runs on Tokio's blocking pool. A slow subscriber cannot block publishers, but its queue may fill and lose events. Keep callbacks short and forward async work to another channel.
 
-```rust,no_run
+See [subscriber.rs](examples/subscriber.rs), the `TracingBridge` in [tracing.rs](examples/tracing.rs), and the Prometheus counters in [metrics.rs](examples/metrics.rs).
+
+## Admission control (feature: `controller`)
+
+Enable the controller on the dependency:
+
+```toml
+taskvisor = { version = "0.6", features = ["controller"] }
+```
+
+The controller groups submissions into named slots. At most one task can occupy a slot; different slots can run concurrently.
+
+| Policy          | Busy-slot behavior                                                           | Typical use                              |
+|-----------------|------------------------------------------------------------------------------|------------------------------------------|
+| `Queue`         | Wait in a bounded FIFO queue.                                                | Ordered work for one resource.           |
+| `Replace`       | Retire the current owner and replace the queue head with the new submission. | Work where the next value must be fresh. |
+| `DropIfRunning` | Reject the new submission.                                                   | Work that must not overlap.              |
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-controller.png" alt="Controller admission: an idle slot tries registry admission; a busy slot queues work when capacity is available, requests owner retirement and sets or replaces the queue head, or rejects the submission according to its policy" width="968">
+</p>
+
+The slot defaults to the task name. Use `with_slot` to place differently named tasks in the same lane:
+
+```rust,ignore
+use taskvisor::prelude::*;
+
+async fn submit_to_slot(
+    handle: &SupervisorHandle,
+    job: TaskRef,
+) -> Result<TaskOutcome, Box<dyn std::error::Error>> {
+    let request = ControllerSpec::queue(TaskSpec::once(job))
+        .with_slot("customer-42");
+    let (_id, waiter) = handle.submit_and_watch(request).await?;
+    Ok(waiter.wait().await?)
+}
+```
+
+`submit().await?` confirms controller intake; admission happens later. `submit_and_watch` returns a final outcome. Work that never starts resolves to `TaskOutcome::Rejected`.
+
+Queue depth is bounded per slot. `Replace` changes only the queue head; FIFO items behind it remain queued. `controller_snapshot()` returns a best-effort, non-transactional view of slot status and queue depth.
+
+See [slots.rs](examples/slots.rs) and [admission.rs](examples/admission.rs) for complete programs.
+
+## Configuration
+
+Runtime limits and task defaults are separate:
+
+```rust
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::Arc;
 use std::time::Duration;
-use taskvisor::{BackoffPolicy, JitterPolicy};
+use taskvisor::{Supervisor, SupervisorConfig, TaskDefaults};
 
-// 200ms -> 400ms -> 800ms -> ... capped at 30s, with jitter.
-let backoff = BackoffPolicy::exponential(Duration::from_millis(200))
-    .with_max(Duration::from_secs(30))
-    .with_jitter(JitterPolicy::Equal);
-```
+fn configured_supervisor() -> Arc<Supervisor> {
+    let runtime = SupervisorConfig::default()
+        .with_grace(Duration::from_secs(30))
+        .with_subscriber_shutdown_timeout(Duration::from_secs(5))
+        .with_max_concurrent(NonZeroUsize::new(16));
 
-Jitter spreads retries in time. It prevents many tasks from retrying at the same moment.
-`JitterPolicy::Equal` keeps each delay within `[base/2, base]` and is the recommended choice for most services.
+    let tasks = TaskDefaults::default()
+        .with_timeout(Duration::from_secs(20))
+        .with_max_retries(NonZeroU32::new(5).unwrap());
 
-### Run a periodic task
-
-```rust,ignore
-// Run, wait 30 seconds, run again. Forever.
-// The interval starts after each completion (not a wall-clock schedule).
-let spec = TaskSpec::periodic(task, Duration::from_secs(30));
-```
-
-### Set a timeout and a retry limit
-
-```rust,ignore
-// Each attempt gets 5s; the task gives up after 3 failure-driven retries.
-let spec = TaskSpec::restartable(task)
-    .with_timeout(Some(Duration::from_secs(5)))
-    .with_max_retries(std::num::NonZeroU32::new(3).unwrap());
-```
-
-### Configure the supervisor
-
-```rust,no_run
-use std::time::Duration;
-use taskvisor::{Supervisor, SupervisorConfig};
-
-let sup = Supervisor::builder(SupervisorConfig::default())
-    .with_grace(Duration::from_secs(30))                      // task shutdown grace period (default 60s)
-    .with_subscriber_shutdown_timeout(Duration::from_secs(5)) // shared subscriber drain timeout
-    .with_registry_queue_capacity(256)                        // bounded management queue (default 1024)
-    .with_max_concurrent(4)                                   // global concurrency limit (default: unlimited)
-    .build();
-```
-
-### Graceful shutdown on Ctrl+C
-
-Static mode (`run`) installs OS shutdown signal handlers for you.
-In dynamic mode, you stop things yourself: `handle.shutdown()` cancels all tasks and waits up to `grace`.
-Tasks that ignore cancellation are force-aborted after the grace period.
-Subscriber queues then get a separate shared drain timeout (default 5s).
-At that deadline queued events are dropped; a callback already running on Tokio's blocking pool may continue.
-Tokio runtime shutdown may still wait for that running callback.
-Subscriber cleanup is best-effort, so reaching its timeout does not replace the task shutdown result.
-The outcome is reported either way.
-
-### Run CPU-heavy work without blocking Tokio
-
-Offload the computation to rayon and await the result through a oneshot channel. All of this runs inside a supervised task.
-Tokio threads stay unblocked. Taskvisor adds restart with backoff:
-
-```rust,ignore
-let (tx, rx) = oneshot::channel();
-rayon::spawn(move || {
-    let _ = tx.send(heavy_compute());
-});
-
-match ctx.run_until_cancelled(rx).await? {
-    Ok(Ok(value)) => Ok(()),                 // use the value
-    Ok(Err(e)) => Err(TaskError::fail(e)),   // supervisor retries with backoff
-    Err(_) => Err(TaskError::fail("compute thread dropped the channel")),
+    Supervisor::builder(runtime)
+        .with_task_defaults(tasks)
+        .build()
 }
 ```
 
-Full program: [`examples/cpu_job.rs`](examples/cpu_job.rs).
+Main defaults:
 
-### Send supervisor events to `tracing`
+| Setting                         | Default                                         |
+|---------------------------------|-------------------------------------------------|
+| Graceful task shutdown          | 60 seconds                                      |
+| Subscriber drain                | 5 seconds, shared by all subscriber queues      |
+| Global task-attempt concurrency | Unlimited                                       |
+| Event bus capacity              | 1024                                            |
+| Registry command capacity       | 1024                                            |
+| Restart policy                  | On failure                                      |
+| Failure backoff                 | Exponential: 200 ms to 30 seconds, equal jitter |
+| Attempt timeout                 | None                                            |
+| Failure retry limit             | Unlimited                                       |
 
-Your application must initialize `tracing` first (for example with `tracing-subscriber`).
-Then add `TracingBridge` as a subscriber:
+Capacity types are non-zero where zero would make the runtime unusable. Checked `try_with_*` setters accept raw values.
 
-```rust,ignore
-// features = ["tracing"]
-let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
-let sup = Supervisor::new(SupervisorConfig::default(), subs);
-// Failures arrive as ERROR, retries as DEBUG in your existing log pipeline.
-// Filter with RUST_LOG=taskvisor=warn.
+## Production limits
+
+Taskvisor defines an in-process lifecycle. Keep these boundaries explicit:
+
+- Events are best-effort. Do not use them as a durable audit log.
+- Watched outcomes are not durable after the process exits.
+- Cancellation depends on the task reaching an await point that observes `TaskContext`. Force-abort cannot stop synchronous code that blocks a runtime thread.
+- Subscriber callbacks may still run on Tokio's blocking pool after their drain deadline. Tokio runtime shutdown may wait for such callbacks.
+- Periodic tasks use an interval after completion. They do not provide calendar scheduling or missed-run recovery.
+- The controller coordinates tasks inside one supervisor.
+- With `panic = "unwind"`, Taskvisor catches task-future panics. It cannot recover from `panic = "abort"`, process aborts, memory exhaustion, or failures outside the process.
+
+For a service deployment, call the joined shutdown path, make resident tasks cancellation-aware, set finite timeouts and retry limits where endless retry is unsafe, monitor lifecycle failures and overflow, and use watched outcomes for decisions that depend on completion.
+
+The crate forbids unsafe Rust with `#![forbid(unsafe_code)]`.
+
+## Feature flags
+
+Taskvisor has no default features. The core depends on `tokio`, `tokio-util`, `thiserror`, and `fastrand`.
+
+| Feature              | Adds                                                          |
+|----------------------|---------------------------------------------------------------|
+| `controller`         | Slot-based admission control; adds `dashmap`.                 |
+| `tracing`            | `TracingBridge` for the `tracing` ecosystem.                  |
+| `logging`            | `LogWriter`, a simple event writer for demos and small tools. |
+| `tokio-util-interop` | Access to the raw cancellation token in `TaskContext`.        |
+| `test-util`          | Helpers for code that integrates with Taskvisor.              |
+
+```toml
+taskvisor = { version = "0.6", features = ["controller", "tracing"] }
 ```
-
-A failing task recovering:
-
-![taskvisor retries a failing task with backoff and recovers, shown as colored tracing logs](https://raw.githubusercontent.com/soltiHQ/.github/main/assets/demo/taskvisor-recovery.gif)
-
-See [`examples/tracing.rs`](examples/tracing.rs) for the full program and [`examples/metrics.rs`](examples/metrics.rs) for Prometheus counters.
-
-### Await a task's final result
-
-```rust,ignore
-// add_and_watch returns a TaskWaiter resolving to the final TaskOutcome.
-let (id, waiter) = handle
-    .add_and_watch(TaskSpec::once(job))
-    .await?;
-
-match waiter.wait().await? {
-    TaskOutcome::Completed => println!("{id} done"),
-    TaskOutcome::Failed { reason, .. } => eprintln!("{id} failed: {reason}"),
-    other => eprintln!("{id} ended with {other:?}"),
-}
-```
-
-## Admission control *(feature `controller`)*
-
-You submit tasks to named slots. A policy decides what happens when a slot is busy:
-
-| Policy          | Behavior                                               | Use case               |
-|-----------------|--------------------------------------------------------|------------------------|
-| `Queue`         | Bounded FIFO queue. Extra submissions are rejected.    | Job queue              |
-| `Replace`       | Cancels the running task, starts the new one.          | Search-as-you-type     |
-| `DropIfRunning` | Rejects the submission if the slot is busy.            | "One deploy at a time" |
-
-```rust,ignore
-let sup = Supervisor::builder(cfg)
-    .with_controller(ControllerConfig::default())
-    .build();
-let handle = sup.serve();
-
-// Await the final task outcome. A submission that is never admitted
-// resolves to TaskOutcome::Rejected.
-let (id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
-let outcome = waiter.wait().await?;
-```
-
-See [`examples/slots.rs`](examples/slots.rs) and [`examples/admission.rs`](examples/admission.rs).
-
-## Production notes
-
-- **No unsafe.** The crate is `#![forbid(unsafe_code)]`.
-- **Tested.** Unit and integration suites cover concurrency, shutdown, timeouts, and task identity. CI covers formatting, linting, tests, docs, and example builds.
-- **Small footprint.** Depends on `tokio`, `tokio-util`, `thiserror`, `fastrand`. Optional: `dashmap` (controller), `tracing`.
 
 ## Examples
 
-All examples run as-is:
+From a cloned repository checkout, run the smallest example with:
 
 ```bash
 cargo run --example basic
 ```
 
-Add `--features tracing` or `--features controller` where the table notes it.
+| Example                                         | What it shows                                            |
+|-------------------------------------------------|----------------------------------------------------------|
+| [basic.rs](examples/basic.rs)                   | One task, one run, one exit.                             |
+| [worker.rs](examples/worker.rs)                 | A long-running worker with graceful cancellation.        |
+| [periodic.rs](examples/periodic.rs)             | Repeated execution after an interval.                    |
+| [multiple.rs](examples/multiple.rs)             | Several restart policies in one supervisor.              |
+| [queue_consumer.rs](examples/queue_consumer.rs) | Reconnect after a consumer failure.                      |
+| [cpu_job.rs](examples/cpu_job.rs)               | Supervise CPU-heavy work without blocking Tokio workers. |
+| [subscriber.rs](examples/subscriber.rs)         | Handle typed lifecycle events.                           |
+| [tracing.rs](examples/tracing.rs)               | Forward events to `tracing` (`tracing` feature).         |
+| [metrics.rs](examples/metrics.rs)               | Build Prometheus counters from events.                   |
+| [dynamic.rs](examples/dynamic.rs)               | Add, list, cancel, and remove tasks at runtime.          |
+| [outcomes.rs](examples/outcomes.rs)             | Await the final result of a task.                        |
+| [slots.rs](examples/slots.rs)                   | Compare controller policies (`controller` feature).      |
+| [admission.rs](examples/admission.rs)           | Observe admission and rejection (`controller` feature).  |
 
-| Example                                         | What it shows                                                                           |
-|-------------------------------------------------|-----------------------------------------------------------------------------------------|
-| [basic.rs](examples/basic.rs)                   | Run one task and exit: the minimal wiring                                               |
-| [worker.rs](examples/worker.rs)                 | A long-running worker that stops cleanly on Ctrl+C                                      |
-| [periodic.rs](examples/periodic.rs)             | Run a job every N seconds, forever                                                      |
-| [multiple.rs](examples/multiple.rs)             | Several tasks with different restart rules under one supervisor                         |
-| [queue_consumer.rs](examples/queue_consumer.rs) | A message consumer that reconnects after failures                                       |
-| [cpu_job.rs](examples/cpu_job.rs)               | Run CPU-heavy work on rayon, supervised, without blocking Tokio                         |
-| [subscriber.rs](examples/subscriber.rs)         | React to lifecycle events with your own handler                                         |
-| [tracing.rs](examples/tracing.rs)               | Send supervisor events into your logs (feature `tracing`)                               |
-| [metrics.rs](examples/metrics.rs)               | Count lifecycle events as Prometheus metrics                                            |
-| [dynamic.rs](examples/dynamic.rs)               | Add, cancel, and remove tasks while the app is running                                  |
-| [outcomes.rs](examples/outcomes.rs)             | Wait for a task's final result: done, failed, or canceled                               |
-| [slots.rs](examples/slots.rs)                   | Limit concurrency per slot: queue, replace, or drop the newcomer (feature `controller`) |
-| [admission.rs](examples/admission.rs)           | Find out if your submission ran or was rejected (feature `controller`)                  |
+## Benchmarks
 
-## Performance
-
-Run the benchmarks on your own hardware:
+The repository includes Criterion suites for lifecycle, throughput, subscriber fan-out, dynamic management, and controller paths:
 
 ```bash
-cargo bench                                          # default-feature suites
-cargo bench --bench lifecycle                        # task lifecycle overhead
-cargo bench --bench controller --features controller # admission control
-```
-
-## Feature flags
-
-| Feature              | What it enables                                                                       |
-|----------------------|---------------------------------------------------------------------------------------|
-| `controller`         | Slot-based admission control: `ControllerSpec`, `ControllerConfig`, `AdmissionPolicy` |
-| `tracing`            | Built-in `TracingBridge` subscriber: events flow into your `tracing` log pipeline     |
-| `logging`            | Built-in `LogWriter` subscriber: event output to stdout (demo/reference)              |
-| `tokio-util-interop` | Access to the raw `CancellationToken` behind `TaskContext`, for APIs that need one    |
-| `test-util`          | Test helpers: `TaskContext::detached()`, `TaskId::for_tests()`, and more              |
-
-```toml
-taskvisor = { version = "0.5", features = ["controller", "tracing"] }
+cargo bench
+cargo bench --bench controller --features controller
 ```
 
 ## Contributing
 
-Issues and pull requests are welcome. Start with the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md).
+Issues and pull requests are welcome. Read the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
 
-<br>
+If Taskvisor earns a place in your stack, a GitHub star helps other Rust developers find it.
 
 ##
+
+<br>
 
 <p align="center">
   <a href="https://github.com/soltiHQ">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/word/solti-word-light.svg">
-      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg" alt="soltiHQ" height="128">
+      <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/logo/solti-logo-dark.svg" alt="soltiHQ" height="84">
     </picture>
   </a>
 </p>

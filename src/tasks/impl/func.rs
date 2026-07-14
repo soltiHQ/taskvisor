@@ -1,4 +1,4 @@
-//! Closure-based [`Task`] implementation.
+//! Create a [`Task`] from an async closure.
 
 use std::{future::Future, sync::Arc};
 
@@ -8,32 +8,34 @@ use crate::{
     tasks::task::{BoxTaskFuture, Task},
 };
 
-/// Closure-based [`Task`] implementation.
+/// A named task backed by an async closure.
 ///
-/// `TaskFn` is the easiest way to create a task.
-/// Pass a name and a closure that returns an async block.
+/// This is the simplest way to define a task.
+/// The supervisor calls the closure for every attempt. Each call creates a fresh future.
 ///
-/// The closure is called on every attempt, so it creates a new future each time.
-///
-/// ## Simple Task
+/// ## Long-Running Worker
 ///
 /// No type annotations are needed: the constructor bounds drive inference.
 ///
 /// ```rust
-/// use taskvisor::{TaskError, TaskFn};
+/// use taskvisor::{TaskError, TaskFn, TaskRef};
 ///
-/// let worker = TaskFn::arc("worker", |ctx| async move {
-///     if ctx.is_cancelled() {
-///         return Err(TaskError::Canceled);
+/// let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
+///     loop {
+///         tokio::select! {
+///             _ = ctx.cancelled() => return Err(TaskError::Canceled),
+///             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+///                 // Do one unit of work.
+///             }
+///         }
 ///     }
-///     Ok(())
 /// });
 /// ```
 ///
 /// ## Task With Shared State
 ///
-/// The closure runs on every attempt.
-/// Clone the state once into the closure, then once into each future:
+/// The closure can run more than once.
+/// Clone shared state into the closure, then clone it again into each returned future:
 ///
 /// ```rust
 /// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
@@ -57,9 +59,9 @@ use crate::{
 /// });
 /// ```
 ///
-/// ## Also
+/// ## See Also
 ///
-/// - See the [`Task`](crate::Task) trait documentation.
+/// - See the [`Task`] trait documentation.
 /// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 pub struct TaskFn<F> {
     name: Arc<str>,
@@ -79,10 +81,9 @@ where
     F: Fn(TaskContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
-    /// Creates a task from a name and closure.
+    /// Creates a named task from a closure.
     ///
-    /// The bounds let the compiler infer the closure types.
-    /// You do not need to annotate the `ctx` parameter or the error type.
+    /// Rust normally infers the context and error types from these bounds.
     pub fn new(name: impl Into<Arc<str>>, f: F) -> Self {
         Self {
             name: name.into(),
@@ -90,9 +91,9 @@ where
         }
     }
 
-    /// Creates a shared task handle.
+    /// Creates a task inside an [`Arc`].
     ///
-    /// The result coerces to [`TaskRef`](crate::TaskRef) where one is expected.
+    /// The result converts to [`TaskRef`](crate::TaskRef) where needed.
     pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {
         Arc::new(Self::new(name, f))
     }
@@ -124,20 +125,17 @@ mod tests {
     }
 
     #[test]
-    fn constructors_infer_closure_types_without_annotations() {
-        let t = TaskFn::arc("infer", |ctx| async move {
+    fn constructors_preserve_names_and_infer_closure_types() {
+        let inferred = TaskFn::arc("infer", |ctx| async move {
             if ctx.is_cancelled() {
                 return Err(TaskError::Canceled);
             }
             Ok(())
         });
-        assert_eq!(t.name(), "infer");
-    }
+        let direct = TaskFn::new("worker-7", |_ctx: TaskContext| async { Ok(()) });
 
-    #[test]
-    fn name_round_trips() {
-        let t = TaskFn::new("worker-7", |_ctx: TaskContext| async { Ok(()) });
-        assert_eq!(t.name(), "worker-7");
+        assert_eq!(inferred.name(), "infer");
+        assert_eq!(direct.name(), "worker-7");
     }
 
     #[test]

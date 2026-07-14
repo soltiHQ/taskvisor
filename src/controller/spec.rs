@@ -1,39 +1,32 @@
-//! Controller submission specification.
+//! # One controller submission
 //!
 //! [`ControllerSpec`] is the value passed to controller submission methods.
-//! It combines:
+//! It combines three values:
 //! - an [`AdmissionPolicy`], which says what to do when the target slot is busy,
 //! - a [`TaskSpec`], which says what task to run and how it should run,
-//! - an optional slot key, which groups submissions into one sequential lane.
+//! - an optional slot key, which groups work into one sequential lane.
 //!
 //! ## Slot vs Task Name
 //!
 //! The task name belongs to the runtime registry.
-//! At most one registered task may use the same task name.
+//! A task name must be unique among all currently registered tasks.
 //!
 //! The slot belongs to the controller.
-//! At most one task may occupy the same slot at a time.
+//! At most one registered task may own the same slot at a time.
 //!
 //! If no slot is set, the slot defaults to the task name.
 //! Use [`ControllerSpec::with_slot`] when several differently named tasks should share one admission lane.
-//!
-//! ```text
-//! task name: "deploy-main-42"  ┐
-//! task name: "deploy-main-43"  ├── slot: "deploy-main"
-//! task name: "deploy-main-44"  ┘
-//! ```
-//!
-//! All three tasks have different runtime names, but the controller admits them through one slot.
+//! For example, `deploy-main-42` and `deploy-main-43` may both use the slot `deploy-main`.
 
 use std::sync::Arc;
 
 use super::admission::AdmissionPolicy;
 use crate::TaskSpec;
 
-/// A request to submit one task through the controller.
+/// Describes one task submission through the controller.
 ///
 /// A `ControllerSpec` does not run a task by itself.
-/// It describes one submission: what task should be submitted, which admission policy should be used, and which slot should receive it.
+/// It stores the task, the busy-slot policy, and the target slot.
 ///
 /// The slot is admission metadata.
 /// It is not part of the task execution model.
@@ -42,7 +35,7 @@ use crate::TaskSpec;
 /// # Example
 ///
 /// ```rust
-/// use taskvisor::{ControllerSpec, TaskContext, TaskError, TaskFn, TaskRef, TaskSpec};
+/// use taskvisor::{ControllerSpec, TaskFn, TaskRef, TaskSpec};
 ///
 /// let task: TaskRef = TaskFn::arc("deploy-main-42", |_ctx| async {
 ///     Ok(())
@@ -53,23 +46,23 @@ use crate::TaskSpec;
 /// assert_eq!(spec.slot_name(), "deploy-main");
 /// ```
 ///
-/// # Also
+/// # See also
 ///
 /// - [`AdmissionPolicy`] - how concurrent submissions to the same slot are handled
-/// - [`TaskSpec`](crate::TaskSpec) - task restart, backoff, timeout, and retry settings
+/// - [`TaskSpec`] - task restart, backoff, timeout, and retry settings
 /// - [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) - submit without waiting for the final outcome
-/// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - submit and receive a [`TaskOutcome`](crate::TaskOutcome)
+/// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - submit and get a [`TaskWaiter`](crate::TaskWaiter) for the final [`TaskOutcome`](crate::TaskOutcome)
 #[derive(Clone)]
 #[must_use]
 pub struct ControllerSpec {
     /// Admission policy used when the target slot is busy.
-    pub admission: AdmissionPolicy,
+    admission: AdmissionPolicy,
 
     /// Task execution specification.
     ///
     /// The task name inside this spec remains the runtime task name.
     /// The controller slot may be the same name, or a separate grouping key set with [`with_slot`](Self::with_slot).
-    pub task_spec: TaskSpec,
+    task_spec: TaskSpec,
 
     /// Admission slot key.
     ///
@@ -100,9 +93,43 @@ impl ControllerSpec {
         }
     }
 
+    /// Returns the admission policy used when the target slot is busy.
+    #[must_use]
+    pub fn admission(&self) -> AdmissionPolicy {
+        self.admission
+    }
+
+    /// Sets the admission policy used when the target slot is busy.
+    pub fn with_admission(mut self, admission: AdmissionPolicy) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    /// Returns the task execution specification.
+    #[must_use = "use the returned task specification"]
+    pub fn task_spec(&self) -> &TaskSpec {
+        &self.task_spec
+    }
+
+    /// Replaces the task execution specification.
+    ///
+    /// When no explicit slot is configured, the effective slot changes to the name of the replacement task.
+    /// An explicit slot is preserved.
+    pub fn with_task_spec(mut self, task_spec: TaskSpec) -> Self {
+        self.task_spec = task_spec;
+        self
+    }
+
+    /// Consumes this submission spec and returns its task execution specification.
+    ///
+    /// Controller-only metadata such as the admission policy and slot override is discarded.
+    pub fn into_task_spec(self) -> TaskSpec {
+        self.task_spec
+    }
+
     /// Sets the admission slot key.
     ///
-    /// The slot is the controller's concurrency unit: only one task can occupy a slot at a time.
+    /// The slot is the controller's admission unit: only one registered task can own a slot at a time.
     ///
     /// Use the same slot for work that must not run in parallel.
     /// Use different slots for work that may run independently.
@@ -111,36 +138,57 @@ impl ControllerSpec {
         self
     }
 
+    /// Removes an explicit slot override.
+    ///
+    /// After this call, [`slot_name`](Self::slot_name) falls back to the current task name.
+    pub fn without_slot(mut self) -> Self {
+        self.slot = None;
+        self
+    }
+
     /// Returns the effective slot key.
     ///
     /// If [`with_slot`](Self::with_slot) was not used, this returns the task name from [`TaskSpec::name`](crate::TaskSpec::name).
+    #[must_use]
     pub fn slot_name(&self) -> &str {
         self.slot
             .as_deref()
             .unwrap_or_else(|| self.task_spec.name())
     }
 
+    /// Returns the explicit slot override, if one was configured.
+    ///
+    /// Unlike [`slot_name`](Self::slot_name), this does not fall back to the task name.
+    #[must_use]
+    pub fn slot_override(&self) -> Option<&str> {
+        self.slot.as_deref()
+    }
+
     /// Creates a submission with FIFO queue admission.
     ///
-    /// If the slot is idle, the task is admitted immediately.
-    /// If the slot is busy, the submission is queued behind older queued submissions.
+    /// If the slot is idle, the controller tries to start registry admission.
+    /// If the slot is busy, the submission is appended behind older pending work when
+    /// [`ControllerConfig::max_slot_queue`](crate::ControllerConfig::max_slot_queue) allows it; otherwise it is rejected.
     pub fn queue(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Queue, task_spec)
     }
 
-    /// Creates a latest-wins submission.
+    /// Creates a replacement submission.
     ///
-    /// If the slot is idle, the task is admitted immediately.
-    /// If the slot is busy, the controller retires the current owner and keeps this submission as the next one to run.
+    /// If the slot is idle, the controller tries to start registry admission.
+    /// If the slot is busy, this submission becomes the queue head.
+    /// The controller retires a registered owner, or waits for a pending registration decision before deciding whether removal is needed.
     ///
-    /// Repeated `Replace` submissions replace the next queued owner instead of growing the queue.
+    /// An existing head is rejected and replaced, even when it came from `Queue`.
+    /// Existing FIFO items behind the head remain queued.
+    /// Repeated replacements therefore keep only the latest head without growing the queue.
     pub fn replace(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Replace, task_spec)
     }
 
     /// Creates a submit-if-idle submission.
     ///
-    /// If the slot is idle, the task is admitted.
+    /// If the slot is idle, the controller tries to start registry admission.
     /// If the slot is busy, the submission is rejected instead of queued.
     pub fn drop_if_running(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::DropIfRunning, task_spec)
@@ -160,18 +208,22 @@ mod tests {
 
     #[test]
     fn convenience_constructors_set_correct_policy() {
-        assert_eq!(
-            ControllerSpec::queue(make_spec("t")).admission,
-            AdmissionPolicy::Queue
-        );
-        assert_eq!(
-            ControllerSpec::replace(make_spec("t")).admission,
-            AdmissionPolicy::Replace
-        );
-        assert_eq!(
-            ControllerSpec::drop_if_running(make_spec("t")).admission,
-            AdmissionPolicy::DropIfRunning
-        );
+        for (spec, expected) in [
+            (
+                ControllerSpec::queue(make_spec("queue")),
+                AdmissionPolicy::Queue,
+            ),
+            (
+                ControllerSpec::replace(make_spec("replace")),
+                AdmissionPolicy::Replace,
+            ),
+            (
+                ControllerSpec::drop_if_running(make_spec("drop")),
+                AdmissionPolicy::DropIfRunning,
+            ),
+        ] {
+            assert_eq!(spec.admission(), expected);
+        }
     }
 
     #[test]
@@ -184,6 +236,7 @@ mod tests {
     fn slot_name_uses_explicit_slot() {
         let cs = ControllerSpec::queue(make_spec("runner-web-7")).with_slot("web");
         assert_eq!(cs.slot_name(), "web");
-        assert_eq!(cs.task_spec.name(), "runner-web-7");
+        assert_eq!(cs.slot_override(), Some("web"));
+        assert_eq!(cs.task_spec().name(), "runner-web-7");
     }
 }

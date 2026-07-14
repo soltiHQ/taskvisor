@@ -1,75 +1,81 @@
 //! # taskvisor
 //!
-//! Taskvisor is a task supervisor for Tokio: it restarts background tasks on failure and reports every step through typed events.
+//! Taskvisor supervises long-running Tokio tasks.
+//! It can restart failed work, slow down retries, time out each attempt, and stop tasks during shutdown.
 //!
-//! It helps you run named async tasks with:
+//! Use it for workers, consumers, connection loops, and other background work that should have a clear lifecycle.
 //!
-//! - restart policies,
-//! - retry backoff,
-//! - per-attempt timeout,
-//! - cooperative cancellation,
-//! - lifecycle events,
-//! - optional final outcomes through `*_and_watch` APIs.
+//! ## Start Here
 //!
-//! The crate is meant to be a building block for services, agents, workers, and higher-level orchestration SDKs.
-//!
-//! ## Core Model
+//! 1. Create a [`Task`] with [`TaskFn`] or your own type.
+//! 2. Wrap it in a [`TaskSpec`] to choose restart rules.
+//! 3. Start a [`Supervisor`] in static or dynamic mode.
+//! 4. Make long-running tasks listen to [`TaskContext`] cancellation.
 //!
 //! ```text
-//! TaskFn / impl Task
-//!        |
-//!        v
-//!     TaskSpec
-//!        |
-//!        v
-//!   Supervisor ---- publishes ----> Event bus ----> Subscribe
-//!        |
-//!        v
-//!    TaskActor
-//!   (attempt loop)
+//! TaskFn or impl Task
+//!          ▼
+//!       TaskSpec  ── fills missing values from ──► TaskDefaults
+//!          ▼
+//!      Supervisor
+//!       │       │
+//!       │       └── best-effort events ──► Subscribe
+//!       │
+//!       └── watched final result ────────► TaskWaiter
 //! ```
 //!
-//! A [`Task`] is the user unit of work.
-//! A [`TaskSpec`] configures how that task runs.
-//! A [`Supervisor`] owns the runtime and manages task lifecycle.
-//! A [`Subscribe`] implementation can observe lifecycle events.
+//! ## Choose a Mode
 //!
-//! ## Task Lifecycle
+//! - **Static:** call [`Supervisor::run`] with a known task set.
+//!   It waits for all tasks to finish or for an OS shutdown signal.
+//! - **Dynamic:** call [`Supervisor::serve`].
+//!   It returns a [`SupervisorHandle`] that can add, remove, cancel, and list tasks while the service is running.
+//!
+//! `run` registers its initial task list as one batch.
+//! If a name is repeated or already in use, no task from that batch starts.
+//!
+//! ## One Task, Many Attempts
+//!
+//! A registered task has one [`TaskId`], but it may run several attempts:
 //!
 //! ```text
-//! add task
-//!   -> TaskStarting
-//!   -> task attempt runs
-//!   -> TaskStopped / TaskFailed / TimeoutHit / TaskCanceled
-//!   -> restart, backoff, or finish
-//!   -> TaskRemoved
+//! register
+//!    ▼
+//! attempt 1 ── failure ──► backoff ──► attempt 2 ── success ──► finish
+//!                                                       ▼
+//!                                                 TaskOutcome
 //! ```
 //!
-//! Events are best-effort observability.
-//! If you need a guaranteed final result for one task, use [`SupervisorHandle::add_and_watch`] or, with the `controller` feature, `submit_and_watch`.
+//! Attempts for one task never overlap.
+//! [`RestartPolicy`] decides whether a new attempt is allowed.
+//! [`BackoffPolicy`] sets the delay after a retryable failure.
+//! A timeout applies to one attempt, not to the full task lifetime.
 //!
-//! ## Main Types
+//! ## Cancellation and Shutdown
 //!
-//! | Area     | Types                                                      |
-//! |----------|------------------------------------------------------------|
-//! | Tasks    | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]        |
-//! | Runtime  | [`Supervisor`], [`SupervisorHandle`], [`SupervisorConfig`] |
-//! | Outcomes | [`TaskWaiter`], [`TaskOutcome`]                            |
-//! | Policies | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]     |
-//! | Events   | [`Event`], [`EventKind`], [`Subscribe`]                    |
-//! | Errors   | [`Error`], [`TaskError`], [`RuntimeError`]                 |
+//! Cancellation is cooperative first.
+//! A long-running task should await [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`], then return [`TaskError::Canceled`].
+//! During shutdown, taskvisor waits for the configured grace period.
+//! It aborts tasks that still have not stopped.
 //!
-//! All main types are re-exported at the crate root.
-//! For the concept behind each area, read the module pages:
-//! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], [`identity`], and `controller` (feature-gated).
+//! Dropping one supervisor or handle clone does not stop the runtime.
+//! Dropping the last public owner sends best-effort cancellation, but cannot wait for cleanup.
+//! Call [`SupervisorHandle::shutdown`] when cleanup must be complete before your code continues.
 //!
-//! ## Optional Features
+//! ## Events or Final Outcomes?
 //!
-//! - `tokio-util-interop`: exposes raw `tokio_util::sync::CancellationToken` interop through [`TaskContext`] and the prelude.
-//! - `controller`:         slot-based admission control with `ControllerSpec`, `AdmissionPolicy`, and `ControllerConfig`.
-//! - `tracing`:            built-in `TracingBridge` subscriber that forwards runtime events to the `tracing` ecosystem.
-//! - `logging`:            built-in `LogWriter` subscriber for examples and simple logs (dev, preview only).
-//! - `test-util`:          test helpers (`TaskContext::detached()`, `TaskId::for_tests()`, `TaskOutcome::*_for_tests`).
+//! Lifecycle [`Event`] values are **best-effort**.
+//! They are suitable for logs, metrics, and live status.
+//! A slow subscriber can miss events.
+//!
+//! A [`TaskWaiter`] uses a direct completion channel.
+//! Event-bus lag does not affect it.
+//!
+//! It normally returns the final [`TaskOutcome`] after retries and registry cleanup;
+//! it returns a runtime error if the completion channel closes first.
+//!
+//! Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast `try_*` form.
+//! With the `controller` feature, use `submit_and_watch` or `try_submit_and_watch`.
 //!
 //! ## Quick Start
 //!
@@ -78,28 +84,51 @@
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+//!     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
 //!     let hello: TaskRef = TaskFn::arc("hello", |_ctx| async move {
-//!         println!("Hello from task!");
+//!         println!("hello from taskvisor");
 //!         Ok(())
 //!     });
 //!
-//!     sup.run(vec![TaskSpec::once(hello)]).await?;
+//!     supervisor.run(vec![TaskSpec::once(hello)]).await?;
 //!     Ok(())
 //! }
 //! ```
 //!
+//! ## Main Types
+//!
+//! | Need             | Types                                                  |
+//! |------------------|--------------------------------------------------------|
+//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]    |
+//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                   |
+//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                 |
+//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`] |
+//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                |
+//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`]                        |
+//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]             |
+//!
+//! Main types are re-exported at the crate root.
+//! The module pages explain each area in more detail:
+//! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], and [`identity`].
+//!
+//! ## Optional Features
+//!
+//! - `tracing`: forwards lifecycle events to `tracing`.
+//! - `logging`: simple event logging for examples and development.
+//! - `tokio-util-interop`: exposes the underlying Tokio cancellation token.
+//! - `controller`: slot-based admission with queue, replace, and reject rules.
+//! - `test-util`: constructors for task contexts, identities, and outcomes in tests.
+//!
 //! ## Examples
 //!
-//! All examples run as-is, from simple to advanced
-//! ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
+//! Repository examples go from simple to advanced ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
 //!
-//! | Example | What it shows |
+//! | Example                                                                                     | What it shows                                                     |
 //! |---------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
 //! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                   | Run one task and exit — the minimal wiring                        |
 //! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)                 | A long-running worker that stops cleanly on Ctrl+C                |
-//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)             | Run a job every N seconds, forever                                |
+//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)             | Repeat a job after each successful cycle                          |
 //! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)             | Several tasks with different restart rules under one supervisor   |
 //! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | A message consumer that reconnects after failures                 |
 //! | [cpu_job](https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs)               | Run CPU-heavy work on rayon, supervised, without blocking Tokio   |
@@ -120,16 +149,10 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-pub mod prelude;
-
-pub mod identity;
-pub use identity::TaskId;
-
-pub mod reasons;
-
 pub mod core;
 pub use core::{
-    Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskOutcome, TaskWaiter,
+    ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
+    TaskOutcome, TaskWaiter,
 };
 
 pub mod tasks;
@@ -147,16 +170,27 @@ pub use events::{BackoffSource, Event, EventKind};
 pub mod subscribers;
 pub use subscribers::Subscribe;
 
+pub mod identity;
+pub use identity::TaskId;
+
+pub mod prelude;
+
+pub mod reasons;
+
 #[cfg(feature = "controller")]
+#[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub mod controller;
 #[cfg(feature = "controller")]
+#[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
     SlotStatusKind, SlotView,
 };
 
 #[cfg(feature = "logging")]
+#[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
 pub use subscribers::LogWriter;
 
 #[cfg(feature = "tracing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 pub use subscribers::TracingBridge;

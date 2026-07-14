@@ -1,8 +1,10 @@
-//! Controller submission errors.
+//! # Controller API errors
 
 use thiserror::Error;
 
-/// Error returned by controller submission methods.
+/// Errors returned by controller configuration, startup, and submission operations.
+///
+/// Match with a wildcard arm because this enum is non-exhaustive.
 #[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {
@@ -12,14 +14,14 @@ pub enum ControllerError {
     #[error("controller not configured")]
     NotConfigured,
 
-    /// The controller intake queue is full.
+    /// The ordered controller command queue is full.
     ///
-    /// Returned only by `try_submit`.
-    /// Use async `submit` or `submit_and_watch` if the caller should wait for intake capacity instead of failing fast.
+    /// Returned only by `try_submit` and `try_submit_and_watch`.
+    /// Use async `submit` or `submit_and_watch` to wait for command capacity.
     #[error("submission queue full")]
     Full,
 
-    /// The controller intake channel is closed.
+    /// The controller command channel is closed.
     ///
     /// This usually means the controller loop has stopped or the supervisor is shutting down.
     #[error("controller channel closed")]
@@ -27,7 +29,7 @@ pub enum ControllerError {
 
     /// The controller loop was started more than once.
     ///
-    /// This is an internal lifecycle guard. Normal submission APIs do not return this variant.
+    /// This is a lifecycle guard. Normal submission APIs do not return it.
     #[error("controller already started")]
     AlreadyStarted,
 }

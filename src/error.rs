@@ -1,4 +1,4 @@
-//! Error types for runtime orchestration and task execution.
+//! # Error model
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,18 +7,21 @@ use thiserror::Error;
 
 use crate::identity::TaskId;
 
-/// Boxed source error carried by [`TaskError::Fail`] and [`TaskError::Fatal`].
+/// Owned source error stored in [`TaskError::Fail`] or [`TaskError::Fatal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Shared source error carried on the completion plane.
+/// Shared source error stored in final task outcomes.
+///
+/// [`TaskOutcome`](crate::TaskOutcome) can be cloned without requiring the original source error to implement `Clone`.
 pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Errors produced by the supervisor runtime.
+/// Errors from supervisor lifecycle and management operations.
 ///
-/// These are orchestration errors: add, remove, shutdown, and run failures.
-/// They are separate from [`TaskError`], which is returned by task attempts.
+/// These errors come from add, remove, cancel, shutdown, and run operations.
+/// They are separate from [`TaskError`], which comes from a task attempt.
 ///
 /// Match with a wildcard arm because this enum is non-exhaustive.
+/// Data-carrying variants are also non-exhaustive; include `..` when matching their fields.
 ///
 /// # Also
 ///
@@ -29,8 +32,10 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 pub enum RuntimeError {
     /// Shutdown grace period was exceeded.
     ///
-    /// Some tasks did not stop in time and had to be force-terminated.
+    /// Some managed task runners did not stop in time and were force-terminated.
+    /// Work detached by user code is outside this guarantee.
     #[error("shutdown timeout {grace:?} exceeded; stuck: {stuck:?}; forcing termination")]
+    #[non_exhaustive]
     GraceExceeded {
         /// Configured shutdown grace duration.
         grace: Duration,
@@ -38,22 +43,28 @@ pub enum RuntimeError {
         stuck: Vec<Arc<str>>,
     },
 
-    /// A task with the same name is already registered or repeated in an atomic batch.
+    /// A task name is already registered or repeated in an all-or-nothing batch.
     #[error("task name '{name}' already exists")]
+    #[non_exhaustive]
     TaskAlreadyExists {
         /// Duplicate task name.
         name: Arc<str>,
     },
 
-    /// The bounded registry command queue has no free capacity.
+    /// A bounded management command queue has no free capacity.
     ///
-    /// The command was not accepted and no registry state was changed.
-    #[error("registry command queue is full")]
+    /// A fail-fast management call could not enqueue its requested state change.
+    /// That request does not change task or slot ownership.
+    #[error("management command queue is full")]
     CommandQueueFull,
 
-    /// Timed out while waiting for registry terminal completion.
-    #[error("timeout waiting for task {id} removal after {timeout:?}")]
-    TaskRemoveTimeout {
+    /// Timed out while waiting for terminal registry cleanup.
+    ///
+    /// The stop request remains active.
+    /// This error only ends the caller's wait; it does not undo cancellation or change the supervisor grace period.
+    #[error("timeout waiting for task {id} termination after {timeout:?}")]
+    #[non_exhaustive]
+    TaskTerminationTimeout {
         /// Task id whose terminal cleanup did not finish in time.
         id: TaskId,
         /// Wait duration before timing out.
@@ -63,8 +74,9 @@ pub enum RuntimeError {
     /// OS signal listener setup failed.
     ///
     /// Signal-based shutdown is unavailable.
-    /// The I/O error kind, message, and source chain are preserved for every caller that joins the shared shutdown operation.
+    /// The I/O error kind, message, and source chain are preserved for callers that join the shared shutdown operation.
     #[error("failed to install shutdown signal handlers: {source}")]
+    #[non_exhaustive]
     SignalSetupFailed {
         /// I/O error returned by signal registration.
         #[source]
@@ -92,7 +104,7 @@ impl RuntimeError {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::CommandQueueFull => "runtime_command_queue_full",
-            RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
+            RuntimeError::TaskTerminationTimeout { .. } => "runtime_task_termination_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
             RuntimeError::AlreadyRunning => "runtime_already_running",
@@ -100,17 +112,19 @@ impl RuntimeError {
     }
 }
 
-/// Errors returned by a task attempt.
+/// Result categories that a task attempt can return.
 ///
 /// A task returns `Result<(), TaskError>` from [`Task::spawn`](crate::Task::spawn).
 ///
-/// Restart behavior:
-/// - [`Canceled`](Self::Canceled) is cooperative shutdown and is not retried,
-/// - [`Fatal`](Self::Fatal) is not retryable,
-/// - [`Timeout`](Self::Timeout) is retryable,
-/// - [`Fail`](Self::Fail) is retryable.
+/// | Variant                      | Retry category | Meaning                              |
+/// |------------------------------|----------------|--------------------------------------|
+/// | [`Canceled`](Self::Canceled) | never          | cooperative stop                     |
+/// | [`Fatal`](Self::Fatal)       | never          | permanent failure                    |
+/// | [`Timeout`](Self::Timeout)   | eligible       | per-attempt time limit was exceeded  |
+/// | [`Fail`](Self::Fail)         | eligible       | temporary or unknown failure         |
 ///
 /// Match with a wildcard arm because this enum is non-exhaustive.
+/// Data-carrying variants are also non-exhaustive; include `..` when matching their fields.
 ///
 /// # Also
 ///
@@ -121,6 +135,7 @@ impl RuntimeError {
 pub enum TaskError {
     /// The attempt exceeded its configured timeout.
     #[error("timed out after {timeout:?}")]
+    #[non_exhaustive]
     Timeout {
         /// Timeout duration that was exceeded.
         timeout: Duration,
@@ -128,7 +143,7 @@ pub enum TaskError {
 
     /// Permanent task failure.
     ///
-    /// This stops the actor and is not retried.
+    /// This stops the managed task and is not retried.
     #[error("fatal error (no retry): {reason}")]
     #[non_exhaustive]
     Fatal {
@@ -145,7 +160,7 @@ pub enum TaskError {
 
     /// Retryable task failure.
     ///
-    /// The actor may restart after this error, depending on restart policy.
+    /// Taskvisor may restart after this error if the restart policy and retry limit allow it.
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
@@ -162,13 +177,18 @@ pub enum TaskError {
 
     /// Cooperative cancellation.
     ///
-    /// Tasks should return this when they stop because [`TaskContext`](crate::TaskContext)
-    /// was cancelled.
+    /// Tasks should return this when they stop because [`TaskContext`](crate::TaskContext) was cancelled.
     #[error("context canceled")]
     Canceled,
 }
 
 impl TaskError {
+    /// Creates a retry-eligible timeout error.
+    #[must_use]
+    pub const fn timeout(timeout: Duration) -> Self {
+        TaskError::Timeout { timeout }
+    }
+
     /// Creates a retryable failure with no source error.
     pub fn fail(reason: impl Into<String>) -> Self {
         TaskError::Fail {
@@ -217,9 +237,9 @@ impl TaskError {
         }
     }
 
-    /// Attaches a process-style exit code to `Fail` or `Fatal`.
+    /// Sets or clears the process-style exit code on `Fail` or `Fatal`.
     ///
-    /// No-op for `Timeout` and `Canceled`.
+    /// Pass an integer to set it or `None` to clear it. This has no effect on `Timeout` or `Canceled`.
     #[must_use]
     pub fn with_exit_code(mut self, code: impl Into<Option<i32>>) -> Self {
         let code = code.into();
@@ -229,7 +249,7 @@ impl TaskError {
         self
     }
 
-    /// Attaches a source error to `Fail` or `Fatal`.
+    /// Sets a source error on `Fail` or `Fatal`.
     ///
     /// No-op for `Timeout` and `Canceled`.
     #[must_use]
@@ -262,7 +282,9 @@ impl TaskError {
         }
     }
 
-    /// Returns `true` for errors that may be retried by restart policy.
+    /// Returns `true` for a retry-eligible error category.
+    ///
+    /// The active restart policy and retry limit can still stop the task.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, TaskError::Timeout { .. } | TaskError::Fail { .. })
@@ -284,7 +306,7 @@ impl TaskError {
     }
 }
 
-/// Umbrella error for mixed supervisor and controller call chains.
+/// Umbrella error for code that mixes runtime and controller operations.
 ///
 /// [`RuntimeError`] and `ControllerError` (feature `controller`) convert into this type with `?`.
 /// Match on the variant to get the original error back.
@@ -313,6 +335,7 @@ pub enum Error {
     ///
     /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     #[error(transparent)]
     Controller(#[from] crate::controller::ControllerError),
 }
@@ -336,58 +359,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_queue_full_has_stable_label() {
-        let error = RuntimeError::CommandQueueFull;
-        assert_eq!(error.as_label(), "runtime_command_queue_full");
-        assert_eq!(error.to_string(), "registry command queue is full");
+    fn runtime_error_labels_are_stable() {
+        let id = TaskId::next();
+        let cases = [
+            (
+                RuntimeError::GraceExceeded {
+                    grace: Duration::from_secs(1),
+                    stuck: vec![Arc::from("worker")],
+                },
+                "runtime_grace_exceeded",
+            ),
+            (
+                RuntimeError::TaskAlreadyExists {
+                    name: Arc::from("worker"),
+                },
+                "runtime_task_already_exists",
+            ),
+            (RuntimeError::CommandQueueFull, "runtime_command_queue_full"),
+            (
+                RuntimeError::TaskTerminationTimeout {
+                    id,
+                    timeout: Duration::from_secs(1),
+                },
+                "runtime_task_termination_timeout",
+            ),
+            (
+                RuntimeError::SignalSetupFailed {
+                    source: std::io::Error::other("boom"),
+                },
+                "runtime_signal_setup_failed",
+            ),
+            (RuntimeError::ShuttingDown, "runtime_shutting_down"),
+            (RuntimeError::AlreadyRunning, "runtime_already_running"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.as_label(), expected, "{error:?}");
+        }
     }
 
     #[test]
-    fn exit_code_is_some_for_fail_with_code() {
-        let e = TaskError::fail("x").with_exit_code(5);
-        assert_eq!(e.exit_code(), Some(5));
-        assert!(e.is_retryable());
-        assert!(!e.is_fatal());
-    }
-
-    #[test]
-    fn exit_code_is_some_for_fatal_with_code() {
-        let e = TaskError::fatal("x").with_exit_code(137);
-        assert_eq!(e.exit_code(), Some(137));
-        assert!(!e.is_retryable());
-        assert!(e.is_fatal());
-    }
-
-    #[test]
-    fn exit_code_is_none_for_logical_fail() {
-        let e = TaskError::fail("logical");
-        assert_eq!(e.exit_code(), None);
-    }
-
-    #[test]
-    fn exit_code_is_none_for_timeout_and_canceled() {
+    fn runtime_error_displays_are_stable() {
         assert_eq!(
-            TaskError::Timeout {
-                timeout: Duration::from_secs(1),
-            }
-            .exit_code(),
-            None,
+            RuntimeError::CommandQueueFull.to_string(),
+            "management command queue is full"
         );
-        assert_eq!(TaskError::Canceled.exit_code(), None);
+
+        let id = TaskId::next();
+        let error = RuntimeError::TaskTerminationTimeout {
+            id,
+            timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("timeout waiting for task {id} termination after 1s")
+        );
     }
 
     #[test]
-    fn display_still_renders_reason_only() {
-        let e = TaskError::fail("boom").with_exit_code(1);
-        assert_eq!(e.to_string(), "execution failed: boom");
+    fn timeout_constructor_is_const_and_preserves_payload_and_display() {
+        const TIMEOUT: TaskError = TaskError::timeout(Duration::from_secs(1));
+
+        assert!(matches!(
+            &TIMEOUT,
+            TaskError::Timeout { timeout, .. } if *timeout == Duration::from_secs(1)
+        ));
+        assert_eq!(TIMEOUT.to_string(), "timed out after 1s");
     }
 
     #[test]
-    fn fail_constructor_is_retryable_and_sourceless() {
+    fn fail_constructor_preserves_reason_and_is_sourceless() {
         let e = TaskError::fail("logical");
         assert_eq!(e.to_string(), "execution failed: logical");
-        assert!(e.is_retryable());
-        assert_eq!(e.exit_code(), None);
         assert!(std::error::Error::source(&e).is_none());
     }
 
@@ -417,14 +460,57 @@ mod tests {
     }
 
     #[test]
-    fn with_exit_code_accepts_bare_and_option() {
-        assert_eq!(TaskError::fail("x").with_exit_code(7).exit_code(), Some(7));
-
+    fn classification_and_exit_codes_cover_every_task_error_variant() {
         let dynamic: Option<i32> = None;
-        assert_eq!(
-            TaskError::fail("y").with_exit_code(dynamic).exit_code(),
-            None
-        );
+        let cases = [
+            (
+                "fail",
+                TaskError::fail("x").with_exit_code(7),
+                "task_failed",
+                Some(7),
+                true,
+                false,
+            ),
+            (
+                "fatal",
+                TaskError::fatal("x").with_exit_code(137),
+                "task_fatal",
+                Some(137),
+                false,
+                true,
+            ),
+            (
+                "optional exit code",
+                TaskError::fail("y").with_exit_code(dynamic),
+                "task_failed",
+                None,
+                true,
+                false,
+            ),
+            (
+                "timeout",
+                TaskError::timeout(Duration::from_secs(1)),
+                "task_timeout",
+                None,
+                true,
+                false,
+            ),
+            (
+                "canceled",
+                TaskError::Canceled,
+                "task_canceled",
+                None,
+                false,
+                false,
+            ),
+        ];
+
+        for (case, error, label, exit_code, retryable, fatal) in cases {
+            assert_eq!(error.as_label(), label, "{case}");
+            assert_eq!(error.exit_code(), exit_code, "{case}");
+            assert_eq!(error.is_retryable(), retryable, "{case}");
+            assert_eq!(error.is_fatal(), fatal, "{case}");
+        }
     }
 
     #[test]

@@ -1,7 +1,9 @@
-//! # LogWriter event printer example.
+//! # Simple stdout event printer
 //!
-//! A minimal subscriber that prints incoming [`Event`]s to stdout.
-//! Useful for development, debugging, and demos.
+//! [`LogWriter`] prints incoming [`Event`] values to standard output.
+//! It is useful for examples, local development, and debugging.
+//!
+//! For production structured logs, prefer [`TracingBridge`](crate::TracingBridge) with the`tracing` feature.
 //!
 //! Each line starts with the event's stable label from [`EventKind::as_label`].
 //!
@@ -30,18 +32,19 @@
 //! let sup = Supervisor::new(SupervisorConfig::default(), subs);
 //! ```
 
-use crate::events::{BackoffSource, Event, EventKind};
+use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
 
-/// Event printer for stdout example.
+/// Prints human-readable events to standard output.
 ///
 /// Implements [`Subscribe`] and prints `[seq] [event-type] key=value ...` with relevant metadata.
-/// Useful for debugging, demos, or understanding supervisor flow.
+/// Output is intended for people and is not a stable machine-readable format.
 ///
 /// ## Also
 ///
 /// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
-/// - See [`Event`](crate::Event) and [`EventKind`](crate::EventKind) for event structure.
+/// - See [`Event`] and [`EventKind`] for event structure.
+#[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
 #[derive(Default)]
 pub struct LogWriter;
 
@@ -57,7 +60,7 @@ impl Subscribe for LogWriter {
 
 impl LogWriter {
     fn print_event(&self, e: &Event) {
-        let head = format!("[{:03}] [{}]", e.seq % 1000, e.kind.as_label());
+        let head = event_head(e);
 
         fn fmt_ms(ms: Option<u32>) -> String {
             match ms {
@@ -119,11 +122,7 @@ impl LogWriter {
                 );
             }
             EventKind::BackoffScheduled => {
-                let src = match e.backoff_source {
-                    Some(BackoffSource::Success) => "success",
-                    Some(BackoffSource::Failure) => "failure",
-                    None => "unknown",
-                };
+                let src = e.backoff_source.map_or("unknown", |s| s.as_label());
                 println!(
                     "{head} task={} source={} delay={} after_attempt={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),
@@ -177,5 +176,22 @@ impl LogWriter {
                 );
             }
         }
+    }
+}
+
+fn event_head(e: &Event) -> String {
+    format!("[{:03}] [{}]", e.seq, e.kind.as_label())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_head_keeps_the_full_sequence_number() {
+        let mut event = Event::new(EventKind::TaskStarting);
+        event.seq = 12_345;
+
+        assert_eq!(event_head(&event), "[12345] [task_starting]");
     }
 }

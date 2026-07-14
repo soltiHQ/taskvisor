@@ -1,74 +1,61 @@
-//! # Public supervisor facade.
+//! # Start and own the runtime
 //!
-//! [`Supervisor`] is the public entry point for running taskvisor.
-//!
-//! It owns the runtime core and, when the `controller` feature is enabled, an optional controller.
-//! The runtime implementation lives in [`SupervisorCore`]; this type keeps the public API small and stable.
+//! [`Supervisor`] is the main entry point.
+//! Build it once, then use `run` for a static batch or `serve` for dynamic management.
+//! The modes can be combined by calling `serve` before the single `run` call.
 //!
 //! ## Modes
 //!
-//! - [`run`](Supervisor::run): run a fixed set of tasks until natural completion or an OS shutdown signal.
-//! - [`serve`](Supervisor::serve): start the runtime and return a [`SupervisorHandle`](crate::SupervisorHandle) for dynamic task management.
+//! ```text
+//! static:   Supervisor::run(batch) ──► wait ──► cleanup ──► Result
+//! dynamic:  Supervisor::serve() ─────► SupervisorHandle
+//!                                        ├── add / remove / cancel
+//!                                        └── shutdown ──► cleanup ──► Result
+//! ```
+//!
+//! [`run`](Supervisor::run) is for a known initial batch.
+//! [`serve`](Supervisor::serve) is for tasks managed while the service runs.
+//!
+//! After its batch is accepted, `run` waits for natural completion, explicit shutdown, or an OS shutdown signal.
+//! `serve` does not install a signal wait; the application decides when to call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
+//!
+//! ## Ownership and Drop
+//!
+//! `Supervisor` and all [`SupervisorHandle`](crate::SupervisorHandle) values share the runtime.
+//! Dropping one owner does nothing while another owner is alive.
+//! Dropping the last owner sends best-effort cancellation, but `Drop` cannot wait.
+//!
+//! Call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown) to wait for cleanup and get its result.
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
 use std::sync::Arc;
 
-use crate::core::{SupervisorConfig, SupervisorCore, builder::SupervisorBuilder};
+use crate::core::{RuntimeOwner, SupervisorConfig, SupervisorCore, builder::SupervisorBuilder};
 use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 
-/// Public facade for the taskvisor runtime.
+/// Owner and entry point for one taskvisor runtime.
 ///
-/// Use [`new`](Self::new) for simple construction, or [`builder`](Self::builder) when you need to configure optional features.
+/// Use [`new`](Self::new) for the standard defaults.
+/// Use [`builder`](Self::builder) to set [`TaskDefaults`](crate::TaskDefaults), subscribers, or optional controller admission.
 ///
-/// ## Static Mode
-///
-/// Static mode runs a known task set:
-///
-/// ```rust,no_run
-/// # use taskvisor::prelude::*;
-/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-/// supervisor.run(vec![/* task specs */]).await?;
-/// # Ok(()) }
-/// ```
-///
-/// ## Dynamic Mode
-///
-/// Dynamic mode returns a handle for runtime task management:
-///
-/// ```rust,no_run
-/// # use taskvisor::prelude::*;
-/// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-/// let handle = supervisor.serve();
-///
-/// // handle.add(...).await?;
-/// // handle.cancel(id).await?;
-/// // handle.shutdown().await?;
-/// # Ok(()) }
-/// ```
-///
-/// # Also
+/// ## See Also
 ///
 /// - [`SupervisorHandle`](crate::SupervisorHandle) - dynamic runtime management API
-/// - [`SupervisorBuilder`](crate::SupervisorBuilder) - step-by-step construction
+/// - [`SupervisorBuilder`] - step-by-step construction
 /// - [`SupervisorConfig`] - runtime defaults and limits
+/// - [`TaskDefaults`](crate::TaskDefaults) - restart, backoff, timeout, and retry defaults
 pub struct Supervisor {
-    core: Arc<SupervisorCore>,
+    owner: Arc<RuntimeOwner>,
 
     #[cfg(feature = "controller")]
     controller: Option<Arc<crate::controller::Controller>>,
-    #[cfg(feature = "controller")]
-    runtime_token: tokio_util::sync::CancellationToken,
-    #[cfg(feature = "controller")]
-    controller_started: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Supervisor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Supervisor")
-            .field("core", &self.core)
+            .field("core", self.owner.core())
             .finish_non_exhaustive()
     }
 }
@@ -78,39 +65,33 @@ impl Supervisor {
     pub(super) fn from_parts(
         core: Arc<SupervisorCore>,
         #[cfg(feature = "controller")] controller: Option<Arc<crate::controller::Controller>>,
-        #[cfg(feature = "controller")] runtime_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
-            core,
+            owner: RuntimeOwner::new(core),
             #[cfg(feature = "controller")]
             controller,
-            #[cfg(feature = "controller")]
-            runtime_token,
-            #[cfg(feature = "controller")]
-            controller_started: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /// Starts the controller loop once, if a controller is configured.
     #[cfg(feature = "controller")]
     fn start_controller(&self) {
-        use std::sync::atomic::Ordering;
-        if let Some(ctrl) = &self.controller
-            && !self.controller_started.swap(true, Ordering::AcqRel)
-        {
-            ctrl.clone().run(self.runtime_token.clone());
+        if let Some(controller) = &self.controller {
+            controller.run();
         }
     }
 
-    /// Creates a new supervisor with config and subscribers.
+    /// Creates a stopped supervisor with runtime config and subscribers.
     ///
-    /// The returned supervisor is not started yet.
-    /// Call [`run`](Self::run) for a fixed task set or [`serve`](Self::serve) for dynamic management.
+    /// Task specs use [`TaskDefaults::default`](crate::TaskDefaults::default).
+    /// Use [`builder`](Self::builder) and [`with_task_defaults`](crate::SupervisorBuilder::with_task_defaults) to replace those defaults.
+    ///
+    /// This method does not start Tokio tasks. Call [`run`](Self::run) or [`serve`](Self::serve) later.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
 
-    /// Creates a builder for constructing a supervisor.
+    /// Creates a builder for custom supervisor settings.
     ///
     /// ## Example
     ///
@@ -125,30 +106,44 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
-    /// Starts the runtime and returns a handle for dynamic task management.
+    /// Starts dynamic mode and returns a management handle.
     ///
-    /// Safe to call more than once.
-    /// Runtime listeners are started once, and each call returns a handle to the same runtime.
-    pub fn serve(self: &Arc<Self>) -> super::handle::SupervisorHandle {
-        self.core.start();
+    /// This method may be called more than once.
+    /// Runtime workers start once; every call returns another handle to the same runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime must start and there is no active Tokio runtime.
+    /// A failed first call may be retried inside Tokio.
+    /// After startup, later calls only create a handle.
+    #[must_use = "use the returned runtime handle to manage or shut down the supervisor"]
+    pub fn serve(&self) -> super::handle::SupervisorHandle {
+        self.owner.core().start();
         #[cfg(feature = "controller")]
         self.start_controller();
-        let handle = super::handle::SupervisorHandle::new(Arc::clone(&self.core));
+        let handle = super::handle::SupervisorHandle::new(Arc::clone(&self.owner));
         #[cfg(feature = "controller")]
         let handle = handle.with_controller(self.controller.clone());
         handle
     }
 
-    /// Runs a fixed task set until natural completion or OS shutdown signal.
+    /// Runs an initial task batch until natural completion or shared shutdown,
+    /// started explicitly or by an OS signal.
     ///
     /// This is static mode.
-    /// It validates and registers the provided tasks as one atomic batch, then waits until all tasks complete or a shutdown signal is received.
-    /// If one task name conflicts, no task from the batch starts.
+    /// The registry accepts the full batch or rejects it.
+    /// If a name is repeated or already registered, no task from the batch starts.
     ///
-    /// A rejected batch does not stop tasks that were already registered through [`serve`](Self::serve).
-    /// The runtime stays open for dynamic management, but `run` remains single-shot and cannot be called again.
+    /// `run` can be called only once for a supervisor.
+    /// A rejected batch does not stop tasks that were added earlier through [`serve`](Self::serve), but the `run` call is still used and cannot be retried.
     ///
-    /// `run` is single-shot for one supervisor instance.
+    /// `Ok(())` means the supervisor lifecycle and cleanup completed successfully.
+    /// It does not mean that every managed task completed successfully.
+    /// Task failures, fatal errors, and panics remain task-level outcomes; use [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) when application logic needs a reliable outcome for one task.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime must start and there is no active Tokio runtime.
     ///
     /// # Errors
     ///
@@ -156,133 +151,59 @@ impl Supervisor {
     /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
     /// - [`RuntimeError::SignalSetupFailed`] when OS signal handlers cannot be installed.
     /// - [`RuntimeError::AlreadyRunning`] when `run` is called a second time.
+    /// - [`RuntimeError::ShuttingDown`] when shutdown has started or cleanup cannot finish normally.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         #[cfg(feature = "controller")]
         self.start_controller();
-        self.core.run(tasks).await
+        self.owner.core().run(tasks).await
+    }
+
+    /// Returns the immutable runtime configuration.
+    #[must_use = "use the returned runtime configuration"]
+    pub fn runtime_config(&self) -> &SupervisorConfig {
+        self.owner.core().runtime_config()
+    }
+
+    /// Returns the immutable task defaults applied during registry admission.
+    #[must_use = "use the returned task defaults"]
+    pub fn task_defaults(&self) -> &crate::TaskDefaults {
+        self.owner.core().task_defaults()
     }
 
     /// Returns the runtime core for controller tests.
-    #[cfg(all(test, feature = "controller"))]
+    #[cfg(test)]
     pub(crate) fn core(&self) -> &Arc<SupervisorCore> {
-        &self.core
+        self.owner.core()
+    }
+
+    /// Returns the public-owner lease for controller unit tests.
+    #[cfg(all(test, feature = "controller"))]
+    pub(crate) fn owner(&self) -> &Arc<RuntimeOwner> {
+        &self.owner
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaskContext, TaskFn, TaskRef};
     use std::time::Duration;
 
     #[tokio::test]
-    async fn shutdown_force_terminates_noncooperative_task_within_grace() {
-        let cfg = SupervisorConfig {
-            grace: Duration::from_millis(200),
-            ..Default::default()
-        };
-        let sup = Supervisor::new(cfg, vec![]);
-        let handle = sup.serve();
+    async fn last_public_owner_drop_releases_the_runtime_core() {
+        let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+        let weak = Arc::downgrade(supervisor.core());
+        let handle = supervisor.serve();
 
-        let stubborn: TaskRef = TaskFn::arc("stubborn", |_ctx: TaskContext| async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Ok(())
-        });
-        handle
-            .add(TaskSpec::once(stubborn))
-            .await
-            .expect("task should register");
+        drop(supervisor);
+        assert!(weak.upgrade().is_some(), "the live handle owns the runtime");
+        drop(handle);
 
-        let res = tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-            .await
-            .expect("shutdown must return within grace, not block on the stuck task");
-
-        match res {
-            Err(RuntimeError::GraceExceeded { stuck, .. }) => {
-                assert!(
-                    stuck.iter().any(|n| &**n == "stubborn"),
-                    "stuck set must list the non-cooperative task, got {stuck:?}"
-                );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
             }
-            other => panic!("expected GraceExceeded listing the stuck task, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn shutdown_cooperative_task_returns_ok() {
-        let cfg = SupervisorConfig {
-            grace: Duration::from_secs(5),
-            ..Default::default()
-        };
-        let sup = Supervisor::new(cfg, vec![]);
-        let handle = sup.serve();
-
-        let good: TaskRef = TaskFn::arc("good", |ctx: TaskContext| async move {
-            ctx.cancelled().await;
-            Ok(())
-        });
-        handle
-            .add(TaskSpec::restartable(good))
-            .await
-            .expect("task should register");
-
-        let res = tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-            .await
-            .expect("cooperative shutdown must not hang");
-        assert!(
-            res.is_ok(),
-            "cooperative shutdown should be Ok, got {res:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn add_duplicate_name_returns_already_exists() {
-        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-        let handle = sup.serve();
-
-        let make = || -> TaskRef {
-            TaskFn::arc("dup", |ctx: TaskContext| async move {
-                ctx.cancelled().await;
-                Ok(())
-            })
-        };
-        handle
-            .add(TaskSpec::restartable(make()))
-            .await
-            .expect("first add should succeed");
-
-        let res = handle.add(TaskSpec::restartable(make())).await;
-        assert!(
-            matches!(res, Err(RuntimeError::TaskAlreadyExists { .. })),
-            "duplicate add must return TaskAlreadyExists, got {res:?}"
-        );
-
-        let _ = handle.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn cancel_reports_removed_then_absent() {
-        let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-        let handle = sup.serve();
-
-        let t: TaskRef = TaskFn::arc("c", |ctx: TaskContext| async move {
-            ctx.cancelled().await;
-            Ok(())
-        });
-        let id = handle
-            .add(TaskSpec::restartable(t))
-            .await
-            .expect("add should succeed");
-
-        let removed = handle.cancel(id).await.expect("cancel should not error");
-        assert!(
-            removed,
-            "cancelling an existing task should report removed=true"
-        );
-
-        let absent = handle.cancel(id).await.expect("cancel should not error");
-        assert!(!absent, "cancelling a missing task should report false");
-
-        let _ = handle.shutdown().await;
+        })
+        .await
+        .expect("last-owner Drop must not leave a core ownership cycle");
     }
 }

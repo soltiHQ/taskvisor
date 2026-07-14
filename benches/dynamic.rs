@@ -50,11 +50,9 @@ const RUNTIMES: [(&str, RtFactory); 2] = [
 ];
 
 fn bench_config() -> SupervisorConfig {
-    SupervisorConfig {
-        bus_capacity: 16384,
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    }
+    SupervisorConfig::default()
+        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
+        .with_grace(Duration::from_secs(5))
 }
 
 fn worker_task(name: &str) -> TaskSpec {

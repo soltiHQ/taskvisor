@@ -1,11 +1,10 @@
-//! # Tracing bridge subscriber.
+//! # Bridge to `tracing`
 //!
-//! Forwards every runtime [`Event`] into the [`tracing`] ecosystem.
-//! Use it to see supervisor lifecycle in your existing log pipeline.
+//! [`TracingBridge`] converts every event it receives into one structured [`tracing`] event.
+//! Subscriber delivery is best-effort, so this bridge does not make event delivery reliable.
 //!
-//! Each tracing event carries:
-//! - target `taskvisor`,
-//! - a level mapped from the event severity (see [`TracingBridge`]),
+//! Each tracing event uses target `taskvisor` and contains:
+//! - a level based on the event severity (see [`TracingBridge`]),
 //! - structured fields: `event` (the stable label), `seq`, and the optional payload fields that are set
 //!   (`task`, `id`, `attempt`, `reason`, `delay_ms`, `timeout_ms`, `duration_ms`, `exit_code`, `backoff_source`).
 //!
@@ -22,11 +21,11 @@
 
 use tracing::Level;
 
-use crate::events::{BackoffSource, Event, EventKind};
+use crate::events::{Event, EventKind};
 use crate::reasons::MAX_RETRIES_EXCEEDED;
 use crate::subscribers::Subscribe;
 
-/// Subscriber that forwards runtime events to [`tracing`].
+/// Sends runtime events to [`tracing`] as structured events.
 ///
 /// Level mapping:
 /// - `ERROR`: task failed, actor dead, subscriber panicked.
@@ -39,6 +38,7 @@ use crate::subscribers::Subscribe;
 ///
 /// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
 /// - See [`EventKind::as_label`] for the stable `event` field values.
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 #[derive(Default)]
 pub struct TracingBridge;
 
@@ -101,10 +101,7 @@ impl Subscribe for TracingBridge {
                     timeout_ms = e.timeout_ms.map(u64::from),
                     duration_ms = e.duration_ms.map(u64::from),
                     exit_code = e.exit_code.map(i64::from),
-                    backoff_source = e.backoff_source.map(|s| match s {
-                        BackoffSource::Success => "success",
-                        BackoffSource::Failure => "failure",
-                    }),
+                    backoff_source = e.backoff_source.map(|s| s.as_label()),
                 )
             };
         }
@@ -134,7 +131,6 @@ mod tests {
 
     type Captured = (Level, HashMap<String, String>);
 
-    /// Minimal collector: stores (level, fields) for every tracing event.
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Captured>>>);
 
@@ -182,7 +178,7 @@ mod tests {
         tracing::subscriber::with_default(cap.clone(), || {
             crate::subscribers::Subscribe::on_event(&TracingBridge, e);
         });
-        let mut events = cap.0.lock().unwrap().clone();
+        let mut events = cap.0.lock().unwrap();
         assert_eq!(events.len(), 1, "exactly one tracing event expected");
         events.pop().unwrap()
     }
@@ -220,36 +216,20 @@ mod tests {
     }
 
     #[test]
-    fn actor_exhausted_retry_limit_maps_to_warn() {
-        let e = Event::new(EventKind::ActorExhausted)
-            .with_task("worker")
-            .with_reason("max_retries_exceeded(3/3): boom");
-
-        let (level, _) = capture_one(&e);
-
-        assert_eq!(
-            level,
-            Level::WARN,
-            "a task that permanently gave up after max retries must be WARN"
-        );
-    }
-
-    #[test]
-    fn actor_exhausted_benign_reasons_stay_info() {
-        for reason in ["policy_exhausted_success", "task_returned_canceled"] {
-            let e = Event::new(EventKind::ActorExhausted)
-                .with_task("worker")
-                .with_reason(reason);
+    fn actor_exhausted_level_depends_on_reason() {
+        for (reason, expected) in [
+            (Some("max_retries_exceeded(3/3): boom"), Level::WARN),
+            (Some("policy_exhausted_success"), Level::INFO),
+            (Some("task_returned_canceled"), Level::INFO),
+            (None, Level::INFO),
+        ] {
+            let mut e = Event::new(EventKind::ActorExhausted).with_task("worker");
+            if let Some(reason) = reason {
+                e = e.with_reason(reason);
+            }
             let (level, _) = capture_one(&e);
-            assert_eq!(level, Level::INFO, "wrong level for reason {reason:?}");
+            assert_eq!(level, expected, "wrong level for reason {reason:?}");
         }
-        let no_reason = Event::new(EventKind::ActorExhausted).with_task("worker");
-        let (level, _) = capture_one(&no_reason);
-        assert_eq!(
-            level,
-            Level::INFO,
-            "ActorExhausted without reason stays INFO"
-        );
     }
 
     #[test]
@@ -261,7 +241,17 @@ mod tests {
             Some("shutdown_requested")
         );
         assert!(fields.contains_key("seq"), "seq is always present");
-        for absent in ["task", "reason", "attempt", "delay_ms", "timeout_ms"] {
+        for absent in [
+            "id",
+            "task",
+            "reason",
+            "attempt",
+            "delay_ms",
+            "timeout_ms",
+            "duration_ms",
+            "exit_code",
+            "backoff_source",
+        ] {
             assert!(
                 !fields.contains_key(absent),
                 "unset optional field {absent:?} must not be recorded"

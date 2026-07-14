@@ -3,6 +3,7 @@
 mod common;
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Poll;
@@ -10,14 +11,6 @@ use std::time::Duration;
 
 use common::*;
 use taskvisor::prelude::*;
-
-/// Task that ignores cancellation and sleeps far longer than any test grace.
-fn make_stubborn(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: TaskContext| async move {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        Ok(())
-    })
-}
 
 fn make_gated_cancel(
     name: &str,
@@ -82,8 +75,8 @@ impl Subscribe for BlockingSubscriber {
         "blocking-shutdown"
     }
 
-    fn queue_capacity(&self) -> usize {
-        64
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(64).unwrap()
     }
 }
 
@@ -144,15 +137,7 @@ async fn wait_for_callback(
 }
 
 fn served(grace: Duration) -> (SupervisorHandle, Arc<EventCollector>) {
-    let collector = EventCollector::new();
-    let subs: Vec<Arc<dyn Subscribe>> = vec![collector.clone() as Arc<dyn Subscribe>];
-    let sup = Supervisor::builder(SupervisorConfig {
-        grace,
-        ..Default::default()
-    })
-    .with_subscribers(subs)
-    .build();
-    (sup.serve(), collector)
+    served_with_collector(SupervisorConfig::default().with_grace(grace))
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -261,11 +246,11 @@ async fn subscriber_deadline_bounds_natural_run_completion() {
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
     let (handle, collector) = served(Duration::from_secs(5));
-    handle
+    let id_c1 = handle
         .add(TaskSpec::restartable(make_coop("c1")))
         .await
         .unwrap();
-    handle
+    let id_c2 = handle
         .add(TaskSpec::restartable(make_coop("c2")))
         .await
         .unwrap();
@@ -285,6 +270,17 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
         requested.seq < all_stopped.seq,
         "ShutdownRequested must precede AllStopped"
     );
+    for (id, label) in [(id_c1, "c1"), (id_c2, "c2")] {
+        assert_eq!(
+            collector
+                .by_id(id)
+                .iter()
+                .filter(|event| event.kind == EventKind::TaskRemoved)
+                .count(),
+            1,
+            "shutdown must emit exactly one TaskRemoved for {label}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -347,13 +343,11 @@ async fn concurrent_shutdown_waiters_share_clean_result() {
 async fn concurrent_shutdown_waiters_share_subscriber_drain() {
     let (subscriber, gate) = blocking_subscriber();
     let watchdog = spawn_callback_watchdog(Arc::clone(&gate));
-    let supervisor = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscriber_shutdown_timeout(Duration::from_secs(5))
-    .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
-    .build();
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscriber_shutdown_timeout(Duration::from_secs(5))
+            .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
+            .build();
     let handle = supervisor.serve();
     handle
         .add(TaskSpec::restartable(make_coop("shared-subscriber-drain")))
@@ -393,18 +387,22 @@ async fn concurrent_shutdown_waiters_share_subscriber_drain() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn concurrent_shutdown_waiters_share_grace_exceeded() {
     let grace = Duration::from_millis(50);
     let (handle, collector) = served(grace);
+    let (stubborn_a, started_a) = make_stubborn("shared-stuck-a");
+    let (stubborn_b, started_b) = make_stubborn("shared-stuck-b");
     handle
-        .add(TaskSpec::once(make_stubborn("shared-stuck-a")))
+        .add(TaskSpec::once(stubborn_a))
         .await
         .expect("first stubborn task must register");
     handle
-        .add(TaskSpec::once(make_stubborn("shared-stuck-b")))
+        .add(TaskSpec::once(stubborn_b))
         .await
         .expect("second stubborn task must register");
+    wait_for_start("shared-stuck-a", &started_a).await;
+    wait_for_start("shared-stuck-b", &started_b).await;
 
     let late = handle.clone();
     let first = handle.clone();
@@ -415,18 +413,18 @@ async fn concurrent_shutdown_waiters_share_grace_exceeded() {
     .await;
 
     let (first_grace, first_stuck) = match first_result {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => (grace, stuck),
         other => panic!("first caller must receive GraceExceeded, got {other:?}"),
     };
     let (second_grace, second_stuck) = match second_result {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => (grace, stuck),
         other => panic!("second caller must receive GraceExceeded, got {other:?}"),
     };
     assert_eq!(first_grace, grace);
     assert_eq!(second_grace, grace);
     assert_eq!(first_stuck, second_stuck, "callers need the same snapshot");
     let (late_grace, late_stuck) = match late.shutdown().await {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => (grace, stuck),
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => (grace, stuck),
         other => panic!("late caller must receive GraceExceeded, got {other:?}"),
     };
     assert_eq!(late_grace, grace);
@@ -482,15 +480,61 @@ async fn dropping_first_shutdown_waiter_does_not_cancel_owner() {
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_cleanup() {
+    let (handle, collector) = served(Duration::from_secs(5));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (_, waiter) = handle
+        .add_and_watch(TaskSpec::restartable(make_gated_cancel(
+            "only-dropped-shutdown-waiter",
+            Arc::clone(&started),
+            Arc::clone(&cancellation_seen),
+            Arc::clone(&release),
+        )))
+        .await
+        .expect("the gated task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the gated task must start");
+
+    let shutdown_waiter = tokio::spawn(async move { handle.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(2), cancellation_seen.notified())
+        .await
+        .expect("the detached owner must start task cancellation");
+    shutdown_waiter.abort();
+    let _ = shutdown_waiter.await;
+
+    let mut outcome = Box::pin(waiter.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut outcome)
+            .await
+            .is_err(),
+        "last-owner Drop must not replace active graceful shutdown with zero-grace cleanup"
+    );
+
+    release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), outcome)
+        .await
+        .expect("the detached graceful owner must finish")
+        .expect("the watched task must keep its terminal outcome");
+    assert!(matches!(outcome, TaskOutcome::Canceled));
+
+    collector
+        .wait_for(EventKind::AllStoppedWithinGrace, Duration::from_secs(2))
+        .await
+        .expect("detached cleanup must publish its graceful result");
+    assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn run_and_handle_shutdown_share_one_operation() {
     let collector = EventCollector::new();
-    let supervisor = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
-    .build();
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
+            .build();
     let handle = supervisor.serve();
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
@@ -533,12 +577,10 @@ async fn run_and_handle_shutdown_share_one_operation() {
 #[tokio::test(flavor = "current_thread")]
 async fn run_joins_shutdown_that_started_first() {
     let collector = EventCollector::new();
-    let supervisor = Supervisor::builder(SupervisorConfig {
-        grace: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
-    .build();
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
+            .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
+            .build();
     let handle = supervisor.serve();
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
@@ -578,16 +620,15 @@ async fn run_joins_shutdown_that_started_first() {
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts() {
     let (handle, collector) = served(Duration::from_millis(200));
-    handle
-        .add(TaskSpec::once(make_stubborn("stubborn")))
-        .await
-        .unwrap();
+    let (stubborn, started) = make_stubborn("stubborn");
+    handle.add(TaskSpec::once(stubborn)).await.unwrap();
+    wait_for_start("stubborn", &started).await;
 
     match with_timeout(5, handle.shutdown()).await {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => {
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => {
             assert_eq!(grace, Duration::from_millis(200));
             assert!(stuck.iter().any(|n| &**n == "stubborn"));
         }
@@ -600,7 +641,7 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_empty_registry_returns_ok_all_stopped() {
-    let (handle, collector) = served(SupervisorConfig::default().grace);
+    let (handle, collector) = served(SupervisorConfig::default().grace());
 
     with_timeout(5, handle.shutdown())
         .await
@@ -611,17 +652,24 @@ async fn shutdown_empty_registry_returns_ok_all_stopped() {
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
     let (handle, collector) = served(Duration::from_millis(500));
-    handle
-        .add(TaskSpec::restartable(make_coop("coop")))
-        .await
-        .unwrap();
-    handle
-        .add(TaskSpec::once(make_stubborn("stuck")))
-        .await
-        .unwrap();
+    let coop_started = Arc::new(tokio::sync::Notify::new());
+    let task_started = Arc::clone(&coop_started);
+    let coop = TaskFn::arc("coop", move |ctx: TaskContext| {
+        let started = Arc::clone(&task_started);
+        async move {
+            started.notify_one();
+            ctx.cancelled().await;
+            Ok(())
+        }
+    });
+    let (stuck, stuck_started) = make_stubborn("stuck");
+    handle.add(TaskSpec::restartable(coop)).await.unwrap();
+    handle.add(TaskSpec::once(stuck)).await.unwrap();
+    wait_for_start("coop", &coop_started).await;
+    wait_for_start("stuck", &stuck_started).await;
 
     match with_timeout(5, handle.shutdown()).await {
         Err(RuntimeError::GraceExceeded { stuck, .. }) => {
@@ -640,13 +688,12 @@ async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
     let (handle, collector) = served(Duration::ZERO);
-    handle
-        .add(TaskSpec::once(make_stubborn("z")))
-        .await
-        .unwrap();
+    let (stubborn, started) = make_stubborn("z");
+    handle.add(TaskSpec::once(stubborn)).await.unwrap();
+    wait_for_start("z", &started).await;
 
     match with_timeout(5, handle.shutdown()).await {
-        Err(RuntimeError::GraceExceeded { grace, stuck }) => {
+        Err(RuntimeError::GraceExceeded { grace, stuck, .. }) => {
             assert_eq!(grace, Duration::ZERO);
             assert!(stuck.iter().any(|n| &**n == "z"));
         }
@@ -655,70 +702,36 @@ async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
     assert!(collector.find(EventKind::GraceExceeded).is_some());
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn shutdown_emits_task_removed_for_each_drained_task() {
-    let (handle, collector) = served(Duration::from_secs(5));
-    let id_a = handle
-        .add(TaskSpec::restartable(make_coop("a")))
-        .await
-        .unwrap();
-    let id_b = handle
-        .add(TaskSpec::restartable(make_coop("b")))
-        .await
-        .unwrap();
-
-    with_timeout(5, handle.shutdown())
-        .await
-        .expect("shutdown ok");
-
-    assert!(
-        collector
-            .by_id(id_a)
-            .iter()
-            .any(|e| e.kind == EventKind::TaskRemoved),
-        "missing TaskRemoved for task a"
-    );
-    assert!(
-        collector
-            .by_id(id_b)
-            .iter()
-            .any(|e| e.kind == EventKind::TaskRemoved),
-        "missing TaskRemoved for task b"
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn run_returns_ok_when_all_oneshots_complete_and_registry_empties() {
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let specs = vec![
-        TaskSpec::once(make_ok_once("o1")),
-        TaskSpec::once(make_ok_once("o2")),
-        TaskSpec::once(make_ok_once("o3")),
-    ];
-    with_timeout(5, sup.run(specs))
-        .await
-        .expect("run returns Ok once registry empties");
-}
-
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn run_blocks_while_gated_task_alive_then_unblocks_on_completion() {
     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
     let gate = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(tokio::sync::Notify::new());
 
     let g = gate.clone();
+    let task_started = Arc::clone(&started);
     let task = TaskFn::arc("gated", move |_ctx: TaskContext| {
         let g = g.clone();
+        let started = Arc::clone(&task_started);
         async move {
+            started.notify_one();
             g.notified().await;
             Ok(())
         }
     });
 
     let sup2 = sup.clone();
-    let jh = tokio::spawn(async move { sup2.run(vec![TaskSpec::once(task)]).await });
+    let mut jh = tokio::spawn(async move { sup2.run(vec![TaskSpec::once(task)]).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!jh.is_finished(), "run() must block while a task is alive");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the gated task must start");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut jh)
+            .await
+            .is_err(),
+        "run() must remain pending while a registered task is alive"
+    );
 
     gate.notify_one();
     with_timeout(5, jh)

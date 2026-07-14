@@ -1,21 +1,22 @@
-//! # Internal event bus.
+//! # Internal event bus
 //!
 //! [`Bus`] is a small wrapper around [`tokio::sync::broadcast`].
-//! Runtime components use it to publish [`Event`](crate::Event) values without blocking each other.
+//! Runtime components use it to publish [`Event`] values without waiting for consumers.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Publishers:
-//!   Supervisor ─┐
-//!   Registry    ├──► Bus ──► receiver: subscriber_listener ──► SubscriberSet ──► Subscribe impls
-//!   TaskActor   ┤       └──► receiver: controller (feature = "controller")
-//!   Runner      ┤
-//!   Subscribers ┘
+//! Supervisor / registry / task runners
+//!                  ▼
+//!          bounded broadcast bus
+//!                  ▼
+//!          subscriber listener
+//!                  ▼
+//!        per-subscriber queues
 //! ```
 //!
-//! Each `subscribe()` call creates an independent receiver cursor.
-//! The channel storage itself is shared: one bounded ring keeps the most recent events.
+//! Each `subscribe()` call creates an independent receiver position.
+//! All receivers share one bounded ring that keeps the newest events.
 //!
 //! ## Delivery model
 //!
@@ -25,8 +26,7 @@
 //! - If a receiver is too slow, it gets `RecvError::Lagged(n)` and skips old events.
 //! - If there are no active receivers, published events are dropped.
 //!
-//! This bus is for observability and runtime coordination.
-//! It is not durable storage and does not provide exactly-once delivery.
+//! This bus is only for observability. It does not provide durable, at-least-once, or exactly-once delivery.
 
 use std::sync::Arc;
 use tokio::sync::broadcast;

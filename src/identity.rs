@@ -1,60 +1,70 @@
-//! Runtime task identity.
+//! # Task identity
 //!
-//! [`TaskId`] is the opaque runtime identity of one task run.
+//! [`TaskId`] is the opaque identity reserved for one task submission.
 //!
-//! It is minted by Taskvisor when a task is accepted into the runtime.
-//! Users can read it, compare it, log it, and pass it back to runtime APIs such as cancel/remove.
-//! Users cannot construct arbitrary ids.
+//! Direct `add*` methods return it after the registry accepts a task.
+//! Controller `submit*` methods return it after queueing, before slot admission.
+//! The same ID therefore also identifies a controller submission that is rejected without running.
 //!
 //! ## TaskId vs Name vs Slot
 //!
 //! | Concept          | Owned by   | Meaning                                                     |
 //! |------------------|------------|-------------------------------------------------------------|
-//! | [`TaskId`]       | runtime    | unique identity of one task run                             |
+//! | [`TaskId`]       | Taskvisor  | identity of one submission and its run, if admitted         |
 //! | task name        | task       | human label used for logs, metrics, and registry uniqueness |
 //! | controller slot  | controller | admission key for "one at a time" scheduling                |
 //!
-//! A task name may be reused after the previous task is removed.
-//! A `TaskId` is never reused.
+//! A task name may be reused after the old task is removed.
+//! A `TaskId` is allocated from a process-local `u64` counter.
+//!
+//! The counter is not stored across process restarts, and a `TaskId` is not a UUID.
+//! If external systems need a persistent identity, store their own ID next to this one.
 //!
 //! With the `controller` feature, a submitted task also has a slot key (`ControllerSpec::slot_name`).
-//! The slot controls admission only; it is not the same thing as the task's runtime identity.
+//! The slot controls admission only; it is not the same thing as the submission identity.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Process-global monotonic source of task identities.
+/// Process-local allocation counter for task identities.
 ///
-/// Starts at `1`; `0` is never minted.
+/// Starts at `1`.
+/// Like all `AtomicU64::fetch_add` counters, it wraps after `2^64` allocations;
+/// reaching that limit is outside normal operation.
 static TASK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Opaque runtime identity of one task run.
+/// Opaque process-local identity of one task submission and its run, if admitted.
 ///
-/// A `TaskId` is minted by the runtime and carried on lifecycle [`Event`](crate::Event)s.
+/// A `TaskId` is allocated by Taskvisor and carried on submission and lifecycle [`Event`](crate::Event)s.
+/// A controller submission keeps the same id from queueing through admission, execution, and terminal cleanup.
+///
+/// Rejected work keeps its id even though no task body ran.
 ///
 /// Use it to:
-/// - correlate events for the same run,
 /// - cancel or remove a task by identity,
-/// - keep stable external logs/metrics references.
+/// - correlate events for the same submission and run,
+/// - keep stable log and metrics references within one process run.
 ///
-/// Do not parse display output.
-/// Use [`get`](Self::get) when a numeric value is needed for logs or external correlation.
+/// Do not parse its display output.
+/// Use [`get`](Self::get) when you need the numeric value.
+/// Numeric order is allocation order, not a causal or time order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskId(u64);
 
 impl TaskId {
-    /// Mints the next runtime identity.
+    /// Allocates the next submission/run identity.
     ///
-    /// Internal only: task identities are owned by the runtime.
+    /// Internal only: Taskvisor owns identity allocation across direct runtime registration and controller pre-admission.
     #[inline]
     pub(crate) fn next() -> Self {
         TaskId(TASK_ID_SEQ.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Returns the raw numeric value.
+    /// Returns the process-local numeric value.
     ///
-    /// This is intended for logs, metrics, and external correlation.
-    /// It does not allow reconstructing a `TaskId`.
+    /// This is useful for logs, metrics, and correlation within one process run.
+    /// The value is not persistent across restarts and cannot reconstruct a `TaskId` through the public API.
     #[inline]
+    #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
@@ -87,17 +97,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_unique_and_monotonic() {
+    fn ids_are_nonzero_unique_and_monotonic() {
         let a = TaskId::next();
         let b = TaskId::next();
 
+        assert!(a.get() >= 1, "zero is reserved and must never be minted");
         assert!(b.get() > a.get(), "ids must increase: {a} then {b}");
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn never_mints_zero() {
-        assert!(TaskId::next().get() >= 1);
     }
 
     #[cfg(feature = "test-util")]
