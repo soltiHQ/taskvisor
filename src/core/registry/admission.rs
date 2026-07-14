@@ -51,7 +51,7 @@ impl Registry {
         })
     }
 
-    /// Spawns an actor for one new entry, optionally held behind a batch start gate.
+    /// Spawns an actor for one new entry, optionally held behind an admission start gate.
     fn spawn_entry(
         &self,
         id: TaskId,
@@ -182,6 +182,7 @@ impl Registry {
     /// Spawns an actor and registers it under `id`.
     ///
     /// Duplicate task names are rejected.
+    /// An accepted actor starts only after its entry is indexed, `TaskAdded` is published, and the direct reply send is attempted.
     ///
     /// Direct `add_and_watch` callers still receive [`RuntimeError::TaskAlreadyExists`] because registration confirmation fails before the waiter is returned.
     pub(super) async fn spawn_and_register(
@@ -214,16 +215,25 @@ impl Registry {
             return;
         }
 
-        let entry = self.spawn_entry(id, Arc::clone(&label), spec, done, completion, None);
+        let (start_tx, start_rx) = watch::channel(false);
+        let entry = self.spawn_entry(
+            id,
+            Arc::clone(&label),
+            spec,
+            done,
+            completion,
+            Some(start_rx),
+        );
         st.tasks.insert(id, entry);
         st.by_label.insert(label.clone(), id);
         drop(st);
 
-        let _ = reply.send(Ok(()));
         self.bus.publish(
             Event::new(EventKind::TaskAdded)
                 .with_task(label)
                 .with_id(id),
         );
+        let _ = reply.send(Ok(()));
+        start_tx.send_replace(true);
     }
 }

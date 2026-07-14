@@ -137,6 +137,7 @@ impl TaskContext {
     ///
     /// Requires the `tokio-util-interop` feature.
     #[cfg(feature = "tokio-util-interop")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tokio-util-interop")))]
     #[must_use]
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancel.clone()

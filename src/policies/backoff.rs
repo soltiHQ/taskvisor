@@ -321,15 +321,6 @@ impl BackoffPolicy {
             floored.max(MIN_NONZERO_DELAY.min(self.max))
         }
     }
-
-    /// Compatibility alias for [`delay_for_retry`](Self::delay_for_retry).
-    ///
-    /// `retry_index` is 0-based: `0` computes the delay before the first retry.
-    #[inline]
-    #[must_use]
-    pub fn next(&self, retry_index: u32) -> Duration {
-        self.delay_for_retry(retry_index)
-    }
 }
 
 #[cfg(test)]
@@ -370,15 +361,6 @@ mod tests {
                     "attempt {attempt}: {delay:?} outside [{lower}ms, {upper}ms]"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn next_is_a_compatible_alias_for_delay_for_retry() {
-        let p = BackoffPolicy::exponential(Duration::from_millis(100));
-
-        for retry_index in [0, 1, 8, u32::MAX] {
-            assert_eq!(p.next(retry_index), p.delay_for_retry(retry_index));
         }
     }
 

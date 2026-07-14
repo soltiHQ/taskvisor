@@ -49,7 +49,8 @@
 //! - Both identity indexes change under one write lock.
 //! - A name stays reserved while its entry is registered or being removed.
 //! - One removal claim owns the actor join handle. Later cancellation calls can wait on the same completion signal.
-//! - An accepted static batch releases task bodies only after every name is checked, every entry is indexed, all `TaskAdded` publications are attempted, and the direct reply send is attempted.
+//! - An accepted registration releases task bodies only after indexing and its `TaskAdded` publication and direct reply send are attempted.
+//! - An accepted static batch completes those steps for every entry before releasing any task body.
 //! - Only terminal join cleanup removes membership. Best-effort events cannot do it.
 //! - Before graceful task drain starts, every management command committed before admission closes reaches its direct registry decision.
 

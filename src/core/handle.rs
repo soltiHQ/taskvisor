@@ -270,17 +270,6 @@ impl SupervisorHandle {
         self.core().snapshot().await
     }
 
-    /// Compatibility alias for [`alive_snapshot`](Self::alive_snapshot).
-    ///
-    /// Prefer `alive_snapshot` in new code. It makes the best-effort behavior clearer and avoids confusion with [`list`](Self::list).
-    #[deprecated(
-        since = "0.6.0",
-        note = "renamed to alive_snapshot; scheduled for removal at the next breaking release"
-    )]
-    pub async fn snapshot(&self) -> Vec<Arc<str>> {
-        self.alive_snapshot().await
-    }
-
     /// Returns whether the cache currently marks any run with this name as alive.
     ///
     /// This best-effort query does not check a specific [`TaskId`] and can miss state after event loss.
@@ -492,6 +481,7 @@ impl SupervisorHandle {
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub async fn submit(
         &self,
         spec: crate::controller::ControllerSpec,
@@ -514,6 +504,7 @@ impl SupervisorHandle {
     /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn try_submit(
         &self,
         spec: crate::controller::ControllerSpec,
@@ -538,6 +529,7 @@ impl SupervisorHandle {
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub async fn submit_and_watch(
         &self,
         spec: crate::controller::ControllerSpec,
@@ -564,6 +556,7 @@ impl SupervisorHandle {
     /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn try_submit_and_watch(
         &self,
         spec: crate::controller::ControllerSpec,
@@ -604,6 +597,7 @@ impl SupervisorHandle {
     ///
     /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub async fn controller_snapshot(&self) -> Option<crate::controller::ControllerSnapshot> {
         match &self.controller {
             Some(ctrl) => Some(ctrl.snapshot().await),

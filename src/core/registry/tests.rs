@@ -306,6 +306,83 @@ async fn add_reply_commits_state_without_event_confirmation() {
     stop_registry(&registry, &token).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn single_add_publishes_added_before_starting() {
+    use crate::{TaskFn, TaskRef};
+
+    const TASKS: usize = 4_096;
+
+    let bus = Bus::new(TASKS * 8);
+    let mut events = bus.subscribe();
+    let token = CancellationToken::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let registry = Registry::new(
+        bus,
+        token.clone(),
+        None,
+        Duration::from_secs(1),
+        TaskDefaults::default(),
+        rx,
+    );
+    registry.clone().spawn_listener();
+
+    let mut registrations = tokio::task::JoinSet::new();
+    for index in 0..TASKS {
+        let registry = Arc::clone(&registry);
+        registrations.spawn(async move {
+            let id = TaskId::next();
+            let task: TaskRef =
+                TaskFn::arc(format!("ordered-add-{index}"), |_ctx| async { Ok(()) });
+            let (reply, reply_rx) = oneshot::channel();
+            registry
+                .spawn_and_register(id, TaskSpec::once(task), None, None, reply)
+                .await;
+            assert!(
+                matches!(reply_rx.await, Ok(Ok(()))),
+                "single registration must succeed"
+            );
+            id
+        });
+    }
+
+    while let Some(result) = registrations.join_next().await {
+        result.expect("registration worker must not panic");
+    }
+    tokio::time::timeout(Duration::from_secs(5), registry.wait_until_empty())
+        .await
+        .expect("all one-shot actors must be reaped");
+
+    let mut order = std::collections::HashMap::<TaskId, (Option<usize>, Option<usize>)>::new();
+    for position in 0.. {
+        let Ok(event) = events.try_recv() else {
+            break;
+        };
+        let Some(id) = event.id else {
+            continue;
+        };
+        let entry = order.entry(id).or_default();
+        match event.kind {
+            EventKind::TaskAdded => entry.0 = Some(position),
+            EventKind::TaskStarting => {
+                entry.1.get_or_insert(position);
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(order.len(), TASKS, "every registration must be observed");
+    for (id, (added, starting)) in order {
+        let added = added.unwrap_or_else(|| panic!("{id} is missing TaskAdded"));
+        let starting = starting.unwrap_or_else(|| panic!("{id} is missing TaskStarting"));
+        assert!(
+            added < starting,
+            "{id} delivered TaskStarting before TaskAdded: added={added}, starting={starting}"
+        );
+    }
+
+    stop_registry(&registry, &token).await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn batch_reply_commits_every_task_as_one_registry_decision() {
     use crate::{TaskContext, TaskFn, TaskRef};

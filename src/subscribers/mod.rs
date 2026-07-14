@@ -40,7 +40,9 @@ pub use subscriber::Subscribe;
 pub(crate) use subscriber_set::SubscriberSet;
 
 #[cfg(feature = "logging")]
+#[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
 pub use embedded::LogWriter;
 
 #[cfg(feature = "tracing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 pub use embedded::TracingBridge;

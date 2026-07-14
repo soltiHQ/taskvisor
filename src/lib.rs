@@ -178,15 +178,19 @@ pub mod prelude;
 pub mod reasons;
 
 #[cfg(feature = "controller")]
+#[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub mod controller;
 #[cfg(feature = "controller")]
+#[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
     SlotStatusKind, SlotView,
 };
 
 #[cfg(feature = "logging")]
+#[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
 pub use subscribers::LogWriter;
 
 #[cfg(feature = "tracing")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 pub use subscribers::TracingBridge;

@@ -100,35 +100,6 @@ impl Controller {
                     break;
                 },
 
-                Some(command) = rx.recv(), if identity_operations.len() < identity_operation_limit => {
-                    match command {
-                        ControllerCommand::Submit(sub) => {
-                            let _ = self
-                                .guarded(
-                                    "handle_submission",
-                                    self.handle_submission(sub, &mut admissions, &mut removals),
-                                )
-                                .await;
-                        }
-                        ControllerCommand::ManageIdentity {
-                            id,
-                            operation,
-                            reply,
-                        } => {
-                            let _ = self
-                                .guarded(
-                                    "handle_identity_operation",
-                                    self.handle_identity_operation(
-                                        id,
-                                        operation,
-                                        reply,
-                                        &mut identity_operations,
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
-                }
                 result = admissions.join_next(), if !admissions.is_empty() => {
                     match result {
                         Some(Ok(result)) => {
@@ -205,6 +176,35 @@ impl Controller {
                             );
                         }
                         None => {}
+                    }
+                }
+                Some(command) = rx.recv(), if identity_operations.len() < identity_operation_limit => {
+                    match command {
+                        ControllerCommand::Submit(sub) => {
+                            let _ = self
+                                .guarded(
+                                    "handle_submission",
+                                    self.handle_submission(sub, &mut admissions, &mut removals),
+                                )
+                                .await;
+                        }
+                        ControllerCommand::ManageIdentity {
+                            id,
+                            operation,
+                            reply,
+                        } => {
+                            let _ = self
+                                .guarded(
+                                    "handle_identity_operation",
+                                    self.handle_identity_operation(
+                                        id,
+                                        operation,
+                                        reply,
+                                        &mut identity_operations,
+                                    ),
+                                )
+                                .await;
+                        }
                     }
                 }
                 }

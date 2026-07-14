@@ -71,22 +71,6 @@ pub enum RuntimeError {
         timeout: Duration,
     },
 
-    /// Compatibility spelling for [`TaskTerminationTimeout`](Self::TaskTerminationTimeout).
-    ///
-    /// The runtime no longer returns this variant.
-    /// Match [`TaskTerminationTimeout`](Self::TaskTerminationTimeout) for cancellation timeouts.
-    #[deprecated(
-        note = "renamed to TaskTerminationTimeout; this compatibility variant is never returned"
-    )]
-    #[error("timeout waiting for task {id} removal after {timeout:?}")]
-    #[non_exhaustive]
-    TaskRemoveTimeout {
-        /// Task id whose terminal cleanup did not finish in time.
-        id: TaskId,
-        /// Wait duration before timing out.
-        timeout: Duration,
-    },
-
     /// OS signal listener setup failed.
     ///
     /// Signal-based shutdown is unavailable.
@@ -121,8 +105,6 @@ impl RuntimeError {
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::CommandQueueFull => "runtime_command_queue_full",
             RuntimeError::TaskTerminationTimeout { .. } => "runtime_task_termination_timeout",
-            #[allow(deprecated)]
-            RuntimeError::TaskRemoveTimeout { .. } => "runtime_task_remove_timeout",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
             RuntimeError::AlreadyRunning => "runtime_already_running",
@@ -353,6 +335,7 @@ pub enum Error {
     ///
     /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     #[error(transparent)]
     Controller(#[from] crate::controller::ControllerError),
 }
@@ -376,7 +359,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(deprecated)]
     fn runtime_error_labels_are_stable() {
         let id = TaskId::next();
         let cases = [
@@ -400,13 +382,6 @@ mod tests {
                     timeout: Duration::from_secs(1),
                 },
                 "runtime_task_termination_timeout",
-            ),
-            (
-                RuntimeError::TaskRemoveTimeout {
-                    id,
-                    timeout: Duration::from_secs(1),
-                },
-                "runtime_task_remove_timeout",
             ),
             (
                 RuntimeError::SignalSetupFailed {

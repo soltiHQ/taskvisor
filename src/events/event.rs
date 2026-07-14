@@ -275,6 +275,7 @@ pub enum EventKind {
     ActorDead,
 
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     /// The controller rejected a submission or could not complete admission.
     ///
     /// Sets:
@@ -288,6 +289,7 @@ pub enum EventKind {
     ControllerRejected,
 
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     /// The controller accepted a submission.
     ///
     /// The task may still be queued or waiting for runtime registration.
@@ -301,6 +303,7 @@ pub enum EventKind {
     ControllerSubmitted,
 
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     /// A controller slot changed state.
     ///
     /// Sets:

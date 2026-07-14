@@ -165,6 +165,7 @@ impl SupervisorBuilder {
     ///
     /// Direct `add*` methods bypass the controller and register with the runtime.
     #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
         self.controller_config = Some(config);
         self

@@ -1262,16 +1262,126 @@ async fn registry_reply_marks_slot_running_without_task_added() {
     let _ = handle.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_owner_progresses_under_continuously_ready_intake() {
+    let sup = Supervisor::builder(crate::SupervisorConfig::default())
+        .with_controller(
+            ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(4_096).unwrap()),
+        )
+        .build();
+    let handle = sup.serve();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let owner: TaskRef = TaskFn::arc("starvation-owner", {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        move |_ctx| {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(())
+            }
+        }
+    });
+    let (owner_id, owner_waiter) = handle
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(owner)).with_slot("hot-slot"))
+        .await
+        .expect("the initial owner submission must enter the controller");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the initial owner must start");
+
+    let flood_task: TaskRef = TaskFn::arc("starvation-flood", |ctx| async move {
+        ctx.cancelled().await;
+        Ok(())
+    });
+    let flood_spec =
+        ControllerSpec::drop_if_running(TaskSpec::once(flood_task)).with_slot("hot-slot");
+    let stop = Arc::new(AtomicBool::new(false));
+    let saw_full = Arc::new(AtomicBool::new(false));
+    let producer_failed = Arc::new(AtomicBool::new(false));
+    let mut producers = Vec::new();
+
+    for _ in 0..4 {
+        let producer_handle = handle.clone();
+        let producer_spec = flood_spec.clone();
+        let producer_stop = Arc::clone(&stop);
+        let producer_saw_full = Arc::clone(&saw_full);
+        let producer_failed = Arc::clone(&producer_failed);
+        producers.push(std::thread::spawn(move || {
+            while !producer_stop.load(Ordering::Relaxed) {
+                match producer_handle.try_submit(producer_spec.clone()) {
+                    Ok(_) => {}
+                    Err(ControllerError::Full) => {
+                        producer_saw_full.store(true, Ordering::Release);
+                        std::hint::spin_loop();
+                    }
+                    Err(_) => {
+                        producer_failed.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
+    let saturated = tokio::time::timeout(Duration::from_secs(2), async {
+        while !saw_full.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+
+    release.notify_one();
+    let owner_outcome = tokio::time::timeout(Duration::from_secs(2), owner_waiter.wait()).await;
+    let progressed = poll_until(Duration::from_secs(2), || async {
+        let Some(snapshot) = handle.controller_snapshot().await else {
+            return false;
+        };
+        snapshot
+            .slot("hot-slot")
+            .is_none_or(|slot| slot.owner_id != Some(owner_id))
+    })
+    .await;
+
+    stop.store(true, Ordering::Release);
+    let producers_joined = producers
+        .into_iter()
+        .all(|producer| producer.join().is_ok());
+    let shutdown = handle.shutdown().await;
+
+    assert!(
+        saturated,
+        "the producers must keep the command channel ready"
+    );
+    assert!(
+        matches!(owner_outcome, Ok(Ok(TaskOutcome::Completed))),
+        "the initial owner must complete normally"
+    );
+    assert!(
+        progressed,
+        "a ready completion result must advance the slot while intake remains saturated"
+    );
+    assert!(producers_joined, "all intake producers must exit cleanly");
+    assert!(
+        !producer_failed.load(Ordering::Acquire),
+        "the controller must remain open during the saturation phase"
+    );
+    assert!(shutdown.is_ok(), "the supervisor must shut down cleanly");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn replace_is_processed_while_registry_reply_is_pending() {
     let sup = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-    // Keep TaskRemoved off the controller bus; the reliable completion must advance Replace.
     let controller_bus = Bus::new(64);
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), controller_bus);
     let token = CancellationToken::new();
     let runner = start_controller_loop(&ctrl, &token).await;
 
-    // The registry is not started yet, so the first committed Add reply stays pending.
     let (first_id, first_outcome) = ctrl
         .handle()
         .submit_and_watch(ControllerSpec::queue(waiting_spec("pending-owner")).with_slot("s"))
