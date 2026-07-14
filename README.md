@@ -428,7 +428,7 @@ Issues and pull requests are welcome. Read the [contributing guide](https://gith
 
 If Taskvisor earns a place in your stack, a GitHub star helps other Rust developers find it.
 
-Taskvisor is licensed under [Apache-2.0](LICENSE).
+##
 
 <br>
 
