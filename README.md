@@ -9,7 +9,7 @@
 
 Write ordinary async code. Taskvisor adds restart and backoff, cooperative shutdown, dynamic task management, typed lifecycle events, reliable final outcomes, and optional per-slot admission control.
 
-[Quick start](#quick-start) · [API docs](https://docs.rs/taskvisor) · [Examples](#examples) · [Production limits](#production-limits)
+[Quick start](#quick-start) - [Examples](#examples) - [Production limits](#production-limits)
 
 ## The loop you stop writing
 
