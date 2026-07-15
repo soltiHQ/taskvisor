@@ -1,7 +1,6 @@
 //! # Run one task attempt
 //!
-//! [`run_once`] calls [`Task::spawn`], applies one attempt timeout, catches
-//! panics while calling or polling the task, and publishes attempt events.
+//! [`run_once`] calls [`Task::spawn`], applies one attempt timeout, catches panics while calling or polling the task, and publishes attempt events.
 //! It returns the attempt result to [`TaskActor`](super::actor::TaskActor), which decides whether to restart.
 //!
 //! ## Event Flow
@@ -17,10 +16,10 @@
 //! ## Rules
 //!
 //! - Each completed call publishes one final attempt event: `TaskStopped`,`TaskCanceled`, or `TaskFailed`. Force-aborting the actor can drop an in-flight call before that event.
-//! - `TimeoutHit` is published only when the configured attempt timer expires.
-//! - `TaskError::Canceled` is a cooperative stop, not a failure.
 //! - Each attempt gets a child cancellation token. Parent cancellation reaches it, but child cancellation does not affect the parent.
 //! - Panics while calling `spawn()` or polling its future become retryable [`TaskError::Fail`] values.
+//! - `TimeoutHit` is published only when the configured attempt timer expires.
+//! - `TaskError::Canceled` is a cooperative stop, not a failure.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -310,7 +309,6 @@ mod tests {
     async fn failure_returns_fail_variant() {
         let bus = Bus::new(16);
         let parent = CancellationToken::new();
-
         let result = run_once(&FailTask, &parent, None, 1, TaskId::next(), &bus).await;
 
         assert!(
