@@ -237,6 +237,7 @@ pub enum EventKind {
     /// Sets:
     /// - `id`: task run identity
     /// - `task`: task name
+    /// - `reason`: [`FORCE_TERMINATED_AFTER_GRACE`](crate::reasons::FORCE_TERMINATED_AFTER_GRACE) when the actor was force-aborted or `None`
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
     TaskRemoved,
