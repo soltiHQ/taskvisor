@@ -298,7 +298,7 @@ impl SubscriberSet {
     }
 }
 
-/// Extracts a human-readable message from a panic payload.
+/// Extracts a readable message from a panic payload.
 fn extract_panic_info(panic_err: &Box<dyn std::any::Any + Send>) -> String {
     let any = &**panic_err;
     if let Some(msg) = any.downcast_ref::<&'static str>() {

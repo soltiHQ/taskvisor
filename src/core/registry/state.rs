@@ -54,7 +54,7 @@ struct PendingInner {
     /// Number of in-flight join reporters per task identity.
     counts: HashMap<TaskId, usize>,
 
-    /// Human labels used for shutdown diagnostics when joins do not finish in time.
+    /// Labels used for shutdown diagnostics when joins do not finish in time.
     labels: HashMap<TaskId, Arc<str>>,
 }
 

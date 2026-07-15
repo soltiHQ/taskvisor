@@ -19,7 +19,8 @@
 
 /// Decides whether a task starts another attempt.
 ///
-/// This policy decides restart eligibility. Retry timing is controlled by [`BackoffPolicy`](crate::BackoffPolicy).
+/// This policy decides restart eligibility.
+/// Retry timing is controlled by [`BackoffPolicy`](crate::BackoffPolicy).
 /// Include a wildcard arm when matching because new policies may be added.
 ///
 /// # Also

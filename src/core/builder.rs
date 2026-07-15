@@ -116,12 +116,6 @@ impl SupervisorBuilder {
         Ok(self)
     }
 
-    /// Sets how many recent events the broadcast bus keeps.
-    pub fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
-        self.runtime = self.runtime.with_bus_capacity(bus_capacity);
-        self
-    }
-
     /// Sets the event-bus capacity from a raw integer.
     ///
     /// # Errors
@@ -155,6 +149,12 @@ impl SupervisorBuilder {
         Ok(self)
     }
 
+    /// Sets how many recent events the broadcast bus keeps.
+    pub fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
+        self.runtime = self.runtime.with_bus_capacity(bus_capacity);
+        self
+    }
+
     /// Replaces the subscribers that receive best-effort lifecycle events.
     pub fn with_subscribers(mut self, subscribers: Vec<Arc<dyn Subscribe>>) -> Self {
         self.subscribers = subscribers;
@@ -175,6 +175,22 @@ impl SupervisorBuilder {
     ///
     /// It is safe to call outside Tokio.
     /// The method allocates channels and stores configuration, but does not spawn tasks.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use taskvisor::{SupervisorBuilder, SupervisorConfig};
+    ///
+    /// let supervisor = SupervisorBuilder::new(SupervisorConfig::default())
+    ///     .with_grace(Duration::from_secs(15))
+    ///     .build();
+    ///
+    /// assert_eq!(
+    ///     supervisor.runtime_config().grace(),
+    ///     Duration::from_secs(15)
+    /// );
+    /// ```
     #[must_use]
     pub fn build(self) -> Arc<Supervisor> {
         let bus = Bus::new(self.runtime.bus_capacity().get());

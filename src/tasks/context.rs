@@ -16,10 +16,12 @@ use crate::error::TaskError;
 ///
 /// ```text
 /// remove / cancel / shutdown
-///             v
-///       TaskContext cancelled
-///             v
-/// task returns TaskError::Canceled
+///             ▼
+/// TaskContext becomes cancelled
+///             ├── cancelled() / is_cancelled()
+///             │            └──► task stops and returns TaskError::Canceled
+///             └── run_until_cancelled(future)
+///                          └──► Err(TaskError::Canceled)
 /// ```
 ///
 /// Await [`cancelled`](Self::cancelled), check [`is_cancelled`](Self::is_cancelled), or wrap a cancellation-safe future in [`run_until_cancelled`](Self::run_until_cancelled).
@@ -95,7 +97,7 @@ impl TaskContext {
     /// If the context is already cancelled, `fut` is not polled.
     /// When cancellation wins, `fut` is dropped.
     ///
-    /// Use this method only with futures that are safe to cancel by dropping.
+    /// > Use this method only with futures that are safe to cancel by dropping.
     ///
     /// This is a short form of `tokio::select!` for common worker loops:
     ///

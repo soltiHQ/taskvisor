@@ -23,12 +23,18 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// A `with_*` method always sets an explicit value and wins over the default.
 ///
 /// ```text
-/// TaskSpec                    TaskDefaults
-///   restart = OnFailure        restart = OnFailure
-///   timeout = inherit    +      timeout = 30s
-///             |
-///             v
-/// resolved at admission: restart = OnFailure, timeout = 30s
+/// Resolve each field at registry admission:
+///
+/// explicit value
+/// TaskSpec.restart     = Never     ─────────────────────────────────► restart = Never
+/// TaskDefaults.restart = OnFailure ─────────────────────────────────► not selected
+///
+/// inherited value
+/// TaskSpec.timeout     = inherit   ──► TaskDefaults.timeout = 30s ──► timeout = 30s
+///
+/// ResolvedTaskSpec
+/// ├── restart = Never
+/// └── timeout = 30s
 /// ```
 ///
 /// | Constructor                            | Restart setting | Other settings                  |
@@ -53,7 +59,8 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 ///     .with_max_retries(NonZeroU32::new(5).unwrap());
 /// ```
 ///
-/// `max_retries = 5` allows the first failed attempt plus five retries.
+/// > `max_retries = 5` allows the first failed attempt plus five retries.
+///
 /// A successful attempt resets this count; an `Always` task may still have more than six attempts over its full lifetime.
 ///
 /// ## See Also
@@ -63,17 +70,27 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 #[derive(Clone)]
 #[must_use]
 pub struct TaskSpec {
+    /// Restart policy selected explicitly or inherited from [`TaskDefaults`].
     restart: Override<RestartPolicy>,
+    /// Backoff policy selected explicitly or inherited from [`TaskDefaults`].
     backoff: Override<BackoffPolicy>,
+    /// Per-attempt timeout; `Set(None)` explicitly disables an inherited timeout.
     timeout: Override<Option<Duration>>,
+    /// Retry limit; `Set(None)` explicitly selects unlimited retries.
     max_retries: Override<Option<NonZeroU32>>,
 
+    /// Task object reused across all attempts started from this spec.
     task: TaskRef,
 }
 
+/// Origin of one `TaskSpec` setting before admission resolves defaults.
+///
+/// For `Override<Option<T>>`, `Inherit` and `Set(None)` are intentionally distinct.
 #[derive(Clone, Copy, Debug)]
 enum Override<T> {
+    /// Resolve the field from [`TaskDefaults`] at registry admission.
     Inherit,
+    /// Use this explicit value instead of the corresponding default.
     Set(T),
 }
 
@@ -134,7 +151,7 @@ impl TaskSpec {
     /// Creates a spec that inherits every execution setting.
     ///
     /// The supervisor resolves restart, backoff, timeout, and retry limit from its [`TaskDefaults`] when it accepts the task.
-    /// A later `with_*` call sets that one field explicitly.
+    /// > A later `with_*` call sets that one field explicitly.
     pub fn from_defaults(task: TaskRef) -> Self {
         Self {
             restart: Override::Inherit,
@@ -147,12 +164,13 @@ impl TaskSpec {
 
     /// Creates a spec with explicit main settings.
     ///
-    /// Prefer the named constructors for common cases:
-    /// [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
+    /// Prefer the named constructors for common cases: [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
     ///
     /// `timeout` accepts a [`Duration`] or `Option<Duration>`.
     /// `None` and zero disable the attempt timeout.
-    /// The retry limit is set to unlimited; change it with [`with_max_retries`](Self::with_max_retries).
+    ///
+    /// The retry limit is set to unlimited.
+    /// > _change it with [`with_max_retries`](Self::with_max_retries)_.
     pub fn new(
         task: TaskRef,
         restart: RestartPolicy,
@@ -171,7 +189,7 @@ impl TaskSpec {
     /// Creates a one-shot task that never restarts.
     ///
     /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
-    /// Override them with the matching `with_*` methods.
+    /// > Override them with the matching `with_*` methods.
     pub fn once(task: TaskRef) -> Self {
         Self {
             restart: Override::Set(RestartPolicy::Never),
@@ -185,7 +203,7 @@ impl TaskSpec {
     /// Creates a task that restarts after retryable failures.
     ///
     /// Success, fatal failure, and cancellation stop the task.
-    /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
+    /// > Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
     pub fn restartable(task: TaskRef) -> Self {
         Self {
             restart: Override::Set(RestartPolicy::OnFailure),
@@ -199,14 +217,15 @@ impl TaskSpec {
     /// Creates a task that runs again after each success.
     ///
     /// After success, the supervisor waits `every` before the next attempt.
-    /// A zero value means no configured interval; a small internal guard still prevents an instant task from creating a hot loop.
+    /// A zero value means no configured interval;
+    /// > _a small internal guard still prevents an instant task from creating a hot loop._
     ///
     /// Retryable failures use the backoff policy, not `every`.
     /// A retry limit can stop the task after repeated failures.
     /// Fatal failure and cancellation always stop it.
     ///
     /// The interval starts after an attempt completes.
-    /// This is not a wall-clock schedule such as "daily at 03:00".
+    /// > *This is not a wall-clock schedule such as "daily at 03:00".*
     ///
     /// ```rust
     /// use std::time::Duration;
@@ -309,6 +328,7 @@ impl TaskSpec {
     ///
     /// Pass a [`NonZeroU32`] to set a limit.
     /// Pass `None` for unlimited retries, including when [`TaskDefaults`] has a limit.
+    ///
     /// A success resets the count.
     #[doc(alias = "retry limit")]
     #[doc(alias = "retry budget")]
@@ -320,8 +340,9 @@ impl TaskSpec {
     /// Sets a retry limit from a raw integer.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `max_retries` is zero.
-    /// Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
+    /// > Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
     pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
         let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
             field: "max_retries",

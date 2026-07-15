@@ -16,7 +16,6 @@
 //! Use it to sort observed events and detect gaps.
 //! It is not stored across process restarts.
 //!
-//! `seq` is not a causal clock.
 //! With concurrent publishers, it shows event construction order, not a guaranteed order of runtime effects or subscriber callbacks.
 //!
 //! ## Fields
@@ -36,8 +35,8 @@
 //! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
 //! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
-//! Treat `reason` as human-readable text unless the event points to a constant in [`reasons`](crate::reasons).
-//! Use [`EventKind::as_label`] for a stable event label.
+//! Treat `reason` a readable text unless the event points to a constant in [`reasons`](crate::reasons).
+//! > Use [`EventKind::as_label`] for a stable event label.
 //!
 //! ## Example
 //!
@@ -63,7 +62,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::identity::TaskId;
 
-/// Process-local counter for `seq` values. It wraps after `2^64` allocations.
+/// Process-local counter for `seq` values.
+///
+/// It wraps after `2^64` allocations.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Describes what happened in the runtime.
@@ -310,7 +311,7 @@ pub enum EventKind {
     /// Sets:
     /// - `task`: slot name
     /// - `id`: the submission's [`TaskId`]
-    /// - `reason`: a human-readable admission summary, e.g. `admission=Queue status=admitting` or
+    /// - `reason`: a readable admission summary, e.g. `admission=Queue status=admitting` or
     ///   `started_from_queue depth=N` (exact text is diagnostic, not a stable contract)
     ControllerSubmitted,
 
@@ -320,7 +321,7 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: human-readable transition text; it is not a stable machine contract
+    /// - `reason`: readable transition text; it is not a stable machine contract
     ControllerSlotTransition,
 }
 
@@ -329,6 +330,15 @@ impl EventKind {
     ///
     /// The label is the snake_case form of the variant name.
     /// Use it as an event name in tracing or as a metrics label value.
+    ///
+    /// ```text
+    /// EventKind::TaskStarting
+    ///           │ as_label()
+    ///           ▼
+    ///     "task_starting"
+    ///        ├── log field:    event="task_starting"
+    ///        └── metric label: event="task_starting"
+    /// ```
     ///
     /// ```rust
     /// use taskvisor::EventKind;
@@ -404,13 +414,13 @@ impl BackoffSource {
 /// - other optional fields are set depending on the [`EventKind`]
 ///
 /// Fields are public for reading. Create an event with [`Event::new`] and add optional values with the `with_*` builders.
-/// Use `..` when matching the struct because more fields may be added.
+/// > Use `..` when matching the struct because more fields may be added.
 ///
 /// # Also
 ///
 /// - [`EventKind`] - event classification
 /// - [`Subscribe`](crate::Subscribe) - user-defined event handler trait
-/// - `LogWriter` (feature = `logging`) - built-in human-readable event printer
+/// - `LogWriter` (feature = `logging`) - built-in readable event printer
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Event {
@@ -472,7 +482,7 @@ impl Event {
         }
     }
 
-    /// Attaches a human-readable reason.
+    /// Attaches a readable reason.
     #[inline]
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<Arc<str>>) -> Self {

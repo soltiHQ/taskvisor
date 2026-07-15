@@ -94,7 +94,7 @@ pub trait Subscribe: Send + Sync + 'static {
     /// The return type guarantees that the queue can hold at least one event.
     /// If the queue is full, Taskvisor drops the new ordinary event for this subscriber and tries to report `SubscriberOverflow`.
     ///
-    /// Default: `1024`.
+    /// > Default: `1024`.
     fn queue_capacity(&self) -> NonZeroUsize {
         DEFAULT_QUEUE_CAPACITY
     }

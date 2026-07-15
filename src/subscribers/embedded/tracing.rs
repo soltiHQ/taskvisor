@@ -1,7 +1,6 @@
 //! # Bridge to `tracing`
 //!
 //! [`TracingBridge`] converts every event it receives into one structured [`tracing`] event.
-//! Subscriber delivery is best-effort, so this bridge does not make event delivery reliable.
 //!
 //! Each tracing event uses target `taskvisor` and contains:
 //! - a level based on the event severity (see [`TracingBridge`]),
@@ -30,7 +29,6 @@ use crate::subscribers::Subscribe;
 /// Level mapping:
 /// - `ERROR`: task failed, actor dead, subscriber panicked.
 /// - `WARN`: timeout, grace exceeded, subscriber overflow, add failed, controller rejected.
-///   Also `actor_exhausted` when the reason starts with `max_retries_exceeded`: the task permanently gave up.
 /// - `INFO`: lifecycle milestones (stopped, canceled, added, removed, shutdown, submitted, and `actor_exhausted` for every other reason).
 /// - `DEBUG`: chatty events (starting, backoff, add/remove requests, slot transitions).
 ///
@@ -86,7 +84,6 @@ fn level_for(e: &Event) -> Level {
 
 impl Subscribe for TracingBridge {
     fn on_event(&self, e: &Event) {
-        // `tracing::event!` needs a const level, one macro call per level.
         macro_rules! emit {
             ($level:expr) => {
                 tracing::event!(

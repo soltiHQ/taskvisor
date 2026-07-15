@@ -27,6 +27,10 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// - [`Supervisor`](crate::Supervisor) - returns `RuntimeError` from [`run`](crate::Supervisor::run)
 /// - [`SupervisorHandle`](crate::SupervisorHandle) - returns `RuntimeError` from management methods
+#[cfg_attr(
+    feature = "controller",
+    doc = "- [`ControllerError`](crate::ControllerError) - errors from optional controller configuration and `submit*` methods"
+)]
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RuntimeError {
@@ -147,7 +151,7 @@ pub enum TaskError {
     #[error("fatal error (no retry): {reason}")]
     #[non_exhaustive]
     Fatal {
-        /// Human-readable failure reason.
+        /// Readable failure reason.
         reason: String,
         /// Process-style exit code, when available.
         ///
@@ -164,7 +168,7 @@ pub enum TaskError {
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
-        /// Human-readable failure reason.
+        /// Readable failure reason.
         reason: String,
         /// Process-style exit code, when available.
         ///
@@ -183,12 +187,6 @@ pub enum TaskError {
 }
 
 impl TaskError {
-    /// Creates a retry-eligible timeout error.
-    #[must_use]
-    pub const fn timeout(timeout: Duration) -> Self {
-        TaskError::Timeout { timeout }
-    }
-
     /// Creates a retryable failure with no source error.
     pub fn fail(reason: impl Into<String>) -> Self {
         TaskError::Fail {
@@ -235,6 +233,12 @@ impl TaskError {
             exit_code: None,
             source: Some(Box::new(source)),
         }
+    }
+
+    /// Creates a retry-eligible timeout error.
+    #[must_use]
+    pub const fn timeout(timeout: Duration) -> Self {
+        TaskError::Timeout { timeout }
     }
 
     /// Sets or clears the process-style exit code on `Fail` or `Fatal`.

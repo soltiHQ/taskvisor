@@ -1,8 +1,8 @@
 //! # Stable `reason` values
 //!
-//! Some events and outcomes contain a `reason` text.
-//! Only the values and prefixes in this module are stable for machine matching.
-//! Other reason text may change between releases.
+//! Some events and outcomes have a `reason` string.
+//! Code can check the stable values and prefixes in this module.
+//! Other reason strings are not stable and may change between releases.
 //!
 //! Exact value:
 //!
@@ -35,8 +35,6 @@
 //! | [`CONTROLLER_SHUTTING_DOWN`]         | `ControllerRejected`, `TaskOutcome::Rejected`          | The controller is shutting down.       |
 //! | [`FORCE_TERMINATED_AFTER_GRACE`]     | `TaskRemoved`                                          | The actor was force-aborted.           |
 //!
-//! Controller rejection values are used only with the `controller` feature.
-//! The constants themselves are always available.
 
 /// `ActorExhausted` reason: the task finished successfully under a `Never`/`OnFailure` policy.
 /// This is not an error.

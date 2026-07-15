@@ -47,7 +47,7 @@
 //! ```
 //!
 //! Named constructors: [`constant`](BackoffPolicy::constant) and [`exponential`](BackoffPolicy::exponential).
-//! For a custom growth factor use [`new`](BackoffPolicy::new).
+//! > For a custom growth factor use [`new`](BackoffPolicy::new).
 
 use std::time::Duration;
 
@@ -287,7 +287,7 @@ impl BackoffPolicy {
     /// For [`JitterPolicy::None`], [`JitterPolicy::Full`], and [`JitterPolicy::Equal`], the jittered delay never exceeds the base.
     /// [`JitterPolicy::RandomizedBand`] uses a wider band and may return a delay larger than the base.
     ///
-    /// This method has no memory. One result does not change later results.
+    /// > This method has no memory. One result does not change later results.
     ///
     /// After jitter, Taskvisor applies the user floor.
     /// For a non-zero base, it also applies a `1ms` safety floor, capped at `max`.
