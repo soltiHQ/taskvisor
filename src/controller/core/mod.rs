@@ -53,7 +53,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{OutcomeTx, SupervisorCore, TaskOutcome},
-    events::{Bus, Event, EventKind},
+    events::{Bus, Event, EventKind, RejectionKind},
     identity::TaskId,
 };
 
@@ -152,9 +152,10 @@ impl Controller {
     /// Resolves a parked watched submission as `Rejected`.
     ///
     /// This is a no-op for unwatched submissions and for watched submissions already handed to the runtime registry.
-    fn finalize_rejected(&self, id: TaskId, reason: &str) {
+    fn finalize_rejected(&self, id: TaskId, kind: RejectionKind, reason: &str) {
         if let Some((_, tx)) = self.watchers.remove(&id) {
             let _ = tx.send(TaskOutcome::Rejected {
+                kind,
                 reason: Arc::from(reason),
             });
         }
@@ -184,9 +185,14 @@ impl Controller {
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_id(id)
+                    .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                     .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
             );
-            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+            self.finalize_rejected(
+                id,
+                RejectionKind::ControllerShuttingDown,
+                crate::reasons::CONTROLLER_SHUTTING_DOWN,
+            );
         }
     }
 

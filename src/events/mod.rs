@@ -8,6 +8,7 @@
 //! | [`EventKind`]     | Event classification                       |
 //! | [`Event`]         | Event payload and metadata                 |
 //! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
+//! | [`RejectionKind`] | Machine-readable submission rejection      |
 //!
 //! ## Events and final outcomes are different
 //!
@@ -54,7 +55,7 @@
 //!   [optional TaskRemoveRequested] ──► TaskRemoved
 //!
 //! Queued controller removal (feature `controller`):
-//!   TaskRemoveRequested ──► ControllerRejected(removed_from_queue)
+//!   TaskRemoveRequested ──► ControllerRejected(RemovedFromQueue)
 //!
 //! Shutdown:
 //!   ShutdownRequested ──► AllStoppedWithinGrace | GraceExceeded
@@ -71,6 +72,7 @@
 //!   It can help sort events and detect gaps, but it is not a causal clock.
 //! - Use [`EventKind::as_label`] for a stable telemetry label.
 //!   Treat free-form [`Event::reason`] text as diagnostic unless it is documented in [`reasons`](crate::reasons).
+//! - Use [`RejectionKind`] for machine-readable handling of `TaskAddFailed` and `ControllerRejected`.
 //!
 //! ## Subscribers
 //!
@@ -79,7 +81,7 @@
 //! With the `logging` feature, `LogWriter` prints simple development logs.
 
 mod event;
-pub use event::{BackoffSource, Event, EventKind};
+pub use event::{BackoffSource, Event, EventKind, RejectionKind};
 
 mod bus;
 pub(crate) use bus::Bus;

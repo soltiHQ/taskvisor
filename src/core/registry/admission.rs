@@ -17,7 +17,7 @@ use crate::{
     core::actor::{ActorExitReason, TaskActor, TaskActorParams},
     core::outcome::TaskOutcome,
     error::RuntimeError,
-    events::{Event, EventKind},
+    events::{Event, EventKind, RejectionKind},
     identity::TaskId,
     reasons,
     tasks::TaskSpec,
@@ -138,10 +138,16 @@ impl Registry {
                 } else {
                     reasons::BATCH_REJECTED
                 };
+                let rejection_kind = if conflicting_ids.contains(&item.id) {
+                    RejectionKind::AlreadyExists
+                } else {
+                    RejectionKind::BatchRejected
+                };
                 self.bus.publish(
                     Event::new(EventKind::TaskAddFailed)
                         .with_task(item.label)
                         .with_id(item.id)
+                        .with_rejection_kind(rejection_kind)
                         .with_reason(reason),
                 );
             }
@@ -203,6 +209,7 @@ impl Registry {
             }));
             if let Some(done) = done {
                 let _ = done.send(TaskOutcome::Rejected {
+                    kind: RejectionKind::AlreadyExists,
                     reason: Arc::from(reasons::ALREADY_EXISTS),
                 });
             }
@@ -210,6 +217,7 @@ impl Registry {
                 Event::new(EventKind::TaskAddFailed)
                     .with_task(label)
                     .with_id(id)
+                    .with_rejection_kind(RejectionKind::AlreadyExists)
                     .with_reason(reasons::ALREADY_EXISTS),
             );
             return;

@@ -8,6 +8,7 @@
 //! | [`TaskFn`]        | Closure-based [`Task`]                                  |
 //! | [`TaskRef`]       | Shared task handle: `Arc<dyn Task>`                     |
 //! | [`TaskSpec`]      | Task plus restart, backoff, timeout, and retry settings |
+//! | [`TaskSetting`]   | Explicit or inherited setting before admission          |
 //! | [`BoxTaskFuture`] | Future returned by [`Task::spawn`]                      |
 //!
 //! ## Create a Task
@@ -59,11 +60,11 @@
 mod task;
 pub use task::{BoxTaskFuture, Task, TaskRef};
 
+mod spec;
+pub use spec::{TaskSetting, TaskSpec};
+
 mod context;
 pub use context::TaskContext;
 
 mod r#impl;
 pub use r#impl::func::TaskFn;
-
-mod spec;
-pub use spec::TaskSpec;

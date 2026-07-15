@@ -156,7 +156,7 @@ pub use core::{
 };
 
 pub mod tasks;
-pub use tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
+pub use tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSetting, TaskSpec};
 
 pub mod policies;
 pub use policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
@@ -165,7 +165,7 @@ pub mod error;
 pub use error::{BoxError, Error, RuntimeError, SharedError, TaskError};
 
 pub mod events;
-pub use events::{BackoffSource, Event, EventKind};
+pub use events::{BackoffSource, Event, EventKind, RejectionKind};
 
 pub mod subscribers;
 pub use subscribers::Subscribe;

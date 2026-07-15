@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     controller::slot::SlotState,
-    events::{Event, EventKind},
+    events::{Event, EventKind, RejectionKind},
     identity::TaskId,
 };
 
@@ -57,9 +57,10 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(slot_name)
                     .with_id(id)
+                    .with_rejection_kind(RejectionKind::QueueFull)
                     .with_reason(reason.clone()),
             );
-            self.finalize_rejected(id, &reason);
+            self.finalize_rejected(id, RejectionKind::QueueFull, &reason);
             true
         } else {
             false
@@ -86,9 +87,14 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(slot_name))
                     .with_id(displaced_id)
+                    .with_rejection_kind(RejectionKind::SupersededByReplace)
                     .with_reason(crate::reasons::SUPERSEDED_BY_REPLACE),
             );
-            self.finalize_rejected(displaced_id, crate::reasons::SUPERSEDED_BY_REPLACE);
+            self.finalize_rejected(
+                displaced_id,
+                RejectionKind::SupersededByReplace,
+                crate::reasons::SUPERSEDED_BY_REPLACE,
+            );
         } else {
             slot.queue.push_front((id, task_spec));
         }

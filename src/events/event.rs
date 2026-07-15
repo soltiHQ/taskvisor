@@ -9,6 +9,7 @@
 //! | [`EventKind`]     | Event classification                       |
 //! | [`Event`]         | Event payload and metadata                 |
 //! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
+//! | [`RejectionKind`] | Machine-readable submission rejection      |
 //!
 //! ## Sequence numbers
 //!
@@ -31,11 +32,13 @@
 //! - `id`: the stable [`TaskId`] for one submission and run.
 //! - `attempt`: task attempt number, starting from 1.
 //! - `task`: usually a task name. Subscriber diagnostics use it for the subscriber name, and controller events use it for the slot name.
+//! - `rejection_kind`: machine-readable category for a rejected add or controller submission.
 //!
 //! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
 //! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
-//! Treat `reason` a readable text unless the event points to a constant in [`reasons`](crate::reasons).
+//! Treat `reason` as readable text unless the event points to a constant in [`reasons`](crate::reasons).
+//! Use [`RejectionKind`] instead of parsing rejection text.
 //! > Use [`EventKind::as_label`] for a stable event label.
 //!
 //! ## Example
@@ -226,6 +229,7 @@ pub enum EventKind {
     /// Sets:
     /// - `id`: task run identity of the rejected add request
     /// - `task`: task name
+    /// - `rejection_kind`: [`RejectionKind::AlreadyExists`] or [`RejectionKind::BatchRejected`]
     /// - `reason`: e.g. "already_exists" or "batch_rejected"
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
@@ -289,16 +293,13 @@ pub enum EventKind {
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
-    /// The controller rejected a submission or could not complete admission.
+    /// The controller rejected a submission.
     ///
     /// Sets:
-    /// - `task`: slot name when known, or `controller` for loop-level diagnostics; may be absent
-    ///   when shutdown rejects a buffered submission whose slot defaults to user task metadata
-    /// - `id`: the rejected submission's [`TaskId`], when the rejection concerns a specific submission.
-    ///   Absent for slot- or loop-level diagnostics that have no submission behind
-    ///   them (e.g. a failed deferred removal or the controller loop exiting).
-    /// - `reason`: rejection reason. Values listed in [`reasons`](crate::reasons)
-    ///   are stable; other text is diagnostic.
+    /// - `task`: slot name, when known
+    /// - `id`: the rejected submission's [`TaskId`]
+    /// - `rejection_kind`: stable machine-readable rejection category
+    /// - `reason`: readable rejection details
     ControllerRejected,
 
     #[cfg(feature = "controller")]
@@ -407,6 +408,55 @@ impl BackoffSource {
     }
 }
 
+/// Reason why a task or controller submission did not start.
+///
+/// [`Event::reason`] and the `reason` field on [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) retain readable details.
+/// Use this enum for branching, metrics, and state transitions.
+///
+/// ```rust
+/// use taskvisor::RejectionKind;
+///
+/// assert_eq!(RejectionKind::QueueFull.as_label(), "queue_full");
+/// assert_eq!(RejectionKind::RemovedFromQueue.as_label(), "removed_from_queue");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RejectionKind {
+    /// The registry already contains a task with the requested name.
+    AlreadyExists,
+    /// One conflicting item caused an all-or-nothing batch to reject this non-conflicting item.
+    BatchRejected,
+    /// `DropIfRunning` rejected a submission because the controller slot was busy.
+    SlotBusy,
+    /// The controller slot queue reached its configured capacity.
+    QueueFull,
+    /// A newer `Replace` submission displaced this queued submission.
+    SupersededByReplace,
+    /// An explicit remove or cancel operation removed the queued submission.
+    RemovedFromQueue,
+    /// Runtime shutdown rejected work that had not reached registry admission.
+    ControllerShuttingDown,
+    /// The controller could not commit the submission to the runtime registry.
+    AdmissionFailed,
+}
+
+impl RejectionKind {
+    /// Returns a stable machine-readable label for logs and metrics.
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Self::AlreadyExists => "already_exists",
+            Self::BatchRejected => "batch_rejected",
+            Self::SlotBusy => "slot_busy",
+            Self::QueueFull => "queue_full",
+            Self::SupersededByReplace => "superseded_by_replace",
+            Self::RemovedFromQueue => "removed_from_queue",
+            Self::ControllerShuttingDown => "controller_shutting_down",
+            Self::AdmissionFailed => "admission_failed",
+        }
+    }
+}
+
 /// One runtime event with optional metadata.
 ///
 /// - `at`: wall-clock timestamp (for logs)
@@ -441,6 +491,10 @@ pub struct Event {
     pub duration_ms: Option<u32>,
     /// Only values documented in [`reasons`](crate::reasons) are stable.
     pub reason: Option<Arc<str>>,
+    /// Machine-readable category for `TaskAddFailed` and `ControllerRejected`.
+    ///
+    /// Readable details remain available in [`reason`](Self::reason).
+    pub rejection_kind: Option<RejectionKind>,
     /// Attempt count (starting from 1).
     pub attempt: Option<u32>,
     /// This is normally a task name. Subscriber diagnostics use it for a subscriber name, and controller events use it for a slot name.
@@ -476,6 +530,7 @@ impl Event {
             duration_ms: None,
             attempt: None,
             reason: None,
+            rejection_kind: None,
             task: None,
             id: None,
             exit_code: None,
@@ -487,6 +542,14 @@ impl Event {
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<Arc<str>>) -> Self {
         self.reason = Some(reason.into());
+        self
+    }
+
+    /// Attaches a machine-readable submission rejection category.
+    #[inline]
+    #[must_use]
+    pub fn with_rejection_kind(mut self, kind: RejectionKind) -> Self {
+        self.rejection_kind = Some(kind);
         self
     }
 
@@ -631,6 +694,9 @@ impl std::fmt::Debug for Event {
         if let Some(ref reason) = self.reason {
             d.field("reason", reason);
         }
+        if let Some(rejection_kind) = self.rejection_kind {
+            d.field("rejection_kind", &rejection_kind);
+        }
         if let Some(timeout_ms) = self.timeout_ms {
             d.field("timeout_ms", &timeout_ms);
         }
@@ -708,9 +774,31 @@ mod tests {
         assert_eq!(ev.attempt, None);
         assert_eq!(ev.exit_code, None);
         assert_eq!(ev.reason, None);
+        assert_eq!(ev.rejection_kind, None);
         assert_eq!(ev.task, None);
         assert_eq!(ev.id, None);
         assert_eq!(ev.backoff_source, None);
+    }
+
+    #[test]
+    fn rejection_kind_labels_are_stable() {
+        let cases = [
+            (RejectionKind::AlreadyExists, "already_exists"),
+            (RejectionKind::BatchRejected, "batch_rejected"),
+            (RejectionKind::SlotBusy, "slot_busy"),
+            (RejectionKind::QueueFull, "queue_full"),
+            (RejectionKind::SupersededByReplace, "superseded_by_replace"),
+            (RejectionKind::RemovedFromQueue, "removed_from_queue"),
+            (
+                RejectionKind::ControllerShuttingDown,
+                "controller_shutting_down",
+            ),
+            (RejectionKind::AdmissionFailed, "admission_failed"),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_label(), expected, "{kind:?}");
+        }
     }
 
     #[test]

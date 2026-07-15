@@ -167,7 +167,18 @@ impl LogWriter {
 
             // Controller: the `task` field carries the slot name.
             #[cfg(feature = "controller")]
-            EventKind::ControllerRejected | EventKind::ControllerSlotTransition => {
+            EventKind::ControllerRejected => {
+                println!(
+                    "{head} slot={} rejection={} reason=\"{}\"",
+                    or(e.task.as_deref(), "none"),
+                    e.rejection_kind
+                        .map(|kind| kind.as_label())
+                        .unwrap_or("unknown"),
+                    or(e.reason.as_deref(), "unknown")
+                );
+            }
+            #[cfg(feature = "controller")]
+            EventKind::ControllerSlotTransition => {
                 println!(
                     "{head} slot={} reason=\"{}\"",
                     or(e.task.as_deref(), "none"),

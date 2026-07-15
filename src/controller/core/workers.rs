@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use crate::{
     RuntimeError,
     core::{AddReplyRx, RemovalCompletion, SupervisorCore},
-    events::{Event, EventKind},
+    events::Event,
     identity::TaskId,
 };
 
@@ -85,10 +85,11 @@ impl Controller {
         }
         if let Err(error) = result.decision {
             self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task(result.slot_name)
-                    .with_id(result.id)
-                    .with_reason(format!("remove_failed: {error}")),
+                Event::runtime_failure(
+                    "controller",
+                    format!("remove_failed slot={}: {error}", result.slot_name),
+                )
+                .with_id(result.id),
             );
         }
     }

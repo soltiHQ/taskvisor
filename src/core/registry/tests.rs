@@ -664,7 +664,7 @@ async fn duplicate_add_reply_rejects_without_starting_body() {
     assert_eq!(runs.load(Ordering::SeqCst), 0, "rejected body must not run");
     assert!(matches!(
         receive_reply(outcome_rx, "duplicate outcome").await,
-        TaskOutcome::Rejected { reason } if reason.as_ref() == reasons::ALREADY_EXISTS
+        TaskOutcome::Rejected { reason, .. } if reason.as_ref() == reasons::ALREADY_EXISTS
     ));
 
     stop_registry(&registry, &token).await;

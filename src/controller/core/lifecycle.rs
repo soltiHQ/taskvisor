@@ -5,10 +5,7 @@ use std::{future::Future, sync::Arc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    controller::error::ControllerError,
-    events::{Event, EventKind},
-};
+use crate::{controller::error::ControllerError, events::Event};
 
 use super::{Controller, ControllerCommand, ControllerTask};
 
@@ -31,18 +28,16 @@ impl Controller {
         match crate::core::panic_guard::guarded(self.run_inner(token)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                self.bus.publish(
-                    Event::new(EventKind::ControllerRejected)
-                        .with_task("controller")
-                        .with_reason(format!("controller_loop_exited: {error}")),
-                );
+                self.bus.publish(Event::runtime_failure(
+                    "controller",
+                    format!("controller_loop_exited: {error}"),
+                ));
             }
             Err(panic) => {
-                self.bus.publish(
-                    Event::new(EventKind::ControllerRejected)
-                        .with_task("controller")
-                        .with_reason(format!("controller_loop_panicked: {panic}")),
-                );
+                self.bus.publish(Event::runtime_failure(
+                    "controller",
+                    format!("controller_loop_panicked: {panic}"),
+                ));
             }
         }
 
@@ -117,9 +112,10 @@ impl Controller {
                         }
                         Some(Err(error)) => {
                             self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task("controller")
-                                    .with_reason(format!("admission_waiter_failed: {error}")),
+                                Event::runtime_failure(
+                                    "controller",
+                                    format!("admission_waiter_failed: {error}"),
+                                ),
                             );
                         }
                         None => {}
@@ -137,9 +133,10 @@ impl Controller {
                         }
                         Some(Err(error)) => {
                             self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task("controller")
-                                    .with_reason(format!("completion_waiter_failed: {error}")),
+                                Event::runtime_failure(
+                                    "controller",
+                                    format!("completion_waiter_failed: {error}"),
+                                ),
                             );
                         }
                         None => {}
@@ -157,9 +154,10 @@ impl Controller {
                         }
                         Some(Err(error)) => {
                             self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task("controller")
-                                    .with_reason(format!("removal_waiter_failed: {error}")),
+                                Event::runtime_failure(
+                                    "controller",
+                                    format!("removal_waiter_failed: {error}"),
+                                ),
                             );
                         }
                         None => {}
@@ -170,9 +168,10 @@ impl Controller {
                         Some(Ok(())) => {}
                         Some(Err(error)) => {
                             self.bus.publish(
-                                Event::new(EventKind::ControllerRejected)
-                                    .with_task("controller")
-                                    .with_reason(format!("identity_operation_failed: {error}")),
+                                Event::runtime_failure(
+                                    "controller",
+                                    format!("identity_operation_failed: {error}"),
+                                ),
                             );
                         }
                         None => {}
@@ -222,18 +221,17 @@ impl Controller {
         Self::drain_workers(&mut identity_operations).await;
         self.finalize_slot_state_on_shutdown().await;
         if let Err(panic) = loop_result {
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task("controller")
-                    .with_reason(format!("controller_loop_panicked: {panic}")),
-            );
+            self.bus.publish(Event::runtime_failure(
+                "controller",
+                format!("controller_loop_panicked: {panic}"),
+            ));
         }
         Ok(())
     }
 
     /// Runs one controller work unit behind a panic boundary.
     ///
-    /// A panic is converted into a diagnostic `ControllerRejected` event and the loop continues.
+    /// A panic is converted into a diagnostic `RuntimeFailure` event and the loop continues.
     ///
     /// This guard does not repair partially updated slot state by itself.
     /// Callers that park watcher state must still make sure the watcher is resolved or returned on every failure path.
@@ -246,11 +244,10 @@ impl Controller {
         match crate::core::panic_guard::guarded(fut).await {
             Ok(output) => Some(output),
             Err(msg) => {
-                self.bus.publish(
-                    Event::new(EventKind::ControllerRejected)
-                        .with_task("controller")
-                        .with_reason(format!("{who}_panicked: {msg}")),
-                );
+                self.bus.publish(Event::runtime_failure(
+                    "controller",
+                    format!("{who}_panicked: {msg}"),
+                ));
                 None
             }
         }
