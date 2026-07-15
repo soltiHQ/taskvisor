@@ -83,6 +83,17 @@ pub enum EventKind {
     /// - `seq`: process-local sequence
     SubscriberPanicked,
 
+    /// An internal runtime component failed.
+    ///
+    /// This includes a caught panic or a worker that did not join cleanly.
+    ///
+    /// Sets:
+    /// - `task`: runtime component name
+    /// - `reason`: diagnostic failure details
+    /// - `at`: wall-clock timestamp
+    /// - `seq`: process-local sequence
+    RuntimeFailure,
+
     /// An event was lost because a subscriber path fell behind or closed.
     ///
     /// Sets:
@@ -329,6 +340,7 @@ impl EventKind {
     pub fn as_label(&self) -> &'static str {
         match self {
             EventKind::SubscriberPanicked => "subscriber_panicked",
+            EventKind::RuntimeFailure => "runtime_failure",
             EventKind::SubscriberOverflow => "subscriber_overflow",
             EventKind::ShutdownRequested => "shutdown_requested",
             EventKind::AllStoppedWithinGrace => "all_stopped_within_grace",
@@ -570,13 +582,24 @@ impl Event {
             .with_reason(info)
     }
 
+    /// Creates an internal runtime failure event.
+    #[inline]
+    #[must_use]
+    pub fn runtime_failure(component: impl Into<Arc<str>>, reason: impl Into<Arc<str>>) -> Self {
+        Event::new(EventKind::RuntimeFailure)
+            .with_task(component)
+            .with_reason(reason)
+    }
+
     /// Returns `true` for internal diagnostic events.
     #[inline]
     #[must_use]
     pub fn is_internal_diagnostic(&self) -> bool {
         matches!(
             self.kind,
-            EventKind::SubscriberOverflow | EventKind::SubscriberPanicked
+            EventKind::SubscriberOverflow
+                | EventKind::SubscriberPanicked
+                | EventKind::RuntimeFailure
         )
     }
 }
@@ -632,6 +655,7 @@ mod tests {
     fn event_kind_labels_are_stable() {
         let cases = [
             (EventKind::SubscriberPanicked, "subscriber_panicked"),
+            (EventKind::RuntimeFailure, "runtime_failure"),
             (EventKind::SubscriberOverflow, "subscriber_overflow"),
             (EventKind::ShutdownRequested, "shutdown_requested"),
             (EventKind::AllStoppedWithinGrace, "all_stopped_within_grace"),
@@ -715,15 +739,19 @@ mod tests {
     }
 
     #[test]
-    fn is_internal_diagnostic_covers_both_variants() {
-        for kind in [EventKind::SubscriberOverflow, EventKind::SubscriberPanicked] {
+    fn is_internal_diagnostic_covers_all_variants() {
+        for kind in [
+            EventKind::SubscriberOverflow,
+            EventKind::SubscriberPanicked,
+            EventKind::RuntimeFailure,
+        ] {
             assert!(Event::new(kind).is_internal_diagnostic(), "{kind:?}");
         }
         assert!(!Event::new(EventKind::TaskStarting).is_internal_diagnostic());
     }
 
     #[test]
-    fn subscriber_factories_set_kind_task_and_reason() {
+    fn diagnostic_factories_set_kind_task_and_reason() {
         let overflow = Event::subscriber_overflow("my-sub", "full");
         assert_eq!(overflow.kind, EventKind::SubscriberOverflow);
         assert_eq!(
@@ -741,6 +769,14 @@ mod tests {
         assert_eq!(panicked.kind, EventKind::SubscriberPanicked);
         assert_eq!(panicked.task.as_deref(), Some("my-sub"));
         assert_eq!(panicked.reason.as_deref(), Some("boom"));
+
+        let runtime_failure = Event::runtime_failure("registry", "listener join failed");
+        assert_eq!(runtime_failure.kind, EventKind::RuntimeFailure);
+        assert_eq!(runtime_failure.task.as_deref(), Some("registry"));
+        assert_eq!(
+            runtime_failure.reason.as_deref(),
+            Some("listener join failed")
+        );
     }
 
     #[test]

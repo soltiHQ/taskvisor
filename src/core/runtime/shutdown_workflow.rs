@@ -295,7 +295,7 @@ impl SupervisorCore {
 
     /// Reports an internal shutdown panic without interrupting later cleanup phases.
     fn report_shutdown_panic(&self, phase: &str, panic: String) {
-        self.bus.publish(Event::subscriber_panicked(
+        self.bus.publish(Event::runtime_failure(
             "shutdown_owner",
             format!("{phase} panic: {panic}"),
         ));

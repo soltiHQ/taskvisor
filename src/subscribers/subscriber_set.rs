@@ -850,7 +850,11 @@ mod tests {
 
     #[tokio::test]
     async fn panic_on_internal_diagnostic_does_not_republish() {
-        for diagnostic in [EventKind::SubscriberPanicked, EventKind::SubscriberOverflow] {
+        for diagnostic in [
+            EventKind::SubscriberPanicked,
+            EventKind::SubscriberOverflow,
+            EventKind::RuntimeFailure,
+        ] {
             let bus = Bus::new(64);
             let mut rx = bus.subscribe();
             let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
