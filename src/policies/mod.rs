@@ -11,16 +11,14 @@
 //!      ├── Ok(()) ────────────────► RestartPolicy
 //!      │                              ├── stop
 //!      │                              └── wait for Always.interval, then run again
-//!      │
 //!      ├── Fail / Timeout ────────► RestartPolicy
 //!      │                              ├── stop
 //!      │                              └── BackoffPolicy ──► wait ──► run again
-//!      │
 //!      └── Fatal / Canceled ──────► stop
 //! ```
 //!
 //! A [`TaskSpec`](crate::TaskSpec) can set these values for one task.
-//! If it does not, it inherits them from [`TaskDefaults`](crate::TaskDefaults).
+//! > If it does not, it inherits them from [`TaskDefaults`](crate::TaskDefaults).
 //!
 //! ## Default behavior
 //!

@@ -16,7 +16,6 @@
 //! Use it to sort observed events and detect gaps.
 //! It is not stored across process restarts.
 //!
-//! `seq` is not a causal clock.
 //! With concurrent publishers, it shows event construction order, not a guaranteed order of runtime effects or subscriber callbacks.
 //!
 //! ## Fields
@@ -37,7 +36,7 @@
 //! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
 //! Treat `reason` as human-readable text unless the event points to a constant in [`reasons`](crate::reasons).
-//! Use [`EventKind::as_label`] for a stable event label.
+//! > Use [`EventKind::as_label`] for a stable event label.
 //!
 //! ## Example
 //!
@@ -63,7 +62,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::identity::TaskId;
 
-/// Process-local counter for `seq` values. It wraps after `2^64` allocations.
+/// Process-local counter for `seq` values.
+///
+/// It wraps after `2^64` allocations.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Describes what happened in the runtime.
@@ -318,6 +319,15 @@ impl EventKind {
     /// The label is the snake_case form of the variant name.
     /// Use it as an event name in tracing or as a metrics label value.
     ///
+    /// ```text
+    /// EventKind::TaskStarting
+    ///           │ as_label()
+    ///           ▼
+    ///     "task_starting"
+    ///        ├── log field:    event="task_starting"
+    ///        └── metric label: event="task_starting"
+    /// ```
+    ///
     /// ```rust
     /// use taskvisor::EventKind;
     ///
@@ -391,7 +401,7 @@ impl BackoffSource {
 /// - other optional fields are set depending on the [`EventKind`]
 ///
 /// Fields are public for reading. Create an event with [`Event::new`] and add optional values with the `with_*` builders.
-/// Use `..` when matching the struct because more fields may be added.
+/// > Use `..` when matching the struct because more fields may be added.
 ///
 /// # Also
 ///

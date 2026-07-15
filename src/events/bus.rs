@@ -7,12 +7,17 @@
 //!
 //! ```text
 //! Supervisor / registry / task runners
+//!                  │ publish(Event)
 //!                  ▼
-//!          bounded broadcast bus
+//!        bounded broadcast bus
+//!                  │ runtime receiver
 //!                  ▼
-//!          subscriber listener
-//!                  ▼
-//!        per-subscriber queues
+//!         subscriber listener
+//!                  │
+//!                  ├──► alive tracker
+//!                  ├──► subscriber queue 1
+//!                  ├──► subscriber queue 2
+//!                  └──► subscriber queue N
 //! ```
 //!
 //! Each `subscribe()` call creates an independent receiver position.
@@ -26,7 +31,8 @@
 //! - If a receiver is too slow, it gets `RecvError::Lagged(n)` and skips old events.
 //! - If there are no active receivers, published events are dropped.
 //!
-//! This bus is only for observability. It does not provide durable, at-least-once, or exactly-once delivery.
+//! This bus is only for observability.
+//! It does not provide durable, at-least-once, or exactly-once delivery.
 
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -52,9 +58,6 @@ pub(crate) struct Bus {
 ///
 /// This is an internal runtime primitive.
 /// Public user code normally consumes events through [`Subscribe`](crate::Subscribe), not by subscribing to `Bus` directly.
-///
-/// The bus is cloneable and multi-producer.
-/// Receivers are independent, but they share one bounded broadcast buffer.
 impl Bus {
     /// Creates a new bus.
     ///

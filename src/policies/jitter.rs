@@ -86,8 +86,7 @@ impl JitterPolicy {
         }
     }
 
-    /// Chooses a uniform random delay in
-    /// `[lower, min(upper_seed × 3, max)]` for [`RandomizedBand`](Self::RandomizedBand).
+    /// Chooses a uniform random delay in `[lower, min(upper_seed × 3, max)]` for [`RandomizedBand`](Self::RandomizedBand).
     ///
     /// This method first clamps `lower` to `max`.
     /// For any other policy, it applies that policy to the clamped `lower`; `upper_seed` is unused.

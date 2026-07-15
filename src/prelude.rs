@@ -1,13 +1,17 @@
 //! # Common imports
 //!
-//! Import the prelude when building ordinary Taskvisor applications:
-//!
 //! ```rust
 //! use taskvisor::prelude::*;
 //! ```
 //!
-//! The prelude includes the main runtime, task, policy, event, subscriber, error, and identity types.
-//! It does not change behavior or enable features.
+//! The prelude includes:
+//!  - identity types
+//!  - main runtime
+//!  - subscriber
+//!  - policy
+//!  - event
+//!  - error
+//!  - task
 
 /// Core supervisor runtime.
 pub use crate::core::{

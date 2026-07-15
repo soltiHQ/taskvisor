@@ -1,6 +1,7 @@
 //! # Runtime events
 //!
-//! Events describe what Taskvisor is doing. Use them for logs, metrics, dashboards, alerts, and tests.
+//! Events describe what Taskvisor is doing.
+//! Use them for logs, metrics, dashboards, alerts, and tests.
 //!
 //! | Type              | Role                                       |
 //! |-------------------|--------------------------------------------|

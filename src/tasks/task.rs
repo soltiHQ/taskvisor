@@ -12,16 +12,16 @@ pub type BoxTaskFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Se
 pub type TaskRef = Arc<dyn Task>;
 
 /// Async work managed by a [`Supervisor`](crate::Supervisor).
-///
-/// Use [`TaskFn`](crate::TaskFn) unless you need a custom task type.
+/// > Use [`TaskFn`](crate::TaskFn) unless you need a custom task type.
 ///
 /// ## Attempt Contract
 ///
 /// The supervisor calls [`spawn`](Task::spawn) once for every attempt.
-/// `spawn` **must return a new future on every call**.
-/// Never store and reuse a future.
+/// > `spawn` **must return a new future on every call**.
 ///
-/// The task object may keep shared state between attempts.
+/// The same task object is reused for every attempt.
+/// State stored in its fields can therefore survive retries.
+/// Each returned future is attempt-local; its local values do not carry over to the next attempt.
 ///
 /// ```text
 /// spawn(ctx) -> attempt 1 -> retry delay -> spawn(ctx) -> attempt 2
@@ -31,11 +31,11 @@ pub type TaskRef = Arc<dyn Task>;
 ///
 /// Long-running tasks should listen to [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`].
 /// Return [`TaskError::Canceled`] when the task stops for that reason.
-/// This is a normal stop and is never retried.
+/// > **This is a normal stop and is never retried.**
 ///
 /// Short tasks may ignore cancellation if they finish quickly.
 /// During shutdown, a task that does not stop before the grace period is aborted.
-/// Dropping its future does not roll back external side effects.
+/// Dropping its future does not rollback external side effects.
 ///
 /// | Result                  | Meaning           | Can restart?                                                      |
 /// |-------------------------|-------------------|-------------------------------------------------------------------|
@@ -46,11 +46,11 @@ pub type TaskRef = Arc<dyn Task>;
 /// | [`TaskError::Fatal`]    | Permanent failure | No                                                                |
 ///
 /// A panic in `spawn` or in the returned future is caught and treated as a retryable failure.
-/// Do not use panic for normal error handling.
+/// > **Do not use panic for normal error handling.**
 ///
 /// ## See Also
 ///
-/// - For the closure-based implementation see [`TaskFn`](crate::TaskFn).
+/// - For the closure-based implementation and a shared-state example, see [`TaskFn`](crate::TaskFn).
 /// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 pub trait Task: Send + Sync + 'static {
     /// Returns the stable name used for registration and observability.
