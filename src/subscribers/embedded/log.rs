@@ -141,6 +141,13 @@ impl LogWriter {
                     or(e.reason.as_deref(), "unknown")
                 );
             }
+            EventKind::RuntimeFailure => {
+                println!(
+                    "{head} component={} reason=\"{}\"",
+                    or(e.task.as_deref(), "none"),
+                    or(e.reason.as_deref(), "unknown")
+                );
+            }
 
             // Terminals.
             EventKind::ActorExhausted => {

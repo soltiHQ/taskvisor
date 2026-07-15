@@ -17,6 +17,7 @@ use crate::{
     core::{actor::ActorExitReason, outcome::TaskOutcome},
     events::{Bus, Event, EventKind},
     identity::TaskId,
+    reasons,
 };
 
 /// Terminal result passed from the single join owner to registry cleanup.
@@ -424,7 +425,7 @@ impl Registry {
                     Event::new(EventKind::TaskRemoved)
                         .with_task(Arc::clone(&entry.label))
                         .with_id(id)
-                        .with_reason("force_terminated_after_grace"),
+                        .with_reason(reasons::FORCE_TERMINATED_AFTER_GRACE),
                 );
             }
         }

@@ -13,6 +13,7 @@ use crate::{
     },
     events::{Event, EventKind},
     identity::TaskId,
+    reasons,
 };
 
 use super::{AdmissionResult, CompletionResult, Controller, RemovalResult, Submission};
@@ -179,7 +180,7 @@ impl Controller {
                 | SlotPhase::Terminating { .. },
                 AdmissionPolicy::DropIfRunning,
             ) => {
-                let reason = format!("dropped: slot busy ({})", slot.status_label());
+                let reason = format!("{} ({})", reasons::DROP_IF_RUNNING, slot.status_label());
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))

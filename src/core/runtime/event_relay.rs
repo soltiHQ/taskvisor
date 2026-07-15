@@ -71,7 +71,7 @@ impl SupervisorCore {
                             )
                             .await
                             {
-                                set.emit_arc(Arc::new(Event::subscriber_panicked(
+                                set.emit_arc(Arc::new(Event::runtime_failure(
                                     "subscriber_listener",
                                     format!("listener panic: {panic}"),
                                 )));
@@ -123,7 +123,7 @@ impl SupervisorCore {
         match handle.await {
             Ok(()) => true,
             Err(error) => {
-                self.subs.emit_arc(Arc::new(Event::subscriber_panicked(
+                self.subs.emit_arc(Arc::new(Event::runtime_failure(
                     "subscriber_listener",
                     format!("listener join failed: {error}"),
                 )));

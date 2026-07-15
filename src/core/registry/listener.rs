@@ -208,7 +208,7 @@ impl Registry {
         match handle.await {
             Ok(()) => true,
             Err(error) => {
-                self.bus.publish(Event::subscriber_panicked(
+                self.bus.publish(Event::runtime_failure(
                     "registry",
                     format!("listener join failed: {error}"),
                 ));
@@ -236,7 +236,7 @@ impl Registry {
     /// A panic while processing one command or completion is reported as a diagnostic event instead of killing the registry listener.
     async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
         if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
-            self.bus.publish(Event::subscriber_panicked(
+            self.bus.publish(Event::runtime_failure(
                 who,
                 format!("listener panic: {msg}"),
             ));

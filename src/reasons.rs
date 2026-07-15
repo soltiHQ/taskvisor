@@ -21,17 +21,19 @@
 //!
 //! ## Where each value appears
 //!
-//! | Constant                     | Used by                                                | Meaning                                |
-//! |------------------------------|--------------------------------------------------------|----------------------------------------|
-//! | [`POLICY_EXHAUSTED_SUCCESS`] | `ActorExhausted`                                       | Normal one-shot finish.                |
-//! | [`TASK_RETURNED_CANCELED`]   | `ActorExhausted`                                       | The task stopped itself.               |
-//! | [`MAX_RETRIES_EXCEEDED`]     | `ActorExhausted` (prefix)                              | Retry limit reached.                   |
-//! | [`ALREADY_EXISTS`]           | `TaskAddFailed`, `TaskOutcome::Rejected`               | A task with this name already exists.  |
-//! | [`BATCH_REJECTED`]           | `TaskAddFailed`                                        | Another item rejected the whole batch. |
-//! | [`QUEUE_FULL`]               | `ControllerRejected`, `TaskOutcome::Rejected` (prefix) | The slot queue is full.                |
-//! | [`REMOVED_FROM_QUEUE`]       | `ControllerRejected`, `TaskOutcome::Rejected`          | A queued task was removed.             |
-//! | [`SUPERSEDED_BY_REPLACE`]    | `ControllerRejected`, `TaskOutcome::Rejected`          | A newer `Replace` task took its place. |
-//! | [`CONTROLLER_SHUTTING_DOWN`] | `ControllerRejected`, `TaskOutcome::Rejected`          | The controller is shutting down.       |
+//! | Constant                             | Used by                                                | Meaning                                |
+//! |--------------------------------------|--------------------------------------------------------|----------------------------------------|
+//! | [`POLICY_EXHAUSTED_SUCCESS`]         | `ActorExhausted`                                       | Normal one-shot finish.                |
+//! | [`TASK_RETURNED_CANCELED`]           | `ActorExhausted`                                       | The task stopped itself.               |
+//! | [`MAX_RETRIES_EXCEEDED`]             | `ActorExhausted` (prefix)                              | Retry limit reached.                   |
+//! | [`ALREADY_EXISTS`]                   | `TaskAddFailed`, `TaskOutcome::Rejected`               | A task with this name already exists.  |
+//! | [`BATCH_REJECTED`]                   | `TaskAddFailed`                                        | Another item rejected the whole batch. |
+//! | [`QUEUE_FULL`]                       | `ControllerRejected`, `TaskOutcome::Rejected` (prefix) | The slot queue is full.                |
+//! | [`DROP_IF_RUNNING`]                  | `ControllerRejected`, `TaskOutcome::Rejected` (prefix) | A busy slot rejected new work.         |
+//! | [`REMOVED_FROM_QUEUE`]               | `ControllerRejected`, `TaskOutcome::Rejected`          | A queued task was removed.             |
+//! | [`SUPERSEDED_BY_REPLACE`]            | `ControllerRejected`, `TaskOutcome::Rejected`          | A newer `Replace` task took its place. |
+//! | [`CONTROLLER_SHUTTING_DOWN`]         | `ControllerRejected`, `TaskOutcome::Rejected`          | The controller is shutting down.       |
+//! | [`FORCE_TERMINATED_AFTER_GRACE`]     | `TaskRemoved`                                          | The actor was force-aborted.           |
 //!
 
 /// `ActorExhausted` reason: the task finished successfully under a `Never`/`OnFailure` policy.
@@ -56,6 +58,15 @@ pub const SUPERSEDED_BY_REPLACE: &str = "superseded_by_replace";
 
 /// Rejection reason: the controller is shutting down.
 pub const CONTROLLER_SHUTTING_DOWN: &str = "controller_shutting_down";
+
+/// `ControllerRejected` and `TaskOutcome::Rejected` reason **prefix**: `DropIfRunning` rejected a submission because its slot was busy.
+///
+/// The full reason is `dropped: slot busy (<status>)`.
+/// Match with `starts_with`, not equality.
+pub const DROP_IF_RUNNING: &str = "dropped: slot busy";
+
+/// `TaskRemoved` reason: the actor did not stop within its grace window and was force-aborted.
+pub const FORCE_TERMINATED_AFTER_GRACE: &str = "force_terminated_after_grace";
 
 /// `ActorExhausted` reason **prefix**: the task stopped after it used all retry attempts.
 ///
