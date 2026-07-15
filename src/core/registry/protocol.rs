@@ -23,7 +23,7 @@ pub(crate) struct AddBatchItem {
 /// Authoritative result of one registry remove command.
 ///
 /// `Ok(true)` means the registry claimed the task and sent cancellation.
-/// It does not mean the actor has terminated yet.
+/// > It does not mean the actor has terminated yet.
 pub(crate) type RemoveReply = Result<bool, RuntimeError>;
 
 /// Receiver for an authoritative registry remove result.
@@ -32,7 +32,7 @@ pub(crate) type RemoveReplyRx = oneshot::Receiver<RemoveReply>;
 /// Registry decision returned to one cancellation caller.
 ///
 /// `claimed` is true only for the caller that changed `Registered` to `Removing`.
-/// Every caller that observes the same removal waits on the same terminal completion.
+/// > Every caller that observes the same removal waits on the same terminal completion.
 pub(crate) struct CancelDecision {
     pub(crate) id: TaskId,
     pub(crate) claimed: bool,
@@ -53,8 +53,7 @@ impl CancelDecision {
 
 /// Authoritative result of one registry cancel command.
 ///
-/// `Ok(None)` means no registry entry exists at this command's ordering point:
-/// the identity is unknown or terminal cleanup has already removed it.
+/// `Ok(None)` means no registry entry exists at this command's ordering point: the identity is unknown or terminal cleanup has already removed it.
 pub(crate) type CancelReply = Result<Option<CancelDecision>, RuntimeError>;
 
 /// Receiver for an authoritative registry cancel decision.

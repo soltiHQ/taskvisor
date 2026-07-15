@@ -35,7 +35,7 @@
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
 
-/// Prints human-readable events to standard output.
+/// Prints a readable events to standard output.
 ///
 /// Implements [`Subscribe`] and prints `[seq] [event-type] key=value ...` with relevant metadata.
 /// Output is intended for people and is not a stable machine-readable format.

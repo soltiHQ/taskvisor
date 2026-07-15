@@ -201,8 +201,7 @@ impl SupervisorCore {
 
     /// Publishes the request event and makes an already-reserved Add visible.
     ///
-    /// Reserving capacity before this call keeps rejected commands silent while
-    /// preserving `TaskAddRequested` before the registry result event.
+    /// Reserving capacity before this call keeps rejected commands silent while preserving `TaskAddRequested` before the registry result event.
     fn commit_add(
         &self,
         permit: mpsc::Permit<'_, RegistryCommand>,
@@ -591,8 +590,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
-    /// Tries to cancel the task that owns `label` without waiting for command queue capacity and
-    /// bounds the terminal-completion wait after the registry decision.
+    /// Tries to cancel the task that owns `label` without waiting for command queue capacity and bounds the terminal-completion wait after the registry decision.
     pub(crate) async fn try_cancel_by_label_with_timeout(
         &self,
         label: Arc<str>,

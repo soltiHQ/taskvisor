@@ -151,7 +151,7 @@ pub enum TaskError {
     #[error("fatal error (no retry): {reason}")]
     #[non_exhaustive]
     Fatal {
-        /// Human-readable failure reason.
+        /// Readable failure reason.
         reason: String,
         /// Process-style exit code, when available.
         ///
@@ -168,7 +168,7 @@ pub enum TaskError {
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
-        /// Human-readable failure reason.
+        /// Readable failure reason.
         reason: String,
         /// Process-style exit code, when available.
         ///

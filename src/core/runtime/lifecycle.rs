@@ -12,9 +12,6 @@ impl SupervisorCore {
     /// - subscriber queue workers,
     /// - the event relay,
     /// - the registry listener.
-    ///
-    /// Safe to call more than once.
-    /// Concurrent callers wait for the first startup to install every listener before they return.
     pub(crate) fn start(&self) {
         if self.started.load(Ordering::Acquire) {
             return;
@@ -101,7 +98,6 @@ impl SupervisorCore {
     /// If a received signal wins the shutdown race, it starts graceful shutdown and publishes `ShutdownRequested`.
     /// If a signal-setup error wins, the shared result is [`RuntimeError::SignalSetupFailed`];
     /// common cleanup still runs, but `ShutdownRequested` and the graceful task-drain verdict are not emitted.
-    /// A losing signal result joins the operation already in progress.
     pub(super) async fn on_shutdown_signal(
         self: &Arc<Self>,
         res: std::io::Result<()>,

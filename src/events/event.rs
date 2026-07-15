@@ -35,7 +35,7 @@
 //! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
 //! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
-//! Treat `reason` as human-readable text unless the event points to a constant in [`reasons`](crate::reasons).
+//! Treat `reason` a readable text unless the event points to a constant in [`reasons`](crate::reasons).
 //! > Use [`EventKind::as_label`] for a stable event label.
 //!
 //! ## Example
@@ -311,7 +311,7 @@ pub enum EventKind {
     /// Sets:
     /// - `task`: slot name
     /// - `id`: the submission's [`TaskId`]
-    /// - `reason`: a human-readable admission summary, e.g. `admission=Queue status=admitting` or
+    /// - `reason`: a readable admission summary, e.g. `admission=Queue status=admitting` or
     ///   `started_from_queue depth=N` (exact text is diagnostic, not a stable contract)
     ControllerSubmitted,
 
@@ -321,7 +321,7 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `task`: slot name
-    /// - `reason`: human-readable transition text; it is not a stable machine contract
+    /// - `reason`: readable transition text; it is not a stable machine contract
     ControllerSlotTransition,
 }
 
@@ -420,7 +420,7 @@ impl BackoffSource {
 ///
 /// - [`EventKind`] - event classification
 /// - [`Subscribe`](crate::Subscribe) - user-defined event handler trait
-/// - `LogWriter` (feature = `logging`) - built-in human-readable event printer
+/// - `LogWriter` (feature = `logging`) - built-in readable event printer
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Event {
@@ -482,7 +482,7 @@ impl Event {
         }
     }
 
-    /// Attaches a human-readable reason.
+    /// Attaches a readable reason.
     #[inline]
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<Arc<str>>) -> Self {
