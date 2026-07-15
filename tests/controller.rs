@@ -496,10 +496,9 @@ async fn drop_if_running_rejects_busy_submission_without_starting_it() {
                         event.task.as_deref() == Some("s")
                             && event.kind == EventKind::ControllerRejected
                             && event.id == Some(rejected_id)
-                            && event
-                                .reason
-                                .as_deref()
-                                .is_some_and(|reason| reason.contains("dropped: slot busy"))
+                            && event.reason.as_deref().is_some_and(|reason| {
+                                reason.starts_with(taskvisor::reasons::DROP_IF_RUNNING)
+                            })
                     })
                 })
                 .await

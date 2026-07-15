@@ -45,9 +45,10 @@ pub struct TracingBridge;
 /// Maps an event to a tracing level.
 fn level_for(e: &Event) -> Level {
     match e.kind {
-        EventKind::TaskFailed | EventKind::ActorDead | EventKind::SubscriberPanicked => {
-            Level::ERROR
-        }
+        EventKind::TaskFailed
+        | EventKind::ActorDead
+        | EventKind::SubscriberPanicked
+        | EventKind::RuntimeFailure => Level::ERROR,
 
         EventKind::TimeoutHit
         | EventKind::GraceExceeded

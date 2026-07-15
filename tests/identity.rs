@@ -392,7 +392,8 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
                     events.iter().any(|event| {
                         event.id == Some(id)
                             && event.kind == EventKind::TaskRemoved
-                            && event.reason.as_deref() == Some("force_terminated_after_grace")
+                            && event.reason.as_deref()
+                                == Some(taskvisor::reasons::FORCE_TERMINATED_AFTER_GRACE)
                     })
                 })
                 .await,
