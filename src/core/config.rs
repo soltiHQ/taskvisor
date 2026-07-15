@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+/// Default capacity of the event bus and registry command queue.
 const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+
+/// Default deadline for draining subscriber queues during shutdown.
 const DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Error from a checked configuration setter.

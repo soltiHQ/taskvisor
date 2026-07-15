@@ -1,7 +1,6 @@
 //! # Manage a running supervisor
 //!
 //! [`Supervisor::serve`](crate::Supervisor::serve) returns a [`SupervisorHandle`].
-//! Use it to add, inspect, stop, and watch tasks while the service is running.
 //!
 //! Direct state-changing `add*`, `remove*`, and `cancel*` commands use one bounded management queue.
 //! A regular method waits for capacity; its `try_*` form fails fast when that queue is full.
@@ -34,8 +33,8 @@ use super::outcome::TaskWaiter;
 /// Dropping the last public `Supervisor` or handle sends best-effort cancellation, but cannot wait for cleanup.
 /// Call [`shutdown`](Self::shutdown) for a confirmed shutdown result.
 ///
-/// Use [`remove`](Self::remove) to request a stop and return after the request is accepted.
-/// Use [`cancel`](Self::cancel) to wait until the task is joined and its name and identity are released.
+/// > Use [`remove`](Self::remove) to request a stop and return after the request is accepted.
+/// > Use [`cancel`](Self::cancel) to wait until the task is joined and its name and identity are released.
 ///
 /// ## Example
 ///
@@ -132,9 +131,10 @@ impl SupervisorHandle {
 
     /// Adds a task and returns a waiter for its final outcome.
     ///
-    /// Registration is the same as [`add`](Self::add). The [`TaskWaiter`] resolves after all retries end,
-    /// the registry joins the task actor, and registry membership is removed.
-    /// It uses a direct completion channel, not best-effort lifecycle events.
+    /// Registration is the same as [`add`](Self::add).
+    /// The [`TaskWaiter`] resolves after all retries end, the registry joins the task actor, and registry membership is removed.
+    ///
+    /// > It uses a direct completion channel, not best-effort lifecycle events.
     ///
     /// # Errors
     ///
@@ -191,8 +191,8 @@ impl SupervisorHandle {
     /// `Ok(false)` means the identity was unknown, already finished, or already claimed by another stop request.
     ///
     /// For a registered task, the method returns before final cleanup.
-    /// Use [`cancel`](Self::cancel) when you need to wait until termination.
     /// Removing queued controller work is complete when this method returns.
+    /// > Use [`cancel`](Self::cancel) when you need to wait until termination.
     ///
     /// # Errors
     ///
@@ -251,8 +251,7 @@ impl SupervisorHandle {
     /// Returns the authoritative registry view as `(id, name)` pairs.
     ///
     /// The list comes from the registry and is sorted by [`TaskId`].
-    /// It includes every registry entry, whether its actor is running, waiting for a permit,
-    /// backoff, or restart interval, already finished but not cleaned up, or being removed.
+    /// It includes every registry entry, whether its actor is running, waiting for a permit, backoff, or restart interval, already finished but not cleaned up, or being removed.
     ///
     /// See [`alive_snapshot`](Self::alive_snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
@@ -273,7 +272,7 @@ impl SupervisorHandle {
     /// Returns whether the cache currently marks any run with this name as alive.
     ///
     /// This best-effort query does not check a specific [`TaskId`] and can miss state after event loss.
-    /// Use [`list`](Self::list) for registry membership.
+    /// > Use [`list`](Self::list) for registry membership.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
     }
@@ -471,8 +470,8 @@ impl SupervisorHandle {
     /// `Ok(id)` confirms only that the controller queue accepted the submission.
     /// Slot admission and runtime registration happen later.
     ///
-    /// Use [`try_submit`](Self::try_submit) to fail fast when the controller queue is full.
-    /// Use [`submit_and_watch`](Self::submit_and_watch) to observe the final outcome, including admission rejection.
+    /// > Use [`try_submit`](Self::try_submit) to fail fast when the controller queue is full.
+    /// > Use [`submit_and_watch`](Self::submit_and_watch) to observe the final outcome, including admission rejection.
     ///
     /// Requires the `controller` feature.
     ///

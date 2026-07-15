@@ -36,8 +36,8 @@ use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 
 /// Owner and entry point for one taskvisor runtime.
 ///
-/// Use [`new`](Self::new) for the standard defaults.
-/// Use [`builder`](Self::builder) to set [`TaskDefaults`](crate::TaskDefaults), subscribers, or optional controller admission.
+/// > Use [`new`](Self::new) for the standard defaults.
+/// > Use [`builder`](Self::builder) to set [`TaskDefaults`](crate::TaskDefaults), subscribers, or optional controller admission.
 ///
 /// ## See Also
 ///
@@ -86,7 +86,8 @@ impl Supervisor {
     /// Task specs use [`TaskDefaults::default`](crate::TaskDefaults::default).
     /// Use [`builder`](Self::builder) and [`with_task_defaults`](crate::SupervisorBuilder::with_task_defaults) to replace those defaults.
     ///
-    /// This method does not start Tokio tasks. Call [`run`](Self::run) or [`serve`](Self::serve) later.
+    /// This method does not start Tokio tasks.
+    /// Call [`run`](Self::run) or [`serve`](Self::serve) later.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
@@ -110,6 +111,26 @@ impl Supervisor {
     ///
     /// This method may be called more than once.
     /// Runtime workers start once; every call returns another handle to the same runtime.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,no_run
+    /// use taskvisor::prelude::*;
+    ///
+    /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    /// let handle = supervisor.serve();
+    ///
+    /// let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
+    ///     ctx.cancelled().await;
+    ///     Err(TaskError::Canceled)
+    /// });
+    ///
+    /// let id = handle.add(TaskSpec::once(worker)).await?;
+    /// handle.cancel(id).await?;
+    /// handle.shutdown().await?;
+    /// # Ok(()) }
+    /// ```
     ///
     /// # Panics
     ///
@@ -140,6 +161,22 @@ impl Supervisor {
     /// `Ok(())` means the supervisor lifecycle and cleanup completed successfully.
     /// It does not mean that every managed task completed successfully.
     /// Task failures, fatal errors, and panics remain task-level outcomes; use [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) when application logic needs a reliable outcome for one task.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,no_run
+    /// use taskvisor::prelude::*;
+    ///
+    /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    /// let task: TaskRef = TaskFn::arc("worker", |_ctx| async move {
+    ///     println!("one unit of work");
+    ///     Ok(())
+    /// });
+    ///
+    /// supervisor.run(vec![TaskSpec::once(task)]).await?;
+    /// # Ok(()) }
+    /// ```
     ///
     /// # Panics
     ///

@@ -1,10 +1,12 @@
 //! # Reliable final task results
 //!
-//! Lifecycle events show live progress, but they are best-effort.
-//! Use a [`TaskWaiter`] when application logic needs the final [`TaskOutcome`].
+//! Lifecycle events answer "what is happening now?".
+//! They may be dropped. Application logic must not reconstruct a final result from them.
 //!
-//! A waiter uses a direct one-shot channel.
-//! Event-bus lag does not affect it.
+//! A [`TaskWaiter`] answers "how did this task end?" for one [`TaskId`].
+//! It receives one final [`TaskOutcome`] through a direct one-shot channel, outside the event bus.
+//! For an admitted task, the registry sends the outcome after joining the actor and removing its membership.
+//! Event-bus lag does not affect this path. If the outcome cannot be delivered, [`TaskWaiter::wait`] returns an error instead of guessing the result.
 //!
 //! ## Successful Direct-Add Flow
 //!
@@ -30,8 +32,7 @@
 //! - One waiter follows one [`TaskId`].
 //! - For admitted work, it resolves after all retries end and the registry joins the task actor.
 //! - Dropping a waiter is safe and does not cancel the task.
-//! - If the runtime drops the sender before it creates an outcome,
-//!   [`TaskWaiter::wait`] returns an error instead of inventing a result.
+//! - If the runtime drops the sender before it creates an outcome, [`TaskWaiter::wait`] returns an error instead of inventing a result.
 //!
 //! Direct [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
 //! returns registration errors such as a duplicate name before it gives the
@@ -121,8 +122,8 @@ pub enum TaskOutcome {
 
     /// The runtime aborted the actor before cooperative stop completed.
     ///
-    /// This normally happens after the configured grace period. Last-owner
-    /// fallback and signal-setup failure cleanup cannot wait for that period.
+    /// This normally happens after the configured grace period.
+    /// Last-owner fallback and signal-setup failure cleanup cannot wait for that period.
     ForceAborted,
 
     /// The internal actor panicked.
@@ -214,7 +215,8 @@ impl TaskOutcome {
     /// Returns the original error source for [`Failed`](Self::Failed) or [`Fatal`](Self::Fatal).
     ///
     /// Returns `None` when the outcome has no source error.
-    /// Callers can use `downcast_ref` or pass it to an error-reporting library.
+    ///
+    /// > Callers can use `downcast_ref` or pass it to an error-reporting library.
     #[must_use]
     pub fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -305,7 +307,9 @@ impl TaskWaiter {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops its sender before producing an outcome. No final result is available in that case.
+    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops its sender before producing an outcome.
+    ///
+    /// > No final result is available in that case.
     pub async fn wait(self) -> Result<TaskOutcome, RuntimeError> {
         self.rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }
