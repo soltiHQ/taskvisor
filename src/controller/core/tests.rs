@@ -83,6 +83,10 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
 
     let ev = rx.try_recv().expect("displaced head must be rejected");
     assert_eq!(ev.kind, EventKind::ControllerRejected);
+    assert_eq!(
+        ev.rejection_kind,
+        Some(crate::RejectionKind::SupersededByReplace)
+    );
     assert_eq!(ev.id, Some(displaced));
     assert_eq!(
         ev.reason.as_deref(),
@@ -249,11 +253,11 @@ async fn removal_error_preserves_owner_and_queue_and_emits_one_diagnostic() {
     let event = events
         .try_recv()
         .expect("the current owner's removal error must be observable");
-    assert_eq!(event.kind, EventKind::ControllerRejected);
+    assert_eq!(event.kind, EventKind::RuntimeFailure);
     assert_eq!(event.id, Some(owner));
-    assert_eq!(event.task.as_deref(), Some("s"));
+    assert_eq!(event.task.as_deref(), Some("controller"));
     assert!(event.reason.as_deref().is_some_and(|reason| {
-        reason.starts_with("remove_failed:") && reason.contains("queue is full")
+        reason.starts_with("remove_failed slot=s:") && reason.contains("queue is full")
     }));
     assert!(
         events.try_recv().is_err(),
@@ -484,7 +488,11 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
 
     assert!(matches!(
         first_outcome.await,
-        Ok(TaskOutcome::Rejected { reason })
+        Ok(TaskOutcome::Rejected {
+            kind: crate::RejectionKind::SupersededByReplace,
+            reason,
+            ..
+        })
             if reason.as_ref() == crate::reasons::SUPERSEDED_BY_REPLACE
     ));
 
@@ -607,7 +615,11 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
 
     assert!(matches!(
         outcome.await,
-        Ok(TaskOutcome::Rejected { reason })
+        Ok(TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ControllerShuttingDown,
+            reason,
+            ..
+        })
             if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
     ));
     assert!(ctrl.watchers.is_empty());
@@ -748,7 +760,7 @@ async fn guarded_converts_panic_to_diagnostic_and_survives() {
     let ev = rx
         .try_recv()
         .expect("a panicking work-unit must publish a diagnostic");
-    assert_eq!(ev.kind, EventKind::ControllerRejected);
+    assert_eq!(ev.kind, EventKind::RuntimeFailure);
     assert!(
         ev.reason.as_deref().unwrap_or_default().contains("boom 1"),
         "diagnostic must carry the panic message, got {:?}",
@@ -914,7 +926,11 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
         .expect("the buffered watched command must resolve before shutdown returns");
     assert!(matches!(
         queued_outcome,
-        TaskOutcome::Rejected { reason }
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ControllerShuttingDown,
+            reason,
+            ..
+        }
             if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
     ));
     let panicking_outcome =
@@ -924,7 +940,11 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
             .expect("the hostile buffered watcher must resolve as an outcome");
     assert!(matches!(
         panicking_outcome,
-        TaskOutcome::Rejected { reason }
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ControllerShuttingDown,
+            reason,
+            ..
+        }
             if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
     ));
     assert!(identity.is_finished());
@@ -1519,7 +1539,11 @@ async fn replace_stays_responsive_under_registry_backpressure() {
     );
     assert!(matches!(
         first_outcome.await,
-        Ok(TaskOutcome::Rejected { reason })
+        Ok(TaskOutcome::Rejected {
+            kind: crate::RejectionKind::SupersededByReplace,
+            reason,
+            ..
+        })
             if reason.as_ref() == crate::reasons::SUPERSEDED_BY_REPLACE
     ));
 
@@ -1586,9 +1610,11 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         "the first cancellation caller must claim the queued submission"
     );
     let outcome = waiter.wait().await.expect("the queued waiter must resolve");
-    assert!(
-        matches!(outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
-    );
+    assert!(matches!(outcome, TaskOutcome::Rejected {
+            kind: crate::RejectionKind::RemovedFromQueue,
+            reason,
+            ..
+        } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE));
 
     let try_ran = Arc::clone(&victim_ran);
     let try_victim: TaskRef = TaskFn::arc("try-remove-victim", move |_ctx: TaskContext| {
@@ -1613,9 +1639,11 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         .wait()
         .await
         .expect("the try_remove waiter must resolve");
-    assert!(
-        matches!(try_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
-    );
+    assert!(matches!(try_outcome, TaskOutcome::Rejected {
+            kind: crate::RejectionKind::RemovedFromQueue,
+            reason,
+            ..
+        } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE));
 
     let try_cancel_ran = Arc::clone(&victim_ran);
     let try_cancel_victim: TaskRef = TaskFn::arc("try-cancel-victim", move |_ctx: TaskContext| {
@@ -1640,9 +1668,11 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         .wait()
         .await
         .expect("the try_cancel waiter must resolve");
-    assert!(
-        matches!(try_cancel_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE)
-    );
+    assert!(matches!(try_cancel_outcome, TaskOutcome::Rejected {
+            kind: crate::RejectionKind::RemovedFromQueue,
+            reason,
+            ..
+        } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE));
 
     assert!(
         handle
@@ -1783,9 +1813,11 @@ async fn duplicate_reply_frees_slot_without_task_add_failed() {
         .await
         .expect("registry rejection must resolve the watcher")
         .expect("registry must send a rejected outcome");
-    assert!(
-        matches!(outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::ALREADY_EXISTS)
-    );
+    assert!(matches!(outcome, TaskOutcome::Rejected {
+            kind: crate::RejectionKind::AlreadyExists,
+            reason,
+            ..
+        } if reason.as_ref() == crate::reasons::ALREADY_EXISTS));
     assert!(
         poll_until(Duration::from_secs(2), || async {
             ctrl.slots.get("s").is_none() && !ctrl.watchers.contains_key(&id)
@@ -1845,9 +1877,11 @@ async fn queued_admission_skips_registry_rejected_head() {
     let duplicate_outcome = duplicate_outcome
         .await
         .expect("registry must resolve the duplicate watcher");
-    assert!(
-        matches!(duplicate_outcome, TaskOutcome::Rejected { reason } if reason.as_ref() == crate::reasons::ALREADY_EXISTS)
-    );
+    assert!(matches!(duplicate_outcome, TaskOutcome::Rejected {
+            kind: crate::RejectionKind::AlreadyExists,
+            reason,
+            ..
+        } if reason.as_ref() == crate::reasons::ALREADY_EXISTS));
     let slot = slot_arc.lock().await;
     assert_eq!(slot.owner_id(), Some(accepted_id));
     assert!(matches!(slot.phase(), SlotPhase::Running { .. }));

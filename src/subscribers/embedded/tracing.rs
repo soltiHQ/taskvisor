@@ -100,6 +100,7 @@ impl Subscribe for TracingBridge {
                     duration_ms = e.duration_ms.map(u64::from),
                     exit_code = e.exit_code.map(i64::from),
                     backoff_source = e.backoff_source.map(|s| s.as_label()),
+                    rejection_kind = e.rejection_kind.map(|kind| kind.as_label()),
                 )
             };
         }

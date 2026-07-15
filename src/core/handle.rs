@@ -15,7 +15,24 @@
 //! With a controller, identity-based remove and cancel operations are ordered after earlier submissions.
 //! This lets them find work that is still queued and has not reached the registry.
 //!
-//! [`SupervisorCore`]: crate::core::SupervisorCore
+//! ## Confirmation Boundaries
+//!
+//! | Method family                              | A successful return confirms                                                                          | It does not confirm                                                     |
+//! |--------------------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
+//! | `add`, `try_add`                           | Registry admission and runner creation                                                                | First attempt started                                                   |
+//! | `add_and_watch`, `try_add_and_watch`       | Registry admission; the returned waiter later confirms terminal cleanup                               | Task success at method return                                           |
+//! | `submit`, `try_submit`                     | Controller command-queue acceptance                                                                   | Slot admission, registry admission, or task start                       |
+//! | `submit_and_watch`, `try_submit_and_watch` | Controller command-queue acceptance; the returned waiter later confirms rejection or terminal cleanup | Slot or registry admission at method return                             |
+//! | `remove`, `try_remove`                     | The stop claim was decided; queued controller work is removed before return                           | Terminal cleanup of registered work                                     |
+//! | `remove_by_label`, `try_remove_by_label`   | The registry name lookup and stop claim were decided                                                  | Terminal cleanup                                                        |
+//! | `cancel`, `try_cancel`                     | Terminal cleanup for known registered work; queued controller removal is complete                     | That this caller was the first stop claimant when the result is `false` |
+//! | `cancel_by_label*`, `try_cancel_by_label*` | Terminal cleanup when the call returns `Ok`; timeout variants bound only the cleanup wait             | Cleanup after `TaskTerminationTimeout`                                  |
+//! | `list`                                     | One authoritative registry snapshot                                                                   | That entries are currently executing an attempt                         |
+//! | `alive_snapshot`, `is_alive`               | One best-effort event-derived cache read                                                              | Authoritative registry membership                                       |
+//! | `controller_snapshot`                      | One best-effort rolling slot snapshot                                                                 | An atomic view across every slot                                        |
+//! | `shutdown`                                 | Shared runtime cleanup completed with the returned result                                             | -                                                                       |
+//!
+//! A `try_*` method changes queue admission only: it fails immediately when the relevant bounded queue is full.
 
 use std::{sync::Arc, time::Duration};
 

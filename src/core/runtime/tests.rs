@@ -1203,6 +1203,7 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
         Err((RuntimeError::CommandQueueFull, Some(returned))) => {
             returned
                 .send(TaskOutcome::Rejected {
+                    kind: crate::RejectionKind::AdmissionFailed,
                     reason: Arc::from("command_queue_full"),
                 })
                 .expect("the full command must return its outcome sender");
@@ -1211,7 +1212,7 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
     }
     assert!(matches!(
         outcome_rx.await,
-        Ok(TaskOutcome::Rejected { reason }) if reason.as_ref() == "command_queue_full"
+        Ok(TaskOutcome::Rejected { reason, .. }) if reason.as_ref() == "command_queue_full"
     ));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     assert!(!core.contains_id(rejected_id).await);
@@ -1346,6 +1347,7 @@ async fn closed_command_queue_returns_shutting_down_and_watcher() {
         Err((RuntimeError::ShuttingDown, Some(returned))) => {
             returned
                 .send(TaskOutcome::Rejected {
+                    kind: crate::RejectionKind::ControllerShuttingDown,
                     reason: Arc::from("shutting_down"),
                 })
                 .expect("closed queue must return its outcome sender");
@@ -1354,7 +1356,7 @@ async fn closed_command_queue_returns_shutting_down_and_watcher() {
     }
     assert!(matches!(
         outcome_rx.await,
-        Ok(TaskOutcome::Rejected { reason }) if reason.as_ref() == "shutting_down"
+        Ok(TaskOutcome::Rejected { reason, .. }) if reason.as_ref() == "shutting_down"
     ));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 
@@ -1377,6 +1379,7 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
         Err((RuntimeError::ShuttingDown, Some(returned))) => {
             returned
                 .send(crate::TaskOutcome::Rejected {
+                    kind: crate::RejectionKind::AdmissionFailed,
                     reason: Arc::from("rejected"),
                 })
                 .expect("returned watcher must still be live");

@@ -2,7 +2,7 @@
 
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use crate::events::{Bus, Event, EventKind};
+use crate::events::{Bus, Event};
 
 pub(super) struct ControllerTask {
     state: Mutex<ControllerTaskState>,
@@ -36,11 +36,10 @@ impl ControllerTask {
         let clean = match handle.await {
             Ok(()) => true,
             Err(error) => {
-                bus.publish(
-                    Event::new(EventKind::ControllerRejected)
-                        .with_task("controller")
-                        .with_reason(format!("controller_join_failed: {error}")),
-                );
+                bus.publish(Event::runtime_failure(
+                    "controller",
+                    format!("controller_join_failed: {error}"),
+                ));
                 false
             }
         };

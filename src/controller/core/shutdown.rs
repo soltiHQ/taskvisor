@@ -20,7 +20,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 
 use crate::RuntimeError;
 use crate::core::TaskOutcome;
-use crate::events::{Event, EventKind};
+use crate::events::{Event, EventKind, RejectionKind};
 
 use super::{Controller, ControllerCommand};
 
@@ -39,6 +39,7 @@ impl Controller {
                 ControllerCommand::Submit(sub) => {
                     let mut event = Event::new(EventKind::ControllerRejected)
                         .with_id(sub.id)
+                        .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                         .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN);
                     if let Some(slot_name) = sub.spec.slot_override() {
                         event = event.with_task(slot_name.to_owned());
@@ -47,6 +48,7 @@ impl Controller {
 
                     if let Some(done) = sub.done {
                         let _ = done.send(TaskOutcome::Rejected {
+                            kind: RejectionKind::ControllerShuttingDown,
                             reason: Arc::from(crate::reasons::CONTROLLER_SHUTTING_DOWN),
                         });
                     }
@@ -76,9 +78,14 @@ impl Controller {
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
                         .with_id(id)
+                        .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                         .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
                 );
-                self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+                self.finalize_rejected(
+                    id,
+                    RejectionKind::ControllerShuttingDown,
+                    crate::reasons::CONTROLLER_SHUTTING_DOWN,
+                );
             }
         }
 

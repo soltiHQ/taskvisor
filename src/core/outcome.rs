@@ -43,6 +43,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::error::{RuntimeError, SharedError};
+use crate::events::RejectionKind;
 use crate::identity::TaskId;
 
 /// Final result of one watched task or controller submission.
@@ -143,7 +144,9 @@ pub enum TaskOutcome {
     /// - registration failed because the task name already existed.
     #[non_exhaustive]
     Rejected {
-        /// Why the submission was rejected.
+        /// Stable category for machine-readable handling.
+        kind: RejectionKind,
+        /// Readable rejection details.
         reason: Arc<str>,
     },
 }
@@ -200,14 +203,18 @@ impl TaskOutcome {
     /// ```rust
     /// use taskvisor::TaskOutcome;
     ///
-    /// let outcome = TaskOutcome::rejected_for_tests("queue_full");
+    /// let outcome = TaskOutcome::rejected_for_tests(
+    ///     taskvisor::RejectionKind::QueueFull,
+    ///     "queue_full",
+    /// );
     /// assert_eq!(outcome.as_label(), "outcome_rejected");
     /// ```
     #[cfg(feature = "test-util")]
     #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
     #[must_use]
-    pub fn rejected_for_tests(reason: impl Into<Arc<str>>) -> Self {
+    pub fn rejected_for_tests(kind: RejectionKind, reason: impl Into<Arc<str>>) -> Self {
         Self::Rejected {
+            kind,
             reason: reason.into(),
         }
     }
@@ -335,10 +342,11 @@ mod tests {
             TaskOutcome::Fatal { reason, exit_code: None, .. } if reason.as_ref() == "bad config"
         ));
 
-        let rejected = TaskOutcome::rejected_for_tests("queue_full");
+        let rejected = TaskOutcome::rejected_for_tests(RejectionKind::QueueFull, "queue_full");
         assert!(matches!(
             &rejected,
-            TaskOutcome::Rejected { reason, .. } if reason.as_ref() == "queue_full"
+            TaskOutcome::Rejected { kind: RejectionKind::QueueFull, reason, .. }
+                if reason.as_ref() == "queue_full"
         ));
         assert!(rejected.source().is_none());
     }
@@ -370,6 +378,7 @@ mod tests {
             (TaskOutcome::Panicked, "outcome_panicked", false),
             (
                 TaskOutcome::Rejected {
+                    kind: RejectionKind::AdmissionFailed,
                     reason: Arc::from("x"),
                 },
                 "outcome_rejected",

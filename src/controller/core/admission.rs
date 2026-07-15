@@ -11,7 +11,7 @@ use crate::{
         admission::AdmissionPolicy,
         slot::{AdmissionTransition, ReplaceAction, SlotPhase, SlotState},
     },
-    events::{Event, EventKind},
+    events::{Event, EventKind, RejectionKind},
     identity::TaskId,
     reasons,
 };
@@ -48,9 +48,14 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(spec.slot_name().to_owned())
                     .with_id(id)
+                    .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                     .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
             );
-            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+            self.finalize_rejected(
+                id,
+                RejectionKind::ControllerShuttingDown,
+                crate::reasons::CONTROLLER_SHUTTING_DOWN,
+            );
             return;
         }
 
@@ -65,9 +70,14 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(&slot_name))
                     .with_id(id)
+                    .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                     .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
             );
-            self.finalize_rejected(id, crate::reasons::CONTROLLER_SHUTTING_DOWN);
+            self.finalize_rejected(
+                id,
+                RejectionKind::ControllerShuttingDown,
+                crate::reasons::CONTROLLER_SHUTTING_DOWN,
+            );
             return;
         }
 
@@ -95,9 +105,10 @@ impl Controller {
                             Event::new(EventKind::ControllerRejected)
                                 .with_task(Arc::clone(&slot_name))
                                 .with_id(id)
+                                .with_rejection_kind(RejectionKind::AdmissionFailed)
                                 .with_reason(reason.clone()),
                         );
-                        self.finalize_rejected(id, &reason);
+                        self.finalize_rejected(id, RejectionKind::AdmissionFailed, &reason);
                         self.gc_if_idle(&slot_name, slot);
                     }
                 }
@@ -185,9 +196,10 @@ impl Controller {
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
                         .with_id(id)
+                        .with_rejection_kind(RejectionKind::SlotBusy)
                         .with_reason(reason.clone()),
                 );
-                self.finalize_rejected(id, &reason);
+                self.finalize_rejected(id, RejectionKind::SlotBusy, &reason);
             }
         }
     }
@@ -342,9 +354,10 @@ impl Controller {
                         Event::new(EventKind::ControllerRejected)
                             .with_task(Arc::clone(slot_name))
                             .with_id(next_id)
+                            .with_rejection_kind(RejectionKind::AdmissionFailed)
                             .with_reason(reason.clone()),
                     );
-                    self.finalize_rejected(next_id, &reason);
+                    self.finalize_rejected(next_id, RejectionKind::AdmissionFailed, &reason);
                 }
             }
         }

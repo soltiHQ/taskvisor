@@ -20,13 +20,13 @@ pub use crate::core::{
 };
 
 /// Task abstractions and task specs.
-pub use crate::tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSpec};
+pub use crate::tasks::{BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef, TaskSetting, TaskSpec};
 
 /// Restart, retry, backoff, and jitter policies.
 pub use crate::policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
 /// Runtime event types.
-pub use crate::events::{BackoffSource, Event, EventKind};
+pub use crate::events::{BackoffSource, Event, EventKind, RejectionKind};
 
 /// Runtime and task error types.
 pub use crate::error::{Error, RuntimeError, TaskError};

@@ -6,7 +6,7 @@ use tokio::{sync::oneshot, task::JoinSet};
 
 use crate::{
     RuntimeError,
-    events::{Event, EventKind},
+    events::{Event, EventKind, RejectionKind},
     identity::TaskId,
 };
 
@@ -108,9 +108,14 @@ impl Controller {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(&slot_name))
                     .with_id(id)
+                    .with_rejection_kind(RejectionKind::RemovedFromQueue)
                     .with_reason(crate::reasons::REMOVED_FROM_QUEUE),
             );
-            self.finalize_rejected(id, crate::reasons::REMOVED_FROM_QUEUE);
+            self.finalize_rejected(
+                id,
+                RejectionKind::RemovedFromQueue,
+                crate::reasons::REMOVED_FROM_QUEUE,
+            );
             self.gc_if_idle(&slot_name, slot);
             return true;
         }
