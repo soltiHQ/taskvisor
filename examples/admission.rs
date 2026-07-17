@@ -6,31 +6,26 @@
 //! `submit_and_watch` also returns a `TaskWaiter`:
 //!
 //! - an admitted task resolves to its final runtime outcome;
-//! - a task that never starts resolves to `TaskOutcome::Rejected` with a reason.
+//! - a task that never starts resolves to `TaskOutcome::Rejected` with a typed `RejectionKind` and diagnostic reason.
 //!
 //! This example shows both paths and reads a live controller snapshot.
 //! Use the waiter when rejection affects application logic.
 //! Events are best-effort and are better suited to logs and metrics.
 //!
-//! Run with
-//! `cargo run --example admission --features controller`.
-
-#[cfg(not(feature = "controller"))]
-compile_error!(
-    "This example requires the `controller` feature: cargo run --example admission --features controller"
-);
+//! Run with `cargo run --example admission`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use taskvisor::ControllerSpec;
 use taskvisor::prelude::*;
+use taskvisor::{ControllerConfig, ControllerSpec, RejectionKind};
 use tokio::sync::Notify;
 
-/// A job that runs for `dur`, observing cancellation.
-fn job(name: &'static str, dur: Duration) -> TaskSpec {
+/// A job that runs for `duration`, observing cancellation.
+fn job(name: &'static str, duration: Duration) -> TaskSpec {
     let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
-        ctx.run_until_cancelled(tokio::time::sleep(dur)).await?;
+        ctx.run_until_cancelled(tokio::time::sleep(duration))
+            .await?;
         Ok(())
     });
     TaskSpec::once(task)
@@ -52,10 +47,10 @@ fn gated_job(name: &'static str, started: Arc<Notify>, release: Arc<Notify>) -> 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sup = Supervisor::builder(SupervisorConfig::default())
-        .with_controller(taskvisor::ControllerConfig::default())
+    let supervisor = Supervisor::builder(SupervisorConfig::default())
+        .with_controller(ControllerConfig::default())
         .build();
-    let handle = sup.serve();
+    let handle = supervisor.serve();
 
     println!("Slot 'deploy' admits at most one task at a time.\n");
 
@@ -101,7 +96,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     match v2.wait().await? {
-        TaskOutcome::Rejected { reason, .. } => {
+        TaskOutcome::Rejected {
+            kind: RejectionKind::SlotBusy,
+            reason,
+            ..
+        } => {
             println!("    deploy-v2 -> Rejected ({reason}) - never ran\n");
         }
         other => println!("    deploy-v2 -> {other:?} (unexpected)\n"),
@@ -113,6 +112,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    deploy-v1 -> {:?}", v1.wait().await?);
 
     handle.shutdown().await?;
-    println!("\nDone.");
     Ok(())
 }

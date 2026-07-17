@@ -28,7 +28,7 @@ struct Metrics {
     starts: AtomicU64,
     successes: AtomicU64,
     failures: AtomicU64,
-    retries: AtomicU64,
+    backoffs: AtomicU64,
 }
 
 impl Metrics {
@@ -37,7 +37,7 @@ impl Metrics {
             starts: AtomicU64::new(0),
             successes: AtomicU64::new(0),
             failures: AtomicU64::new(0),
-            retries: AtomicU64::new(0),
+            backoffs: AtomicU64::new(0),
         }
     }
 
@@ -47,13 +47,13 @@ impl Metrics {
         println!("  starts:   {}", self.starts.load(Ordering::Relaxed));
         println!("  successes: {}", self.successes.load(Ordering::Relaxed));
         println!("  failures: {}", self.failures.load(Ordering::Relaxed));
-        println!("  retries:  {}", self.retries.load(Ordering::Relaxed));
+        println!("  backoffs: {}", self.backoffs.load(Ordering::Relaxed));
     }
 }
 
 impl Subscribe for Metrics {
-    fn on_event(&self, ev: &Event) {
-        match ev.kind {
+    fn on_event(&self, event: &Event) {
+        match event.kind {
             EventKind::AttemptStarting => {
                 self.starts.fetch_add(1, Ordering::Relaxed);
             }
@@ -64,7 +64,7 @@ impl Subscribe for Metrics {
                 self.failures.fetch_add(1, Ordering::Relaxed);
             }
             EventKind::BackoffScheduled => {
-                self.retries.fetch_add(1, Ordering::Relaxed);
+                self.backoffs.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -104,9 +104,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // restartable() uses exponential backoff from 200ms to 30s with equal jitter.
     let spec = TaskSpec::restartable(flaky);
 
-    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as _];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-    sup.run(vec![spec]).await?;
+    let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as _];
+    let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
+    supervisor.run(vec![spec]).await?;
 
     metrics.report();
     Ok(())

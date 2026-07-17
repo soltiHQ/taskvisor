@@ -74,9 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_jitter(JitterPolicy::Equal),
     );
 
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    sup.run(vec![spec]).await?;
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    supervisor.run(vec![spec]).await?;
 
-    println!("Done.");
     Ok(())
 }

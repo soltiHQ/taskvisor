@@ -26,14 +26,14 @@ struct PromSubscriber {
 }
 
 impl Subscribe for PromSubscriber {
-    fn on_event(&self, e: &Event) {
-        let task = e.task.as_deref().unwrap_or("none");
-        let outcome = e
+    fn on_event(&self, event: &Event) {
+        let task = event.task.as_deref().unwrap_or("none");
+        let outcome = event
             .outcome_kind
             .map(TaskOutcomeKind::as_label)
             .unwrap_or("none");
         self.events
-            .with_label_values(&[e.kind.as_label(), outcome, task])
+            .with_label_values(&[event.kind.as_label(), outcome, task])
             .inc();
     }
 
@@ -72,11 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = TaskSpec::restartable(flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(100)));
 
-    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(PromSubscriber {
+    let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(PromSubscriber {
         events: events.clone(),
     })];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-    sup.run(vec![spec]).await?;
+    let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
+    supervisor.run(vec![spec]).await?;
 
     // In a real service: serve this string at GET /metrics.
     let mut buf = Vec::new();

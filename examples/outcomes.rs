@@ -1,7 +1,7 @@
 //! # Outcomes: wait for the final result
 //!
 //! `add_and_watch` returns a `TaskWaiter`.
-//! The waiter resolves after the task entry has stopped, including all restarts allowed by its policy.
+//! The waiter resolves after all allowed attempts end, the managed runner is joined, and registry membership is removed.
 //!
 //! Taskvisor has two result paths:
 //!
@@ -22,11 +22,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use taskvisor::prelude::*;
+use tokio::sync::Notify;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = sup.serve();
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let handle = supervisor.serve();
 
     // 1) A one-shot job that succeeds -> Completed.
     println!("=== Completed ===");
@@ -63,17 +64,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3) A long-running worker we cancel -> Canceled.
     println!("=== Canceled ===");
-    let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
-        ctx.cancelled().await;
-        Err(TaskError::Canceled)
+    let started = Arc::new(Notify::new());
+    let worker: TaskRef = TaskFn::arc("worker", {
+        let started = Arc::clone(&started);
+        move |ctx| {
+            let started = Arc::clone(&started);
+            async move {
+                started.notify_one();
+                ctx.cancelled().await;
+                Err(TaskError::Canceled)
+            }
+        }
     });
     let (id, waiter) = handle.add_and_watch(TaskSpec::restartable(worker)).await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The task body, rather than a timer, confirms that the worker started.
+    started.notified().await;
     println!("  cancelling worker...");
     handle.cancel(id).await?;
     println!("  worker -> {:?}\n", waiter.wait().await?);
 
     handle.shutdown().await?;
-    println!("Done.");
     Ok(())
 }

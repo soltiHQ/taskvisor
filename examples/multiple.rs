@@ -75,10 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_max_retries(NonZeroU32::new(3).unwrap()),
     ];
 
-    let cfg = SupervisorConfig::default().with_grace(Duration::from_secs(5));
-    let sup = Supervisor::new(cfg, vec![]);
-    sup.run(specs).await?;
+    let config = SupervisorConfig::default().with_grace(Duration::from_secs(5));
+    let supervisor = Supervisor::new(config, vec![]);
+    supervisor.run(specs).await?;
 
-    println!("All tasks finished.");
     Ok(())
 }

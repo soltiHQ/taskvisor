@@ -1,6 +1,6 @@
 //! # Slot admission policies
 //!
-//! The optional controller groups tasks by a slot key.
+//! The controller groups tasks by a slot key.
 //! One task can run in a slot at a time.
 //! Different slot keys are independent.
 //!
@@ -14,20 +14,16 @@
 //! `with_slot` can set an explicit key.
 //! `add` bypasses the controller; `submit` uses its admission rules.
 //! An `Ok(id)` from `submit` confirms intake, not final admission.
-//! Use`submit_and_watch` when application logic needs the final result.
+//! Use `submit_and_watch` when application logic needs the final result.
 //! `Replace` does not clear the full FIFO queue; items behind the head remain.
 //!
-//! Run with `cargo run --example slots --features controller`.
-
-#[cfg(not(feature = "controller"))]
-compile_error!(
-    "This example requires the `controller` feature: cargo run --example slots --features controller"
-);
+//! Run with `cargo run --example slots`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use taskvisor::prelude::*;
+use taskvisor::{ControllerConfig, ControllerSpec};
 use tokio::sync::Notify;
 
 fn job(name: &'static str, duration: Duration) -> TaskSpec {
@@ -65,12 +61,12 @@ fn job_with_start(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sup = Supervisor::builder(SupervisorConfig::default())
-        .with_controller(taskvisor::ControllerConfig::default())
+    let supervisor = Supervisor::builder(SupervisorConfig::default())
+        .with_controller(ControllerConfig::default())
         .build();
 
     // serve() returns a handle for dynamic task submission.
-    let handle = sup.serve();
+    let handle = supervisor.serve();
 
     // Queue: tasks run sequentially
     println!("=== Queue Policy ===");
@@ -79,9 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut queued = Vec::new();
     for i in 1..=3 {
         let spec = job("queued-job", Duration::from_millis(400));
-        let (_id, waiter) = handle
-            .submit_and_watch(taskvisor::ControllerSpec::queue(spec))
-            .await?;
+        let (_id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
         queued.push(waiter);
         println!("  submitted #{i}");
     }
@@ -100,13 +94,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Arc::clone(&long_started)),
     );
     let (_long_id, long_waiter) = handle
-        .submit_and_watch(taskvisor::ControllerSpec::replace(long))
+        .submit_and_watch(ControllerSpec::replace(long))
         .await?;
     long_started.notified().await;
 
     let short = job("replace-job", Duration::from_millis(200));
     let (_short_id, short_waiter) = handle
-        .submit_and_watch(taskvisor::ControllerSpec::replace(short))
+        .submit_and_watch(ControllerSpec::replace(short))
         .await?;
     println!("  long -> {:?}", long_waiter.wait().await?);
     println!("  short -> {:?}", short_waiter.wait().await?);
@@ -122,19 +116,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Arc::clone(&first_started)),
     );
     let (_first_id, first_waiter) = handle
-        .submit_and_watch(taskvisor::ControllerSpec::drop_if_running(first))
+        .submit_and_watch(ControllerSpec::drop_if_running(first))
         .await?;
     first_started.notified().await;
 
     let second = job("drop-job", Duration::from_millis(100));
     let (_second_id, second_waiter) = handle
-        .submit_and_watch(taskvisor::ControllerSpec::drop_if_running(second))
+        .submit_and_watch(ControllerSpec::drop_if_running(second))
         .await?;
     println!("  second -> {:?}", second_waiter.wait().await?);
     println!("  first -> {:?}", first_waiter.wait().await?);
 
-    // Shutdown (consumes the handle)
-    println!("\nDone.");
+    // Joined shutdown consumes the handle.
     handle.shutdown().await?;
 
     Ok(())

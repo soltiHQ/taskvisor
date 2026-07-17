@@ -2,22 +2,17 @@
 //!
 //! A tenant is the natural admission key:
 //! - syncs for the same tenant never overlap;
-//! - a newer revision replaces stale work;
+//! - only the newest waiting revision survives replacement;
 //! - another tenant can sync independently.
 //!
 //! Reliable `TaskWaiter` outcomes, not lifecycle events, drive the decisions in this example.
 //!
-//! Run with `cargo run --example tenant_sync --features controller`.
-
-#[cfg(not(feature = "controller"))]
-compile_error!(
-    "This example requires the `controller` feature: cargo run --example tenant_sync --features controller"
-);
+//! Run with `cargo run --example tenant_sync`.
 
 use std::sync::Arc;
 
 use taskvisor::prelude::*;
-use taskvisor::{ControllerConfig, ControllerSpec};
+use taskvisor::{ControllerConfig, ControllerSpec, RejectionKind};
 use tokio::sync::Notify;
 
 #[derive(Debug)]
@@ -77,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = supervisor.serve();
 
     let tenant_42_old = SyncGate::new(true);
-    let tenant_42_new = SyncGate::new(false);
+    let tenant_42_latest = SyncGate::new(false);
     let tenant_17 = SyncGate::new(false);
 
     let (_, old_waiter) = handle
@@ -97,23 +92,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tenant_17.started.notified().await;
     println!("different tenant slots are running together\n");
 
-    let (_, new_waiter) = handle
+    let (_, pending_waiter) = handle
         .submit_and_watch(
-            ControllerSpec::replace(tenant_sync("tenant-42", 2, Arc::clone(&tenant_42_new)))
+            ControllerSpec::replace(tenant_sync("tenant-42", 2, SyncGate::new(false)))
                 .with_slot("tenant-42"),
         )
         .await?;
     tenant_42_old.cancel_observed.notified().await;
     println!("tenant-42 revision 2 waits for revision 1 cleanup\n");
 
+    let (_, latest_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::replace(tenant_sync("tenant-42", 3, Arc::clone(&tenant_42_latest)))
+                .with_slot("tenant-42"),
+        )
+        .await?;
+    match pending_waiter.wait().await? {
+        TaskOutcome::Rejected {
+            kind: RejectionKind::SupersededByReplace,
+            ..
+        } => println!("tenant-42 revision 2 -> superseded before start\n"),
+        other => panic!("unexpected tenant-42 revision 2 outcome: {other:?}"),
+    }
+
     tenant_42_old.cancel_cleanup.notify_one();
     println!("tenant-42 revision 1 -> {:?}", old_waiter.wait().await?);
-    tenant_42_new.started.notified().await;
+    tenant_42_latest.started.notified().await;
 
-    tenant_42_new.finish.notify_one();
+    tenant_42_latest.finish.notify_one();
     tenant_17.finish.notify_one();
-    let (new_outcome, other_outcome) = tokio::try_join!(new_waiter.wait(), other_waiter.wait())?;
-    println!("tenant-42 revision 2 -> {new_outcome:?}");
+    let (latest_outcome, other_outcome) =
+        tokio::try_join!(latest_waiter.wait(), other_waiter.wait())?;
+    println!("tenant-42 revision 3 -> {latest_outcome:?}");
     println!("tenant-17 revision 1 -> {other_outcome:?}");
 
     handle.shutdown().await?;

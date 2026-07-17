@@ -27,8 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let spec = TaskSpec::periodic(heartbeat, Duration::from_secs(2));
 
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    sup.run(vec![spec]).await?;
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    supervisor.run(vec![spec]).await?;
 
     Ok(())
 }

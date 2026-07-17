@@ -99,7 +99,9 @@ attempt 3
 
 Every attempt gets a fresh future. A retryable failure follows the configured backoff; a successful `restartable` task stops. `Supervisor::run` returns only after lifecycle cleanup finishes.
 
-For a resident worker that runs until Ctrl+C, see [worker.rs](examples/worker.rs). For a reconnecting queue consumer, see [queue_consumer.rs](examples/queue_consumer.rs).
+For a resident worker that runs until Ctrl+C, see [worker.rs](examples/worker.rs).
+
+For a reconnecting queue consumer, see [queue_consumer.rs](examples/queue_consumer.rs).
 
 ## One key, one owner
 
@@ -438,22 +440,46 @@ From a cloned repository checkout, run the smallest example with:
 cargo run --example basic
 ```
 
+Follow the groups in order, or jump to the pattern you need.
+
+### Start here
+
+| Example                                   | What it shows                                     |
+|-------------------------------------------|---------------------------------------------------|
+| [basic.rs](examples/basic.rs)             | One task, one run, one exit.                      |
+| [worker.rs](examples/worker.rs)           | A long-running worker with graceful cancellation. |
+| [periodic.rs](examples/periodic.rs)       | Repeated execution after an interval.             |
+| [multiple.rs](examples/multiple.rs)       | Several restart policies in one supervisor.       |
+
+### Real patterns
+
 | Example                                         | What it shows                                            |
 |-------------------------------------------------|----------------------------------------------------------|
-| [basic.rs](examples/basic.rs)                   | One task, one run, one exit.                             |
-| [worker.rs](examples/worker.rs)                 | A long-running worker with graceful cancellation.        |
-| [periodic.rs](examples/periodic.rs)             | Repeated execution after an interval.                    |
-| [multiple.rs](examples/multiple.rs)             | Several restart policies in one supervisor.              |
 | [queue_consumer.rs](examples/queue_consumer.rs) | Reconnect after a consumer failure.                      |
 | [cpu_job.rs](examples/cpu_job.rs)               | Supervise CPU-heavy work without blocking Tokio workers. |
-| [subscriber.rs](examples/subscriber.rs)         | Handle typed lifecycle events.                           |
-| [tracing.rs](examples/tracing.rs)               | Forward events to `tracing` (`tracing` feature).         |
-| [metrics.rs](examples/metrics.rs)               | Build Prometheus counters from events.                   |
-| [dynamic.rs](examples/dynamic.rs)               | Add, list, cancel, and remove tasks at runtime.          |
-| [outcomes.rs](examples/outcomes.rs)             | Await the final result of a task.                        |
-| [tenant_sync.rs](examples/tenant_sync.rs)       | Replace stale sync work per tenant (`controller`).      |
-| [slots.rs](examples/slots.rs)                   | Compare controller policies (`controller` feature).      |
-| [admission.rs](examples/admission.rs)           | Observe admission and rejection (`controller` feature).  |
+
+### Observability
+
+| Example                                   | What it shows                                    |
+|-------------------------------------------|--------------------------------------------------|
+| [subscriber.rs](examples/subscriber.rs)   | Handle typed lifecycle events.                   |
+| [tracing.rs](examples/tracing.rs)         | Forward events to `tracing` (`tracing` feature). |
+| [metrics.rs](examples/metrics.rs)         | Build Prometheus counters from events.           |
+
+### Dynamic work and outcomes
+
+| Example                               | What it shows                                   |
+|---------------------------------------|-------------------------------------------------|
+| [dynamic.rs](examples/dynamic.rs)     | Add, list, cancel, and remove tasks at runtime. |
+| [outcomes.rs](examples/outcomes.rs)   | Await the reliable final result of a task.      |
+
+### Keyed admission
+
+| Example                                         | What it shows                                      |
+|-------------------------------------------------|----------------------------------------------------|
+| [tenant_sync.rs](examples/tenant_sync.rs)       | Keep only the latest sync revision per tenant.     |
+| [slots.rs](examples/slots.rs)                   | Compare queue, replace, and drop policies.          |
+| [admission.rs](examples/admission.rs)           | Observe typed admission and rejection outcomes.    |
 
 ## Benchmarks
 
