@@ -5,7 +5,7 @@
 //! Each tracing event uses target `taskvisor` and contains:
 //! - a level based on the event severity (see [`TracingBridge`]),
 //! - structured fields: `event` (the stable label), `seq`, and the optional payload fields that are set
-//!   (`task`, `id`, `attempt`, `reason`, `delay_ms`, `timeout_ms`, `duration_ms`, `exit_code`, `backoff_source`).
+//!   (`task`, `id`, `attempt`, `reason`, `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `exit_code`, `backoff_source`).
 //!
 //! Unset optional fields are not recorded.
 //!
@@ -20,17 +20,17 @@
 
 use tracing::Level;
 
+use crate::TaskOutcomeKind;
 use crate::events::{Event, EventKind};
-use crate::reasons::MAX_RETRIES_EXCEEDED;
 use crate::subscribers::Subscribe;
 
 /// Sends runtime events to [`tracing`] as structured events.
 ///
 /// Level mapping:
-/// - `ERROR`: task failed, actor dead, subscriber panicked.
-/// - `WARN`: timeout, grace exceeded, subscriber overflow, add failed, controller rejected.
-/// - `INFO`: lifecycle milestones (stopped, canceled, added, removed, shutdown, submitted, and `actor_exhausted` for every other reason).
-/// - `DEBUG`: chatty events (starting, backoff, add/remove requests, slot transitions).
+/// - `ERROR`: failed attempts, fatal/panicked terminal outcomes, subscriber panics, runtime failures.
+/// - `WARN`: timeouts, non-fatal failed/force-aborted outcomes, grace exceeded, overflow, and rejection.
+/// - `INFO`: successful/canceled attempts and task outcomes, registration, removal, and shutdown milestones.
+/// - `DEBUG`: attempt starts, backoff, management requests, and slot transitions.
 ///
 /// ## Also
 ///
@@ -43,32 +43,32 @@ pub struct TracingBridge;
 /// Maps an event to a tracing level.
 fn level_for(e: &Event) -> Level {
     match e.kind {
-        EventKind::TaskFailed
-        | EventKind::ActorDead
-        | EventKind::SubscriberPanicked
-        | EventKind::RuntimeFailure => Level::ERROR,
+        EventKind::AttemptFailed | EventKind::SubscriberPanicked | EventKind::RuntimeFailure => {
+            Level::ERROR
+        }
 
-        EventKind::TimeoutHit
+        EventKind::AttemptTimedOut
         | EventKind::GraceExceeded
         | EventKind::SubscriberOverflow
         | EventKind::TaskAddFailed => Level::WARN,
 
-        EventKind::ActorExhausted => {
-            let gave_up = e
-                .reason
-                .as_deref()
-                .is_some_and(|r| r.starts_with(MAX_RETRIES_EXCEEDED));
-            if gave_up { Level::WARN } else { Level::INFO }
-        }
+        EventKind::TaskFinished => match e.outcome_kind {
+            Some(TaskOutcomeKind::Fatal | TaskOutcomeKind::Panicked) => Level::ERROR,
+            Some(
+                TaskOutcomeKind::Failed | TaskOutcomeKind::ForceAborted | TaskOutcomeKind::Rejected,
+            )
+            | None => Level::WARN,
+            Some(TaskOutcomeKind::Completed | TaskOutcomeKind::Canceled) => Level::INFO,
+        },
 
-        EventKind::TaskStopped
-        | EventKind::TaskCanceled
+        EventKind::AttemptSucceeded
+        | EventKind::AttemptCanceled
         | EventKind::TaskAdded
         | EventKind::TaskRemoved
         | EventKind::ShutdownRequested
         | EventKind::AllStoppedWithinGrace => Level::INFO,
 
-        EventKind::TaskStarting
+        EventKind::AttemptStarting
         | EventKind::BackoffScheduled
         | EventKind::TaskAddRequested
         | EventKind::TaskRemoveRequested => Level::DEBUG,
@@ -101,6 +101,7 @@ impl Subscribe for TracingBridge {
                     exit_code = e.exit_code.map(i64::from),
                     backoff_source = e.backoff_source.map(|s| s.as_label()),
                     rejection_kind = e.rejection_kind.map(|kind| kind.as_label()),
+                    outcome_kind = e.outcome_kind.map(TaskOutcomeKind::as_label),
                 )
             };
         }
@@ -183,16 +184,19 @@ mod tests {
     }
 
     #[test]
-    fn task_failed_maps_to_error_with_structured_fields() {
-        let e = Event::new(EventKind::TaskFailed)
+    fn attempt_failed_maps_to_error_with_structured_fields() {
+        let e = Event::new(EventKind::AttemptFailed)
             .with_task("worker")
             .with_reason("boom")
             .with_attempt(2);
 
         let (level, fields) = capture_one(&e);
 
-        assert_eq!(level, Level::ERROR, "TaskFailed must map to ERROR");
-        assert_eq!(fields.get("event").map(String::as_str), Some("task_failed"));
+        assert_eq!(level, Level::ERROR, "AttemptFailed must map to ERROR");
+        assert_eq!(
+            fields.get("event").map(String::as_str),
+            Some("attempt_failed")
+        );
         assert_eq!(fields.get("task").map(String::as_str), Some("worker"));
         assert_eq!(fields.get("reason").map(String::as_str), Some("boom"));
         assert_eq!(fields.get("attempt").map(String::as_str), Some("2"));
@@ -201,10 +205,9 @@ mod tests {
     #[test]
     fn levels_match_event_severity() {
         let cases = [
-            (EventKind::TaskStopped, Level::INFO),
-            (EventKind::TaskStarting, Level::DEBUG),
-            (EventKind::TimeoutHit, Level::WARN),
-            (EventKind::ActorDead, Level::ERROR),
+            (EventKind::AttemptSucceeded, Level::INFO),
+            (EventKind::AttemptStarting, Level::DEBUG),
+            (EventKind::AttemptTimedOut, Level::WARN),
             (EventKind::GraceExceeded, Level::WARN),
             (EventKind::BackoffScheduled, Level::DEBUG),
         ];
@@ -215,19 +218,28 @@ mod tests {
     }
 
     #[test]
-    fn actor_exhausted_level_depends_on_reason() {
-        for (reason, expected) in [
-            (Some("max_retries_exceeded(3/3): boom"), Level::WARN),
-            (Some("policy_exhausted_success"), Level::INFO),
-            (Some("task_returned_canceled"), Level::INFO),
-            (None, Level::INFO),
+    fn task_finished_level_and_field_depend_on_outcome_kind() {
+        for (outcome_kind, expected) in [
+            (TaskOutcomeKind::Completed, Level::INFO),
+            (TaskOutcomeKind::Canceled, Level::INFO),
+            (TaskOutcomeKind::Failed, Level::WARN),
+            (TaskOutcomeKind::ForceAborted, Level::WARN),
+            (TaskOutcomeKind::Rejected, Level::WARN),
+            (TaskOutcomeKind::Fatal, Level::ERROR),
+            (TaskOutcomeKind::Panicked, Level::ERROR),
         ] {
-            let mut e = Event::new(EventKind::ActorExhausted).with_task("worker");
-            if let Some(reason) = reason {
-                e = e.with_reason(reason);
-            }
+            let e = Event::new(EventKind::TaskFinished)
+                .with_task("worker")
+                .with_outcome_kind(outcome_kind)
+                .with_reason("free-form diagnostic text");
             let (level, _) = capture_one(&e);
-            assert_eq!(level, expected, "wrong level for reason {reason:?}");
+            assert_eq!(level, expected, "wrong level for {outcome_kind:?}");
+
+            let (_, fields) = capture_one(&e);
+            assert_eq!(
+                fields.get("outcome_kind").map(String::as_str),
+                Some(outcome_kind.as_label())
+            );
         }
     }
 
@@ -250,6 +262,8 @@ mod tests {
             "duration_ms",
             "exit_code",
             "backoff_source",
+            "rejection_kind",
+            "outcome_kind",
         ] {
             assert!(
                 !fields.contains_key(absent),

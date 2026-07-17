@@ -26,8 +26,17 @@ impl ControllerHandle {
     /// `Ok(id)` means the channel accepted the command.
     ///
     /// The controller may not have applied the admission policy yet, and runtime admission happens later.
+    #[cfg(test)]
     pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
+        self.submit_prepared(id, spec).await
+    }
+
+    pub(crate) async fn submit_prepared(
+        &self,
+        id: TaskId,
+        spec: ControllerSpec,
+    ) -> Result<TaskId, ControllerError> {
         self.tx
             .send(ControllerCommand::Submit(Submission {
                 id,
@@ -43,8 +52,17 @@ impl ControllerHandle {
     ///
     /// `ControllerError::Full` means the controller command channel is full.
     /// It does not mean the target slot queue is full.
+    #[cfg(test)]
     pub fn try_submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
+        self.try_submit_prepared(id, spec)
+    }
+
+    pub(crate) fn try_submit_prepared(
+        &self,
+        id: TaskId,
+        spec: ControllerSpec,
+    ) -> Result<TaskId, ControllerError> {
         self.tx
             .try_send(ControllerCommand::Submit(Submission {
                 id,
@@ -66,11 +84,20 @@ impl ControllerHandle {
     ///
     /// `Ok((id, rx))` means the channel accepted the command.
     /// The controller may not have applied the slot policy yet.
+    #[cfg(test)]
     pub async fn submit_and_watch(
         &self,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
         let id = TaskId::next();
+        self.submit_prepared_and_watch(id, spec).await
+    }
+
+    pub(crate) async fn submit_prepared_and_watch(
+        &self,
+        id: TaskId,
+        spec: ControllerSpec,
+    ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ControllerCommand::Submit(Submission {
@@ -88,11 +115,20 @@ impl ControllerHandle {
     /// The returned receiver has the same completion semantics as [`submit_and_watch`](Self::submit_and_watch).
     ///
     /// `ControllerError::Full` means the controller command channel is full, not that the target slot rejected the submission.
+    #[cfg(test)]
     pub fn try_submit_and_watch(
         &self,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
         let id = TaskId::next();
+        self.try_submit_prepared_and_watch(id, spec)
+    }
+
+    pub(crate) fn try_submit_prepared_and_watch(
+        &self,
+        id: TaskId,
+        spec: ControllerSpec,
+    ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .try_send(ControllerCommand::Submit(Submission {

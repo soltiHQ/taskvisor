@@ -3,12 +3,13 @@
 //! Events describe what Taskvisor is doing.
 //! Use them for logs, metrics, dashboards, alerts, and tests.
 //!
-//! | Type              | Role                                       |
-//! |-------------------|--------------------------------------------|
-//! | [`EventKind`]     | Event classification                       |
-//! | [`Event`]         | Event payload and metadata                 |
-//! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
-//! | [`RejectionKind`] | Machine-readable submission rejection      |
+//! | Type                                        | Role                                       |
+//! |---------------------------------------------|--------------------------------------------|
+//! | [`EventKind`]                               | Event classification                       |
+//! | [`Event`]                                   | Event payload and metadata                 |
+//! | [`BackoffSource`]                           | Why a `BackoffScheduled` event was emitted |
+//! | [`RejectionKind`]                           | Machine-readable submission rejection      |
+//! | [`TaskOutcomeKind`](crate::TaskOutcomeKind) | Machine-readable final outcome             |
 //!
 //! ## Events and final outcomes are different
 //!
@@ -30,29 +31,29 @@
 //!
 //! ```text
 //! Add:
-//!   TaskAddRequested ──► TaskAdded ──► TaskStarting
+//!   TaskAddRequested ──► TaskAdded ──► AttemptStarting
 //!                   └──► TaskAddFailed
 //!
 //! Attempt:
-//!   TaskStarting ──► TaskStopped
-//!              ├──► TaskCanceled
-//!              ├──► TaskFailed
-//!              └──► TimeoutHit ──► TaskFailed
+//!   AttemptStarting ──► AttemptSucceeded
+//!              ├──► AttemptCanceled ──► TaskFinished(Canceled)
+//!              ├──► AttemptFailed
+//!              └──► AttemptTimedOut
 //!
 //! Successful attempt:
-//!   TaskStopped ──► ActorExhausted
-//!              ├──► BackoffScheduled(Success) ──► TaskStarting
-//!              └──► TaskStarting (Always without an interval)
+//!   AttemptSucceeded ──► TaskFinished(Completed)
+//!              ├──► BackoffScheduled(Success) ──► AttemptStarting
+//!              └──► AttemptStarting (Always without an interval)
 //!
-//! Retryable failure:
-//!   TaskFailed ──► BackoffScheduled(Failure) ──► TaskStarting
-//!             └──► ActorExhausted
+//! Retryable failure or configured timeout:
+//!   AttemptFailed | AttemptTimedOut ──► BackoffScheduled(Failure) ──► AttemptStarting
+//!                                  └──► TaskFinished(Failed)
 //!
 //! Fatal failure:
-//!   TaskFailed ──► ActorDead
+//!   AttemptFailed ──► TaskFinished(Fatal)
 //!
 //! Registry cleanup:
-//!   [optional TaskRemoveRequested] ──► TaskRemoved
+//!   [optional TaskRemoveRequested] ──► TaskFinished ──► TaskRemoved
 //!
 //! Queued controller removal (feature `controller`):
 //!   TaskRemoveRequested ──► ControllerRejected(RemovedFromQueue)
@@ -66,13 +67,16 @@
 //!
 //! ## Read the Stream Safely
 //!
-//! - [`TaskFailed`](EventKind::TaskFailed) describes one attempt.
-//!   The task may retry. [`ActorExhausted`](EventKind::ActorExhausted) and [`ActorDead`](EventKind::ActorDead) mean that no more attempts will start.
+//! - [`AttemptFailed`](EventKind::AttemptFailed) describes one attempt.
+//!   The task may retry. [`TaskFinished`](EventKind::TaskFinished) means that a registered task has reached its final [`TaskOutcomeKind`](crate::TaskOutcomeKind).
+//!   Cancellation while waiting for a permit or backoff can produce `TaskFinished(Canceled)` without an `AttemptCanceled` event.
 //! - [`Event::seq`] is process-local construction order.
 //!   It can help sort events and detect gaps, but it is not a causal clock.
 //! - Use [`EventKind::as_label`] for a stable telemetry label.
-//!   Treat free-form [`Event::reason`] text as diagnostic unless it is documented in [`reasons`](crate::reasons).
+//!   Treat free-form [`Event::reason`] text as diagnostic, never as schema.
+//!   Use [`TaskOutcomeKind`](crate::TaskOutcomeKind) and [`RejectionKind`] for machine decisions.
 //! - Use [`RejectionKind`] for machine-readable handling of `TaskAddFailed` and `ControllerRejected`.
+//!   Rejected work never enters the registry, so it has no `TaskFinished` or `TaskRemoved` event.
 //!
 //! ## Subscribers
 //!

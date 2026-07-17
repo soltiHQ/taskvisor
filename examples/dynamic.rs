@@ -44,16 +44,17 @@ fn make_worker(name: &'static str) -> TaskSpec {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 
     // serve() starts listeners and returns a handle for dynamic management.
-    let handle = sup.serve();
+    let handle = supervisor.serve();
 
     // Add workers dynamically
     println!("Adding worker-a and worker-b...");
     let id_a = handle.add(make_worker("worker-a")).await?;
     let id_b = handle.add(make_worker("worker-b")).await?;
 
+    // Demo pacing only: add() has already confirmed registration.
     tokio::time::sleep(Duration::from_secs(1)).await;
     println!("Active: {:?}", handle.list().await);
 
@@ -71,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add worker-c
     println!("\nAdding worker-c...");
     handle.add(make_worker("worker-c")).await?;
+    // Demo pacing only: let the terminal show a worker-c tick.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Cancel worker-b
@@ -82,12 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handle.is_alive("worker-b").await
     );
 
+    // Demo pacing only: let worker-c keep ticking before the final snapshot.
     tokio::time::sleep(Duration::from_millis(500)).await;
     println!("\nActive: {:?}", handle.list().await);
 
     // Graceful shutdown (consumes the handle)
     println!("\nShutting down...");
     handle.shutdown().await?;
-    println!("Done.");
     Ok(())
 }

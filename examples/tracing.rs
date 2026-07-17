@@ -8,11 +8,6 @@
 //!
 //! Run with `cargo run --example tracing --features tracing`.
 
-#[cfg(not(feature = "tracing"))]
-compile_error!(
-    "This example requires the `tracing` feature: cargo run --example tracing --features tracing"
-);
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -50,9 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(100)));
 
     // One line: supervisor events flow into your log pipeline.
-    let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
-    let sup = Supervisor::new(SupervisorConfig::default(), subs);
-    sup.run(vec![spec]).await?;
+    let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
+    let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
+    supervisor.run(vec![spec]).await?;
 
     Ok(())
 }

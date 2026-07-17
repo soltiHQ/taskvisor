@@ -68,7 +68,7 @@ impl Controller {
     /// Removes one queued, not-yet-admitted submission by identity.
     ///
     /// Returns `true` only when this call claimed the queued submission.
-    /// A claimed watched submission resolves as `Rejected("removed_from_queue")` because its task body never ran.
+    /// A claimed watched submission resolves as `Rejected { kind: RemovedFromQueue, .. }` because its task body never ran.
     async fn remove_queued_submission(
         &self,
         id: TaskId,

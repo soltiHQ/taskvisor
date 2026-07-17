@@ -24,13 +24,13 @@
 //!
 //! - Lifecycle events create and update entries. Reconciliation can remove them.
 //! - While an entry exists, events with `seq <= last_seq` for the same key are ignored as stale.
-//! - `TaskStarting` marks the current attempt as alive.
+//! - `AttemptStarting` marks the current attempt as alive.
 //! - Stop, failure, cancellation, and actor-end events mark it as not alive.
 //! - `TaskRemoved` deletes the cache entry.
 //! - `reconcile` removes identities no longer present in the registry.
 //! - Queries can lag or miss state because event delivery is best-effort.
 //!
-//! Alive means that the latest applied lifecycle event for a task run is `TaskStarting`.
+//! Alive means that the latest applied lifecycle event for a task run is `AttemptStarting`.
 //! A registered task can be marked not alive while it waits for a permit, retry, successful restart, or terminal cleanup.
 
 use std::{
@@ -93,18 +93,18 @@ impl AliveTracker {
     /// Events are applied only when `ev.seq > last_seq` for the same cache key ([`TaskId`] when present, otherwise the task name):
     ///
     /// ```text
-    /// update(TaskStopped,  seq=100) -> alive=false, last_seq=100
-    /// update(TaskStarting, seq=99)  -> ignored as stale
+    /// update(AttemptSucceeded,  seq=100) -> alive=false, last_seq=100
+    /// update(AttemptStarting, seq=99)  -> ignored as stale
     /// ```
     pub async fn update(&self, ev: &Event) -> bool {
         let relevant = matches!(
             ev.kind,
-            EventKind::TaskStarting
-                | EventKind::TaskStopped
-                | EventKind::TaskCanceled
-                | EventKind::TaskFailed
-                | EventKind::ActorExhausted
-                | EventKind::ActorDead
+            EventKind::AttemptStarting
+                | EventKind::AttemptSucceeded
+                | EventKind::AttemptCanceled
+                | EventKind::AttemptFailed
+                | EventKind::AttemptTimedOut
+                | EventKind::TaskFinished
                 | EventKind::TaskRemoved
         );
         if !relevant {
@@ -144,12 +144,12 @@ impl AliveTracker {
         }
 
         let next_alive = match ev.kind {
-            EventKind::TaskStarting => true,
-            EventKind::TaskStopped
-            | EventKind::TaskCanceled
-            | EventKind::TaskFailed
-            | EventKind::ActorExhausted
-            | EventKind::ActorDead => false,
+            EventKind::AttemptStarting => true,
+            EventKind::AttemptSucceeded
+            | EventKind::AttemptCanceled
+            | EventKind::AttemptFailed
+            | EventKind::AttemptTimedOut
+            | EventKind::TaskFinished => false,
             _ => entry.alive,
         };
 
@@ -216,7 +216,7 @@ mod tests {
             .update(&evi(EventKind::BackoffScheduled, "slot-name", 1, id))
             .await;
         tracker
-            .update(&evi(EventKind::TaskStarting, "real-name", 2, id))
+            .update(&evi(EventKind::AttemptStarting, "real-name", 2, id))
             .await;
 
         assert!(
@@ -236,10 +236,10 @@ mod tests {
         let new = crate::identity::TaskId::next();
 
         tracker
-            .update(&evi(EventKind::TaskStarting, "x", 1, old))
+            .update(&evi(EventKind::AttemptStarting, "x", 1, old))
             .await;
         tracker
-            .update(&evi(EventKind::TaskStarting, "x", 3, new))
+            .update(&evi(EventKind::AttemptStarting, "x", 3, new))
             .await;
         tracker
             .update(&evi(EventKind::TaskRemoved, "x", 4, old))
@@ -264,10 +264,12 @@ mod tests {
     async fn stale_and_equal_sequence_events_are_rejected() {
         for (incoming_seq, case) in [(99, "stale"), (100, "equal")] {
             let tracker = AliveTracker::new();
-            tracker.update(&ev(EventKind::TaskStopped, "t1", 100)).await;
+            tracker
+                .update(&ev(EventKind::AttemptSucceeded, "t1", 100))
+                .await;
 
             let changed = tracker
-                .update(&ev(EventKind::TaskStarting, "t1", incoming_seq))
+                .update(&ev(EventKind::AttemptStarting, "t1", incoming_seq))
                 .await;
             assert!(!changed, "{case} event must not change state");
             assert!(
@@ -281,8 +283,10 @@ mod tests {
     async fn task_removed_deletes_entry() {
         let tracker = AliveTracker::new();
         assert!(
-            tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await,
-            "first TaskStarting should change alive from false to true"
+            tracker
+                .update(&ev(EventKind::AttemptStarting, "t1", 1))
+                .await,
+            "first AttemptStarting should change alive from false to true"
         );
         assert!(tracker.is_alive("t1").await);
 
@@ -290,14 +294,18 @@ mod tests {
         assert!(changed, "TaskRemoved should report change");
         assert!(!tracker.is_alive("t1").await);
 
-        tracker.update(&ev(EventKind::TaskStarting, "t1", 3)).await;
+        tracker
+            .update(&ev(EventKind::AttemptStarting, "t1", 3))
+            .await;
         assert!(tracker.is_alive("t1").await, "fresh entry after removal");
     }
 
     #[tokio::test]
     async fn stale_task_removed_ignored() {
         let tracker = AliveTracker::new();
-        tracker.update(&ev(EventKind::TaskStarting, "t1", 10)).await;
+        tracker
+            .update(&ev(EventKind::AttemptStarting, "t1", 10))
+            .await;
 
         let changed = tracker.update(&ev(EventKind::TaskRemoved, "t1", 5)).await;
         assert!(!changed);
@@ -319,16 +327,16 @@ mod tests {
     async fn snapshot_returns_alive_sorted() {
         let tracker = AliveTracker::new();
         tracker
-            .update(&ev(EventKind::TaskStarting, "charlie", 1))
+            .update(&ev(EventKind::AttemptStarting, "charlie", 1))
             .await;
         tracker
-            .update(&ev(EventKind::TaskStarting, "alpha", 2))
+            .update(&ev(EventKind::AttemptStarting, "alpha", 2))
             .await;
         tracker
-            .update(&ev(EventKind::TaskStarting, "bravo", 3))
+            .update(&ev(EventKind::AttemptStarting, "bravo", 3))
             .await;
         tracker
-            .update(&ev(EventKind::TaskStopped, "bravo", 4))
+            .update(&ev(EventKind::AttemptSucceeded, "bravo", 4))
             .await;
 
         let alive = tracker.snapshot().await;
@@ -339,7 +347,7 @@ mod tests {
     #[tokio::test]
     async fn event_without_task_name_ignored() {
         let tracker = AliveTracker::new();
-        let mut e = Event::new(EventKind::TaskStarting);
+        let mut e = Event::new(EventKind::AttemptStarting);
         e.seq = 1;
         let changed = tracker.update(&e).await;
         assert!(!changed);
@@ -349,7 +357,9 @@ mod tests {
     #[tokio::test]
     async fn non_lifecycle_event_is_ignored_and_keeps_alive() {
         let tracker = AliveTracker::new();
-        tracker.update(&ev(EventKind::TaskStarting, "t1", 1)).await;
+        tracker
+            .update(&ev(EventKind::AttemptStarting, "t1", 1))
+            .await;
 
         let changed = tracker
             .update(&ev(EventKind::BackoffScheduled, "t1", 2))
@@ -357,22 +367,26 @@ mod tests {
         assert!(!changed, "non-lifecycle event should be ignored");
         assert!(tracker.is_alive("t1").await);
 
-        let changed = tracker.update(&ev(EventKind::TaskStopped, "t1", 2)).await;
-        assert!(changed, "TaskStopped with seq=2 should still apply");
+        let changed = tracker
+            .update(&ev(EventKind::AttemptSucceeded, "t1", 2))
+            .await;
+        assert!(changed, "AttemptSucceeded with seq=2 should still apply");
         assert!(!tracker.is_alive("t1").await);
     }
 
     #[tokio::test]
     async fn all_death_events_set_alive_false() {
         for kind in [
-            EventKind::TaskStopped,
-            EventKind::TaskCanceled,
-            EventKind::TaskFailed,
-            EventKind::ActorExhausted,
-            EventKind::ActorDead,
+            EventKind::AttemptSucceeded,
+            EventKind::AttemptCanceled,
+            EventKind::AttemptFailed,
+            EventKind::AttemptTimedOut,
+            EventKind::TaskFinished,
         ] {
             let tracker = AliveTracker::new();
-            tracker.update(&ev(EventKind::TaskStarting, "t", 1)).await;
+            tracker
+                .update(&ev(EventKind::AttemptStarting, "t", 1))
+                .await;
             let changed = tracker.update(&ev(kind, "t", 2)).await;
             assert!(changed, "{kind:?} should set alive=false");
             assert!(
@@ -389,10 +403,10 @@ mod tests {
         let orphan = crate::identity::TaskId::next();
 
         tracker
-            .update(&evi(EventKind::TaskStarting, "kept", 1, kept))
+            .update(&evi(EventKind::AttemptStarting, "kept", 1, kept))
             .await;
         tracker
-            .update(&evi(EventKind::TaskStarting, "orphan", 2, orphan))
+            .update(&evi(EventKind::AttemptStarting, "orphan", 2, orphan))
             .await;
         assert!(tracker.is_alive("orphan").await);
 

@@ -1,9 +1,9 @@
 //! # taskvisor
 //!
-//! Taskvisor supervises long-running Tokio tasks.
-//! It can restart failed work, slow down retries, time out each attempt, and stop tasks during shutdown.
+//! Taskvisor is an in-process Tokio task supervisor with retries, reliable outcomes, and keyed queue/replace/reject admission.
+//! It can time out attempts, stop tasks during shutdown, and dynamically manage work.
 //!
-//! Use it for workers, consumers, connection loops, and other background work that should have a clear lifecycle.
+//! Use it for dynamic or keyed background work that needs conflict handling and a clear lifecycle.
 //!
 //! ## Start Here
 //!
@@ -75,7 +75,7 @@
 //! it returns a runtime error if the completion channel closes first.
 //!
 //! Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast `try_*` form.
-//! With the `controller` feature, use `submit_and_watch` or `try_submit_and_watch`.
+//! With a configured controller, use `submit_and_watch` or `try_submit_and_watch`.
 //!
 //! ## Quick Start
 //!
@@ -98,47 +98,81 @@
 //!
 //! ## Main Types
 //!
-//! | Need             | Types                                                  |
-//! |------------------|--------------------------------------------------------|
-//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]    |
-//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                   |
-//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                 |
-//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`] |
-//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                |
-//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`]                        |
-//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]             |
+//! | Need             | Types                                                          |
+//! |------------------|----------------------------------------------------------------|
+//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]            |
+//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                           |
+//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                         |
+//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]         |
+//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                        |
+//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]           |
+//! | Admit keyed work | [`ControllerSpec`], [`PreparedSubmission`], [`AdmissionPolicy`], [`ControllerConfig`] |
+//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]                     |
 //!
 //! Main types are re-exported at the crate root.
 //! The module pages explain each area in more detail:
 //! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], and [`identity`].
 //!
-//! ## Optional Features
+//! ## Keyed Admission
+//!
+//! The default `controller` feature provides per-slot admission. Configure it with
+//! [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`] that
+//! queues, replaces, or rejects work when the slot already has an owner.
+//! Different slots are independent, subject to the supervisor's global limits.
+//!
+//! ## Feature Flags
 //!
 //! - `tracing`: forwards lifecycle events to `tracing`.
 //! - `logging`: simple event logging for examples and development.
 //! - `tokio-util-interop`: exposes the underlying Tokio cancellation token.
-//! - `controller`: slot-based admission with queue, replace, and reject rules.
+//! - `controller` (default): slot-based admission with queue, replace, and reject rules.
 //! - `test-util`: constructors for task contexts, identities, and outcomes in tests.
 //!
 //! ## Examples
 //!
-//! Repository examples go from simple to advanced ([browse them on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples)):
+//! Choose a short path, or [browse all examples on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples):
 //!
-//! | Example                                                                                     | What it shows                                                     |
-//! |---------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
-//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                   | Run one task and exit — the minimal wiring                        |
-//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)                 | A long-running worker that stops cleanly on Ctrl+C                |
-//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)             | Repeat a job after each successful cycle                          |
-//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)             | Several tasks with different restart rules under one supervisor   |
-//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | A message consumer that reconnects after failures                 |
-//! | [cpu_job](https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs)               | Run CPU-heavy work on rayon, supervised, without blocking Tokio   |
-//! | [subscriber](https://github.com/soltiHQ/taskvisor/blob/main/examples/subscriber.rs)         | React to lifecycle events with your own handler                   |
-//! | [tracing](https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs)               | Send supervisor events into your logs (feature `tracing`)         |
-//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)               | Count lifecycle events as Prometheus metrics                      |
-//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)               | Add, cancel, and remove tasks while the app is running            |
-//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)             | Wait for a task's final result: done, failed, or canceled         |
-//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                   | Limit concurrency per slot: queue, replace, or drop the newcomer  |
-//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)           | Find out if your submission ran or was rejected                   |
+//! - New to supervision: `basic` → `worker` → `outcomes`.
+//! - Need per-key coordination: `tenant_sync` → `slots` → `admission`.
+//!
+//! ### Start here
+//!
+//! | Example                                                                                   | What it shows                                                   |
+//! |-------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                 | Run one task and exit — the minimal wiring                      |
+//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)               | A long-running worker that stops cleanly on Ctrl+C              |
+//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)           | Repeat a job after each successful cycle                        |
+//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)           | Several restart rules under one supervisor                      |
+//!
+//! ### Real patterns
+//!
+//! | Example                                                                                     | What it shows                                                   |
+//! |---------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | Retry a failed broker connection                                |
+//! | [cpu_job](https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs)               | Run CPU-heavy work on rayon without blocking Tokio              |
+//!
+//! ### Observability
+//!
+//! | Example                                                                                 | What it shows                                             |
+//! |-----------------------------------------------------------------------------------------|-----------------------------------------------------------|
+//! | [subscriber](https://github.com/soltiHQ/taskvisor/blob/main/examples/subscriber.rs)     | React to lifecycle events with your own handler           |
+//! | [tracing](https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs)           | Send events into `tracing` (feature `tracing`)            |
+//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)           | Build Prometheus counters from lifecycle events           |
+//!
+//! ### Dynamic work and outcomes
+//!
+//! | Example                                                                                 | What it shows                                            |
+//! |-----------------------------------------------------------------------------------------|----------------------------------------------------------|
+//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)           | Add, list, cancel, and remove tasks at runtime           |
+//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)         | Wait for reliable outcomes, including a timeout          |
+//!
+//! ### Keyed admission
+//!
+//! | Example                                                                                       | What it shows                                         |
+//! |-----------------------------------------------------------------------------------------------|-------------------------------------------------------|
+//! | [tenant_sync](https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs)         | Keep only the latest sync revision per tenant         |
+//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                     | Compare queue, replace, and reject policies           |
+//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)             | Observe typed admission and rejection outcomes       |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -152,7 +186,7 @@ struct ReadmeDoctests;
 pub mod core;
 pub use core::{
     ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
-    TaskOutcome, TaskWaiter,
+    TaskOutcome, TaskOutcomeKind, TaskWaiter,
 };
 
 pub mod tasks;
@@ -175,7 +209,7 @@ pub use identity::TaskId;
 
 pub mod prelude;
 
-pub mod reasons;
+pub(crate) mod reasons;
 
 #[cfg(feature = "controller")]
 #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
@@ -184,7 +218,7 @@ pub mod controller;
 #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
-    SlotStatusKind, SlotView,
+    PreparedSubmission, SlotStatusKind, SlotView,
 };
 
 #[cfg(feature = "logging")]

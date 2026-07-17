@@ -50,6 +50,7 @@ use crate::TaskSpec;
 ///
 /// - [`AdmissionPolicy`] - how concurrent submissions to the same slot are handled
 /// - [`TaskSpec`] - task restart, backoff, timeout, and retry settings
+/// - [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission) - reserve the submission identity before events can start
 /// - [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) - submit without waiting for the final outcome
 /// - [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) - submit and get a [`TaskWaiter`](crate::TaskWaiter) for the final [`TaskOutcome`](crate::TaskOutcome)
 #[derive(Clone)]

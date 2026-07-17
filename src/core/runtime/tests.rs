@@ -227,7 +227,7 @@ async fn subscriber_listener_reports_bus_lag_as_overflow() {
 
     for i in 0..500 {
         core.bus
-            .publish(Event::new(EventKind::TaskStarting).with_task(format!("f{i}")));
+            .publish(Event::new(EventKind::AttemptStarting).with_task(format!("f{i}")));
     }
 
     let saw_lag = timeout(
@@ -261,7 +261,7 @@ async fn drain_pending_delivers_retained_tail_after_a_lag_gap() {
     set.start();
 
     for i in 0..5 {
-        bus.publish(Event::new(EventKind::TaskStarting).with_task(format!("t{i}")));
+        bus.publish(Event::new(EventKind::AttemptStarting).with_task(format!("t{i}")));
     }
 
     SupervisorCore::drain_pending(&mut rx, &alive, &set).await;
@@ -271,7 +271,7 @@ async fn drain_pending_delivers_retained_tail_after_a_lag_gap() {
     assert!(
         delivered
             .iter()
-            .any(|e| e.kind == EventKind::TaskStarting && e.task.as_deref() == Some("t4")),
+            .any(|e| e.kind == EventKind::AttemptStarting && e.task.as_deref() == Some("t4")),
         "newest retained event must reach subscribers despite a lag gap"
     );
 }
@@ -394,7 +394,7 @@ async fn shutdown_panic_still_runs_cleanup_before_caching_result() {
 
     let delivered_before_probe = seen.lock().unwrap().len();
     core.subs.emit_arc(Arc::new(
-        Event::new(EventKind::TaskStarting).with_task("closed-probe"),
+        Event::new(EventKind::AttemptStarting).with_task("closed-probe"),
     ));
     assert_eq!(
         seen.lock().unwrap().len(),
@@ -1285,7 +1285,7 @@ async fn static_run_batch_uses_one_queue_slot_with_lagged_observer() {
     let mut stale_events = core.bus.subscribe();
     for index in 0..4 {
         core.bus
-            .publish(Event::new(EventKind::TaskStarting).with_task(format!("noise-{index}")));
+            .publish(Event::new(EventKind::AttemptStarting).with_task(format!("noise-{index}")));
     }
     assert!(matches!(
         stale_events.try_recv(),
@@ -1547,7 +1547,7 @@ async fn cancel_uses_registry_completion_when_event_bus_lags() {
 
     for _ in 0..16 {
         core.bus
-            .publish(Event::new(EventKind::TaskStarting).with_task("noise"));
+            .publish(Event::new(EventKind::AttemptStarting).with_task("noise"));
     }
     assert!(
         matches!(stale_events.try_recv(), Err(TryRecvError::Lagged(_))),

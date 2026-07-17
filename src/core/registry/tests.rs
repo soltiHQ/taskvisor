@@ -292,7 +292,7 @@ async fn add_reply_commits_state_without_event_confirmation() {
     assert_eq!(registry.list().await, vec![(id, Arc::from("reply-add"))]);
 
     for _ in 0..4 {
-        bus.publish(Event::new(EventKind::TaskStarting).with_task("noise"));
+        bus.publish(Event::new(EventKind::AttemptStarting).with_task("noise"));
     }
     assert!(
         matches!(stale_events.try_recv(), Err(TryRecvError::Lagged(_))),
@@ -363,7 +363,7 @@ async fn single_add_publishes_added_before_starting() {
         let entry = order.entry(id).or_default();
         match event.kind {
             EventKind::TaskAdded => entry.0 = Some(position),
-            EventKind::TaskStarting => {
+            EventKind::AttemptStarting => {
                 entry.1.get_or_insert(position);
             }
             _ => {}
@@ -373,10 +373,10 @@ async fn single_add_publishes_added_before_starting() {
     assert_eq!(order.len(), TASKS, "every registration must be observed");
     for (id, (added, starting)) in order {
         let added = added.unwrap_or_else(|| panic!("{id} is missing TaskAdded"));
-        let starting = starting.unwrap_or_else(|| panic!("{id} is missing TaskStarting"));
+        let starting = starting.unwrap_or_else(|| panic!("{id} is missing AttemptStarting"));
         assert!(
             added < starting,
-            "{id} delivered TaskStarting before TaskAdded: added={added}, starting={starting}"
+            "{id} delivered AttemptStarting before TaskAdded: added={added}, starting={starting}"
         );
     }
 
@@ -449,7 +449,7 @@ async fn dropped_batch_reply_still_starts_after_all_added_events() {
         .collect();
     let starting: Vec<_> = observed
         .iter()
-        .filter(|event| event.kind == EventKind::TaskStarting)
+        .filter(|event| event.kind == EventKind::AttemptStarting)
         .collect();
     assert_eq!(added.len(), 2);
     assert_eq!(starting.len(), 2);
@@ -799,8 +799,10 @@ async fn concurrent_cancel_commands_share_one_terminal_completion() {
     assert!(decisions.iter().all(|decision| !decision.is_complete()));
     assert!(registry.contains(id).await);
     assert!(
-        std::iter::from_fn(|| events.try_recv().ok())
-            .all(|event| event.id != Some(id) || event.kind != EventKind::TaskRemoved),
+        std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.id != Some(id)
+                || !matches!(event.kind, EventKind::TaskFinished | EventKind::TaskRemoved)
+        }),
         "terminal cleanup cannot happen before the task is released"
     );
 
@@ -813,13 +815,19 @@ async fn concurrent_cancel_commands_share_one_terminal_completion() {
     tokio::time::timeout(Duration::from_secs(2), registry.wait_until_empty())
         .await
         .expect("terminal cleanup must remove the task");
-    let removed = std::iter::from_fn(|| events.try_recv().ok())
-        .filter(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
-        .count();
+    let terminal: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| {
+            event.id == Some(id)
+                && matches!(event.kind, EventKind::TaskFinished | EventKind::TaskRemoved)
+        })
+        .collect();
+    assert_eq!(terminal.len(), 2);
+    assert_eq!(terminal[0].kind, EventKind::TaskFinished);
     assert_eq!(
-        removed, 1,
-        "shared cancellation must publish one terminal event"
+        terminal[0].outcome_kind,
+        Some(crate::TaskOutcomeKind::Canceled)
     );
+    assert_eq!(terminal[1].kind, EventKind::TaskRemoved);
 
     stop_registry(&registry, &token).await;
 }
@@ -1192,9 +1200,10 @@ async fn forged_terminal_event_does_not_remove_running_actor() {
     );
 
     bus.publish(
-        Event::new(EventKind::ActorExhausted)
+        Event::new(EventKind::TaskFinished)
             .with_task("ignore-terminal-event")
-            .with_id(id),
+            .with_id(id)
+            .with_outcome_kind(crate::TaskOutcomeKind::Completed),
     );
 
     let barrier_id = TaskId::next();
@@ -1260,17 +1269,20 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
             .is_empty()
     );
 
-    let mut actor_dead = 0;
+    let mut task_finished = 0;
     let mut task_removed = 0;
     while let Ok(event) = events.try_recv() {
-        if event.id == Some(id) && event.kind == EventKind::ActorDead {
-            actor_dead += 1;
+        if event.id == Some(id)
+            && event.kind == EventKind::TaskFinished
+            && event.outcome_kind == Some(crate::TaskOutcomeKind::Panicked)
+        {
+            task_finished += 1;
         }
         if event.id == Some(id) && event.kind == EventKind::TaskRemoved {
             task_removed += 1;
         }
     }
-    assert_eq!(actor_dead, 1);
+    assert_eq!(task_finished, 1);
     assert_eq!(task_removed, 1);
 
     stop_registry(&registry, &token).await;
@@ -1319,13 +1331,23 @@ async fn remove_path_owns_cleanup_when_completion_signal_arrives() {
         receive_reply(send_remove(&tx, TaskId::next()), "completion barrier reply",).await,
         Ok(false)
     ));
-    let removed_count = std::iter::from_fn(|| events.try_recv().ok())
-        .filter(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
-        .count();
+    let terminal: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| {
+            event.id == Some(id)
+                && matches!(event.kind, EventKind::TaskFinished | EventKind::TaskRemoved)
+        })
+        .collect();
     assert_eq!(
-        removed_count, 1,
-        "stale completion signal must not duplicate terminal cleanup"
+        terminal.len(),
+        2,
+        "stale completion must not duplicate events"
     );
+    assert_eq!(terminal[0].kind, EventKind::TaskFinished);
+    assert_eq!(
+        terminal[0].outcome_kind,
+        Some(crate::TaskOutcomeKind::Canceled)
+    );
+    assert_eq!(terminal[1].kind, EventKind::TaskRemoved);
 
     stop_registry(&registry, &token).await;
 }
@@ -1390,8 +1412,10 @@ async fn completion_claim_before_remove_emits_one_terminal_event() {
     );
     assert!(!joined_cancel.is_complete());
     assert!(
-        std::iter::from_fn(|| events.try_recv().ok())
-            .all(|event| event.id != Some(id) || event.kind != EventKind::TaskRemoved),
+        std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.id != Some(id)
+                || !matches!(event.kind, EventKind::TaskFinished | EventKind::TaskRemoved)
+        }),
         "remove must not report termination while cleanup is still joining"
     );
 
@@ -1416,13 +1440,19 @@ async fn completion_claim_before_remove_emits_one_terminal_event() {
         .await,
         Ok(false)
     ));
-    let removed_count = std::iter::from_fn(|| events.try_recv().ok())
-        .filter(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
-        .count();
+    let terminal: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| {
+            event.id == Some(id)
+                && matches!(event.kind, EventKind::TaskFinished | EventKind::TaskRemoved)
+        })
+        .collect();
+    assert_eq!(terminal.len(), 2, "completion-first must publish one pair");
+    assert_eq!(terminal[0].kind, EventKind::TaskFinished);
     assert_eq!(
-        removed_count, 1,
-        "completion-first race must publish one terminal event"
+        terminal[0].outcome_kind,
+        Some(crate::TaskOutcomeKind::Completed)
     );
+    assert_eq!(terminal[1].kind, EventKind::TaskRemoved);
 
     stop_registry(&registry, &token).await;
 }

@@ -1,11 +1,11 @@
-//! # Queue consumer: reconnect after failure
+//! # Queue consumer: retry a failed broker connection
 //!
 //! This example models a long-lived broker consumer.
 //! An in-process channel stands in for Kafka, Redis, SQS, or another client.
 //!
 //! One task attempt represents one connection session.
-//! A connection error returns `TaskError::fail`.
-//! The supervisor starts a new session after exponential backoff and jitter.
+//! The first connection attempt returns `TaskError::fail`.
+//! The supervisor retries it after exponential backoff and jitter.
 //! A clean return stops the `OnFailure` task.
 //!
 //! The receive operation uses `TaskContext::run_until_cancelled`.
@@ -67,16 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Reconnect policy: base delays of 100ms, 200ms, 400ms, ... capped at 5s, with jitter.
+    // Retry policy: base delays of 100ms, 200ms, 400ms, ... capped at 5s, with jitter.
     let spec = TaskSpec::restartable(consumer).with_backoff(
         BackoffPolicy::exponential(Duration::from_millis(100))
             .with_max(Duration::from_secs(5))
             .with_jitter(JitterPolicy::Equal),
     );
 
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    sup.run(vec![spec]).await?;
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    supervisor.run(vec![spec]).await?;
 
-    println!("Done.");
     Ok(())
 }

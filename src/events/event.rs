@@ -10,6 +10,7 @@
 //! | [`Event`]         | Event payload and metadata                 |
 //! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
 //! | [`RejectionKind`] | Machine-readable submission rejection      |
+//! | [`TaskOutcomeKind`]| Machine-readable final task outcome        |
 //!
 //! ## Sequence numbers
 //!
@@ -32,13 +33,14 @@
 //! - `id`: the stable [`TaskId`] for one submission and run.
 //! - `attempt`: task attempt number, starting from 1.
 //! - `task`: usually a task name. Subscriber diagnostics use it for the subscriber name, and controller events use it for the slot name.
+//! - `outcome_kind`: machine-readable final outcome for `TaskFinished` and rejected work.
 //! - `rejection_kind`: machine-readable category for a rejected add or controller submission.
 //!
 //! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
 //! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
 //!
-//! Treat `reason` as readable text unless the event points to a constant in [`reasons`](crate::reasons).
-//! Use [`RejectionKind`] instead of parsing rejection text.
+//! Treat `reason` as readable diagnostic text, not schema.
+//! Use [`TaskOutcomeKind`] and [`RejectionKind`] for machine decisions.
 //! > Use [`EventKind::as_label`] for a stable event label.
 //!
 //! ## Example
@@ -47,13 +49,13 @@
 //! use std::time::Duration;
 //! use taskvisor::{Event, EventKind};
 //!
-//! let ev = Event::new(EventKind::TaskFailed)
+//! let ev = Event::new(EventKind::AttemptFailed)
 //!     .with_task("demo-task")
 //!     .with_reason("boom")
 //!     .with_attempt(3)
 //!     .with_duration(Duration::from_millis(42));
 //!
-//! assert_eq!(ev.kind, EventKind::TaskFailed);
+//! assert_eq!(ev.kind, EventKind::AttemptFailed);
 //! assert_eq!(ev.task.as_deref(), Some("demo-task"));
 //! assert_eq!(ev.reason.as_deref(), Some("boom"));
 //! assert_eq!(ev.duration_ms, Some(42));
@@ -63,7 +65,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, SystemTime};
 
-use crate::identity::TaskId;
+use crate::{TaskOutcomeKind, identity::TaskId};
 
 /// Process-local counter for `seq` values.
 ///
@@ -138,7 +140,7 @@ pub enum EventKind {
     /// - `attempt`: attempt number (1-based for this task run)
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
-    TaskStarting,
+    AttemptStarting,
 
     /// A task attempt returned `Ok(())`.
     ///
@@ -150,7 +152,7 @@ pub enum EventKind {
     /// - `task`: task name
     /// - `attempt`: attempt number
     /// - `duration_ms`: attempt duration
-    TaskStopped,
+    AttemptSucceeded,
 
     /// Task attempt returned [`TaskError::Canceled`](crate::TaskError::Canceled).
     ///
@@ -159,11 +161,13 @@ pub enum EventKind {
     /// - `task`: task name
     /// - `attempt`: attempt number
     /// - `duration_ms`: attempt duration
-    TaskCanceled,
+    AttemptCanceled,
 
     /// A task attempt returned a failure.
     ///
-    /// This includes retryable failures, timeouts, and fatal errors.
+    /// This includes retryable failures, fatal errors, task-returned timeouts,
+    /// and panics caught while running user code. A configured per-attempt
+    /// deadline instead emits [`AttemptTimedOut`](Self::AttemptTimedOut).
     /// A later event shows whether Taskvisor retries or reaches a terminal state.
     ///
     /// Sets:
@@ -173,11 +177,9 @@ pub enum EventKind {
     /// - `duration_ms`: attempt duration
     /// - `reason`: error message
     /// - `exit_code`: process-like exit code, when available
-    TaskFailed,
+    AttemptFailed,
 
     /// Task exceeded its configured timeout for this attempt.
-    ///
-    /// A timeout is followed by a `TaskFailed` event carrying `TaskError::Timeout`.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -185,7 +187,7 @@ pub enum EventKind {
     /// - `attempt`: attempt number
     /// - `timeout_ms`: configured timeout
     /// - `duration_ms`: elapsed attempt duration
-    TimeoutHit,
+    AttemptTimedOut,
 
     /// The next attempt was scheduled after success or failure.
     ///
@@ -229,8 +231,9 @@ pub enum EventKind {
     /// Sets:
     /// - `id`: task run identity of the rejected add request
     /// - `task`: task name
+    /// - `outcome_kind`: [`TaskOutcomeKind::Rejected`]
     /// - `rejection_kind`: [`RejectionKind::AlreadyExists`] or [`RejectionKind::BatchRejected`]
-    /// - `reason`: e.g. "already_exists" or "batch_rejected"
+    /// - `reason`: diagnostic rejection details
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
     TaskAddFailed,
@@ -248,48 +251,30 @@ pub enum EventKind {
     /// - `seq`: process-local sequence
     TaskRemoveRequested,
 
-    /// Task was removed from the supervisor (after join/cleanup).
+    /// Task was removed from the supervisor after terminal cleanup.
     ///
     /// Sets:
     /// - `id`: task run identity
     /// - `task`: task name
-    /// - `reason`: [`FORCE_TERMINATED_AFTER_GRACE`](crate::reasons::FORCE_TERMINATED_AFTER_GRACE) when the actor was force-aborted or `None`
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
     TaskRemoved,
 
-    /// A task reached a non-fatal terminal state and will not restart.
+    /// A registered task reached its final outcome and will not start another attempt.
     ///
-    /// Emitted when:
-    /// - `RestartPolicy::Never` stops after success or a retryable failure
-    /// - `RestartPolicy::OnFailure` stops after success
-    /// - the retry limit is reached after retryable failures
-    /// - the task returns `TaskError::Canceled` without a runtime cancellation
+    /// This is emitted once after the task runner is joined and before
+    /// [`TaskRemoved`](Self::TaskRemoved). It also covers force-abort and an
+    /// internal runner panic, even when no attempt-level terminal event exists.
     ///
     /// Sets:
     /// - `id`: task run identity
     /// - `task`: task name
-    /// - `attempt`: last attempt number
-    /// - `reason`: optional message
-    /// - `exit_code`: numeric exit code (process-like runtimes); `None` otherwise
+    /// - `outcome_kind`: stable machine-readable final category
+    /// - `reason`: optional diagnostic detail; never parse it as schema
+    /// - `exit_code`: process-like exit code, when available
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
-    ActorExhausted,
-
-    /// A task reached a fatal terminal state and will not restart.
-    ///
-    /// Emitted when:
-    /// - Task returned `TaskError::Fatal`
-    ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: last attempt number
-    /// - `reason`: fatal error message
-    /// - `exit_code`: numeric exit code when the fatal error has one; `None` for logical errors
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
-    ActorDead,
+    TaskFinished,
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
@@ -298,6 +283,7 @@ pub enum EventKind {
     /// Sets:
     /// - `task`: slot name, when known
     /// - `id`: the rejected submission's [`TaskId`]
+    /// - `outcome_kind`: [`TaskOutcomeKind::Rejected`]
     /// - `rejection_kind`: stable machine-readable rejection category
     /// - `reason`: readable rejection details
     ControllerRejected,
@@ -333,18 +319,18 @@ impl EventKind {
     /// Use it as an event name in tracing or as a metrics label value.
     ///
     /// ```text
-    /// EventKind::TaskStarting
+    /// EventKind::AttemptStarting
     ///           │ as_label()
     ///           ▼
-    ///     "task_starting"
-    ///        ├── log field:    event="task_starting"
-    ///        └── metric label: event="task_starting"
+    ///     "attempt_starting"
+    ///        ├── log field:    event="attempt_starting"
+    ///        └── metric label: event="attempt_starting"
     /// ```
     ///
     /// ```rust
     /// use taskvisor::EventKind;
     ///
-    /// assert_eq!(EventKind::TaskStarting.as_label(), "task_starting");
+    /// assert_eq!(EventKind::AttemptStarting.as_label(), "attempt_starting");
     /// assert_eq!(EventKind::BackoffScheduled.as_label(), "backoff_scheduled");
     /// ```
     #[must_use]
@@ -356,19 +342,18 @@ impl EventKind {
             EventKind::ShutdownRequested => "shutdown_requested",
             EventKind::AllStoppedWithinGrace => "all_stopped_within_grace",
             EventKind::GraceExceeded => "grace_exceeded",
-            EventKind::TaskStarting => "task_starting",
-            EventKind::TaskStopped => "task_stopped",
-            EventKind::TaskCanceled => "task_canceled",
-            EventKind::TaskFailed => "task_failed",
-            EventKind::TimeoutHit => "timeout_hit",
+            EventKind::AttemptStarting => "attempt_starting",
+            EventKind::AttemptSucceeded => "attempt_succeeded",
+            EventKind::AttemptCanceled => "attempt_canceled",
+            EventKind::AttemptFailed => "attempt_failed",
+            EventKind::AttemptTimedOut => "attempt_timed_out",
             EventKind::BackoffScheduled => "backoff_scheduled",
             EventKind::TaskAddRequested => "task_add_requested",
             EventKind::TaskAdded => "task_added",
             EventKind::TaskAddFailed => "task_add_failed",
             EventKind::TaskRemoveRequested => "task_remove_requested",
             EventKind::TaskRemoved => "task_removed",
-            EventKind::ActorExhausted => "actor_exhausted",
-            EventKind::ActorDead => "actor_dead",
+            EventKind::TaskFinished => "task_finished",
             #[cfg(feature = "controller")]
             EventKind::ControllerRejected => "controller_rejected",
             #[cfg(feature = "controller")]
@@ -489,13 +474,24 @@ pub struct Event {
     pub delay_ms: Option<u32>,
     /// Elapsed duration of the attempt in milliseconds.
     pub duration_ms: Option<u32>,
-    /// Only values documented in [`reasons`](crate::reasons) are stable.
+    /// Human-readable diagnostic detail.
+    ///
+    /// This text is not schema and may change. Use typed fields such as
+    /// [`outcome_kind`](Self::outcome_kind) and
+    /// [`rejection_kind`](Self::rejection_kind) for machine decisions.
     pub reason: Option<Arc<str>>,
+    /// Machine-readable final category for `TaskFinished` and rejected work.
+    ///
+    /// Use [`TaskOutcomeKind`] for branching and [`TaskOutcomeKind::as_label`]
+    /// for telemetry labels.
+    pub outcome_kind: Option<TaskOutcomeKind>,
     /// Machine-readable category for `TaskAddFailed` and `ControllerRejected`.
     ///
     /// Readable details remain available in [`reason`](Self::reason).
     pub rejection_kind: Option<RejectionKind>,
-    /// Attempt count (starting from 1).
+    /// 1-based number of the attempt described by an attempt-level or backoff event.
+    ///
+    /// This is not the total number of attempts and is not set on `TaskFinished`.
     pub attempt: Option<u32>,
     /// This is normally a task name. Subscriber diagnostics use it for a subscriber name, and controller events use it for a slot name.
     pub task: Option<Arc<str>>,
@@ -530,6 +526,7 @@ impl Event {
             duration_ms: None,
             attempt: None,
             reason: None,
+            outcome_kind: None,
             rejection_kind: None,
             task: None,
             id: None,
@@ -545,11 +542,23 @@ impl Event {
         self
     }
 
+    /// Attaches a machine-readable final outcome category.
+    #[inline]
+    #[must_use]
+    pub fn with_outcome_kind(mut self, kind: TaskOutcomeKind) -> Self {
+        self.outcome_kind = Some(kind);
+        self
+    }
+
     /// Attaches a machine-readable submission rejection category.
+    ///
+    /// This also sets [`outcome_kind`](Self::outcome_kind) to
+    /// [`TaskOutcomeKind::Rejected`].
     #[inline]
     #[must_use]
     pub fn with_rejection_kind(mut self, kind: RejectionKind) -> Self {
         self.rejection_kind = Some(kind);
+        self.outcome_kind = Some(TaskOutcomeKind::Rejected);
         self
     }
 
@@ -694,6 +703,9 @@ impl std::fmt::Debug for Event {
         if let Some(ref reason) = self.reason {
             d.field("reason", reason);
         }
+        if let Some(outcome_kind) = self.outcome_kind {
+            d.field("outcome_kind", &outcome_kind);
+        }
         if let Some(rejection_kind) = self.rejection_kind {
             d.field("rejection_kind", &rejection_kind);
         }
@@ -722,8 +734,8 @@ mod tests {
 
     #[test]
     fn seq_increases_monotonically() {
-        let a = Event::new(EventKind::TaskStarting);
-        let b = Event::new(EventKind::TaskStopped);
+        let a = Event::new(EventKind::AttemptStarting);
+        let b = Event::new(EventKind::AttemptSucceeded);
         assert!(b.seq > a.seq, "seq must grow: {} vs {}", a.seq, b.seq);
     }
 
@@ -736,19 +748,18 @@ mod tests {
             (EventKind::ShutdownRequested, "shutdown_requested"),
             (EventKind::AllStoppedWithinGrace, "all_stopped_within_grace"),
             (EventKind::GraceExceeded, "grace_exceeded"),
-            (EventKind::TaskStarting, "task_starting"),
-            (EventKind::TaskStopped, "task_stopped"),
-            (EventKind::TaskCanceled, "task_canceled"),
-            (EventKind::TaskFailed, "task_failed"),
-            (EventKind::TimeoutHit, "timeout_hit"),
+            (EventKind::AttemptStarting, "attempt_starting"),
+            (EventKind::AttemptSucceeded, "attempt_succeeded"),
+            (EventKind::AttemptCanceled, "attempt_canceled"),
+            (EventKind::AttemptFailed, "attempt_failed"),
+            (EventKind::AttemptTimedOut, "attempt_timed_out"),
             (EventKind::BackoffScheduled, "backoff_scheduled"),
             (EventKind::TaskAddRequested, "task_add_requested"),
             (EventKind::TaskAdded, "task_added"),
             (EventKind::TaskAddFailed, "task_add_failed"),
             (EventKind::TaskRemoveRequested, "task_remove_requested"),
             (EventKind::TaskRemoved, "task_removed"),
-            (EventKind::ActorExhausted, "actor_exhausted"),
-            (EventKind::ActorDead, "actor_dead"),
+            (EventKind::TaskFinished, "task_finished"),
             #[cfg(feature = "controller")]
             (EventKind::ControllerRejected, "controller_rejected"),
             #[cfg(feature = "controller")]
@@ -767,13 +778,14 @@ mod tests {
 
     #[test]
     fn new_event_leaves_all_optionals_empty() {
-        let ev = Event::new(EventKind::TaskStarting);
+        let ev = Event::new(EventKind::AttemptStarting);
         assert_eq!(ev.timeout_ms, None);
         assert_eq!(ev.delay_ms, None);
         assert_eq!(ev.duration_ms, None);
         assert_eq!(ev.attempt, None);
         assert_eq!(ev.exit_code, None);
         assert_eq!(ev.reason, None);
+        assert_eq!(ev.outcome_kind, None);
         assert_eq!(ev.rejection_kind, None);
         assert_eq!(ev.task, None);
         assert_eq!(ev.id, None);
@@ -799,6 +811,11 @@ mod tests {
         for (kind, expected) in cases {
             assert_eq!(kind.as_label(), expected, "{kind:?}");
         }
+
+        let rejected =
+            Event::new(EventKind::TaskAddFailed).with_rejection_kind(RejectionKind::AlreadyExists);
+        assert_eq!(rejected.rejection_kind, Some(RejectionKind::AlreadyExists));
+        assert_eq!(rejected.outcome_kind, Some(TaskOutcomeKind::Rejected));
     }
 
     #[test]
@@ -809,9 +826,12 @@ mod tests {
         type ReadMs = fn(&Event) -> Option<u32>;
 
         let cases: [(&str, EventKind, Builder, ReadMs); 3] = [
-            ("timeout", EventKind::TimeoutHit, Event::with_timeout, |e| {
-                e.timeout_ms
-            }),
+            (
+                "timeout",
+                EventKind::AttemptTimedOut,
+                Event::with_timeout,
+                |e| e.timeout_ms,
+            ),
             (
                 "delay",
                 EventKind::BackoffScheduled,
@@ -820,7 +840,7 @@ mod tests {
             ),
             (
                 "duration",
-                EventKind::TaskStopped,
+                EventKind::AttemptSucceeded,
                 Event::with_duration,
                 |e| e.duration_ms,
             ),
@@ -845,7 +865,7 @@ mod tests {
         ] {
             assert!(Event::new(kind).is_internal_diagnostic(), "{kind:?}");
         }
-        assert!(!Event::new(EventKind::TaskStarting).is_internal_diagnostic());
+        assert!(!Event::new(EventKind::AttemptStarting).is_internal_diagnostic());
     }
 
     #[test]
@@ -879,7 +899,10 @@ mod tests {
 
     #[test]
     fn with_exit_code_keeps_sign() {
-        for (kind, code) in [(EventKind::TaskFailed, 42), (EventKind::ActorDead, -1)] {
+        for (kind, code) in [
+            (EventKind::AttemptFailed, 42),
+            (EventKind::TaskFinished, -1),
+        ] {
             assert_eq!(Event::new(kind).with_exit_code(code).exit_code, Some(code));
         }
     }
@@ -913,13 +936,19 @@ mod tests {
 
     #[test]
     fn debug_renders_exit_code_only_when_set() {
-        let ev = Event::new(EventKind::ActorExhausted).with_exit_code(137);
+        let ev = Event::new(EventKind::TaskFinished)
+            .with_outcome_kind(TaskOutcomeKind::ForceAborted)
+            .with_exit_code(137);
         assert!(
             format!("{ev:?}").contains("exit_code: 137"),
             "Debug must surface exit_code when present"
         );
+        assert!(
+            format!("{ev:?}").contains("outcome_kind: ForceAborted"),
+            "Debug must surface outcome_kind when present"
+        );
 
-        let none = Event::new(EventKind::TaskStopped);
+        let none = Event::new(EventKind::AttemptSucceeded);
         assert!(
             !format!("{none:?}").contains("exit_code"),
             "Debug must omit exit_code when absent"

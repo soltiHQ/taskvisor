@@ -16,8 +16,8 @@ pub enum ControllerError {
 
     /// The ordered controller command queue is full.
     ///
-    /// Returned only by `try_submit` and `try_submit_and_watch`.
-    /// Use async `submit` or `submit_and_watch` to wait for command capacity.
+    /// Returned only by fail-fast `try_submit*` methods, including those on [`PreparedSubmission`](crate::PreparedSubmission).
+    /// Use the corresponding async submit method to wait for command capacity.
     #[error("submission queue full")]
     Full,
 

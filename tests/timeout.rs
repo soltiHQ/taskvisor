@@ -17,14 +17,14 @@ async fn run_to_exhaustion(spec: TaskSpec) -> Arc<EventCollector> {
         .await
         .expect("run() should return Ok");
     collector
-        .wait_for(EventKind::ActorExhausted, Duration::from_secs(2))
+        .wait_for(EventKind::TaskFinished, Duration::from_secs(2))
         .await
-        .expect("ActorExhausted was not observed");
+        .expect("TaskFinished was not observed");
     collector
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries() {
+async fn configured_timeout_emits_one_terminal_attempt_event_then_retries() {
     let task = TaskFn::arc("slow", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         Ok(())
@@ -35,33 +35,24 @@ async fn per_attempt_timeout_emits_timeout_hit_before_task_failed_then_retries()
         .with_max_retries(NonZeroU32::new(1).unwrap());
     let collector = run_to_exhaustion(spec).await;
 
-    assert_eq!(collector.count(EventKind::TimeoutHit), 2);
-    assert_eq!(collector.count(EventKind::TaskFailed), 2);
+    assert_eq!(collector.count(EventKind::AttemptTimedOut), 2);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 0);
     assert_eq!(collector.count(EventKind::BackoffScheduled), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
 
     for attempt in 1..=2u32 {
         let hit = collector
-            .find_all(EventKind::TimeoutHit)
+            .find_all(EventKind::AttemptTimedOut)
             .into_iter()
             .find(|e| e.attempt == Some(attempt))
             .unwrap();
-        let failed = collector
-            .find_all(EventKind::TaskFailed)
-            .into_iter()
-            .find(|e| e.attempt == Some(attempt))
-            .unwrap();
-        assert!(hit.seq < failed.seq, "TimeoutHit must precede TaskFailed");
-        assert!(failed.reason.as_deref().unwrap().contains("timed out"));
-        assert_eq!(failed.exit_code, None);
+        assert_eq!(hit.timeout_ms, Some(50));
     }
 
-    let reason = collector
-        .find(EventKind::ActorExhausted)
-        .unwrap()
-        .reason
-        .unwrap();
-    assert!(reason.contains("max_retries_exceeded") && reason.contains("(1/1)"));
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Failed));
+    let reason = finished.reason.unwrap();
+    assert!(reason.contains("timed out"));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -83,13 +74,12 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
         .with_backoff(fast_backoff());
     let collector = run_to_exhaustion(spec).await;
 
-    assert_eq!(collector.count(EventKind::TimeoutHit), 1);
-    assert_eq!(collector.count(EventKind::TaskFailed), 1);
+    assert_eq!(collector.count(EventKind::AttemptTimedOut), 1);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 0);
     assert_eq!(collector.count(EventKind::BackoffScheduled), 1);
-    assert_eq!(collector.count(EventKind::TaskStarting), 2);
-    assert_eq!(collector.count(EventKind::TaskStopped), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
-    assert_eq!(collector.count(EventKind::ActorDead), 0);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 2);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
 
     assert_eq!(
         collector
@@ -98,14 +88,9 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
             .backoff_source,
         Some(BackoffSource::Failure)
     );
-    assert_eq!(
-        collector
-            .find(EventKind::ActorExhausted)
-            .unwrap()
-            .reason
-            .as_deref(),
-        Some("policy_exhausted_success")
-    );
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Completed));
+    assert_eq!(finished.reason, None);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -117,15 +102,28 @@ async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
     let spec = TaskSpec::once(task).with_timeout(Duration::ZERO);
     let collector = run_to_exhaustion(spec).await;
 
-    assert_eq!(collector.count(EventKind::TimeoutHit), 0);
-    assert_eq!(collector.count(EventKind::TaskStopped), 1);
-    assert_eq!(collector.count(EventKind::TaskFailed), 0);
+    assert_eq!(collector.count(EventKind::AttemptTimedOut), 0);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 1);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 0);
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Completed));
+    assert_eq!(finished.reason, None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_returned_timeout_is_an_attempt_failure_not_a_configured_deadline() {
+    let task = TaskFn::arc("reported-timeout", |_ctx: TaskContext| async move {
+        Err(TaskError::timeout(Duration::from_secs(7)))
+    });
+    let collector = run_to_exhaustion(TaskSpec::once(task)).await;
+
+    assert_eq!(collector.count(EventKind::AttemptTimedOut), 0);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 1);
     assert_eq!(
         collector
-            .find(EventKind::ActorExhausted)
+            .find(EventKind::TaskFinished)
             .unwrap()
-            .reason
-            .as_deref(),
-        Some("policy_exhausted_success")
+            .outcome_kind,
+        Some(TaskOutcomeKind::Failed)
     );
 }

@@ -17,7 +17,6 @@ use crate::{
     core::{actor::ActorExitReason, outcome::TaskOutcome},
     events::{Bus, Event, EventKind},
     identity::TaskId,
-    reasons,
 };
 
 /// Terminal result passed from the single join owner to registry cleanup.
@@ -418,15 +417,7 @@ impl Registry {
                 Self::report_join(bus, id, &entry.label, res, outcome);
             }
             JoinCompletion::ForceAborted => {
-                if let Some(done) = outcome {
-                    let _ = done.send(TaskOutcome::ForceAborted);
-                }
-                bus.publish(
-                    Event::new(EventKind::TaskRemoved)
-                        .with_task(Arc::clone(&entry.label))
-                        .with_id(id)
-                        .with_reason(reasons::FORCE_TERMINATED_AFTER_GRACE),
-                );
+                Self::report_outcome(bus, id, &entry.label, TaskOutcome::ForceAborted, outcome);
             }
         }
         pending_joins.dec(id);
@@ -444,7 +435,7 @@ impl Registry {
 
     /// Reports the result of a joined actor.
     ///
-    /// Sends the watched [`TaskOutcome`] if present, publishes `ActorDead` for an actor panic, and always publishes `TaskRemoved` for this joined actor.
+    /// Maps the join result once, then publishes and delivers the same final outcome.
     fn report_join(
         bus: &Bus,
         id: TaskId,
@@ -452,18 +443,48 @@ impl Registry {
         res: Result<ActorExitReason, JoinError>,
         done: Option<OutcomeTx>,
     ) {
-        if let Err(e) = &res
-            && e.is_panic()
-        {
-            bus.publish(
-                Event::new(EventKind::ActorDead)
-                    .with_task(name)
-                    .with_id(id)
-                    .with_reason("actor_panic"),
-            );
+        let outcome = Self::outcome_of(res);
+        Self::report_outcome(bus, id, name, outcome, done);
+    }
+
+    /// Publishes one typed terminal event, delivers the watched outcome, then publishes registry removal.
+    ///
+    /// The event and waiter are classified from the same [`TaskOutcome`] value.
+    /// `reason` remains diagnostic; callers branch on [`TaskOutcomeKind`](crate::TaskOutcomeKind).
+    fn report_outcome(
+        bus: &Bus,
+        id: TaskId,
+        name: &str,
+        outcome: TaskOutcome,
+        done: Option<OutcomeTx>,
+    ) {
+        let mut finished = Event::new(EventKind::TaskFinished)
+            .with_task(name)
+            .with_id(id)
+            .with_outcome_kind(outcome.kind());
+        match &outcome {
+            TaskOutcome::Failed {
+                reason, exit_code, ..
+            }
+            | TaskOutcome::Fatal {
+                reason, exit_code, ..
+            } => {
+                finished = finished.with_reason(Arc::clone(reason));
+                if let Some(code) = exit_code {
+                    finished = finished.with_exit_code(*code);
+                }
+            }
+            TaskOutcome::ForceAborted => {
+                finished = finished.with_reason("task did not stop within grace; force-aborted");
+            }
+            TaskOutcome::Panicked => {
+                finished = finished.with_reason("internal task runner panicked");
+            }
+            TaskOutcome::Completed | TaskOutcome::Canceled | TaskOutcome::Rejected { .. } => {}
         }
+        bus.publish(finished);
         if let Some(done) = done {
-            let _ = done.send(Self::outcome_of(res));
+            let _ = done.send(outcome);
         }
         bus.publish(
             Event::new(EventKind::TaskRemoved)

@@ -1,7 +1,7 @@
 //! # Outcomes: wait for the final result
 //!
 //! `add_and_watch` returns a `TaskWaiter`.
-//! The waiter resolves after the task entry has stopped, including all restarts allowed by its policy.
+//! The waiter resolves after all allowed attempts end, the managed runner is joined, and registry membership is removed.
 //!
 //! Taskvisor has two result paths:
 //!
@@ -10,8 +10,8 @@
 //! | lifecycle events | logs, metrics, live progress | bounded and best-effort    |
 //! | `TaskOutcome`    | final business decision      | dedicated terminal channel |
 //!
-//! This example handles successful, failed, and canceled tasks.
-//! Other outcomes cover fatal errors, force-abort, actor panic, and controller rejection.
+//! This example handles successful, retry-exhausted, timed-out, and canceled tasks.
+//! Other outcomes cover fatal errors, force-abort, task-runner panic, and controller rejection.
 //! `TaskWaiter::wait` can still return an error if the runtime closes the terminal channel unexpectedly.
 //!
 //! Run with `cargo run --example outcomes`.
@@ -22,11 +22,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use taskvisor::prelude::*;
+use tokio::sync::Notify;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = sup.serve();
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let handle = supervisor.serve();
 
     // 1) A one-shot job that succeeds -> Completed.
     println!("=== Completed ===");
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  import -> {:?}\n", waiter.wait().await?);
 
     // 2) A task that always fails, with a bounded retry budget -> Failed.
-    //    Note the outcome's reason/exit_code are identical to the ActorExhausted event.
+    //    Its reason/exit_code are identical to the typed TaskFinished event.
     println!("=== Failed (retries exhausted) ===");
     let attempts = Arc::new(AtomicU32::new(0));
     let flaky: TaskRef = TaskFn::arc("sync", move |_ctx| {
@@ -61,19 +62,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => println!("  sync -> {other:?}\n"),
     }
 
-    // 3) A long-running worker we cancel -> Canceled.
+    // 3) A one-shot task that exceeds its per-attempt deadline -> Failed.
+    println!("=== Failed (attempt timed out) ===");
+    let slow: TaskRef = TaskFn::arc("slow-report", |_ctx| async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(())
+    });
+    let timed = TaskSpec::once(slow).with_timeout(Duration::from_millis(20));
+    match handle.add_and_watch(timed).await?.1.wait().await? {
+        TaskOutcome::Failed { reason, .. } => {
+            println!("  slow-report -> Failed: {reason}\n");
+        }
+        other => println!("  slow-report -> {other:?}\n"),
+    }
+
+    // 4) A long-running worker we cancel -> Canceled.
     println!("=== Canceled ===");
-    let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
-        ctx.cancelled().await;
-        Err(TaskError::Canceled)
+    let started = Arc::new(Notify::new());
+    let worker: TaskRef = TaskFn::arc("worker", {
+        let started = Arc::clone(&started);
+        move |ctx| {
+            let started = Arc::clone(&started);
+            async move {
+                started.notify_one();
+                ctx.cancelled().await;
+                Err(TaskError::Canceled)
+            }
+        }
     });
     let (id, waiter) = handle.add_and_watch(TaskSpec::restartable(worker)).await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The task body, rather than a timer, confirms that the worker started.
+    started.notified().await;
     println!("  cancelling worker...");
     handle.cancel(id).await?;
     println!("  worker -> {:?}\n", waiter.wait().await?);
 
     handle.shutdown().await?;
-    println!("Done.");
     Ok(())
 }

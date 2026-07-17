@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,27 +18,24 @@ async fn run_to_completion(spec: TaskSpec) -> Arc<EventCollector> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn task_failure_exit_code_propagates_to_terminal_events() {
+async fn task_failure_exit_code_propagates_to_attempt_and_task_events() {
     for (name, expected_code) in [("fail-code", Some(7)), ("logical", None)] {
         let collector = run_to_completion(TaskSpec::once(make_fail(name, expected_code))).await;
-        let exhausted = collector
-            .wait_for(EventKind::ActorExhausted, Duration::from_secs(2))
+        let finished = collector
+            .wait_for(EventKind::TaskFinished, Duration::from_secs(2))
             .await
-            .unwrap_or_else(|| panic!("{name}: ActorExhausted was not observed"));
+            .unwrap_or_else(|| panic!("{name}: TaskFinished was not observed"));
         let failed = collector
-            .find(EventKind::TaskFailed)
-            .unwrap_or_else(|| panic!("{name}: TaskFailed was not observed"));
+            .find(EventKind::AttemptFailed)
+            .unwrap_or_else(|| panic!("{name}: AttemptFailed was not observed"));
 
-        assert_eq!(failed.exit_code, expected_code, "{name}: TaskFailed");
-        assert_eq!(exhausted.exit_code, expected_code, "{name}: exhausted");
+        assert_eq!(failed.exit_code, expected_code, "{name}: AttemptFailed");
+        assert_eq!(finished.exit_code, expected_code, "{name}: TaskFinished");
+        assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Failed));
         assert_eq!(failed.attempt, Some(1), "{name}: first attempt");
         assert!(
-            !exhausted
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("max_retries_exceeded"),
-            "{name}: RestartPolicy::Never is not retry-budget exhaustion"
+            finished.reason.is_some(),
+            "{name}: diagnostic detail is retained"
         );
     }
 }
@@ -57,8 +55,8 @@ async fn panicking_task_is_reaped_and_run_returns() {
         "panicked task must be reaped (TaskRemoved published)"
     );
     assert!(
-        collector.any_reason_contains(EventKind::TaskFailed, "panic"),
-        "panic must surface as TaskFailed with a panic reason"
+        collector.any_reason_contains(EventKind::AttemptFailed, "panic"),
+        "panic must surface as AttemptFailed with a panic reason"
     );
 }
 
@@ -91,11 +89,12 @@ async fn panicking_task_restarts_per_policy_then_succeeds() {
             .wait_until(Duration::from_secs(2), |events| {
                 events.iter().any(|event| {
                     event.task.as_deref() == Some("flaky-panic")
-                        && event.kind == EventKind::ActorExhausted
+                        && event.kind == EventKind::TaskFinished
+                        && event.outcome_kind == Some(TaskOutcomeKind::Completed)
                 })
             })
             .await,
-        "actor must finish normally after panics are retried"
+        "task must finish normally after panics are retried"
     );
 }
 
@@ -110,14 +109,16 @@ async fn task_returning_canceled_without_cancellation_is_reaped() {
 
     let collector = run_to_completion(spec).await;
 
-    assert!(
-        collector.any_reason_contains(EventKind::ActorExhausted, "task_returned_canceled"),
-        "spurious Canceled must surface as ActorExhausted with an explicit reason"
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Canceled));
+    assert_eq!(
+        finished.reason, None,
+        "classification must not require reason text"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
+async fn cooperative_cancellation_returning_ok_yields_succeeded_attempt_and_canceled_task() {
     let (handle, collector) =
         served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(5)));
 
@@ -140,9 +141,11 @@ async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
         );
 
         let by_id = collector.by_id(id);
-        assert!(by_id.iter().any(|e| e.kind == EventKind::TaskStopped));
-        assert!(by_id.iter().all(|e| e.kind != EventKind::TaskFailed));
-        assert!(by_id.iter().all(|e| e.kind != EventKind::ActorDead));
+        assert!(by_id.iter().any(|e| e.kind == EventKind::AttemptSucceeded));
+        assert!(by_id.iter().all(|e| e.kind != EventKind::AttemptFailed));
+        assert!(by_id.iter().any(|e| {
+            e.kind == EventKind::TaskFinished && e.outcome_kind == Some(TaskOutcomeKind::Canceled)
+        }));
         assert!(by_id.iter().any(|e| e.kind == EventKind::TaskRemoved));
 
         let _ = handle.shutdown().await;
@@ -151,7 +154,7 @@ async fn cooperative_cancellation_returning_ok_yields_task_stopped() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancellation_returning_canceled_error_yields_task_canceled() {
+async fn cancellation_returning_canceled_error_yields_canceled_attempt_and_task() {
     let (handle, collector) =
         served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(5)));
 
@@ -180,19 +183,84 @@ async fn cancellation_returning_canceled_error_yields_task_canceled() {
 
         let by_id = collector.by_id(id);
         assert!(
-            by_id.iter().any(|e| e.kind == EventKind::TaskCanceled),
-            "graceful cancellation must surface as TaskCanceled"
+            by_id.iter().any(|e| e.kind == EventKind::AttemptCanceled),
+            "graceful cancellation must surface as AttemptCanceled"
         );
         assert!(
-            by_id.iter().all(|e| e.kind != EventKind::TaskStopped),
-            "TaskStopped is reserved for successful attempts"
+            by_id.iter().all(|e| e.kind != EventKind::AttemptSucceeded),
+            "AttemptSucceeded is reserved for successful attempts"
         );
-        assert!(by_id.iter().all(|e| e.kind != EventKind::TaskFailed));
-        assert!(by_id.iter().all(|e| e.kind != EventKind::ActorExhausted));
-        assert!(by_id.iter().all(|e| e.kind != EventKind::ActorDead));
+        assert!(by_id.iter().all(|e| e.kind != EventKind::AttemptFailed));
+        assert!(by_id.iter().any(|e| {
+            e.kind == EventKind::TaskFinished && e.outcome_kind == Some(TaskOutcomeKind::Canceled)
+        }));
         assert!(by_id.iter().any(|e| e.kind == EventKind::TaskRemoved));
 
         let _ = handle.shutdown().await;
     })
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_while_waiting_for_a_permit_finishes_without_an_attempt() {
+    let (handle, collector) = served_with_collector(
+        SupervisorConfig::default().with_max_concurrent(NonZeroUsize::new(1)),
+    );
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let permit_owner: TaskRef = TaskFn::arc("permit-owner", {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        move |_ctx: TaskContext| {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(())
+            }
+        }
+    });
+
+    handle.add(TaskSpec::once(permit_owner)).await.unwrap();
+    started.notified().await;
+
+    let (id, waiter) = handle
+        .add_and_watch(TaskSpec::once(make_ok_once("permit-waiter")))
+        .await
+        .unwrap();
+    assert!(handle.cancel(id).await.unwrap());
+    assert!(matches!(
+        waiter.wait().await.unwrap(),
+        TaskOutcome::Canceled
+    ));
+    assert!(
+        collector
+            .wait_until(Duration::from_secs(2), |events| {
+                events
+                    .iter()
+                    .any(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
+            })
+            .await
+    );
+
+    let by_id = collector.by_id(id);
+    assert!(
+        by_id
+            .iter()
+            .all(|event| event.kind != EventKind::AttemptStarting)
+    );
+    assert_eq!(
+        by_id
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::TaskFinished
+                    && event.outcome_kind == Some(TaskOutcomeKind::Canceled)
+            })
+            .count(),
+        1
+    );
+
+    release.notify_one();
+    handle.shutdown().await.unwrap();
 }

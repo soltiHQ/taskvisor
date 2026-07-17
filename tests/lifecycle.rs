@@ -43,54 +43,52 @@ fn supervisor_builder_is_nameable_from_public_api() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn never_oneshot_success_emits_starting_stopped_exhausted_once() {
+async fn never_oneshot_success_emits_attempt_and_typed_task_finish_once() {
     let collector = run_static(vec![TaskSpec::once(make_ok_once("oneshot"))]).await;
 
-    assert_eq!(collector.count(EventKind::TaskStarting), 1);
-    assert_eq!(collector.count(EventKind::TaskStopped), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 1);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
     assert_eq!(collector.count(EventKind::TaskRemoved), 1);
-    assert_eq!(collector.count(EventKind::TaskFailed), 0);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 0);
     assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
-    assert_eq!(collector.count(EventKind::ActorDead), 0);
-
-    let exhausted = collector.find(EventKind::ActorExhausted).unwrap();
-    assert_eq!(
-        exhausted.reason.as_deref(),
-        Some("policy_exhausted_success")
-    );
-    let stopped = collector.find(EventKind::TaskStopped).unwrap();
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Completed));
+    assert_eq!(finished.reason, None);
+    let stopped = collector.find(EventKind::AttemptSucceeded).unwrap();
     assert!(
         stopped.duration_ms.is_some(),
-        "terminal TaskStopped must carry attempt duration"
+        "terminal AttemptSucceeded must carry attempt duration"
     );
-    assert!(exhausted.seq > stopped.seq, "exhausted must follow stopped");
+    assert!(
+        finished.seq > stopped.seq,
+        "TaskFinished must follow the attempt"
+    );
+    let removed = collector.find(EventKind::TaskRemoved).unwrap();
+    assert!(
+        removed.seq > finished.seq,
+        "TaskRemoved must follow TaskFinished"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn never_oneshot_failure_emits_taskfailed_then_exhausted_no_backoff() {
+async fn never_oneshot_failure_emits_failed_attempt_then_failed_task() {
     let task = TaskFn::arc("fail-once", |_ctx: TaskContext| async move {
         Err(TaskError::fail("boom".to_string()))
     });
     let collector = run_static(vec![TaskSpec::once(task)]).await;
 
-    assert_eq!(collector.count(EventKind::TaskStarting), 1);
-    assert_eq!(collector.count(EventKind::TaskFailed), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 1);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
     assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
-    assert_eq!(collector.count(EventKind::ActorDead), 0);
-    assert_eq!(collector.count(EventKind::TaskStopped), 0);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 0);
 
-    let failed = collector.find(EventKind::TaskFailed).unwrap();
+    let failed = collector.find(EventKind::AttemptFailed).unwrap();
     assert!(failed.reason.as_deref().unwrap().contains("boom"));
-    let exhausted = collector.find(EventKind::ActorExhausted).unwrap();
-    assert!(
-        !exhausted
-            .reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("max_retries_exceeded")
-    );
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Failed));
+    assert!(finished.reason.as_deref().unwrap().contains("boom"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -111,48 +109,47 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
     let spec = TaskSpec::restartable(task).with_backoff(fast_backoff());
     let collector = run_static(vec![spec]).await;
 
-    assert_eq!(collector.count(EventKind::TaskStarting), 3);
-    assert_eq!(collector.count(EventKind::TaskFailed), 2);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 3);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 2);
     assert_eq!(collector.count(EventKind::BackoffScheduled), 2);
-    assert_eq!(collector.count(EventKind::TaskStopped), 1);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 1);
-    assert_eq!(collector.count(EventKind::ActorDead), 0);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
 
     for b in collector.find_all(EventKind::BackoffScheduled) {
         assert_eq!(b.backoff_source, Some(BackoffSource::Failure));
         assert_eq!(b.delay_ms, Some(1));
         assert!(b.reason.as_deref().unwrap().contains("transient-err"));
     }
-    let exhausted = collector.find(EventKind::ActorExhausted).unwrap();
-    assert_eq!(
-        exhausted.reason.as_deref(),
-        Some("policy_exhausted_success")
-    );
-    assert!(
-        !collector.any_reason_contains(EventKind::ActorExhausted, "max_retries_exceeded"),
-        "unlimited retries must end on success, not retry-budget exhaustion"
-    );
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Completed));
+    assert_eq!(finished.reason, None);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn on_failure_fatal_emits_actordead_with_exit_code_no_retry() {
+async fn on_failure_fatal_emits_fatal_task_finish_with_exit_code_no_retry() {
     let spec = TaskSpec::restartable(make_fatal("fatal-task", Some(7)));
     let collector = run_static(vec![spec]).await;
 
-    assert_eq!(collector.count(EventKind::TaskStarting), 1);
-    assert_eq!(collector.count(EventKind::TaskFailed), 1);
-    assert_eq!(collector.count(EventKind::ActorDead), 1);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 1);
+    assert_eq!(collector.count(EventKind::AttemptFailed), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
     assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 0);
-    assert_eq!(collector.count(EventKind::TaskStopped), 0);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 0);
 
     assert_eq!(
-        collector.find(EventKind::TaskFailed).unwrap().exit_code,
+        collector.find(EventKind::AttemptFailed).unwrap().exit_code,
         Some(7)
     );
-    let dead = collector.find(EventKind::ActorDead).unwrap();
-    assert_eq!(dead.exit_code, Some(7));
-    assert!(dead.reason.as_deref().unwrap().contains("unrecoverable"));
+    let finished = collector.find(EventKind::TaskFinished).unwrap();
+    assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Fatal));
+    assert_eq!(finished.exit_code, Some(7));
+    assert!(
+        finished
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("unrecoverable")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -161,8 +158,15 @@ async fn fatal_no_restart_under_always_interval_none() {
         .with_restart(RestartPolicy::Always { interval: None });
     let collector = run_static(vec![spec]).await;
 
-    assert_eq!(collector.count(EventKind::TaskStarting), 1);
-    assert_eq!(collector.count(EventKind::ActorDead), 1);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 1);
+    assert_eq!(collector.count(EventKind::TaskFinished), 1);
+    assert_eq!(
+        collector
+            .find(EventKind::TaskFinished)
+            .unwrap()
+            .outcome_kind,
+        Some(TaskOutcomeKind::Fatal)
+    );
     assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
 }
 
@@ -177,12 +181,12 @@ async fn max_retries_allows_initial_attempt_plus_configured_retries() {
         let expected_attempts = usize::try_from(retries + 1).unwrap();
 
         assert_eq!(
-            collector.count(EventKind::TaskStarting),
+            collector.count(EventKind::AttemptStarting),
             expected_attempts,
             "retry limit {retries}"
         );
         assert_eq!(
-            collector.count(EventKind::TaskFailed),
+            collector.count(EventKind::AttemptFailed),
             expected_attempts,
             "retry limit {retries}"
         );
@@ -191,23 +195,21 @@ async fn max_retries_allows_initial_attempt_plus_configured_retries() {
             usize::try_from(retries).unwrap(),
             "retry limit {retries}"
         );
-        assert_eq!(collector.count(EventKind::ActorExhausted), 1);
-        assert_eq!(collector.count(EventKind::ActorDead), 0);
+        assert_eq!(collector.count(EventKind::TaskFinished), 1);
         assert!(
             collector
-                .find_all(EventKind::TaskFailed)
+                .find_all(EventKind::AttemptFailed)
                 .iter()
                 .all(|event| event.exit_code == Some(42)),
             "retry limit {retries}: every failed attempt keeps the exit code"
         );
 
-        let exhausted = collector.find(EventKind::ActorExhausted).unwrap();
-        assert_eq!(exhausted.exit_code, Some(42));
-        let reason = exhausted.reason.as_deref().unwrap();
-        assert!(reason.contains("max_retries_exceeded"), "got: {reason}");
+        let finished = collector.find(EventKind::TaskFinished).unwrap();
+        assert_eq!(finished.outcome_kind, Some(TaskOutcomeKind::Failed));
+        assert_eq!(finished.exit_code, Some(42));
         assert!(
-            reason.contains(&format!("({retries}/{retries})")),
-            "got: {reason}"
+            finished.reason.as_deref().unwrap().contains("boom"),
+            "diagnostic detail should retain the final task error"
         );
     }
 }
@@ -236,7 +238,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
                     counter.load(Ordering::SeqCst) >= 5
                         && events
                             .iter()
-                            .filter(|event| event.kind == EventKind::TaskStarting)
+                            .filter(|event| event.kind == EventKind::AttemptStarting)
                             .count()
                             >= 5
                 })
@@ -244,7 +246,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
             "immediate-restart loop and its observable start events should reach 5 runs"
         );
         assert_eq!(collector.count(EventKind::BackoffScheduled), 0);
-        assert!(collector.count(EventKind::TaskStarting) >= 5);
+        assert!(collector.count(EventKind::AttemptStarting) >= 5);
         let _ = handle.shutdown().await;
     })
     .await;
@@ -290,7 +292,7 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
             assert_eq!(b.delay_ms, Some(5));
             assert_eq!(b.reason, None);
         }
-        assert_eq!(collector.count(EventKind::TaskFailed), 0);
+        assert_eq!(collector.count(EventKind::AttemptFailed), 0);
         let _ = handle.shutdown().await;
     })
     .await;
@@ -333,17 +335,14 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
                 .await,
             "task and its first failure events should settle before assertions"
         );
-        assert_eq!(collector.count(EventKind::TaskFailed), 1);
+        assert_eq!(collector.count(EventKind::AttemptFailed), 1);
         let failure_backoffs = collector
             .find_all(EventKind::BackoffScheduled)
             .into_iter()
             .filter(|b| b.backoff_source == Some(BackoffSource::Failure))
             .count();
         assert_eq!(failure_backoffs, 1);
-        assert!(
-            !collector.any_reason_contains(EventKind::ActorExhausted, "max_retries_exceeded"),
-            "budget reset means it must never exhaust on max-retries"
-        );
+        assert_eq!(collector.count(EventKind::TaskFinished), 0);
         let _ = handle.shutdown().await;
     })
     .await;
@@ -358,20 +357,23 @@ async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
     ];
     let collector = run_static(specs).await;
 
-    assert_eq!(collector.count(EventKind::TaskStarting), 3);
-    assert_eq!(collector.count(EventKind::TaskStopped), 3);
-    assert_eq!(collector.count(EventKind::ActorExhausted), 3);
+    assert_eq!(collector.count(EventKind::AttemptStarting), 3);
+    assert_eq!(collector.count(EventKind::AttemptSucceeded), 3);
+    assert_eq!(collector.count(EventKind::TaskFinished), 3);
     assert_eq!(collector.count(EventKind::TaskRemoved), 3);
 
     for label in ["a", "b", "c"] {
         let evs = collector.by_label(label);
         assert!(
-            evs.iter().any(|e| e.kind == EventKind::TaskStarting),
-            "missing TaskStarting for {label}"
+            evs.iter().any(|e| e.kind == EventKind::AttemptStarting),
+            "missing AttemptStarting for {label}"
         );
         assert!(
-            evs.iter().any(|e| e.kind == EventKind::ActorExhausted),
-            "missing ActorExhausted for {label}"
+            evs.iter().any(|e| {
+                e.kind == EventKind::TaskFinished
+                    && e.outcome_kind == Some(TaskOutcomeKind::Completed)
+            }),
+            "missing completed TaskFinished for {label}"
         );
     }
 }
@@ -425,7 +427,10 @@ async fn duplicate_static_batch_starts_no_task_body() {
 
     for label in ["unique", "duplicate"] {
         assert!(collector.by_label(label).iter().all(|event| {
-            !matches!(event.kind, EventKind::TaskAdded | EventKind::TaskStarting)
+            !matches!(
+                event.kind,
+                EventKind::TaskAdded | EventKind::AttemptStarting
+            )
         }));
     }
 
@@ -435,18 +440,15 @@ async fn duplicate_static_batch_starts_no_task_body() {
         .find(|event| event.kind == EventKind::TaskAddFailed)
         .expect("unique item must receive its batch rejection event");
     assert_eq!(
-        unique_failure.reason.as_deref(),
-        Some(taskvisor::reasons::BATCH_REJECTED)
+        unique_failure.rejection_kind,
+        Some(RejectionKind::BatchRejected)
     );
-    let duplicate_reasons: Vec<_> = collector
+    assert_eq!(unique_failure.outcome_kind, Some(TaskOutcomeKind::Rejected));
+    let duplicate_kinds: Vec<_> = collector
         .by_label("duplicate")
         .into_iter()
         .filter(|event| event.kind == EventKind::TaskAddFailed)
-        .filter_map(|event| event.reason)
+        .filter_map(|event| event.rejection_kind)
         .collect();
-    assert!(
-        duplicate_reasons
-            .iter()
-            .any(|reason| reason.as_ref() == taskvisor::reasons::ALREADY_EXISTS)
-    );
+    assert!(duplicate_kinds.contains(&RejectionKind::AlreadyExists));
 }

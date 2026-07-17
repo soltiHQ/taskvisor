@@ -21,9 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     });
 
-    let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    sup.run(vec![TaskSpec::once(task)]).await?;
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    supervisor.run(vec![TaskSpec::once(task)]).await?;
 
-    println!("Done.");
     Ok(())
 }

@@ -6,7 +6,7 @@
 //! |-------------|--------------------|---------------------------------------|
 //! | `one-shot`  | never restart      | run once                              |
 //! | `resilient` | restart on failure | fail twice, then succeed              |
-//! | `always-on` | always restart     | wait 500 ms after each successful run |
+//! | `recurring` | periodic           | wait 500 ms after each successful run |
 //!
 //! The resilient task uses exponential backoff and a retry budget.
 //! Only failure-driven restarts consume that budget.
@@ -52,13 +52,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Always-on: repeats every 500ms until Ctrl+C
+    // Recurring: repeats every 500ms until Ctrl+C
     let cycle = Arc::new(AtomicU32::new(0));
-    let always_on: TaskRef = TaskFn::arc("always-on", move |_ctx| {
+    let recurring: TaskRef = TaskFn::arc("recurring", move |_ctx| {
         let cycle = Arc::clone(&cycle);
         async move {
             let n = cycle.fetch_add(1, Ordering::Relaxed) + 1;
-            println!("[always-on] cycle #{n}");
+            println!("[recurring] cycle #{n}");
             tokio::time::sleep(Duration::from_millis(300)).await;
             Ok(())
         }
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let specs = vec![
         TaskSpec::once(one_shot),
-        TaskSpec::periodic(always_on, Duration::from_millis(500)),
+        TaskSpec::periodic(recurring, Duration::from_millis(500)),
         TaskSpec::restartable(resilient)
             .with_backoff(
                 BackoffPolicy::exponential(Duration::from_millis(200))
@@ -75,10 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_max_retries(NonZeroU32::new(3).unwrap()),
     ];
 
-    let cfg = SupervisorConfig::default().with_grace(Duration::from_secs(5));
-    let sup = Supervisor::new(cfg, vec![]);
-    sup.run(specs).await?;
+    let config = SupervisorConfig::default().with_grace(Duration::from_secs(5));
+    let supervisor = Supervisor::new(config, vec![]);
+    supervisor.run(specs).await?;
 
-    println!("All tasks finished.");
     Ok(())
 }

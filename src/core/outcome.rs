@@ -5,13 +5,13 @@
 //!
 //! A [`TaskWaiter`] answers "how did this task end?" for one [`TaskId`].
 //! It receives one final [`TaskOutcome`] through a direct one-shot channel, outside the event bus.
-//! For an admitted task, the registry sends the outcome after joining the actor and removing its membership.
+//! For an admitted task, the registry sends the outcome after joining its managed runner and removing registry membership.
 //! Event-bus lag does not affect this path. If the outcome cannot be delivered, [`TaskWaiter::wait`] returns an error instead of guessing the result.
 //!
 //! ## Successful Direct-Add Flow
 //!
 //! ```text
-//! Caller                         Runtime                         Task actor
+//! Caller                         Runtime                      Managed runner
 //!   │                               │                                │
 //!   ├── add_and_watch(spec) ───────►│                                │
 //!   │                               ├── register and spawn ─────────►│
@@ -19,7 +19,7 @@
 //!   │                               │                                │ attempts / retries
 //!   │ await waiter.wait()           │                                │
 //!   │                               │◄─────── terminal signal ───────┤
-//!   │                               │ join actor                     │
+//!   │                               │ join runner                    │
 //!   │                               │ remove TaskId and name         │
 //!   │◄──── TaskOutcome (oneshot) ───┤                                │
 //! ```
@@ -30,7 +30,7 @@
 //! ## Guarantees
 //!
 //! - One waiter follows one [`TaskId`].
-//! - For admitted work, it resolves after all retries end and the registry joins the task actor.
+//! - For admitted work, it resolves after all retries end and the registry joins the managed runner.
 //! - Dropping a waiter is safe and does not cancel the task.
 //! - If the runtime drops the sender before it creates an outcome, [`TaskWaiter::wait`] returns an error instead of inventing a result.
 //!
@@ -46,9 +46,51 @@ use crate::error::{RuntimeError, SharedError};
 use crate::events::RejectionKind;
 use crate::identity::TaskId;
 
+/// Machine-readable category of a final [`TaskOutcome`].
+///
+/// This lightweight enum mirrors [`TaskOutcome`] without carrying diagnostic
+/// text or source errors. It is used by lifecycle [`Event`](crate::Event)
+/// values so metrics, dashboards, and alerts never need to parse `reason`.
+///
+/// Match with a wildcard arm because new outcome categories may be added.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TaskOutcomeKind {
+    /// Final attempt succeeded and policy stopped the task.
+    Completed,
+    /// A non-fatal failure reached a policy or retry-limit stop condition.
+    Failed,
+    /// The task reported a permanent failure.
+    Fatal,
+    /// Cancellation was requested or reported cooperatively.
+    Canceled,
+    /// The runtime aborted the task before cooperative stop completed.
+    ForceAborted,
+    /// The internal task runner panicked.
+    Panicked,
+    /// Admission rejected the work before its task body ran.
+    Rejected,
+}
+
+impl TaskOutcomeKind {
+    /// Returns the stable machine-readable label used by events, logs, and metrics.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Completed => "outcome_completed",
+            Self::Failed => "outcome_failed",
+            Self::Fatal => "outcome_fatal",
+            Self::Canceled => "outcome_canceled",
+            Self::ForceAborted => "outcome_force_aborted",
+            Self::Panicked => "outcome_panicked",
+            Self::Rejected => "outcome_rejected",
+        }
+    }
+}
+
 /// Final result of one watched task or controller submission.
 ///
-/// For admitted work, this value is sent after the retry loop ends, the actor is joined, and registry membership is removed.
+/// For admitted work, this value is sent after the retry loop ends, the managed runner is joined, and registry membership is removed.
 /// A controller can instead return [`Rejected`](Self::Rejected) before the task starts.
 ///
 /// This enum is non-exhaustive.
@@ -68,7 +110,7 @@ use crate::identity::TaskId;
 /// | [`Fatal`](Self::Fatal)               | Task reported a permanent failure          |
 /// | [`Canceled`](Self::Canceled)         | Cooperative cancellation                   |
 /// | [`ForceAborted`](Self::ForceAborted) | Runtime aborted before cooperative stop    |
-/// | [`Panicked`](Self::Panicked)         | Internal actor panicked                    |
+/// | [`Panicked`](Self::Panicked)         | Internal task runner panicked              |
 /// | [`Rejected`](Self::Rejected)         | Task body never ran                        |
 ///
 /// ## See Also
@@ -95,7 +137,10 @@ pub enum TaskOutcome {
     /// - the retry budget is used up.
     #[non_exhaustive]
     Failed {
-        /// Final failure message. Same text as the `ActorExhausted` event reason.
+        /// Diagnostic final failure message.
+        ///
+        /// This text is not a machine-readable category and may change.
+        /// Use [`TaskOutcome::kind`] for branching, metrics, and alerts.
         reason: Arc<str>,
         /// Numeric exit code from a process-like task, if any.
         exit_code: Option<i32>,
@@ -108,7 +153,10 @@ pub enum TaskOutcome {
     /// Fatal errors are not retried.
     #[non_exhaustive]
     Fatal {
-        /// Fatal error message. Same text as the `ActorDead` event reason.
+        /// Diagnostic fatal error message.
+        ///
+        /// This text is not a machine-readable category and may change.
+        /// Use [`TaskOutcome::kind`] for branching, metrics, and alerts.
         reason: Arc<str>,
         /// Numeric exit code from a process-like task, if any.
         exit_code: Option<i32>,
@@ -121,13 +169,13 @@ pub enum TaskOutcome {
     /// This can come from shutdown, explicit removal, or the task returning [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
-    /// The runtime aborted the actor before cooperative stop completed.
+    /// The runtime aborted the managed task runner before cooperative stop completed.
     ///
     /// This normally happens after the configured grace period.
     /// Last-owner fallback and signal-setup failure cleanup cannot wait for that period.
     ForceAborted,
 
-    /// The internal actor panicked.
+    /// The internal task runner panicked.
     ///
     /// This guards against a runtime bug.
     /// Panics inside the user task are caught earlier and become retryable failures instead.
@@ -146,12 +194,28 @@ pub enum TaskOutcome {
     Rejected {
         /// Stable category for machine-readable handling.
         kind: RejectionKind,
-        /// Readable rejection details.
+        /// Readable diagnostic rejection details.
+        ///
+        /// Use `kind` instead of parsing this text.
         reason: Arc<str>,
     },
 }
 
 impl TaskOutcome {
+    /// Returns the machine-readable category of this outcome.
+    #[must_use]
+    pub const fn kind(&self) -> TaskOutcomeKind {
+        match self {
+            TaskOutcome::Completed => TaskOutcomeKind::Completed,
+            TaskOutcome::Failed { .. } => TaskOutcomeKind::Failed,
+            TaskOutcome::Fatal { .. } => TaskOutcomeKind::Fatal,
+            TaskOutcome::Canceled => TaskOutcomeKind::Canceled,
+            TaskOutcome::ForceAborted => TaskOutcomeKind::ForceAborted,
+            TaskOutcome::Panicked => TaskOutcomeKind::Panicked,
+            TaskOutcome::Rejected { .. } => TaskOutcomeKind::Rejected,
+        }
+    }
+
     /// Returns `true` only for [`Completed`](Self::Completed).
     #[must_use]
     pub fn is_success(&self) -> bool {
@@ -205,7 +269,7 @@ impl TaskOutcome {
     ///
     /// let outcome = TaskOutcome::rejected_for_tests(
     ///     taskvisor::RejectionKind::QueueFull,
-    ///     "queue_full",
+    ///     "slot queue reached capacity",
     /// );
     /// assert_eq!(outcome.as_label(), "outcome_rejected");
     /// ```
@@ -242,15 +306,7 @@ impl TaskOutcome {
     /// Useful for logs, metrics, and telemetry.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
-        match self {
-            TaskOutcome::Completed => "outcome_completed",
-            TaskOutcome::Failed { .. } => "outcome_failed",
-            TaskOutcome::Fatal { .. } => "outcome_fatal",
-            TaskOutcome::Canceled => "outcome_canceled",
-            TaskOutcome::ForceAborted => "outcome_force_aborted",
-            TaskOutcome::Panicked => "outcome_panicked",
-            TaskOutcome::Rejected { .. } => "outcome_rejected",
-        }
+        self.kind().as_label()
     }
 }
 
@@ -261,7 +317,7 @@ impl TaskOutcome {
 /// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)\n- [`PreparedSubmission::submit_and_watch`](crate::PreparedSubmission::submit_and_watch)\n- [`PreparedSubmission::try_submit_and_watch`](crate::PreparedSubmission::try_submit_and_watch)"
 )]
 ///
 /// [`wait`](Self::wait) consumes the waiter.
@@ -342,11 +398,14 @@ mod tests {
             TaskOutcome::Fatal { reason, exit_code: None, .. } if reason.as_ref() == "bad config"
         ));
 
-        let rejected = TaskOutcome::rejected_for_tests(RejectionKind::QueueFull, "queue_full");
+        let rejected = TaskOutcome::rejected_for_tests(
+            RejectionKind::QueueFull,
+            "slot queue reached capacity",
+        );
         assert!(matches!(
             &rejected,
             TaskOutcome::Rejected { kind: RejectionKind::QueueFull, reason, .. }
-                if reason.as_ref() == "queue_full"
+                if reason.as_ref() == "slot queue reached capacity"
         ));
         assert!(rejected.source().is_none());
     }
@@ -354,13 +413,19 @@ mod tests {
     #[test]
     fn labels_and_success_flags_are_stable_for_every_variant() {
         let cases = [
-            (TaskOutcome::Completed, "outcome_completed", true),
+            (
+                TaskOutcome::Completed,
+                TaskOutcomeKind::Completed,
+                "outcome_completed",
+                true,
+            ),
             (
                 TaskOutcome::Failed {
                     reason: Arc::from("x"),
                     exit_code: None,
                     source: None,
                 },
+                TaskOutcomeKind::Failed,
                 "outcome_failed",
                 false,
             ),
@@ -370,17 +435,34 @@ mod tests {
                     exit_code: Some(1),
                     source: None,
                 },
+                TaskOutcomeKind::Fatal,
                 "outcome_fatal",
                 false,
             ),
-            (TaskOutcome::Canceled, "outcome_canceled", false),
-            (TaskOutcome::ForceAborted, "outcome_force_aborted", false),
-            (TaskOutcome::Panicked, "outcome_panicked", false),
+            (
+                TaskOutcome::Canceled,
+                TaskOutcomeKind::Canceled,
+                "outcome_canceled",
+                false,
+            ),
+            (
+                TaskOutcome::ForceAborted,
+                TaskOutcomeKind::ForceAborted,
+                "outcome_force_aborted",
+                false,
+            ),
+            (
+                TaskOutcome::Panicked,
+                TaskOutcomeKind::Panicked,
+                "outcome_panicked",
+                false,
+            ),
             (
                 TaskOutcome::Rejected {
                     kind: RejectionKind::AdmissionFailed,
                     reason: Arc::from("x"),
                 },
+                TaskOutcomeKind::Rejected,
                 "outcome_rejected",
                 false,
             ),
@@ -388,11 +470,15 @@ mod tests {
 
         let labels: std::collections::HashSet<_> = cases
             .iter()
-            .map(|(outcome, expected_label, expected_success)| {
-                assert_eq!(outcome.as_label(), *expected_label);
-                assert_eq!(outcome.is_success(), *expected_success, "{expected_label}");
-                outcome.as_label()
-            })
+            .map(
+                |(outcome, expected_kind, expected_label, expected_success)| {
+                    assert_eq!(outcome.kind(), *expected_kind);
+                    assert_eq!(outcome.as_label(), *expected_label);
+                    assert_eq!(expected_kind.as_label(), *expected_label);
+                    assert_eq!(outcome.is_success(), *expected_success, "{expected_label}");
+                    outcome.as_label()
+                },
+            )
             .collect();
         assert_eq!(labels.len(), cases.len(), "labels must remain distinct");
     }
