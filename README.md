@@ -168,6 +168,7 @@ These type groups form the main API:
 | `Supervisor` and `SupervisorHandle`    | Own task lifecycle, shutdown, and dynamic management.      |
 | `TaskWaiter` and `TaskOutcome`         | Deliver the reliable final result of watched work.         |
 | `ControllerSpec` and `AdmissionPolicy` | Resolve queue, replace, or reject conflicts per slot.      |
+| `PreparedSubmission`                   | Expose a submission ID before controller events can start. |
 | `ControllerConfig`                     | Sets controller queue and command limits.                  |
 
 <p align="center">

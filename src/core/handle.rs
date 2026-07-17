@@ -21,6 +21,7 @@
 //! |--------------------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
 //! | `add`, `try_add`                           | Registry admission and runner creation                                                                | First attempt started                                                   |
 //! | `add_and_watch`, `try_add_and_watch`       | Registry admission; the returned waiter later confirms terminal cleanup                               | Task success at method return                                           |
+//! | `prepare_submission`                       | A controller `TaskId` is reserved and visible to the caller                                            | Queue intake; preparation publishes no event                            |
 //! | `submit`, `try_submit`                     | Controller command-queue acceptance                                                                   | Slot admission, registry admission, or task start                       |
 //! | `submit_and_watch`, `try_submit_and_watch` | Controller command-queue acceptance; the returned waiter later confirms rejection or terminal cleanup | Slot or registry admission at method return                             |
 //! | `remove`, `try_remove`                     | The stop claim was decided; queued controller work is removed before return                           | Terminal cleanup of registered work                                     |
@@ -482,6 +483,34 @@ impl SupervisorHandle {
         self.core().shutdown().await
     }
 
+    /// Prepares a controller submission and exposes its identity before intake.
+    ///
+    /// This allocates the [`TaskId`] but does not enqueue work or publish an event.
+    /// Install any application-level correlation for [`PreparedSubmission::id`](crate::PreparedSubmission::id), then consume the prepared value with one of its submit methods.
+    ///
+    /// Use the ordinary [`submit`](Self::submit) and [`submit_and_watch`](Self::submit_and_watch) shortcuts when correlation does not need to exist before lifecycle events can start.
+    ///
+    /// Requires the `controller` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured)
+    /// when this supervisor was built without a controller.
+    #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
+    pub fn prepare_submission(
+        &self,
+        spec: crate::controller::ControllerSpec,
+    ) -> Result<crate::controller::PreparedSubmission, crate::controller::ControllerError> {
+        match &self.controller {
+            Some(controller) => Ok(crate::controller::PreparedSubmission::new(
+                controller.handle(),
+                spec,
+            )),
+            None => Err(crate::controller::ControllerError::NotConfigured),
+        }
+    }
+
     /// Sends a task to the controller and returns its reserved [`TaskId`].
     ///
     /// `Ok(id)` confirms only that the controller queue accepted the submission.
@@ -502,10 +531,7 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<TaskId, crate::controller::ControllerError> {
-        match &self.controller {
-            Some(ctrl) => ctrl.handle().submit(spec).await,
-            None => Err(crate::controller::ControllerError::NotConfigured),
-        }
+        self.prepare_submission(spec)?.submit().await
     }
 
     /// Submits only if the controller queue has capacity now.
@@ -525,10 +551,7 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<TaskId, crate::controller::ControllerError> {
-        match &self.controller {
-            Some(ctrl) => ctrl.handle().try_submit(spec),
-            None => Err(crate::controller::ControllerError::NotConfigured),
-        }
+        self.prepare_submission(spec)?.try_submit()
     }
 
     /// Sends a task to the controller and returns a final-outcome waiter.
@@ -550,13 +573,7 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(TaskId, TaskWaiter), crate::controller::ControllerError> {
-        match &self.controller {
-            Some(ctrl) => {
-                let (id, rx) = ctrl.handle().submit_and_watch(spec).await?;
-                Ok((id, TaskWaiter::new(id, rx)))
-            }
-            None => Err(crate::controller::ControllerError::NotConfigured),
-        }
+        self.prepare_submission(spec)?.submit_and_watch().await
     }
 
     /// Submits watched work only if the controller queue has capacity now.
@@ -577,13 +594,7 @@ impl SupervisorHandle {
         &self,
         spec: crate::controller::ControllerSpec,
     ) -> Result<(TaskId, TaskWaiter), crate::controller::ControllerError> {
-        match &self.controller {
-            Some(ctrl) => {
-                let (id, rx) = ctrl.handle().try_submit_and_watch(spec)?;
-                Ok((id, TaskWaiter::new(id, rx)))
-            }
-            None => Err(crate::controller::ControllerError::NotConfigured),
-        }
+        self.prepare_submission(spec)?.try_submit_and_watch()
     }
 
     /// Returns a best-effort rolling snapshot of controller slots.

@@ -17,7 +17,7 @@ Read the code in this order if you are new to the repository:
 | 5    | [`core/registry.rs`](core/registry.rs), [`core/registry/`](core/registry)                                                                                                      | Which task state is authoritative, and how is it cleaned up     |
 | 6    | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                           | How does one task run, retry, time out, and stop                |
 | 7    | [`core/outcome.rs`](core/outcome.rs), [`events/`](events), [`subscribers/`](subscribers)                                                                                       | Which results are reliable, and which signals are observability |
-| 8    | [`controller/mod.rs`](controller/mod.rs), [`controller/slot.rs`](controller/slot.rs), [`controller/core/`](controller/core)                                                    | How does per-slot queue/replace/reject admission work           |
+| 8    | [`controller/mod.rs`](controller/mod.rs), [`controller/prepared.rs`](controller/prepared.rs), [`controller/slot.rs`](controller/slot.rs), [`controller/core/`](controller/core) | How does per-slot queue/replace/reject admission work           |
 | 9    | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/shutdown.rs`](core/shutdown.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | How is one shared shutdown coordinated                          |
 
 After the module documentation, read the integration tests by behavior: [`tests/watch.rs`](../tests/watch.rs), [`tests/identity.rs`](../tests/identity.rs), [`tests/controller.rs`](../tests/controller.rs), and [`tests/shutdown.rs`](../tests/shutdown.rs).
@@ -30,10 +30,11 @@ After the module documentation, read the integration tests by behavior: [`tests/
 
 ```mermaid
 %%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart TB
+flowchart LR
     App["Application"]
     Builder["SupervisorBuilder"]
     Supervisor["Supervisor / SupervisorHandle"]
+    Prepared["PreparedSubmission: reserved TaskId + ControllerSpec"]
     Core["SupervisorCore"]
     Controller["Controller: per-slot admission"]
     Registry["Registry: authoritative task membership"]
@@ -45,13 +46,15 @@ flowchart TB
     Waiter["TaskWaiter / TaskOutcome"]
     Shutdown["ShutdownCoordinator"]
 
-    Builder -->|constructs| Core
-    Builder -->|constructs when configured| Controller
-    Builder -->|returns| Supervisor
     App --> Supervisor
+    Builder -->|returns| Supervisor
     Supervisor --> Core
-    Supervisor -->|submit methods| Controller
+    Supervisor -->|prepare_submission| Prepared
+    Supervisor -->|submit shortcuts| Controller
+    Prepared -->|single-use submit| Controller
+    Builder -->|constructs when configured| Controller
     Controller -->|accepted work| Core
+    Builder -->|constructs| Core
     Core -->|bounded command channel| Registry
     Registry -->|spawns and joins| Actor
     Actor --> Runner
@@ -68,6 +71,8 @@ flowchart TB
 ```
 
 The controller is compiled by the default `controller` feature, but it is a runtime opt-in: it exists only when a builder receives a `ControllerConfig`. Direct `add*` methods bypass slot admission; `submit*` methods use it.
+
+`PreparedSubmission` is only a command-side hand-off. It allocates the controller submission's `TaskId` and holds its `ControllerSpec`, but it does not publish or enqueue anything. Consuming it sends the same ordered controller command as the ordinary `submit*` shortcuts. This lets an integrating application install `application ID -> TaskId` correlation before events for that `TaskId` can begin.
 
 ## Direct task lifecycle
 
@@ -113,36 +118,39 @@ For a static `run(tasks)` batch, the registry indexes every accepted entry, atte
 `TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts.
 
 ```mermaid
-stateDiagram-v2
-    state "Wait for concurrency permit" as Permit
-    state "Run one attempt" as Attempt
-    state "Success interval or restart floor" as SuccessDelay
-    state "Failure backoff" as FailureDelay
-    state "ActorExitReason::Completed" as Completed
-    state "ActorExitReason::Exhausted" as Exhausted
-    state "ActorExitReason::Fatal" as Fatal
-    state "ActorExitReason::Canceled" as Canceled
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
+    Start(( ))
+    Permit("Wait for concurrency permit")
+    Attempt("Run one attempt")
+    SuccessDelay("Success interval or restart floor")
+    FailureDelay("Failure backoff")
+    Completed("ActorExitReason::Completed")
+    Exhausted("ActorExitReason::Exhausted")
+    Fatal("ActorExitReason::Fatal")
+    Canceled("ActorExitReason::Canceled")
+    End(( ))
 
-    [*] --> Permit
-    Permit --> Attempt: permit acquired
-    Permit --> Canceled: runtime canceled
+    Start --> Permit
+    Permit -->|permit acquired| Attempt
+    Permit -->|runtime canceled| Canceled
 
-    Attempt --> Completed: success, policy stops
-    Attempt --> SuccessDelay: success, Always restarts
-    Attempt --> FailureDelay: retryable, retry allowed
-    Attempt --> Exhausted: retry not allowed
-    Attempt --> Fatal: fatal error
-    Attempt --> Canceled: cooperative cancellation
+    Attempt -->|success, policy stops| Completed
+    Attempt -->|success, Always restarts| SuccessDelay
+    Attempt -->|retryable, retry allowed| FailureDelay
+    Attempt -->|retry not allowed| Exhausted
+    Attempt -->|fatal error| Fatal
+    Attempt -->|cooperative cancellation| Canceled
 
-    SuccessDelay --> Permit: delay complete
-    SuccessDelay --> Canceled: runtime canceled
-    FailureDelay --> Permit: delay complete
-    FailureDelay --> Canceled: runtime canceled
+    SuccessDelay -->|delay complete| Permit
+    SuccessDelay -->|runtime canceled| Canceled
+    FailureDelay -->|delay complete| Permit
+    FailureDelay -->|runtime canceled| Canceled
 
-    Completed --> [*]
-    Exhausted --> [*]
-    Fatal --> [*]
-    Canceled --> [*]
+    Completed --> End
+    Exhausted --> End
+    Fatal --> End
+    Canceled --> End
 ```
 
 Important boundaries:
@@ -227,19 +235,25 @@ flowchart LR
 The internal slot phases are:
 
 ```mermaid
-stateDiagram-v2
-    state "CancelPendingAdmission" as CancelPending
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
+    Start(( ))
+    Idle("Idle")
+    Admitting("Admitting")
+    Running("Running")
+    CancelPending("CancelPendingAdmission")
+    Terminating("Terminating")
 
-    [*] --> Idle
-    Idle --> Admitting: submit or advance queued head
-    Admitting --> Running: registry accepts Add
-    Admitting --> Idle: registry rejects Add
-    Admitting --> CancelPending: Replace arrives before Add decision
-    CancelPending --> Terminating: registry accepts Add, then removal starts
-    CancelPending --> Idle: registry rejects Add
-    Running --> Terminating: Replace requests removal
-    Running --> Idle: terminal registry completion
-    Terminating --> Idle: terminal registry completion
+    Start --> Idle
+    Idle -->|submit or advance queued head| Admitting
+    Admitting -->|registry accepts Add| Running
+    Admitting -->|registry rejects Add| Idle
+    Admitting -->|Replace arrives before Add decision| CancelPending
+    CancelPending -->|registry accepts Add, then removal starts| Terminating
+    CancelPending -->|registry rejects Add| Idle
+    Running -->|Replace requests removal| Terminating
+    Running -->|terminal registry completion| Idle
+    Terminating -->|terminal registry completion| Idle
 ```
 
 Policy behavior around those phases:

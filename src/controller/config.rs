@@ -44,9 +44,8 @@ pub struct ControllerConfig {
     /// When that cap is reached, the controller stops draining new commands; later commands remain in the bounded channel.
     ///
     /// When the command channel is full:
-    /// - `submit()` waits for capacity,
-    /// - `submit_and_watch()` waits for capacity,
-    /// - `try_submit()` and `try_submit_and_watch()` return [`ControllerError::Full`](crate::ControllerError::Full),
+    /// - async `submit()` and `submit_and_watch()` methods wait for capacity,
+    /// - `try_submit()` and `try_submit_and_watch()` methods return [`ControllerError::Full`](crate::ControllerError::Full),
     /// - `remove()`, `cancel()`, and `cancel_with_timeout()` wait for capacity,
     /// - `try_remove()`, `try_cancel()`, and `try_cancel_with_timeout()` return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull).
     ///

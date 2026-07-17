@@ -489,7 +489,9 @@ pub struct Event {
     ///
     /// Readable details remain available in [`reason`](Self::reason).
     pub rejection_kind: Option<RejectionKind>,
-    /// Attempt count (starting from 1).
+    /// 1-based number of the attempt described by an attempt-level or backoff event.
+    ///
+    /// This is not the total number of attempts and is not set on `TaskFinished`.
     pub attempt: Option<u32>,
     /// This is normally a task name. Subscriber diagnostics use it for a subscriber name, and controller events use it for a slot name.
     pub task: Option<Arc<str>>,

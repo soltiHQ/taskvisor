@@ -84,6 +84,9 @@
 //! - Configure with [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller).
 //! - Submit with [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) or [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch).
 //!   Their `try_*` forms return immediately instead of waiting when the command channel is full.
+//! - When application correlation must exist before lifecycle events can start,
+//!   call [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission),
+//!   store its [`TaskId`](crate::TaskId), then consume the returned [`PreparedSubmission`].
 //! - Remove or cancel by the [`TaskId`](crate::TaskId) returned from submission.
 //! - Read current slot state with [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot).
 //!
@@ -122,6 +125,8 @@
 //! The returned `TaskId` is allocated before runtime admission.
 //! If admission succeeds, the runtime uses the same ID.
 //! Before admission, it still identifies queued work for cancellation, outcomes, and event correlation.
+//! A [`PreparedSubmission`] exposes that ID before controller intake. Preparing
+//! alone does not enqueue work or publish an event.
 //!
 //! [`ControllerConfig::queue_capacity`] bounds the controller command queue and separately caps registry-backed remove/cancel operations.
 //! A new `Queue` submission is rejected when the slot's pending depth is already [`ControllerConfig::max_slot_queue`] or greater.
@@ -169,6 +174,9 @@ pub(crate) use core::Controller;
 
 mod error;
 pub use error::ControllerError;
+
+mod prepared;
+pub use prepared::PreparedSubmission;
 
 mod spec;
 pub use spec::ControllerSpec;

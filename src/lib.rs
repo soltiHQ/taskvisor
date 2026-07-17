@@ -106,7 +106,7 @@
 //! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]         |
 //! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                        |
 //! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]           |
-//! | Admit keyed work | [`ControllerSpec`], [`AdmissionPolicy`], [`ControllerConfig`]   |
+//! | Admit keyed work | [`ControllerSpec`], [`PreparedSubmission`], [`AdmissionPolicy`], [`ControllerConfig`] |
 //! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]                     |
 //!
 //! Main types are re-exported at the crate root.
@@ -218,7 +218,7 @@ pub mod controller;
 #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
-    SlotStatusKind, SlotView,
+    PreparedSubmission, SlotStatusKind, SlotView,
 };
 
 #[cfg(feature = "logging")]

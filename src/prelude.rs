@@ -44,7 +44,7 @@ pub use crate::identity::TaskId;
 #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub use crate::controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
-    SlotStatusKind, SlotView,
+    PreparedSubmission, SlotStatusKind, SlotView,
 };
 
 /// Built-in logging subscriber.

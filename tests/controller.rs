@@ -3,6 +3,7 @@
 mod common;
 
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -76,6 +77,100 @@ fn controller_spec_components_are_configured_through_accessors() {
 // Watched submission contracts.
 
 #[tokio::test(flavor = "current_thread")]
+async fn prepared_submission_exposes_identity_before_events_and_preserves_it() {
+    let (handle, collector) = served_controller(ControllerConfig::default());
+
+    with_timeout(10, async {
+        let request = ControllerSpec::queue(TaskSpec::once(make_ok_once("prepared-watched")))
+            .with_slot("prepared-slot");
+        let prepared = handle
+            .prepare_submission(request)
+            .expect("controller is configured");
+        let reserved_id = prepared.id();
+
+        assert_eq!(prepared.spec().slot_name(), "prepared-slot");
+        assert!(
+            collector.by_id(reserved_id).is_empty(),
+            "preparation must not publish an event"
+        );
+
+        let (submitted_id, waiter) = prepared
+            .submit_and_watch()
+            .await
+            .expect("prepared submission must enter the controller queue");
+        assert_eq!(submitted_id, reserved_id);
+        assert_eq!(waiter.id(), reserved_id);
+        assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
+
+        assert!(
+            collector
+                .wait_until(Duration::from_secs(2), |events| {
+                    events.iter().any(|event| {
+                        event.id == Some(reserved_id) && event.kind == EventKind::TaskRemoved
+                    })
+                })
+                .await,
+            "the prepared identity must be used through terminal cleanup"
+        );
+        assert!(
+            collector.by_id(reserved_id).iter().any(|event| {
+                event.kind == EventKind::AttemptStarting && event.attempt == Some(1)
+            })
+        );
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_prepared_submission_starts_no_work_and_publishes_no_event() {
+    let (handle, collector) = served_controller(ControllerConfig::default());
+    let starts = Arc::new(AtomicUsize::new(0));
+    let task_starts = Arc::clone(&starts);
+    let task = TaskFn::arc("prepared-dropped", move |_ctx| {
+        let starts = Arc::clone(&task_starts);
+        async move {
+            starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+
+    with_timeout(10, async {
+        let prepared = handle
+            .prepare_submission(
+                ControllerSpec::queue(TaskSpec::once(task)).with_slot("prepared-dropped"),
+            )
+            .expect("controller is configured");
+        let dropped_id = prepared.id();
+        drop(prepared);
+
+        let (barrier_id, barrier) = handle
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+                "prepared-drop-barrier",
+            ))))
+            .await
+            .expect("barrier submission");
+        assert!(matches!(barrier.wait().await, Ok(TaskOutcome::Completed)));
+        assert!(
+            collector
+                .wait_until(Duration::from_secs(2), |events| {
+                    events.iter().any(|event| {
+                        event.id == Some(barrier_id) && event.kind == EventKind::TaskRemoved
+                    })
+                })
+                .await
+        );
+
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert!(collector.by_id(dropped_id).is_empty());
+
+        handle.shutdown().await.expect("shutdown ok");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn watched_submit_variants_resolve_completed_for_admitted_tasks() {
     let (handle, _collector) = served_controller(ControllerConfig::default());
 
@@ -94,11 +189,16 @@ async fn watched_submit_variants_resolve_completed_for_admitted_tasks() {
             "an admitted task that succeeds must resolve Completed, got {outcome:?}"
         );
 
-        let (id, waiter) = handle
-            .try_submit_and_watch(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+        let prepared = handle
+            .prepare_submission(ControllerSpec::queue(TaskSpec::once(make_ok_once(
                 "try-watched-ok",
             ))))
+            .expect("controller is configured");
+        let reserved_id = prepared.id();
+        let (id, waiter) = prepared
+            .try_submit_and_watch()
             .expect("the controller queue has capacity");
+        assert_eq!(id, reserved_id);
         assert_eq!(waiter.id(), id);
         assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
 
@@ -359,6 +459,14 @@ async fn submit_without_controller_is_consistent_across_construction_paths() {
     with_timeout(5, async {
         for (constructor, supervisor, spec) in cases {
             let handle = supervisor.serve();
+
+            assert!(
+                matches!(
+                    handle.prepare_submission(spec.clone()),
+                    Err(ControllerError::NotConfigured)
+                ),
+                "prepare_submission must reject a supervisor created through {constructor}"
+            );
 
             assert_eq!(
                 handle.submit(spec.clone()).await,

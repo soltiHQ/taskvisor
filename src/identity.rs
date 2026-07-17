@@ -4,6 +4,8 @@
 //!
 //! Direct `add*` methods return it after the registry accepts a task.
 //! Controller `submit*` methods return it after queueing, before slot admission.
+//! Controller `prepare_submission` exposes it earlier, before the submission can
+//! publish any event.
 //! The same ID therefore also identifies a controller submission that is rejected without running.
 //!
 //! ## One identity across the lifecycle
@@ -72,6 +74,7 @@ static TASK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 /// Opaque process-local identity of one task submission.
 ///
 /// Taskvisor allocates it once. With the `controller` feature, this happens before admission so queued work can already be addressed and correlated.
+/// A prepared controller submission exposes the allocated value before controller intake and before any event for that value can be published.
 /// If admitted, the same value becomes the registry key and remains unchanged through all attempts and terminal cleanup.
 ///
 /// Rejected work keeps its id even though no task body ran.
