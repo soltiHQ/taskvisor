@@ -28,40 +28,67 @@ After the module documentation, read the integration tests by behavior: [`tests/
 
 `Supervisor::run` and `Supervisor::serve` call the idempotent runtime start path.
 
+The same component may appear in more than one path below. Repetition is only for layout; each label refers to the same runtime component.
+
+### Construction and task execution
+
 ```mermaid
 %%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart LR
+flowchart TB
     App["Application"]
     Builder["SupervisorBuilder"]
     Supervisor["Supervisor / SupervisorHandle"]
-    Prepared["PreparedSubmission: reserved TaskId + ControllerSpec"]
     Core["SupervisorCore"]
-    Controller["Controller: per-slot admission"]
     Registry["Registry: authoritative task membership"]
     Actor["TaskActor: one registered task"]
     Runner["run_once: one attempt"]
     Task["Task + TaskSpec + policies"]
-    Bus["Bus: best-effort broadcast"]
-    Observability["Event relay: alive view + subscriber queues"]
-    Waiter["TaskWaiter / TaskOutcome"]
     Shutdown["ShutdownCoordinator"]
+    Waiter["TaskWaiter / TaskOutcome"]
 
     App --> Supervisor
     Builder -->|returns| Supervisor
     Supervisor --> Core
-    Supervisor -->|prepare_submission| Prepared
-    Supervisor -->|submit shortcuts| Controller
-    Prepared -->|single-use submit| Controller
-    Builder -->|constructs when configured| Controller
-    Controller -->|accepted work| Core
     Builder -->|constructs| Core
     Core -->|bounded command channel| Registry
     Registry -->|spawns and joins| Actor
     Actor --> Runner
     Runner --> Task
-    Registry -->|direct one-shot| Waiter
-    Controller -->|direct rejection outcome| Waiter
     Core --> Shutdown
+    Registry -->|direct one-shot| Waiter
+```
+
+### Controller admission
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    Builder["SupervisorBuilder"]
+    Supervisor["Supervisor / SupervisorHandle"]
+    Prepared["PreparedSubmission: reserved TaskId + ControllerSpec"]
+    Controller["Controller: per-slot admission"]
+    Core["SupervisorCore"]
+    Waiter["TaskWaiter / TaskOutcome"]
+
+    Builder -->|constructs when configured| Controller
+    Supervisor -->|prepare_submission| Prepared
+    Supervisor -->|submit shortcuts| Controller
+    Prepared -->|single-use submit| Controller
+    Controller -->|accepted work| Core
+    Controller -->|direct rejection outcome| Waiter
+```
+
+### Best-effort observability
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
+    Registry["Registry: authoritative task membership"]
+    Actor["TaskActor: one registered task"]
+    Controller["Controller: per-slot admission"]
+    Shutdown["ShutdownCoordinator"]
+    Bus["Bus: best-effort broadcast"]
+    Observability["Event relay: alive view + subscriber queues"]
 
     Registry -. lifecycle events .-> Bus
     Actor -. attempt events .-> Bus
@@ -117,10 +144,32 @@ For a static `run(tasks)` batch, the registry indexes every accepted entry, atte
 
 `TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts.
 
+The retry loop and actor exits are shown separately below. Repeated phase names refer to the same actor phases.
+
+### Retry loop
+
 ```mermaid
 %%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart LR
+flowchart TB
     Start(( ))
+    Permit("Wait for concurrency permit")
+    Attempt("Run one attempt")
+    SuccessDelay("Success interval or restart floor")
+    FailureDelay("Failure backoff")
+
+    Start --> Permit
+    Permit -->|permit acquired| Attempt
+    Attempt -->|success, Always restarts| SuccessDelay
+    Attempt -->|retryable, retry allowed| FailureDelay
+    SuccessDelay -->|delay complete| Permit
+    FailureDelay -->|delay complete| Permit
+```
+
+### Exit paths
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TB
     Permit("Wait for concurrency permit")
     Attempt("Run one attempt")
     SuccessDelay("Success interval or restart floor")
@@ -131,20 +180,12 @@ flowchart LR
     Canceled("ActorExitReason::Canceled")
     End(( ))
 
-    Start --> Permit
-    Permit -->|permit acquired| Attempt
     Permit -->|runtime canceled| Canceled
-
     Attempt -->|success, policy stops| Completed
-    Attempt -->|success, Always restarts| SuccessDelay
-    Attempt -->|retryable, retry allowed| FailureDelay
     Attempt -->|retry not allowed| Exhausted
     Attempt -->|fatal error| Fatal
     Attempt -->|cooperative cancellation| Canceled
-
-    SuccessDelay -->|delay complete| Permit
     SuccessDelay -->|runtime canceled| Canceled
-    FailureDelay -->|delay complete| Permit
     FailureDelay -->|runtime canceled| Canceled
 
     Completed --> End
