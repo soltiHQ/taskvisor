@@ -16,7 +16,7 @@
 /// Core supervisor runtime.
 pub use crate::core::{
     ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
-    TaskOutcome, TaskWaiter,
+    TaskOutcome, TaskOutcomeKind, TaskWaiter,
 };
 
 /// Task abstractions and task specs.

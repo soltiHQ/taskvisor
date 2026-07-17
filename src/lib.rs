@@ -1,7 +1,7 @@
 //! # taskvisor
 //!
-//! Taskvisor supervises long-running Tokio tasks.
-//! It can restart failed work, slow down retries, time out each attempt, and stop tasks during shutdown.
+//! Taskvisor supervises Tokio tasks with restart/backoff, reliable outcomes, and keyed queue/replace/drop admission.
+//! It can time out attempts, stop tasks during shutdown, and dynamically manage work.
 //!
 //! Use it for workers, consumers, connection loops, and other background work that should have a clear lifecycle.
 //!
@@ -105,7 +105,7 @@
 //! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                 |
 //! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`] |
 //! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                |
-//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`]                        |
+//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]   |
 //! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]             |
 //!
 //! Main types are re-exported at the crate root.
@@ -117,7 +117,7 @@
 //! - `tracing`: forwards lifecycle events to `tracing`.
 //! - `logging`: simple event logging for examples and development.
 //! - `tokio-util-interop`: exposes the underlying Tokio cancellation token.
-//! - `controller`: slot-based admission with queue, replace, and reject rules.
+//! - `controller` (default): slot-based admission with queue, replace, and reject rules.
 //! - `test-util`: constructors for task contexts, identities, and outcomes in tests.
 //!
 //! ## Examples
@@ -137,6 +137,7 @@
 //! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)               | Count lifecycle events as Prometheus metrics                      |
 //! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)               | Add, cancel, and remove tasks while the app is running            |
 //! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)             | Wait for a task's final result: done, failed, or canceled         |
+//! | [tenant_sync](https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs)       | Replace stale sync work independently per tenant                  |
 //! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                   | Limit concurrency per slot: queue, replace, or drop the newcomer  |
 //! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)           | Find out if your submission ran or was rejected                   |
 
@@ -152,7 +153,7 @@ struct ReadmeDoctests;
 pub mod core;
 pub use core::{
     ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
-    TaskOutcome, TaskWaiter,
+    TaskOutcome, TaskOutcomeKind, TaskWaiter,
 };
 
 pub mod tasks;
@@ -175,7 +176,7 @@ pub use identity::TaskId;
 
 pub mod prelude;
 
-pub mod reasons;
+pub(crate) mod reasons;
 
 #[cfg(feature = "controller")]
 #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]

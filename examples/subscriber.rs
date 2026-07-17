@@ -26,7 +26,7 @@ use taskvisor::prelude::*;
 /// A simple metrics subscriber that counts lifecycle events.
 struct Metrics {
     starts: AtomicU64,
-    stops: AtomicU64,
+    successes: AtomicU64,
     failures: AtomicU64,
     retries: AtomicU64,
 }
@@ -35,7 +35,7 @@ impl Metrics {
     fn new() -> Self {
         Self {
             starts: AtomicU64::new(0),
-            stops: AtomicU64::new(0),
+            successes: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             retries: AtomicU64::new(0),
         }
@@ -45,7 +45,7 @@ impl Metrics {
         println!();
         println!("--- Metrics ---");
         println!("  starts:   {}", self.starts.load(Ordering::Relaxed));
-        println!("  stops:    {}", self.stops.load(Ordering::Relaxed));
+        println!("  successes: {}", self.successes.load(Ordering::Relaxed));
         println!("  failures: {}", self.failures.load(Ordering::Relaxed));
         println!("  retries:  {}", self.retries.load(Ordering::Relaxed));
     }
@@ -54,13 +54,13 @@ impl Metrics {
 impl Subscribe for Metrics {
     fn on_event(&self, ev: &Event) {
         match ev.kind {
-            EventKind::TaskStarting => {
+            EventKind::AttemptStarting => {
                 self.starts.fetch_add(1, Ordering::Relaxed);
             }
-            EventKind::TaskStopped => {
-                self.stops.fetch_add(1, Ordering::Relaxed);
+            EventKind::AttemptSucceeded => {
+                self.successes.fetch_add(1, Ordering::Relaxed);
             }
-            EventKind::TaskFailed => {
+            EventKind::AttemptFailed => {
                 self.failures.fetch_add(1, Ordering::Relaxed);
             }
             EventKind::BackoffScheduled => {

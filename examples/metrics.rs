@@ -1,13 +1,14 @@
 //! # Metrics from lifecycle events
 //!
 //! This example implements `Subscribe` and maps each event to a Prometheus counter.
-//! `EventKind::as_label` provides stable, machine-readable values such as `task_failed` and `backoff_scheduled`.
+//! `EventKind::as_label` provides stable, machine-readable values such as `attempt_failed` and `backoff_scheduled`.
 //!
 //! A real service would expose the registry on its metrics endpoint.
 //! This example prints the Prometheus text format when it exits.
 //!
 //! The `task` label uses task names. Keep these names bounded and stable.
 //! Do not put request IDs, user IDs, or other unbounded values in metric labels.
+//! Terminal classification comes from `TaskOutcomeKind`; diagnostic `reason` text is deliberately not used as a label.
 //!
 //! Run with `cargo run --example metrics`.
 
@@ -27,8 +28,12 @@ struct PromSubscriber {
 impl Subscribe for PromSubscriber {
     fn on_event(&self, e: &Event) {
         let task = e.task.as_deref().unwrap_or("none");
+        let outcome = e
+            .outcome_kind
+            .map(TaskOutcomeKind::as_label)
+            .unwrap_or("none");
         self.events
-            .with_label_values(&[e.kind.as_label(), task])
+            .with_label_values(&[e.kind.as_label(), outcome, task])
             .inc();
     }
 
@@ -46,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = Registry::new();
     let events = IntCounterVec::new(
         Opts::new("taskvisor_events_total", "Supervisor lifecycle events"),
-        &["event", "task"],
+        &["event", "outcome", "task"],
     )?;
     registry.register(Box::new(events.clone()))?;
 

@@ -38,7 +38,7 @@
 //!
 //! impl Subscribe for Metrics {
 //!     fn on_event(&self, ev: &Event) {
-//!         if matches!(ev.kind, EventKind::TaskFailed) {
+//!         if matches!(ev.kind, EventKind::AttemptFailed) {
 //!             // update counters, push to a channel, etc.
 //!         }
 //!     }

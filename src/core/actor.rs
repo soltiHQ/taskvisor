@@ -6,7 +6,7 @@
 //! ## Flow
 //!
 //! ```text
-//! wait for permit -> TaskStarting -> run attempt -> release permit -> apply policy
+//! wait for permit -> AttemptStarting -> run attempt -> release permit -> apply policy
 //! ```
 //!
 //! | Attempt result              | Actor decision                                         |
@@ -20,10 +20,11 @@
 //!
 //! ## Events and Final State
 //!
-//! `TaskStopped`, `TaskCanceled`, and `TaskFailed` describe one attempt.
-//! `BackoffScheduled`, `ActorExhausted`, and `ActorDead` describe the actor's decision.
+//! `AttemptSucceeded`, `AttemptCanceled`, and `AttemptFailed` describe one attempt.
+//! `BackoffScheduled` describes the decision to start another attempt.
+//! After this actor returns, the registry publishes one typed `TaskFinished` event from the resulting [`TaskOutcome`](crate::TaskOutcome).
 //!
-//! A `TaskFailed` event is not a final outcome; another attempt may follow it.
+//! > An `AttemptFailed` event is not a final outcome; another attempt may follow it.
 //!
 //! ## Rules
 //!
@@ -51,7 +52,6 @@ use crate::{
     events::{Bus, Event, EventKind},
     identity::TaskId,
     policies::{BackoffPolicy, RestartPolicy},
-    reasons,
     tasks::Task,
 };
 
@@ -90,7 +90,7 @@ pub(crate) enum ActorExitReason {
     /// - the error is not retryable
     /// - the retry budget (`max_retries`) is used up
     Exhausted {
-        /// Final failure message. Same text as the `ActorExhausted` event reason.
+        /// Diagnostic final failure message.
         reason: Arc<str>,
         /// Numeric exit code from a process-like task, if any.
         exit_code: Option<i32>,
@@ -101,14 +101,14 @@ pub(crate) enum ActorExitReason {
     /// Actor stopped because of runtime shutdown, explicit removal, or `TaskError::Canceled`.
     ///
     /// This maps to [`TaskOutcome::Canceled`](crate::TaskOutcome).
-    /// Depending on where cancellation happened, there may be no actor-level terminal event.
+    /// Depending on where cancellation happened, there may be no attempt-level terminal event.
     Canceled,
 
     /// Actor stopped because the task returned a fatal error.
     ///
     /// Fatal errors are not retried.
     Fatal {
-        /// Fatal error message. Same text as the `ActorDead` event reason.
+        /// Diagnostic fatal error message.
         reason: Arc<str>,
         /// Numeric exit code from a process-like task, if any.
         exit_code: Option<i32>,
@@ -193,16 +193,7 @@ impl TaskActor {
                     tokio::select! {
                         res = &mut fut => match res {
                             Ok(p) => Some(p),
-                            Err(_closed) => {
-                                self.bus.publish(
-                                    Event::new(EventKind::ActorExhausted)
-                                        .with_task(task_name.clone())
-                                        .with_id(id)
-                                        .with_attempt(attempt)
-                                        .with_reason("semaphore_closed"),
-                                );
-                                return ActorExitReason::Canceled;
-                            }
+                            Err(_closed) => return ActorExitReason::Canceled,
                         },
                         _ = runtime_token.cancelled() => {
                             return ActorExitReason::Canceled;
@@ -219,7 +210,7 @@ impl TaskActor {
             attempt = attempt.saturating_add(1);
 
             self.bus.publish(
-                Event::new(EventKind::TaskStarting)
+                Event::new(EventKind::AttemptStarting)
                     .with_task(task_name.clone())
                     .with_id(id)
                     .with_attempt(attempt),
@@ -276,13 +267,6 @@ impl TaskActor {
                             if runtime_token.is_cancelled() {
                                 return ActorExitReason::Canceled;
                             }
-                            self.bus.publish(
-                                Event::new(EventKind::ActorExhausted)
-                                    .with_task(task_name.clone())
-                                    .with_id(id)
-                                    .with_attempt(attempt)
-                                    .with_reason(reasons::POLICY_EXHAUSTED_SUCCESS),
-                            );
                             return ActorExitReason::Completed;
                         }
                     }
@@ -292,15 +276,6 @@ impl TaskActor {
                     let exit_code = e.exit_code();
                     let source: Option<SharedError> = e.into_source().map(Arc::from);
 
-                    let mut ev = Event::new(EventKind::ActorDead)
-                        .with_task(task_name.clone())
-                        .with_id(id)
-                        .with_attempt(attempt)
-                        .with_reason(Arc::clone(&reason));
-                    if let Some(code) = exit_code {
-                        ev = ev.with_exit_code(code);
-                    }
-                    self.bus.publish(ev);
                     return ActorExitReason::Fatal {
                         reason,
                         exit_code,
@@ -308,16 +283,6 @@ impl TaskActor {
                     };
                 }
                 Err(TaskError::Canceled) => {
-                    if runtime_token.is_cancelled() {
-                        return ActorExitReason::Canceled;
-                    }
-                    self.bus.publish(
-                        Event::new(EventKind::ActorExhausted)
-                            .with_task(task_name.clone())
-                            .with_id(id)
-                            .with_attempt(attempt)
-                            .with_reason(reasons::TASK_RETURNED_CANCELED),
-                    );
                     return ActorExitReason::Canceled;
                 }
                 Err(e) => {
@@ -336,11 +301,8 @@ impl TaskActor {
                             self.params.max_retries.filter(|_| retries_exhausted)
                         {
                             Arc::from(format!(
-                                "{}({}/{}): {}",
-                                reasons::MAX_RETRIES_EXCEEDED,
-                                backoff_attempt,
-                                limit.get(),
-                                e
+                                "retry limit reached after {backoff_attempt} of {} retries: {e}",
+                                limit.get()
                             ))
                         } else {
                             Arc::from(e.to_string())
@@ -348,15 +310,6 @@ impl TaskActor {
                         let exit_code = e.exit_code();
                         let source: Option<SharedError> = e.into_source().map(Arc::from);
 
-                        let mut ev = Event::new(EventKind::ActorExhausted)
-                            .with_task(task_name.clone())
-                            .with_id(id)
-                            .with_attempt(attempt)
-                            .with_reason(Arc::clone(&reason));
-                        if let Some(code) = exit_code {
-                            ev = ev.with_exit_code(code);
-                        }
-                        self.bus.publish(ev);
                         return ActorExitReason::Exhausted {
                             reason,
                             exit_code,
@@ -530,10 +483,7 @@ mod tests {
         let reason = a.run(CancellationToken::new()).await;
         match reason {
             ActorExitReason::Exhausted { reason, .. } => {
-                assert!(
-                    reason.contains("max_retries_exceeded"),
-                    "reason must mention exhausted budget: {reason}"
-                );
+                assert!(reason.contains("retry limit reached"));
             }
             other => panic!("expected Exhausted, got {other:?}"),
         }

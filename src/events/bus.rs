@@ -113,16 +113,16 @@ mod tests {
         let mut a = bus.subscribe();
         let mut b = bus.subscribe();
 
-        bus.publish(Event::new(EventKind::TaskStarting));
+        bus.publish(Event::new(EventKind::AttemptStarting));
 
-        assert_eq!(a.recv().await.unwrap().kind, EventKind::TaskStarting);
-        assert_eq!(b.recv().await.unwrap().kind, EventKind::TaskStarting);
+        assert_eq!(a.recv().await.unwrap().kind, EventKind::AttemptStarting);
+        assert_eq!(b.recv().await.unwrap().kind, EventKind::AttemptStarting);
     }
 
     #[tokio::test]
     async fn publish_without_subscribers_is_dropped() {
         let bus = Bus::new(16);
-        bus.publish(Event::new(EventKind::TaskStarting));
+        bus.publish(Event::new(EventKind::AttemptStarting));
 
         let mut rx = bus.subscribe();
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
@@ -134,7 +134,7 @@ mod tests {
         let mut rx = bus.subscribe();
 
         for _ in 0..4 {
-            bus.publish(Event::new(EventKind::TaskStarting));
+            bus.publish(Event::new(EventKind::AttemptStarting));
         }
 
         let err = rx
@@ -145,6 +145,6 @@ mod tests {
             matches!(err, RecvError::Lagged(_)),
             "expected Lagged, got {err:?}"
         );
-        assert_eq!(rx.recv().await.unwrap().kind, EventKind::TaskStarting);
+        assert_eq!(rx.recv().await.unwrap().kind, EventKind::AttemptStarting);
     }
 }

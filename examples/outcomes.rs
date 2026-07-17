@@ -11,7 +11,7 @@
 //! | `TaskOutcome`    | final business decision      | dedicated terminal channel |
 //!
 //! This example handles successful, failed, and canceled tasks.
-//! Other outcomes cover fatal errors, force-abort, actor panic, and controller rejection.
+//! Other outcomes cover fatal errors, force-abort, task-runner panic, and controller rejection.
 //! `TaskWaiter::wait` can still return an error if the runtime closes the terminal channel unexpectedly.
 //!
 //! Run with `cargo run --example outcomes`.
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  import -> {:?}\n", waiter.wait().await?);
 
     // 2) A task that always fails, with a bounded retry budget -> Failed.
-    //    Note the outcome's reason/exit_code are identical to the ActorExhausted event.
+    //    Its reason/exit_code are identical to the typed TaskFinished event.
     println!("=== Failed (retries exhausted) ===");
     let attempts = Arc::new(AtomicU32::new(0));
     let flaky: TaskRef = TaskFn::arc("sync", move |_ctx| {

@@ -74,7 +74,7 @@
 //! `Queue` and `DropIfRunning` also leave the current owner's status unchanged.
 //!
 //! After a registered owner, the next queued task starts only after terminal registry cleanup.
-//! At that point, the old task actor has been joined and its task name is free.
+//! At that point, the old managed runner has been joined and its task name is free.
 //! If registration is rejected, no registered owner exists; the controller can try the next queued item as soon as it receives that direct decision.
 //! Events are only for observability; they do not drive slot state.
 //!
@@ -86,6 +86,10 @@
 //!   Their `try_*` forms return immediately instead of waiting when the command channel is full.
 //! - Remove or cancel by the [`TaskId`](crate::TaskId) returned from submission.
 //! - Read current slot state with [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot).
+//!
+//! Slots control admission only. There is no slot-wide cancel/remove operation.
+//! Canceling a registered owner by ID or name does not automatically purge a
+//! queued replacement for the same slot.
 //!
 //! ## Example
 //!

@@ -18,20 +18,20 @@
 //!         │                                                             │
 //!         └── optional controller ─► queue[A] ─► slot admission[A] ─────┤
 //!                                      │                                │
-//!                                      └──► rejected[A] (no actor)      │
+//!                                      └──► rejected[A] (not registered)│
 //!                                                                       ▼
 //!                                                         registry admission[A]
 //!                                                             │        │
 //!                                      rejected[A] ◄──────────┘        └──► registry[A]
-//!                                      (no actor)                            │
+//!                                      (not registered)                     │
 //!                                                                            ▼
-//!                                                    actor[A] ─► attempt 1, 2, ...
+//!                                              task runner[A] ─► attempt 1, 2, ...
 //!                                                                            ▼
 //!                                                                       cleanup[A]
 //! ```
 //!
 //! No new `TaskId` is allocated at admission or between retry attempts.
-//! Queue management, registry membership, the actor, and completion tracking carry the same `A`.
+//! Queue management, registry membership, the managed runner, and completion tracking carry the same `A`.
 //! Related lifecycle events expose it so callers can correlate cancellation, logs, and metrics.
 //!
 //! ## TaskId vs Name vs Slot

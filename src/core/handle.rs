@@ -149,7 +149,7 @@ impl SupervisorHandle {
     /// Adds a task and returns a waiter for its final outcome.
     ///
     /// Registration is the same as [`add`](Self::add).
-    /// The [`TaskWaiter`] resolves after all retries end, the registry joins the task actor, and registry membership is removed.
+    /// The [`TaskWaiter`] resolves after all retries end, the registry joins the managed runner, and registry membership is removed.
     ///
     /// > It uses a direct completion channel, not best-effort lifecycle events.
     ///
@@ -268,7 +268,7 @@ impl SupervisorHandle {
     /// Returns the authoritative registry view as `(id, name)` pairs.
     ///
     /// The list comes from the registry and is sorted by [`TaskId`].
-    /// It includes every registry entry, whether its actor is running, waiting for a permit, backoff, or restart interval, already finished but not cleaned up, or being removed.
+    /// It includes every registry entry, whether its managed task is running, waiting for a permit, in backoff or a restart interval, already finished but not cleaned up, or being removed.
     ///
     /// See [`alive_snapshot`](Self::alive_snapshot) for the best-effort list of task names currently marked alive.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
@@ -308,7 +308,7 @@ impl SupervisorHandle {
 
     /// Cancels work by identity and waits for terminal cleanup.
     ///
-    /// For registered work, this returns after the actor is joined and its name and identity are released.
+    /// For registered work, this returns after the managed runner is joined and its name and identity are released.
     /// For queued controller work, removal is already complete when this method returns.
     ///
     /// `Ok(true)` is returned only to the call that claimed the stop.
@@ -536,7 +536,7 @@ impl SupervisorHandle {
     /// The waiter uses the direct completion channel, not the best-effort event bus.
     /// It normally resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) when controller or registry admission rejects the submission.
     /// If the completion sender closes first, [`TaskWaiter::wait`] returns [`RuntimeError::ShuttingDown`].
-    /// If admitted, the waiter resolves after the task finishes and its actor is joined.
+    /// If admitted, the waiter resolves after the task finishes and its managed runner is joined.
     ///
     /// Requires the `controller` feature.
     ///

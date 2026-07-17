@@ -1260,7 +1260,7 @@ async fn registry_reply_marks_slot_running_without_task_added() {
         .await
         .expect("controller intake must accept the submission");
     for _ in 0..16 {
-        controller_bus.publish(Event::new(EventKind::TaskStarting).with_task("noise"));
+        controller_bus.publish(Event::new(EventKind::AttemptStarting).with_task("noise"));
     }
 
     let reached_running = poll_until(Duration::from_secs(2), || async {

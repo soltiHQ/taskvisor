@@ -42,7 +42,7 @@ async fn add_confirms_registration_returns_id_and_starts_task() {
             poll_until(Duration::from_secs(2), || async {
                 handle.is_alive("worker").await
                     && collector.by_id(id).iter().any(|e| {
-                        e.kind == EventKind::TaskStarting && e.task.as_deref() == Some("worker")
+                        e.kind == EventKind::AttemptStarting && e.task.as_deref() == Some("worker")
                     })
             })
             .await
@@ -389,15 +389,23 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
         assert!(
             collector
                 .wait_until(Duration::from_secs(3), |events| {
-                    events.iter().any(|event| {
-                        event.id == Some(id)
-                            && event.kind == EventKind::TaskRemoved
-                            && event.reason.as_deref()
-                                == Some(taskvisor::reasons::FORCE_TERMINATED_AFTER_GRACE)
-                    })
+                    events
+                        .iter()
+                        .any(|event| event.id == Some(id) && event.kind == EventKind::TaskRemoved)
                 })
                 .await,
             "stuck task must be force-aborted after grace, not leaked"
+        );
+        assert_eq!(
+            collector
+                .by_id(id)
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::TaskFinished
+                        && event.outcome_kind == Some(TaskOutcomeKind::ForceAborted)
+                })
+                .count(),
+            1
         );
         let _ = handle.shutdown().await;
     })
@@ -512,7 +520,7 @@ async fn events_carry_correct_id_across_full_lifecycle() {
         );
 
         let by_id = collector.by_id(id);
-        assert!(by_id.iter().any(|e| e.kind == EventKind::TaskStarting));
+        assert!(by_id.iter().any(|e| e.kind == EventKind::AttemptStarting));
         assert!(by_id.iter().any(|e| e.kind == EventKind::TaskRemoved));
         for e in collector.by_label("life") {
             if let Some(eid) = e.id {

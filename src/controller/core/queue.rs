@@ -69,7 +69,7 @@ impl Controller {
 
     /// Implements latest-wins replacement for the queue head only.
     ///
-    /// If the queue has a head, that head is rejected as `superseded_by_replace` and replaced by the new submission.
+    /// If the queue has a head, that head is rejected with [`RejectionKind::SupersededByReplace`] and replaced by the new submission.
     /// FIFO items behind it stay in place.
     ///
     /// If the queue is empty, the new submission becomes the head.

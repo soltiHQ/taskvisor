@@ -49,7 +49,7 @@
 //! - Event sequence numbers help sort observations, but do not prove causal order between concurrent tasks.
 
 mod outcome;
-pub use outcome::{TaskOutcome, TaskWaiter};
+pub use outcome::{TaskOutcome, TaskOutcomeKind, TaskWaiter};
 
 mod runtime;
 pub(crate) use runtime::SupervisorCore;

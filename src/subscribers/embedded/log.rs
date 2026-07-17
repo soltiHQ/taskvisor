@@ -9,12 +9,12 @@
 //!
 //! ## Example output
 //! ```text
-//! [001] [task_starting] task=worker attempt=1
-//! [002] [task_failed] task=worker reason="connection refused" attempt=1
+//! [001] [attempt_starting] task=worker attempt=1
+//! [002] [attempt_failed] task=worker reason="connection refused" attempt=1
 //! [003] [backoff_scheduled] task=worker source=failure delay=2s after_attempt=1 reason="connection refused"
-//! [004] [timeout_hit] task=worker timeout=5s
-//! [005] [task_stopped] task=worker
-//! [006] [actor_exhausted] task=worker reason=policy
+//! [004] [attempt_timed_out] task=worker timeout=5s
+//! [005] [attempt_succeeded] task=worker
+//! [006] [task_finished] task=worker outcome=outcome_completed
 //! [007] [task_add_requested] task=new-worker
 //! [008] [task_added] task=new-worker
 //! [009] [task_remove_requested] task=old-worker
@@ -83,8 +83,8 @@ impl LogWriter {
             }
 
             // Task lifecycle and management: task name only.
-            EventKind::TaskStopped
-            | EventKind::TaskCanceled
+            EventKind::AttemptSucceeded
+            | EventKind::AttemptCanceled
             | EventKind::TaskAddRequested
             | EventKind::TaskAdded
             | EventKind::TaskRemoveRequested
@@ -92,14 +92,14 @@ impl LogWriter {
                 println!("{head} task={}", or(e.task.as_deref(), "none"));
             }
 
-            EventKind::TaskStarting => {
+            EventKind::AttemptStarting => {
                 println!(
                     "{head} task={} attempt={}",
                     or(e.task.as_deref(), "none"),
                     e.attempt.unwrap_or(0)
                 );
             }
-            EventKind::TaskFailed => {
+            EventKind::AttemptFailed => {
                 println!(
                     "{head} task={} reason=\"{}\" attempt={}",
                     or(e.task.as_deref(), "none"),
@@ -114,7 +114,7 @@ impl LogWriter {
                     or(e.reason.as_deref(), "unknown")
                 );
             }
-            EventKind::TimeoutHit => {
+            EventKind::AttemptTimedOut => {
                 println!(
                     "{head} task={} timeout={}",
                     or(e.task.as_deref(), "none"),
@@ -149,20 +149,18 @@ impl LogWriter {
                 );
             }
 
-            // Terminals.
-            EventKind::ActorExhausted => {
-                println!(
-                    "{head} task={} reason=\"{}\"",
-                    or(e.task.as_deref(), "none"),
-                    or(e.reason.as_deref(), "policy")
-                );
-            }
-            EventKind::ActorDead => {
-                println!(
-                    "{head} task={} reason=\"{}\"",
-                    or(e.task.as_deref(), "none"),
-                    or(e.reason.as_deref(), "fatal")
-                );
+            // Registered-task terminal outcome.
+            EventKind::TaskFinished => {
+                let task = or(e.task.as_deref(), "none");
+                let outcome = e
+                    .outcome_kind
+                    .map(|kind| kind.as_label())
+                    .unwrap_or("unknown");
+                if let Some(reason) = e.reason.as_deref() {
+                    println!("{head} task={task} outcome={outcome} reason=\"{reason}\"");
+                } else {
+                    println!("{head} task={task} outcome={outcome}");
+                }
             }
 
             // Controller: the `task` field carries the slot name.
@@ -207,9 +205,9 @@ mod tests {
 
     #[test]
     fn event_head_keeps_the_full_sequence_number() {
-        let mut event = Event::new(EventKind::TaskStarting);
+        let mut event = Event::new(EventKind::AttemptStarting);
         event.seq = 12_345;
 
-        assert_eq!(event_head(&event), "[12345] [task_starting]");
+        assert_eq!(event_head(&event), "[12345] [attempt_starting]");
     }
 }

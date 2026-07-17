@@ -7,18 +7,20 @@
 //!
 //! | Attempt result                                      | Events                          | Returned result      |
 //! |-----------------------------------------------------|---------------------------------|----------------------|
-//! | `Ok(())`                                            | `TaskStopped`                   | `Ok(())`             |
-//! | `TaskError::Canceled`                               | `TaskCanceled`                  | Same error           |
-//! | Task-returned `Fail`, `Fatal`, or `Timeout`         | `TaskFailed`                    | Same error           |
-//! | Panic while calling `spawn()` or polling its future | `TaskFailed`                    | `TaskError::Fail`    |
-//! | Configured attempt timer expires                    | `TimeoutHit`, then `TaskFailed` | `TaskError::Timeout` |
+//! | `Ok(())`                                            | `AttemptSucceeded` | `Ok(())`             |
+//! | `TaskError::Canceled`                               | `AttemptCanceled`  | Same error           |
+//! | Task-returned `Fail`, `Fatal`, or `Timeout`         | `AttemptFailed`    | Same error           |
+//! | Panic while calling `spawn()` or polling its future | `AttemptFailed`    | `TaskError::Fail`    |
+//! | Configured attempt timer expires                    | `AttemptTimedOut`  | `TaskError::Timeout` |
 //!
 //! ## Rules
 //!
-//! - Each completed call publishes one final attempt event: `TaskStopped`,`TaskCanceled`, or `TaskFailed`. Force-aborting the actor can drop an in-flight call before that event.
+//! - Each completed call publishes one final attempt event: `AttemptSucceeded`,
+//!   `AttemptCanceled`, `AttemptFailed`, or `AttemptTimedOut`. Force-aborting
+//!   the managed runner can drop an in-flight call before that event.
 //! - Each attempt gets a child cancellation token. Parent cancellation reaches it, but child cancellation does not affect the parent.
 //! - Panics while calling `spawn()` or polling its future become retryable [`TaskError::Fail`] values.
-//! - `TimeoutHit` is published only when the configured attempt timer expires.
+//! - `AttemptTimedOut` is published only when the configured attempt timer expires.
 //! - `TaskError::Canceled` is a cooperative stop, not a failure.
 
 use std::future::Future;
@@ -79,14 +81,16 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
 /// A positive timeout limits this attempt only.
 /// When the configured timer expires, the attempt future is dropped and is no longer polled.
 /// The child token is then cancelled so work that cloned it can observe cancellation.
-/// `TimeoutHit` is published before the final `TaskFailed`.
+/// A configured timeout publishes `AttemptTimedOut` as the attempt's single
+/// terminal event. A task that explicitly returns `TaskError::Timeout` instead
+/// follows the ordinary `AttemptFailed` path.
 /// `None` and zero mean no timeout.
 ///
 /// ### Cancellation
 ///
 /// Parent cancellation reaches the attempt context.
 /// A cooperative task should observe [`TaskContext::cancelled`](crate::TaskContext::cancelled) and return [`TaskError::Canceled`].
-/// This publishes `TaskCanceled`, not `TaskFailed`.
+/// This publishes `AttemptCanceled`, not `AttemptFailed`.
 ///
 /// ### Panic Handling
 ///
@@ -118,7 +122,7 @@ pub async fn run_once<T: Task + ?Sized>(
             Err(_elapsed) => {
                 child.cancel();
                 publish_timeout(bus, id, task.name(), dur, attempt, started.elapsed());
-                Err(TaskError::timeout(dur))
+                return Err(TaskError::timeout(dur));
             }
         }
     } else {
@@ -141,10 +145,10 @@ pub async fn run_once<T: Task + ?Sized>(
     }
 }
 
-/// Publishes `TaskStopped` for a successful attempt.
+/// Publishes `AttemptSucceeded` for a successful attempt.
 fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Duration) {
     bus.publish(
-        Event::new(EventKind::TaskStopped)
+        Event::new(EventKind::AttemptSucceeded)
             .with_task(name)
             .with_id(id)
             .with_attempt(attempt)
@@ -152,10 +156,10 @@ fn publish_stopped(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Du
     );
 }
 
-/// Publishes `TaskCanceled` for a cooperative cancellation attempt.
+/// Publishes `AttemptCanceled` for a cooperative cancellation attempt.
 fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: Duration) {
     bus.publish(
-        Event::new(EventKind::TaskCanceled)
+        Event::new(EventKind::AttemptCanceled)
             .with_task(name)
             .with_id(id)
             .with_attempt(attempt)
@@ -163,7 +167,7 @@ fn publish_canceled(bus: &Bus, id: TaskId, name: &str, attempt: u32, duration: D
     );
 }
 
-/// Publishes `TaskFailed` with error details and attempt duration.
+/// Publishes `AttemptFailed` with error details and attempt duration.
 fn publish_failed(
     bus: &Bus,
     id: TaskId,
@@ -172,7 +176,7 @@ fn publish_failed(
     err: &TaskError,
     duration: Duration,
 ) {
-    let mut ev = Event::new(EventKind::TaskFailed)
+    let mut ev = Event::new(EventKind::AttemptFailed)
         .with_task(name)
         .with_id(id)
         .with_attempt(attempt)
@@ -184,7 +188,7 @@ fn publish_failed(
     bus.publish(ev);
 }
 
-/// Publishes `TimeoutHit` before the final timeout `TaskFailed` event.
+/// Publishes `AttemptTimedOut` as the configured timeout's terminal attempt event.
 fn publish_timeout(
     bus: &Bus,
     id: TaskId,
@@ -194,7 +198,7 @@ fn publish_timeout(
     duration: Duration,
 ) {
     bus.publish(
-        Event::new(EventKind::TimeoutHit)
+        Event::new(EventKind::AttemptTimedOut)
             .with_task(name)
             .with_id(id)
             .with_timeout(dur)
@@ -239,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn timeout_returns_timeout_and_publishes_timeout_hit() {
+    async fn timeout_returns_timeout_and_publishes_attempt_timed_out() {
         let bus = Bus::new(16);
         let mut rx = bus.subscribe();
         let parent = CancellationToken::new();
@@ -260,8 +264,8 @@ mod tests {
         }
         assert!(
             std::iter::from_fn(|| rx.try_recv().ok())
-                .any(|event| event.kind == EventKind::TimeoutHit),
-            "a timeout result must be accompanied by TimeoutHit"
+                .any(|event| event.kind == EventKind::AttemptTimedOut),
+            "a timeout result must be accompanied by AttemptTimedOut"
         );
     }
 
@@ -289,16 +293,16 @@ mod tests {
             .expect("task succeeds");
 
         let stopped = std::iter::from_fn(|| rx.try_recv().ok())
-            .find(|event| event.kind == EventKind::TaskStopped)
-            .expect("a successful attempt must publish TaskStopped");
+            .find(|event| event.kind == EventKind::AttemptSucceeded)
+            .expect("a successful attempt must publish AttemptSucceeded");
         assert_eq!(
             stopped.attempt,
             Some(3),
-            "TaskStopped must carry the attempt number"
+            "AttemptSucceeded must carry the attempt number"
         );
         let measured = stopped
             .duration_ms
-            .expect("TaskStopped must carry the attempt duration");
+            .expect("AttemptSucceeded must carry the attempt duration");
         assert!(
             measured >= 20,
             "attempt duration must reflect the ~30ms of work, got {measured}ms"

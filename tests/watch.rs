@@ -33,26 +33,27 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
             .wait_until(Duration::from_secs(2), |events| {
                 events
                     .iter()
-                    .any(|event| event.id == Some(id) && event.kind == EventKind::ActorExhausted)
+                    .any(|event| event.id == Some(id) && event.kind == EventKind::TaskFinished)
             })
             .await
     );
     let event = collector
         .by_id(id)
         .into_iter()
-        .find(|e| e.kind == EventKind::ActorExhausted)
-        .expect("ActorExhausted event for the run");
+        .find(|e| e.kind == EventKind::TaskFinished)
+        .expect("TaskFinished event for the run");
+    assert_eq!(event.outcome_kind, Some(TaskOutcomeKind::Failed));
 
     match outcome {
         TaskOutcome::Failed {
             reason, exit_code, ..
         } => {
-            assert!(reason.contains("max_retries_exceeded"));
+            assert!(reason.contains("boom"));
             assert_eq!(exit_code, Some(9));
             assert_eq!(
                 &*reason,
                 event.reason.as_deref().expect("event carries a reason"),
-                "TaskOutcome reason must be byte-identical to the ActorExhausted reason"
+                "TaskOutcome reason must be byte-identical to the TaskFinished reason"
             );
             assert_eq!(exit_code, event.exit_code, "exit_code must match too");
         }

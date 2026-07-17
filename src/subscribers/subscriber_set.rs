@@ -323,7 +323,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     fn ev(task: &str) -> Arc<Event> {
-        Arc::new(Event::new(EventKind::TaskStarting).with_task(task))
+        Arc::new(Event::new(EventKind::AttemptStarting).with_task(task))
     }
 
     fn kind_ev(kind: EventKind) -> Arc<Event> {

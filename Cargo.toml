@@ -4,13 +4,13 @@ version      = "0.6.0"
 edition      = "2024"
 rust-version = "1.90.0"
 
-description   = "Task supervisor for Tokio: restarts background tasks on failure with exponential backoff and jitter, graceful shutdown, and lifecycle events"
+description   = "Tokio task supervisor with restart/backoff, reliable outcomes, and per-key queue/replace/drop admission"
 repository    = "https://github.com/soltiHQ/taskvisor"
 documentation = "https://docs.rs/taskvisor"
 license       = "Apache-2.0"
 readme        = "README.md"
 
-keywords   = ["supervisor", "tokio", "retry", "restart", "backoff"]
+keywords   = ["supervisor", "tokio", "retry", "backoff", "graceful-shutdown"]
 categories = ["asynchronous", "concurrency"]
 
 exclude = [
@@ -23,7 +23,7 @@ exclude = [
 
 [features]
 controller         = ["dep:dashmap"]
-default            = []
+default            = ["controller"]
 logging            = []
 test-util          = []
 tracing            = ["dep:tracing"]
@@ -54,6 +54,10 @@ required-features = ["controller"]
 
 [[example]]
 name              = "admission"
+required-features = ["controller"]
+
+[[example]]
+name              = "tenant_sync"
 required-features = ["controller"]
 
 [[example]]
