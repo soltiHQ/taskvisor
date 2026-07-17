@@ -53,7 +53,7 @@ If you have a small fixed set of workers and only need retry plus graceful shutd
 
 ```toml
 [dependencies]
-taskvisor = "0.6"
+taskvisor = "0.7"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -111,12 +111,6 @@ Retry alone does not resolve conflicting work for the same resource. The control
 sync tenant-42/rev-1 is running
 sync tenant-42/rev-2 arrives  ──► retire rev-1, then run rev-2
 sync tenant-17/rev-1 arrives  ──► run independently
-```
-
-The controller API is enabled by default. Configuring a controller at runtime remains explicit:
-
-```toml
-taskvisor = "0.6"
 ```
 
 ```rust,ignore
@@ -428,13 +422,13 @@ The `controller` feature is enabled by default so the keyed admission API is pre
 | `test-util`          | no      | Helpers for code that integrates with Taskvisor.              |
 
 ```toml
-taskvisor = { version = "0.6", features = ["tracing"] }
+taskvisor = { version = "0.7", features = ["tracing"] }
 ```
 
 Core-only install:
 
 ```toml
-taskvisor = { version = "0.6", default-features = false }
+taskvisor = { version = "0.7", default-features = false }
 ```
 
 ## Examples
