@@ -1,9 +1,9 @@
 //! # taskvisor
 //!
-//! Taskvisor supervises Tokio tasks with restart/backoff, reliable outcomes, and keyed queue/replace/drop admission.
+//! Taskvisor is an in-process Tokio task supervisor with retries, reliable outcomes, and keyed queue/replace/reject admission.
 //! It can time out attempts, stop tasks during shutdown, and dynamically manage work.
 //!
-//! Use it for workers, consumers, connection loops, and other background work that should have a clear lifecycle.
+//! Use it for dynamic or keyed background work that needs conflict handling and a clear lifecycle.
 //!
 //! ## Start Here
 //!
@@ -75,7 +75,7 @@
 //! it returns a runtime error if the completion channel closes first.
 //!
 //! Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast `try_*` form.
-//! With the `controller` feature, use `submit_and_watch` or `try_submit_and_watch`.
+//! With a configured controller, use `submit_and_watch` or `try_submit_and_watch`.
 //!
 //! ## Quick Start
 //!
@@ -98,21 +98,29 @@
 //!
 //! ## Main Types
 //!
-//! | Need             | Types                                                  |
-//! |------------------|--------------------------------------------------------|
-//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]    |
-//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                   |
-//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                 |
-//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`] |
-//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                |
-//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]   |
-//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]             |
+//! | Need             | Types                                                          |
+//! |------------------|----------------------------------------------------------------|
+//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]            |
+//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                           |
+//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                         |
+//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]         |
+//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                        |
+//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]           |
+//! | Admit keyed work | [`ControllerSpec`], [`AdmissionPolicy`], [`ControllerConfig`]   |
+//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]                     |
 //!
 //! Main types are re-exported at the crate root.
 //! The module pages explain each area in more detail:
 //! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], and [`identity`].
 //!
-//! ## Optional Features
+//! ## Keyed Admission
+//!
+//! The default `controller` feature provides per-slot admission. Configure it with
+//! [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`] that
+//! queues, replaces, or rejects work when the slot already has an owner.
+//! Different slots are independent, subject to the supervisor's global limits.
+//!
+//! ## Feature Flags
 //!
 //! - `tracing`: forwards lifecycle events to `tracing`.
 //! - `logging`: simple event logging for examples and development.
@@ -122,7 +130,10 @@
 //!
 //! ## Examples
 //!
-//! Follow the groups in order, or [browse all examples on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples).
+//! Choose a short path, or [browse all examples on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples):
+//!
+//! - New to supervision: `basic` → `worker` → `outcomes`.
+//! - Need per-key coordination: `tenant_sync` → `slots` → `admission`.
 //!
 //! ### Start here
 //!
@@ -137,7 +148,7 @@
 //!
 //! | Example                                                                                     | What it shows                                                   |
 //! |---------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | A message consumer that reconnects after failures               |
+//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | Retry a failed broker connection                                |
 //! | [cpu_job](https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs)               | Run CPU-heavy work on rayon without blocking Tokio              |
 //!
 //! ### Observability
@@ -153,14 +164,14 @@
 //! | Example                                                                                 | What it shows                                            |
 //! |-----------------------------------------------------------------------------------------|----------------------------------------------------------|
 //! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)           | Add, list, cancel, and remove tasks at runtime           |
-//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)         | Wait for a task's reliable final result                  |
+//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)         | Wait for reliable outcomes, including a timeout          |
 //!
 //! ### Keyed admission
 //!
 //! | Example                                                                                       | What it shows                                         |
 //! |-----------------------------------------------------------------------------------------------|-------------------------------------------------------|
 //! | [tenant_sync](https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs)         | Keep only the latest sync revision per tenant         |
-//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                     | Compare queue, replace, and drop policies             |
+//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                     | Compare queue, replace, and reject policies           |
 //! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)             | Observe typed admission and rejection outcomes       |
 
 #![forbid(unsafe_code)]

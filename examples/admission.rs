@@ -6,7 +6,7 @@
 //! `submit_and_watch` also returns a `TaskWaiter`:
 //!
 //! - an admitted task resolves to its final runtime outcome;
-//! - a task that never starts resolves to `TaskOutcome::Rejected` with a typed `RejectionKind` and diagnostic reason.
+//! - a submission rejected before registry admission resolves to `TaskOutcome::Rejected` with a typed `RejectionKind` and diagnostic reason; its task body never starts.
 //!
 //! This example shows both paths and reads a live controller snapshot.
 //! Use the waiter when rejection affects application logic.

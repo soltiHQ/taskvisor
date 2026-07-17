@@ -5,9 +5,9 @@
 [![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
-> Queue, replace, or reject Tokio work independently per key - with supervised lifecycles and reliable outcomes.
+> Queue, replace, or reject Tokio work independently per key—with supervised lifecycles and reliable outcomes.
 
-Write ordinary async code.
+Taskvisor is an in-process task supervisor for Tokio services. Write ordinary async code.
 
 Taskvisor adds restart and backoff, cooperative shutdown, dynamic task management, typed lifecycle events, and reliable final outcomes. Its controller gives each key one owner and resolves conflicts by policy: queue, replace, or reject.
 
@@ -45,9 +45,9 @@ Taskvisor owns the lifecycle machinery. Your task keeps the application logic.
 
 ## Check the fit first
 
-If you have 1–5 fixed workers and only need retry plus graceful shutdown, Taskvisor is probably more lifecycle than you need. Start with `JoinSet` or `TaskTracker`, `CancellationToken`, and a retry crate such as `backon`.
+If you have a small fixed set of workers and only need retry plus graceful shutdown, Taskvisor is probably more lifecycle than you need. Start with `JoinSet` or `TaskTracker`, `CancellationToken`, and a retry crate such as `backon`.
 
-> Taskvisor is aimed at services where work is added dynamically, belongs to a key, or needs one coordinated contract for admission, replacement, cancellation, and a reliable final outcome.
+> Taskvisor is aimed at services where work is added dynamically or contends per key, and needs one in-process contract for admission, supervised cancellation, and reliable final outcomes.
 
 ## Quick start
 
@@ -101,7 +101,7 @@ Every attempt gets a fresh future. A retryable failure follows the configured ba
 
 For a resident worker that runs until Ctrl+C, see [worker.rs](examples/worker.rs).
 
-For a reconnecting queue consumer, see [queue_consumer.rs](examples/queue_consumer.rs).
+For a queue consumer that retries a failed broker connection, see [queue_consumer.rs](examples/queue_consumer.rs).
 
 ## One key, one owner
 
@@ -113,10 +113,10 @@ sync tenant-42/rev-2 arrives  ──► retire rev-1, then run rev-2
 sync tenant-17/rev-1 arrives  ──► run independently
 ```
 
-The feature is enabled by default; this explicit dependency form makes the keyed-admission contract visible:
+The controller API is enabled by default. Configuring a controller at runtime remains explicit:
 
 ```toml
-taskvisor = { version = "0.6", features = ["controller"] }
+taskvisor = "0.6"
 ```
 
 ```rust,ignore
@@ -127,9 +127,9 @@ let (_id, waiter) = handle.submit_and_watch(request).await?;
 let outcome = waiter.wait().await?;
 ```
 
-- `DropIfRunning` rejects the conflict without starting it. See the runnable [tenant-42 conflict example](examples/tenant_sync.rs);
-- `Replace` makes the newest submission the next owner only after the old owner finishes cancellation cleanup;
-- `Queue` preserves FIFO order;
+- `DropIfRunning` rejects the conflict without starting it. See [admission.rs](examples/admission.rs);
+- `Replace` makes the newest submission the next owner only after the old owner finishes cancellation cleanup. See the runnable [tenant-42 conflict example](examples/tenant_sync.rs);
+- `Queue` preserves FIFO order. See [slots.rs](examples/slots.rs).
 
 ## Why Taskvisor?
 
@@ -143,34 +143,38 @@ Taskvisor also provides:
 - **Admission control.** The controller applies `Queue`, `Replace`, or `DropIfRunning` per named slot when configured.
 - **Explicit limits.** Configure per-attempt timeout, retry budget, global concurrency, and bounded queues.
 
-`JoinSet` and `TaskTracker` help own and join spawned futures. Taskvisor owns the restart policy and the task's complete lifecycle contract.
+`JoinSet` and `TaskTracker` help own and join spawned futures. Taskvisor owns the restart policy and the managed in-process task lifecycle.
 
-It is a good fit for queue consumers, pollers, sync loops, connection keepers, periodic work, and one-shot in-process jobs that need admission or a reliable outcome.
+Taskvisor is strongest when dynamic or keyed work needs conflict handling and a reliable outcome. It also supports queue consumers, pollers, sync loops, connection keepers, periodic work, and one-shot in-process jobs.
 
 When the primary requirement is different, use a more specialized tool:
 
-| You need                                         | Better fit                                                                                       |
-|--------------------------------------------------|--------------------------------------------------------------------------------------------------|
-| 1–5 fixed workers with retry and cancellation    | `JoinSet`/`TaskTracker` + `CancellationToken` + [backon](https://crates.io/crates/backon)        |
-| Retry one future                                 | [backon](https://crates.io/crates/backon) or [tokio-retry](https://crates.io/crates/tokio-retry) |
-| Persist and recover jobs after a process restart | [apalis](https://crates.io/crates/apalis)                                                        |
-| Actors with addresses and mailboxes              | [ractor](https://crates.io/crates/ractor) or [kameo](https://crates.io/crates/kameo)             |
-| Structured subsystem shutdown without restarts   | [tokio-graceful-shutdown](https://crates.io/crates/tokio-graceful-shutdown)                      |
+| You need                                                    | Better fit                                                                                        |
+|-------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| A small fixed set of workers with retry and cancellation    | `JoinSet`/`TaskTracker` + `CancellationToken` + [backon](https://crates.io/crates/backon)         |
+| Retry one future                                            | [backon](https://crates.io/crates/backon) or [tokio-retry](https://crates.io/crates/tokio-retry)  |
+| Persist and recover jobs after a process restart            | [apalis](https://crates.io/crates/apalis) with a persistent storage backend                       |
+| Actors with addresses and mailboxes                         | [ractor](https://crates.io/crates/ractor) or [kameo](https://crates.io/crates/kameo)              |
+| Structured subsystem shutdown without restarts              | [tokio-graceful-shutdown](https://crates.io/crates/tokio-graceful-shutdown)                       |
 
-## Core model
+## Main API model
 
-Four types form the main API:
+These type groups form the main API:
 
-| Type               | Purpose                                                    |
-|--------------------|------------------------------------------------------------|
-| `TaskFn` or `Task` | The async work. A new future is created for every attempt. |
-| `TaskSpec`         | Restart policy, backoff, timeout, and retry limit.         |
-| `Supervisor`       | Owns task lifecycle, shutdown, and event delivery.         |
-| `SupervisorHandle` | Adds, removes, cancels, and watches tasks at runtime.      |
+| Type                                   | Purpose                                                    |
+|----------------------------------------|------------------------------------------------------------|
+| `TaskFn` or `Task`                     | The async work. A new future is created for every attempt. |
+| `TaskSpec`                             | Restart policy, backoff, timeout, and retry limit.         |
+| `Supervisor` and `SupervisorHandle`    | Own task lifecycle, shutdown, and dynamic management.      |
+| `TaskWaiter` and `TaskOutcome`         | Deliver the reliable final result of watched work.         |
+| `ControllerSpec` and `AdmissionPolicy` | Resolve queue, replace, or reject conflicts per slot.      |
+| `ControllerConfig`                     | Sets controller queue and command limits.                  |
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="Taskvisor core lifecycle: the Supervisor runs one task attempt, then either schedules another after failure backoff or an optional interval, or produces a final outcome for watched tasks" width="556">
 </p>
+
+The diagram shows common registered-task outcomes. `TaskOutcome` also distinguishes fatal failure, force-abort, and task-runner panic. Controller rejection produces `TaskOutcome::Rejected` before task registration.
 
 Retries for one task run in sequence. Two attempts for the same `TaskId` never run at the same time. Active task names must be unique; the name can be reused after terminal cleanup, with a new `TaskId`.
 
@@ -181,7 +185,7 @@ There are two runtime modes:
 | `supervisor.run(specs)` | Tasks are known at startup | Taskvisor waits for completion or an OS signal. |
 | `supervisor.serve()`    | Tasks are added at runtime | Your code calls `handle.shutdown().await`.      |
 
-`Supervisor::run(...).await == Ok(())` means the supervisor lifecycle and cleanup completed successfully. It does not mean that every task succeeded. Use a watched outcome when application logic needs that answer.
+`Supervisor::run(...).await == Ok(())` means the supervisor lifecycle and cleanup completed successfully. It does not mean that every task succeeded, and `run` does not return per-task outcomes. Register work through `add_and_watch` or `submit_and_watch` when application logic needs the final result.
 
 ## Choose task behavior
 
@@ -343,7 +347,7 @@ async fn submit_to_slot(
 }
 ```
 
-`submit().await?` confirms controller intake; admission happens later. `submit_and_watch` returns a final outcome. Work that never starts resolves to `TaskOutcome::Rejected`.
+`submit().await?` confirms controller intake; admission happens later. `submit_and_watch` returns a final outcome. A submission rejected before registry admission resolves to `TaskOutcome::Rejected`; admitted work resolves to the registered task's terminal outcome.
 
 Queue depth is bounded per slot. `Replace` changes only the queue head; FIFO items behind it remain queued. `controller_snapshot()` returns a best-effort, non-transactional view of slot status and queue depth.
 
@@ -423,7 +427,7 @@ The `controller` feature is enabled by default so the keyed admission API is pre
 | `test-util`          | no      | Helpers for code that integrates with Taskvisor.              |
 
 ```toml
-taskvisor = { version = "0.6", features = ["controller", "tracing"] }
+taskvisor = { version = "0.6", features = ["tracing"] }
 ```
 
 Core-only install:
@@ -440,7 +444,12 @@ From a cloned repository checkout, run the smallest example with:
 cargo run --example basic
 ```
 
-Follow the groups in order, or jump to the pattern you need.
+Choose the shortest path for your use case:
+
+- New to supervision: `basic` → `worker` → `outcomes`.
+- Need per-key coordination: `tenant_sync` → `slots` → `admission`.
+
+The full catalog follows.
 
 ### Start here
 
@@ -453,10 +462,10 @@ Follow the groups in order, or jump to the pattern you need.
 
 ### Real patterns
 
-| Example                                         | What it shows                                            |
-|-------------------------------------------------|----------------------------------------------------------|
-| [queue_consumer.rs](examples/queue_consumer.rs) | Reconnect after a consumer failure.                      |
-| [cpu_job.rs](examples/cpu_job.rs)               | Supervise CPU-heavy work without blocking Tokio workers. |
+| Example                                          | What it shows                                             |
+|--------------------------------------------------|-----------------------------------------------------------|
+| [queue_consumer.rs](examples/queue_consumer.rs)  | Retry a failed broker connection.                         |
+| [cpu_job.rs](examples/cpu_job.rs)                | Supervise CPU-heavy work without blocking Tokio workers.  |
 
 ### Observability
 
@@ -468,18 +477,18 @@ Follow the groups in order, or jump to the pattern you need.
 
 ### Dynamic work and outcomes
 
-| Example                               | What it shows                                   |
-|---------------------------------------|-------------------------------------------------|
-| [dynamic.rs](examples/dynamic.rs)     | Add, list, cancel, and remove tasks at runtime. |
-| [outcomes.rs](examples/outcomes.rs)   | Await the reliable final result of a task.      |
+| Example                               | What it shows                                    |
+|---------------------------------------|--------------------------------------------------|
+| [dynamic.rs](examples/dynamic.rs)     | Add, list, cancel, and remove tasks at runtime.  |
+| [outcomes.rs](examples/outcomes.rs)   | Await reliable outcomes, including a timeout.    |
 
 ### Keyed admission
 
-| Example                                         | What it shows                                      |
-|-------------------------------------------------|----------------------------------------------------|
-| [tenant_sync.rs](examples/tenant_sync.rs)       | Keep only the latest sync revision per tenant.     |
-| [slots.rs](examples/slots.rs)                   | Compare queue, replace, and drop policies.          |
-| [admission.rs](examples/admission.rs)           | Observe typed admission and rejection outcomes.    |
+| Example                                         | What it shows                                       |
+|-------------------------------------------------|-----------------------------------------------------|
+| [tenant_sync.rs](examples/tenant_sync.rs)       | Keep only the latest sync revision per tenant.      |
+| [slots.rs](examples/slots.rs)                   | Compare queue, replace, and reject policies.        |
+| [admission.rs](examples/admission.rs)           | Observe typed admission and rejection outcomes.     |
 
 ## Benchmarks
 
@@ -487,7 +496,6 @@ The repository includes Criterion suites for lifecycle, throughput, subscriber f
 
 ```bash
 cargo bench
-cargo bench --bench controller --features controller
 ```
 
 ## Contributing

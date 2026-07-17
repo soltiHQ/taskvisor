@@ -10,7 +10,7 @@
 //! | lifecycle events | logs, metrics, live progress | bounded and best-effort    |
 //! | `TaskOutcome`    | final business decision      | dedicated terminal channel |
 //!
-//! This example handles successful, failed, and canceled tasks.
+//! This example handles successful, retry-exhausted, timed-out, and canceled tasks.
 //! Other outcomes cover fatal errors, force-abort, task-runner panic, and controller rejection.
 //! `TaskWaiter::wait` can still return an error if the runtime closes the terminal channel unexpectedly.
 //!
@@ -62,7 +62,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => println!("  sync -> {other:?}\n"),
     }
 
-    // 3) A long-running worker we cancel -> Canceled.
+    // 3) A one-shot task that exceeds its per-attempt deadline -> Failed.
+    println!("=== Failed (attempt timed out) ===");
+    let slow: TaskRef = TaskFn::arc("slow-report", |_ctx| async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(())
+    });
+    let timed = TaskSpec::once(slow).with_timeout(Duration::from_millis(20));
+    match handle.add_and_watch(timed).await?.1.wait().await? {
+        TaskOutcome::Failed { reason, .. } => {
+            println!("  slow-report -> Failed: {reason}\n");
+        }
+        other => println!("  slow-report -> {other:?}\n"),
+    }
+
+    // 4) A long-running worker we cancel -> Canceled.
     println!("=== Canceled ===");
     let started = Arc::new(Notify::new());
     let worker: TaskRef = TaskFn::arc("worker", {

@@ -52,6 +52,7 @@ fn tenant_sync(tenant: &'static str, revision: u64, gate: Arc<SyncGate>) -> Task
                     if gate.hold_cancel_cleanup {
                         gate.cancel_cleanup.notified().await;
                     }
+                    println!("  {tenant} revision {revision}: cleanup finished");
                     Err(TaskError::Canceled)
                 }
                 _ = gate.finish.notified() => {

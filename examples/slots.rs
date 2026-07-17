@@ -12,6 +12,7 @@
 //!
 //! The slot key defaults to the task name.
 //! `with_slot` can set an explicit key.
+//! Each scenario below uses different task names with one shared slot to make that distinction visible.
 //! `add` bypasses the controller; `submit` uses its admission rules.
 //! An `Ok(id)` from `submit` confirms intake, not final admission.
 //! Use `submit_and_watch` when application logic needs the final result.
@@ -70,14 +71,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Queue: tasks run sequentially
     println!("=== Queue Policy ===");
-    println!("Submit 3 jobs with the same name — they run one-by-one.\n");
+    println!("Submit 3 differently named jobs to one slot — they run one-by-one.\n");
 
     let mut queued = Vec::new();
-    for i in 1..=3 {
-        let spec = job("queued-job", Duration::from_millis(400));
-        let (_id, waiter) = handle.submit_and_watch(ControllerSpec::queue(spec)).await?;
+    for (index, name) in ["queued-job-1", "queued-job-2", "queued-job-3"]
+        .into_iter()
+        .enumerate()
+    {
+        let spec = job(name, Duration::from_millis(400));
+        let request = ControllerSpec::queue(spec).with_slot("queue-demo");
+        let (_id, waiter) = handle.submit_and_watch(request).await?;
         queued.push(waiter);
-        println!("  submitted #{i}");
+        println!("  submitted #{}", index + 1);
     }
     for (index, waiter) in queued.into_iter().enumerate() {
         println!("  queued #{} -> {:?}", index + 1, waiter.wait().await?);
@@ -89,19 +94,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let long_started = Arc::new(Notify::new());
     let long = job_with_start(
-        "replace-job",
+        "replace-v1",
         Duration::from_secs(5),
         Some(Arc::clone(&long_started)),
     );
-    let (_long_id, long_waiter) = handle
-        .submit_and_watch(ControllerSpec::replace(long))
-        .await?;
+    let long_request = ControllerSpec::replace(long).with_slot("replace-demo");
+    let (_long_id, long_waiter) = handle.submit_and_watch(long_request).await?;
     long_started.notified().await;
 
-    let short = job("replace-job", Duration::from_millis(200));
-    let (_short_id, short_waiter) = handle
-        .submit_and_watch(ControllerSpec::replace(short))
-        .await?;
+    let short = job("replace-v2", Duration::from_millis(200));
+    let short_request = ControllerSpec::replace(short).with_slot("replace-demo");
+    let (_short_id, short_waiter) = handle.submit_and_watch(short_request).await?;
     println!("  long -> {:?}", long_waiter.wait().await?);
     println!("  short -> {:?}", short_waiter.wait().await?);
 
@@ -111,19 +114,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let first_started = Arc::new(Notify::new());
     let first = job_with_start(
-        "drop-job",
+        "drop-v1",
         Duration::from_millis(600),
         Some(Arc::clone(&first_started)),
     );
-    let (_first_id, first_waiter) = handle
-        .submit_and_watch(ControllerSpec::drop_if_running(first))
-        .await?;
+    let first_request = ControllerSpec::drop_if_running(first).with_slot("drop-demo");
+    let (_first_id, first_waiter) = handle.submit_and_watch(first_request).await?;
     first_started.notified().await;
 
-    let second = job("drop-job", Duration::from_millis(100));
-    let (_second_id, second_waiter) = handle
-        .submit_and_watch(ControllerSpec::drop_if_running(second))
-        .await?;
+    let second = job("drop-v2", Duration::from_millis(100));
+    let second_request = ControllerSpec::drop_if_running(second).with_slot("drop-demo");
+    let (_second_id, second_waiter) = handle.submit_and_watch(second_request).await?;
     println!("  second -> {:?}", second_waiter.wait().await?);
     println!("  first -> {:?}", first_waiter.wait().await?);
 
