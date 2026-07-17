@@ -1,30 +1,35 @@
 # Taskvisor source guide
 
-This document is a reading map for contributors. It shows which module owns each decision and how data moves through the runtime. The Rust source and its module-level documentation remain the source of truth.
+This document is a reading map for contributors. 
+
+It shows which module owns each decision and how data moves through the runtime. The Rust source and its module-level documentation remain the source of truth.
 
 ## Recommended reading order
 
 Read the code in this order if you are new to the repository:
 
-| Step | Files                                                                                                                                                                          | Question answered                                                 |
-|------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
-| 1    | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                                                                                 | What is public                                                    |
-| 2    | [`tasks/`](tasks), [`policies/`](policies), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                   | What describes a task and its retry rules                         |
-| 3    | [`core/builder.rs`](core/builder.rs), [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)                         | How is the runtime built, owned, and exposed                      |
-| 4    | [`core/runtime.rs`](core/runtime.rs), [`core/runtime/management.rs`](core/runtime/management.rs), [`core/runtime/lifecycle.rs`](core/runtime/lifecycle.rs)                     | How do public calls enter the runtime                             |
-| 5    | [`core/registry.rs`](core/registry.rs), then [`core/registry/`](core/registry)                                                                                                 | Which task state is authoritative, and how is it cleaned up       |
-| 6    | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                           | How does one task run, retry, time out, and stop                  |
-| 7    | [`core/outcome.rs`](core/outcome.rs), [`events/`](events), [`subscribers/`](subscribers)                                                                                       | Which results are reliable, and which signals are observability   |
-| 8    | [`controller/mod.rs`](controller/mod.rs), [`controller/slot.rs`](controller/slot.rs), then [`controller/core/`](controller/core)                                               | How does per-slot queue/replace/reject admission work             |
-| 9    | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/shutdown.rs`](core/shutdown.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | How is one shared shutdown coordinated                            |
+| Step | Files                                                                                                                                                                          | Question answered                                               |
+|------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| 1    | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                                                                                 | What is public                                                  |
+| 2    | [`tasks/`](tasks), [`policies/`](policies), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                   | What describes a task and its retry rules                       |
+| 3    | [`core/builder.rs`](core/builder.rs), [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)                         | How is the runtime built, owned, and exposed                    |
+| 4    | [`core/runtime.rs`](core/runtime.rs), [`core/runtime/management.rs`](core/runtime/management.rs), [`core/runtime/lifecycle.rs`](core/runtime/lifecycle.rs)                     | How do public calls enter the runtime                           |
+| 5    | [`core/registry.rs`](core/registry.rs), [`core/registry/`](core/registry)                                                                                                      | Which task state is authoritative, and how is it cleaned up     |
+| 6    | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                           | How does one task run, retry, time out, and stop                |
+| 7    | [`core/outcome.rs`](core/outcome.rs), [`events/`](events), [`subscribers/`](subscribers)                                                                                       | Which results are reliable, and which signals are observability |
+| 8    | [`controller/mod.rs`](controller/mod.rs), [`controller/slot.rs`](controller/slot.rs), [`controller/core/`](controller/core)                                                    | How does per-slot queue/replace/reject admission work           |
+| 9    | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/shutdown.rs`](core/shutdown.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | How is one shared shutdown coordinated                          |
 
 After the module documentation, read the integration tests by behavior: [`tests/watch.rs`](../tests/watch.rs), [`tests/identity.rs`](../tests/identity.rs), [`tests/controller.rs`](../tests/controller.rs), and [`tests/shutdown.rs`](../tests/shutdown.rs).
 
 ## Runtime map
 
-`SupervisorBuilder` wires the runtime but does not start its background tasks. `Supervisor::run` and `Supervisor::serve` call the idempotent runtime start path.
+`SupervisorBuilder` wires the runtime but does not start its background tasks. 
+
+`Supervisor::run` and `Supervisor::serve` call the idempotent runtime start path.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart TB
     App["Application"]
     Builder["SupervisorBuilder"]
@@ -36,10 +41,7 @@ flowchart TB
     Runner["run_once: one attempt"]
     Task["Task + TaskSpec + policies"]
     Bus["Bus: best-effort broadcast"]
-    Relay["Event relay"]
-    Alive["AliveTracker: best-effort view"]
-    Subscribers["SubscriberSet: bounded queues"]
-    Callbacks["Subscribe callbacks"]
+    Observability["Event relay: alive view + subscriber queues"]
     Waiter["TaskWaiter / TaskOutcome"]
     Shutdown["ShutdownCoordinator"]
 
@@ -56,16 +58,13 @@ flowchart TB
     Runner --> Task
     Registry -->|direct one-shot| Waiter
     Controller -->|direct rejection outcome| Waiter
-
     Core --> Shutdown
+
     Registry -. lifecycle events .-> Bus
     Actor -. attempt events .-> Bus
     Controller -. admission events .-> Bus
     Shutdown -. shutdown events .-> Bus
-    Bus -. broadcast .-> Relay
-    Relay -. updates .-> Alive
-    Relay -. enqueues .-> Subscribers
-    Subscribers -. invokes .-> Callbacks
+    Bus -. best-effort broadcast .-> Observability
 ```
 
 The controller is compiled by the default `controller` feature, but it is a runtime opt-in: it exists only when a builder receives a `ControllerConfig`. Direct `add*` methods bypass slot admission; `submit*` methods use it.
@@ -81,7 +80,7 @@ sequenceDiagram
     participant Core as SupervisorCore
     participant Queue as Registry command channel
     participant Registry
-    participant Actor as TaskActor
+    participant TaskActor
     participant Waiter as TaskWaiter
 
     Caller->>Handle: add_and_watch(TaskSpec)
@@ -89,17 +88,17 @@ sequenceDiagram
     Core->>Queue: Add command + reply + outcome sender
     Queue->>Registry: listener receives command
     Registry->>Registry: resolve defaults and index ID + name
-    Registry->>Actor: spawn behind start gate
+    Registry->>TaskActor: spawn behind start gate
     Registry-->>Core: direct Add decision
-    Registry->>Actor: open start gate
+    Registry->>TaskActor: open start gate
     Core-->>Caller: TaskId + TaskWaiter
 
     loop Sequential attempts
-        Actor->>Actor: permit, run_once, policy decision
+        TaskActor->>TaskActor: permit, run_once, policy decision
     end
 
-    Actor-->>Registry: reliable completion ID
-    Registry->>Actor: claim and join actor
+    TaskActor-->>Registry: reliable completion ID
+    Registry->>TaskActor: claim and join actor
     Registry->>Registry: remove ID + name indexes
     Registry-->>Waiter: direct TaskOutcome
     Waiter-->>Caller: final outcome
@@ -128,10 +127,10 @@ stateDiagram-v2
     Permit --> Attempt: permit acquired
     Permit --> Canceled: runtime canceled
 
-    Attempt --> Completed: success and policy stops
-    Attempt --> SuccessDelay: success and Always restarts
-    Attempt --> FailureDelay: retryable error and retry allowed
-    Attempt --> Exhausted: error and retry not allowed
+    Attempt --> Completed: success, policy stops
+    Attempt --> SuccessDelay: success, Always restarts
+    Attempt --> FailureDelay: retryable, retry allowed
+    Attempt --> Exhausted: retry not allowed
     Attempt --> Fatal: fatal error
     Attempt --> Canceled: cooperative cancellation
 
@@ -161,6 +160,7 @@ Important boundaries:
 Events support diagnostics, metrics, and best-effort liveness views. They do not drive cleanup, watched outcomes, or controller slot ownership.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
     Runtime["Runtime components"]
     Bus["Broadcast Bus"]
@@ -202,6 +202,7 @@ Use the following source according to the question being asked:
 The controller is a serialized admission layer before the registry. One loop owns slot transitions and processes ordered commands, direct registry Add decisions, terminal `RemovalCompletion` signals, and the reliable runtime shutdown token.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
     Commands["Ordered submit and identity commands"]
     AddDecision["Direct registry Add decision"]
@@ -254,40 +255,27 @@ Policy behavior around those phases:
 Explicit shutdown, a received OS signal, and natural completion join one cancellation-safe shutdown operation. The first trigger installs the operation; all callers wait for its cached result.
 
 ```mermaid
-flowchart TB
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
     Explicit["Explicit request"]
     Signal["Received OS signal"]
     Natural["Registry becomes empty"]
     Coordinator["ShutdownCoordinator: first trigger wins"]
-    Admission["Close management admission"]
-    Fence["Fence committed registry commands"]
-    Drain["Cancel and join tasks within grace"]
-    Verdict{"All task cleanup finished?"}
-    GraceOK["AllStoppedWithinGrace"]
-    GraceExceeded["GraceExceeded + stuck task names"]
-    JoinController["Join controller"]
-    CancelRuntime["Cancel runtime token"]
-    JoinRegistry["Join registry listener"]
-    JoinRelay["Join event relay"]
-    CloseSubscribers["Close subscriber workers"]
-    Result["Cache and return one shared result"]
+    Close["Close management admission,<br/>fence committed registry commands"]
+    Drain["Cancel and join tasks<br/>within grace"]
+    Verdict{"All task cleanup<br/>finished?"}
+    Tail["Cleanup tail: join controller,<br/>cancel runtime token,<br/>join registry listener and event relay,<br/>close subscriber workers"]
+    Result["Cache and return<br/>one shared result"]
 
     Explicit --> Coordinator
     Signal --> Coordinator
     Natural --> Coordinator
-    Coordinator --> Admission
-    Admission --> Fence
-    Fence --> Drain
+    Coordinator --> Close
+    Close --> Drain
     Drain --> Verdict
-    Verdict -->|yes| GraceOK
-    Verdict -->|no| GraceExceeded
-    GraceOK --> JoinController
-    GraceExceeded --> JoinController
-    JoinController --> CancelRuntime
-    CancelRuntime --> JoinRegistry
-    JoinRegistry --> JoinRelay
-    JoinRelay --> CloseSubscribers
-    CloseSubscribers --> Result
+    Verdict -->|AllStoppedWithinGrace| Tail
+    Verdict -->|GraceExceeded + stuck task names| Tail
+    Tail --> Result
 ```
 
 Subscriber shutdown has its own timeout and happens after the task grace phase. Every common cleanup phase is attempted even if an earlier phase reports an internal failure. If OS signal setup itself fails, shutdown still closes admission and runs the common cleanup tail, but it does not run the normal task-drain branch. Dropping the last runtime owner is only a synchronous fallback: it closes admission and cancels tokens, but cannot await or report graceful cleanup.
