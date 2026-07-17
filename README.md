@@ -500,7 +500,7 @@ cargo bench
 
 ## Contributing
 
-Issues and pull requests are welcome. Read the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
+Issues and pull requests are welcome. Start with the [source architecture guide](src/ARCHITECTURE.md) to understand the runtime flows, then read the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
 
 If Taskvisor earns a place in your stack, a GitHub star helps other Rust developers find it.
 
