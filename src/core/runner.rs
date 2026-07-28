@@ -7,17 +7,16 @@
 //!
 //! | Attempt result                                      | Events                          | Returned result      |
 //! |-----------------------------------------------------|---------------------------------|----------------------|
-//! | `Ok(())`                                            | `AttemptSucceeded` | `Ok(())`             |
-//! | `TaskError::Canceled`                               | `AttemptCanceled`  | Same error           |
-//! | Task-returned `Fail`, `Fatal`, or `Timeout`         | `AttemptFailed`    | Same error           |
-//! | Panic while calling `spawn()` or polling its future | `AttemptFailed`    | `TaskError::Fail`    |
-//! | Configured attempt timer expires                    | `AttemptTimedOut`  | `TaskError::Timeout` |
+//! | `Ok(())`                                            | `AttemptSucceeded`              | `Ok(())`             |
+//! | `TaskError::Canceled`                               | `AttemptCanceled`               | Same error           |
+//! | Task-returned `Fail`, `Fatal`, or `Timeout`         | `AttemptFailed`                 | Same error           |
+//! | Panic while calling `spawn()` or polling its future | `AttemptFailed`                 | `TaskError::Fail`    |
+//! | Configured attempt timer expires                    | `AttemptTimedOut`               | `TaskError::Timeout` |
 //!
 //! ## Rules
 //!
-//! - Each completed call publishes one final attempt event: `AttemptSucceeded`,
-//!   `AttemptCanceled`, `AttemptFailed`, or `AttemptTimedOut`. Force-aborting
-//!   the managed runner can drop an in-flight call before that event.
+//! - Each completed call publishes one final attempt event: `AttemptSucceeded`, `AttemptCanceled`, `AttemptFailed`, or `AttemptTimedOut`.
+//!   Force-aborting the managed runner can drop an in-flight call before that event.
 //! - Each attempt gets a child cancellation token. Parent cancellation reaches it, but child cancellation does not affect the parent.
 //! - Panics while calling `spawn()` or polling its future become retryable [`TaskError::Fail`] values.
 //! - `AttemptTimedOut` is published only when the configured attempt timer expires.
@@ -81,9 +80,8 @@ fn panic_to_error(payload: &(dyn std::any::Any + Send)) -> TaskError {
 /// A positive timeout limits this attempt only.
 /// When the configured timer expires, the attempt future is dropped and is no longer polled.
 /// The child token is then cancelled so work that cloned it can observe cancellation.
-/// A configured timeout publishes `AttemptTimedOut` as the attempt's single
-/// terminal event. A task that explicitly returns `TaskError::Timeout` instead
-/// follows the ordinary `AttemptFailed` path.
+/// A configured timeout publishes `AttemptTimedOut` as the attempt's single terminal event.
+/// A task that explicitly returns `TaskError::Timeout` instead follows the ordinary `AttemptFailed` path.
 /// `None` and zero mean no timeout.
 ///
 /// ### Cancellation
