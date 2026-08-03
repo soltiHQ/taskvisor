@@ -11,6 +11,8 @@ Taskvisor is an in-process task supervisor for Tokio services. Write ordinary as
 
 Taskvisor adds restart and backoff, cooperative shutdown, dynamic task management, typed lifecycle events, and reliable final outcomes. Its controller gives each key one owner and resolves conflicts by policy: queue, replace, or reject.
 
+[Solti SDK](https://github.com/soltiHQ/sdk) uses Taskvisor for supervised attempt lifecycles inside resource-driven agents.
+
 | [Quick start](#quick-start) | [Examples](#examples) | [Production limits](#production-limits) |
 
 ## The loop you stop writing
@@ -485,6 +487,20 @@ The full catalog follows.
 | [slots.rs](examples/slots.rs)                   | Compare queue, replace, and reject policies.        |
 | [admission.rs](examples/admission.rs)           | Observe typed admission and rejection outcomes.     |
 
+## Development
+
+Run the repository checks:
+
+```bash
+task ci/fmt
+task ci/clippy
+task ci/test
+task ci/docs
+task ci/publish-dry-run
+```
+
+The shared [`Taskfile.yml`](Taskfile.yml) module selects the CI image from the MSRV declared in [`Cargo.toml`](Cargo.toml).
+
 ## Benchmarks
 
 The repository includes Criterion suites for lifecycle, throughput, subscriber fan-out, dynamic management, and controller paths:
@@ -495,7 +511,9 @@ cargo bench
 
 ## Contributing
 
-Issues and pull requests are welcome. Start with the [source architecture guide](src/ARCHITECTURE.md) to understand the runtime flows, then read the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
+Issues and pull requests are welcome.
+Read the [source architecture guide](src/ARCHITECTURE.md) before changing runtime flows.
+Read the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
 
 If Taskvisor earns a place in your stack, a GitHub star helps other Rust developers find it.
 
