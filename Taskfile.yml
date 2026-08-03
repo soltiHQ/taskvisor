@@ -2,9 +2,7 @@ version: '3'
 
 includes:
   rust:
-    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/rust/Taskfile.yml
-    vars:
-      image_patch: "-1"
+    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/v1/taskfiles/rust/Taskfile.yml
 
 tasks:
   ci/fmt:
@@ -13,9 +11,10 @@ tasks:
       - task: rust:fmt
 
   ci/check:
-    desc: Run 'cargo check'.
+    desc: Run 'cargo check' on the declared MSRV.
     cmds:
       - task: rust:check
+        vars: { CHECK_ARGS: '--all-targets --all-features --locked' }
 
   ci/clippy:
     desc: "Run 'cargo clippy' for one feature set. FEATURE = none|all|<feature-name> (default: all)."
@@ -30,26 +29,27 @@ tasks:
           esac
     cmds:
       - task: rust:clippy
-        vars: { CLIPPY_ARGS: '--all {{.FEATURE_FLAGS}} -- -D warnings' }
+        vars: { CLIPPY_ARGS: '--all-targets {{.FEATURE_FLAGS}} --locked -- -D warnings' }
 
   ci/test:
     desc: Run 'cargo test' (all targets, all features).
     cmds:
       - task: rust:test
+        vars: { TEST_ARGS: '--all-features --locked' }
 
   ci/test-unit:
     desc: Run unit tests ('cargo test --lib') and doctests ('cargo test --doc').
     cmds:
       - task: rust:test
-        vars: { TEST_ARGS: '--lib --all-features' }
+        vars: { TEST_ARGS: '--lib --all-features --locked' }
       - task: rust:test
-        vars: { TEST_ARGS: '--doc --all-features' }
+        vars: { TEST_ARGS: '--doc --all-features --locked' }
 
   ci/test-integration:
     desc: Run integration tests ('cargo test --test "*"').
     cmds:
       - task: rust:test
-        vars: { TEST_ARGS: '--test "*" --all-features' }
+        vars: { TEST_ARGS: '--test "*" --all-features --locked' }
 
   ci/audit:
     desc: Run 'cargo audit'.
@@ -59,21 +59,22 @@ tasks:
   ci/docs:
     desc: Run 'rustdoc' for the taskvisor crate. Fails on broken doc links in any feature config.
     cmds:
-      - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-      - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+      - task: rust:doc
+        vars: { DOC_ARGS: '--locked --no-deps' }
+      - task: rust:doc
+        vars: { DOC_ARGS: '--locked --no-deps --all-features' }
       - task: rust:docs
-        vars:
-          DOCS_ARGS: '--all-features'
+        vars: { DOCS_ARGS: '--all-features --locked' }
 
   ci/build:
-    desc: Build a taskvisor example. Pass CRATE = example name.
+    desc: Build all examples for a package. Pass CRATE.
     requires:
       vars: [ CRATE ]
     cmds:
       - task: rust:build
         vars:
-          CRATE: "taskvisor"
-          BUILD_ARGS: '--example {{.CRATE}} --all-features'
+          CRATE: '{{.CRATE}}'
+          BUILD_ARGS: '--examples --all-features --locked'
 
   ci/publish-dry-run:
     desc: Simulate 'cargo publish' for the taskvisor crate.
@@ -81,6 +82,7 @@ tasks:
       - task: rust:publish-dry-run
         vars:
           CRATE: "taskvisor"
+          PUBLISH_ARGS: '--all-features --locked'
 
   rust:benchmark:
     desc: Run 'cargo bench'.

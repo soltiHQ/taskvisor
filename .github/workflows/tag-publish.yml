@@ -1,4 +1,4 @@
-name: Release
+name: Tag publish
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - "v*"
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: tag-publish-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions: {

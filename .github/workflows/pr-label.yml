@@ -1,11 +1,11 @@
-name: Label
+name: PR label
 
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
 concurrency:
-  group: label-${{ github.ref }}
+  group: pr-label-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {

@@ -1,11 +1,11 @@
-name: Pr
+name: PR action
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: pr-${{ github.ref }}
+  group: pr-action-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {
@@ -17,5 +17,3 @@ jobs:
   ci:
     name: ci
     uses: soltiHQ/actions/.github/workflows/rust-ci.yml@v1
-    with:
-      preflight-required: true
