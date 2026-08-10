@@ -66,7 +66,7 @@ flowchart TB
     Builder["SupervisorBuilder"]
     Supervisor["Supervisor / SupervisorHandle"]
     Prepared["PreparedSubmission: reserved TaskId + ControllerSpec"]
-    Controller["Controller: per-slot admission"]
+    Controller["Controller: per-slot admission + queued ID index"]
     Core["SupervisorCore"]
     Waiter["TaskWaiter / TaskOutcome"]
 

@@ -84,7 +84,7 @@ impl Controller {
                 continue;
             };
             let mut slot = slot.lock().await;
-            while let Some(pending) = slot.queue.pop_front() {
+            while let Some(pending) = self.pop_queued_front(&mut slot) {
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
@@ -103,6 +103,7 @@ impl Controller {
 
         self.finalize_remaining_watchers();
         self.slots.clear();
+        self.queued_slots.clear();
         for pending in pending_to_drop {
             self.drop_guarded("drop_queued_submission", pending).await;
         }

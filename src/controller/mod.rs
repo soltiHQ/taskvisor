@@ -125,6 +125,7 @@
 //! The returned `TaskId` is allocated before runtime admission.
 //! If admission succeeds, the runtime uses the same ID.
 //! Before admission, it still identifies queued work for cancellation, outcomes, and event correlation.
+//! The controller keeps a reverse `TaskId`-to-slot index while work is queued, so identity operations inspect only the owning slot before falling back to the runtime registry.
 //! A [`PreparedSubmission`] exposes that ID before controller intake. Preparing
 //! alone does not enqueue work or publish an event.
 //!

@@ -6,7 +6,8 @@
 //!
 //! - watched submission senders until they are handed to the runtime or rejected,
 //! - the bounded ordered channel for submissions and identity operations,
-//! - the per-slot state map.
+//! - the per-slot state map,
+//! - a reverse index from every queued [`TaskId`] to its slot.
 //!
 //! ## Authoritative slot-state inputs
 //!
@@ -118,6 +119,10 @@ pub(crate) struct Controller {
     shutdown_token: CancellationToken,
     /// Per-slot mutable state.
     slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
+    /// Reverse index for submissions that are still waiting in a slot queue.
+    ///
+    /// Admitting and running IDs are registry-owned and therefore intentionally absent.
+    queued_slots: DashMap<TaskId, Arc<str>>,
     /// Watched submissions not yet handed to the runtime registry.
     watchers: DashMap<TaskId, OutcomeTx>,
     /// Ordered command sender cloned into `ControllerHandle`.
@@ -144,6 +149,7 @@ impl Controller {
             bus,
             shutdown_token,
             slots: DashMap::new(),
+            queued_slots: DashMap::new(),
             watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),

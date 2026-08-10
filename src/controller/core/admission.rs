@@ -359,7 +359,7 @@ impl Controller {
                         .await;
                     return;
                 }
-                slot.queue.push_back(pending);
+                self.push_queued(&mut slot, &slot_name, pending);
                 watcher.commit();
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
@@ -384,8 +384,6 @@ impl Controller {
             }
         }
 
-        // A displaced user task may own an arbitrary destructor.
-        // Release the slot lock before dropping it; its watcher has already reached a terminal result.
         drop(slot);
         if let Some(displaced) = displaced_to_drop {
             self.drop_guarded("drop_superseded_submission", displaced)
@@ -537,7 +535,7 @@ impl Controller {
         if !slot.is_idle() {
             return deferred_drops;
         }
-        while let Some(next) = slot.queue.pop_front() {
+        while let Some(next) = self.pop_queued_front(slot) {
             let next_id = next.id;
             match self.start_in_slot(sup, slot, slot_name, next, admissions) {
                 Ok(()) => {

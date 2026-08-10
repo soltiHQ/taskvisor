@@ -79,7 +79,9 @@ impl Task for ShutdownDropProbeTask {
 impl Drop for ShutdownDropProbeTask {
     fn drop(&mut self) {
         let state_is_clean = self.controller.upgrade().is_some_and(|controller| {
-            controller.watchers.is_empty() && controller.slots.is_empty()
+            controller.watchers.is_empty()
+                && controller.slots.is_empty()
+                && controller.queued_slots.is_empty()
         });
         self.state_clean_at_drop
             .store(state_is_clean, Ordering::Release);
@@ -187,11 +189,12 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
     slot.queue
         .push_back(pending(TaskId::next(), make_spec("tail")));
 
+    let replacement = TaskId::next();
     let displaced_spec = ctrl
         .replace_head_or_push(
             &mut slot,
             &slot_arc_name(),
-            pending(TaskId::next(), make_spec("new-head")),
+            pending(replacement, make_spec("new-head")),
         )
         .expect("the old queue head must be returned for deferred drop");
 
@@ -199,6 +202,13 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
     assert_eq!(slot.queue.front().unwrap().task_spec.name(), "new-head");
     assert_eq!(slot.queue.back().unwrap().task_spec.name(), "tail");
     assert_eq!(displaced_spec.task_spec.name(), "old-head");
+    assert!(!ctrl.queued_slots.contains_key(&displaced));
+    assert_eq!(
+        ctrl.queued_slots
+            .get(&replacement)
+            .map(|entry| Arc::clone(entry.value())),
+        Some(slot_arc_name())
+    );
 
     let ev = rx.try_recv().expect("displaced head must be rejected");
     assert_eq!(ev.kind, EventKind::ControllerRejected);
@@ -256,6 +266,43 @@ fn queue_full_reason_respects_the_capacity_boundary() {
             "unexpected decision at queue depth {depth}"
         );
     }
+}
+
+#[test]
+fn queued_reverse_index_tracks_push_pop_and_position_removal() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let slot_name = slot_arc_name();
+    let mut slot = SlotState::new();
+    let first = TaskId::next();
+    let second = TaskId::next();
+
+    ctrl.push_queued(&mut slot, &slot_name, pending(first, make_spec("first")));
+    ctrl.push_queued(&mut slot, &slot_name, pending(second, make_spec("second")));
+    assert_eq!(
+        ctrl.queued_slots
+            .get(&first)
+            .map(|entry| Arc::clone(entry.value())),
+        Some(Arc::clone(&slot_name))
+    );
+    assert_eq!(
+        ctrl.queued_slots
+            .get(&second)
+            .map(|entry| Arc::clone(entry.value())),
+        Some(Arc::clone(&slot_name))
+    );
+
+    assert_eq!(
+        ctrl.pop_queued_front(&mut slot).map(|pending| pending.id),
+        Some(first)
+    );
+    assert!(!ctrl.queued_slots.contains_key(&first));
+    assert_eq!(
+        ctrl.remove_queued_at(&mut slot, 0)
+            .map(|pending| pending.id),
+        Some(second)
+    );
+    assert!(!ctrl.queued_slots.contains_key(&second));
+    assert!(slot.queue.is_empty());
 }
 
 #[test]
@@ -739,10 +786,16 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     {
         let mut slot = slot.lock().await;
         *slot = running_slot(running_id);
-        slot.queue
-            .push_back(pending(watched_id, waiting_spec("watched-shutdown-queue")));
-        slot.queue
-            .push_back(pending(unwatched_id, waiting_spec("plain-shutdown-queue")));
+        ctrl.push_queued(
+            &mut slot,
+            &Arc::from("shutdown-slot"),
+            pending(watched_id, waiting_spec("watched-shutdown-queue")),
+        );
+        ctrl.push_queued(
+            &mut slot,
+            &Arc::from("shutdown-slot"),
+            pending(unwatched_id, waiting_spec("plain-shutdown-queue")),
+        );
     }
 
     ctrl.finalize_slot_state_on_shutdown().await;
@@ -758,6 +811,7 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     ));
     assert!(ctrl.watchers.is_empty());
     assert!(ctrl.slots.is_empty());
+    assert!(ctrl.queued_slots.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -888,17 +942,20 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
     let (done, outcome) = oneshot::channel();
     ctrl.watchers.insert(id, done);
     let slot = ctrl.get_or_create_slot(&slot_name);
-    slot.lock()
-        .await
-        .queue
-        .push_back(crate::controller::slot::PendingSubmission::new(
+    let mut slot_state = slot.lock().await;
+    ctrl.push_queued(
+        &mut slot_state,
+        &slot_name,
+        crate::controller::slot::PendingSubmission::new(
             id,
             Arc::from("identity-drop-panic-task"),
             TaskSpec::once(Arc::new(PanickingDropTask {
                 name: "identity-drop-panic-task",
                 drops: Arc::clone(&drops),
             })),
-        ));
+        ),
+    );
+    drop(slot_state);
 
     let (reply, result) = oneshot::channel();
     let mut identity_operations = JoinSet::new();
@@ -925,6 +982,7 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
     assert_eq!(drops.load(Ordering::Acquire), 1);
     assert!(identity_operations.is_empty());
     assert!(ctrl.watchers.is_empty());
+    assert!(ctrl.queued_slots.is_empty());
     assert!(ctrl.slots.get(&*slot_name).is_none());
 
     let drained = drain_events(&mut events);
@@ -941,6 +999,23 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("injected task drop panic"))
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_identity_does_not_wait_for_unrelated_slot_lock() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let slot_name = slot_arc_name();
+    let slot = ctrl.get_or_create_slot(&slot_name);
+    let _slot_guard = slot.lock().await;
+
+    let removed = tokio::time::timeout(
+        Duration::from_millis(50),
+        ctrl.remove_queued_submission(TaskId::next(), None),
+    )
+    .await
+    .expect("an unindexed ID must not inspect or wait for unrelated slots");
+
+    assert!(!removed);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1014,6 +1089,7 @@ fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
         bus,
         shutdown_token: CancellationToken::new(),
         slots: DashMap::new(),
+        queued_slots: DashMap::new(),
         watchers: DashMap::new(),
         tx,
         rx: RwLock::new(Some(rx)),
@@ -2519,6 +2595,15 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         .submit_and_watch(ControllerSpec::queue(TaskSpec::once(victim)).with_slot("s"))
         .await
         .expect("the queued submission must enter the controller channel");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            ctrl.queued_slots
+                .get(&victim_id)
+                .is_some_and(|entry| entry.value().as_ref() == "s")
+        })
+        .await,
+        "queued admission must publish its reverse-index route"
+    );
 
     assert!(
         handle
@@ -2533,6 +2618,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
             reason,
             ..
         } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE));
+    assert!(!ctrl.queued_slots.contains_key(&victim_id));
 
     let try_ran = Arc::clone(&victim_ran);
     let try_victim: TaskRef = TaskFn::arc("try-remove-victim", move |_ctx: TaskContext| {
@@ -2609,6 +2695,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         !victim_ran.load(Ordering::SeqCst),
         "a queued submission claimed by cancel must never start"
     );
+    assert!(ctrl.queued_slots.is_empty());
 
     stop_controller_loop(token, runner).await;
     let _ = runtime_handle.shutdown().await;

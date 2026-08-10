@@ -1,4 +1,4 @@
-//! Ordered queued-work lookup and concurrent registry fallback by identity.
+//! Indexed queued-work lookup and concurrent registry fallback by identity.
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use super::{Controller, IdentityOperation, IdentityReply};
 impl Controller {
     /// Starts one accepted identity operation after earlier controller commands have been handled.
     ///
-    /// The controller checks and claims still-queued work inline, preserving command order.
+    /// The controller checks and claims still-queued work through its reverse index, preserving command order.
     /// For every other ID, it starts a bounded registry-fallback worker.
     /// Those workers may finish concurrently and are not a global ordering barrier.
     /// The controller owns each worker; dropping the public caller cannot stop an accepted operation.
@@ -69,56 +69,56 @@ impl Controller {
     ///
     /// Returns `true` only when this call claimed the queued submission.
     /// A claimed watched submission resolves as `Rejected { kind: RemovedFromQueue, .. }` because its task body never ran.
-    async fn remove_queued_submission(
+    pub(super) async fn remove_queued_submission(
         &self,
         id: TaskId,
         request_reason: Option<&'static str>,
     ) -> bool {
-        let slot_keys: Vec<Arc<str>> = self
-            .slots
-            .iter()
-            .map(|entry| Arc::clone(entry.key()))
-            .collect();
+        let Some(slot_name) = self
+            .queued_slots
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        let Some(slot_arc) = self.slots.get(&*slot_name).map(|entry| entry.clone()) else {
+            self.queued_slots.remove(&id);
+            return false;
+        };
 
-        for slot_name in slot_keys {
-            let Some(slot_arc) = self.slots.get(&*slot_name).map(|e| e.clone()) else {
-                continue;
-            };
-            let mut slot = slot_arc.lock().await;
-            if self.is_shutting_down() {
-                return false;
-            }
-            let Some(pos) = slot.queue.iter().position(|pending| pending.id == id) else {
-                continue;
-            };
-            let task_name = Arc::clone(&slot.queue[pos].task_name);
-            let mut request = Event::new(EventKind::TaskRemoveRequested)
-                .with_task(task_name)
-                .with_id(id);
-            if let Some(reason) = request_reason {
-                request = request.with_reason(reason);
-            }
-            self.bus.publish(request);
-            let removed = slot
-                .queue
-                .remove(pos)
-                .expect("the queued submission position was checked above");
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task(Arc::clone(&slot_name))
-                    .with_id(id)
-                    .with_rejection_kind(RejectionKind::RemovedFromQueue)
-                    .with_reason(crate::reasons::REMOVED_FROM_QUEUE),
-            );
-            self.finalize_rejected(
-                id,
-                RejectionKind::RemovedFromQueue,
-                crate::reasons::REMOVED_FROM_QUEUE,
-            );
-            self.gc_if_idle(&slot_name, slot);
-            self.drop_guarded("drop_removed_submission", removed).await;
-            return true;
+        let mut slot = slot_arc.lock().await;
+        if self.is_shutting_down() {
+            return false;
         }
-        false
+        let Some(position) = slot.queue.iter().position(|pending| pending.id == id) else {
+            self.queued_slots.remove(&id);
+            return false;
+        };
+        let task_name = Arc::clone(&slot.queue[position].task_name);
+        let mut request = Event::new(EventKind::TaskRemoveRequested)
+            .with_task(task_name)
+            .with_id(id);
+        if let Some(reason) = request_reason {
+            request = request.with_reason(reason);
+        }
+        self.bus.publish(request);
+        let removed = self
+            .remove_queued_at(&mut slot, position)
+            .expect("the queued submission position was checked above");
+        self.bus.publish(
+            Event::new(EventKind::ControllerRejected)
+                .with_task(Arc::clone(&slot_name))
+                .with_id(id)
+                .with_rejection_kind(RejectionKind::RemovedFromQueue)
+                .with_reason(crate::reasons::REMOVED_FROM_QUEUE),
+        );
+        self.finalize_rejected(
+            id,
+            RejectionKind::RemovedFromQueue,
+            crate::reasons::REMOVED_FROM_QUEUE,
+        );
+        self.gc_if_idle(&slot_name, slot);
+        self.drop_guarded("drop_removed_submission", removed).await;
+        true
     }
 }

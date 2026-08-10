@@ -14,6 +14,7 @@
 //!
 //! With a controller, identity-based remove and cancel operations are ordered after earlier submissions.
 //! This lets them find work that is still queued and has not reached the registry.
+//! Queued IDs are routed through the controller's reverse slot index; IDs absent from that index go directly to the registry path.
 //!
 //! ## Confirmation Boundaries
 //!

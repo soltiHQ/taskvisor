@@ -44,6 +44,7 @@ impl Controller {
         self.mark_shutting_down();
         self.finalize_remaining_watchers();
         self.slots.clear();
+        self.queued_slots.clear();
     }
 
     /// Waits for the owned controller loop exactly once.

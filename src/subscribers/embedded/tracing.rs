@@ -4,12 +4,10 @@
 //!
 //! Each tracing event uses target `taskvisor` and contains:
 //! - a level based on the event severity (see [`TracingBridge`]),
-//! - structured fields: `event` (the stable label), `event_seq`, `event_unix_ms`, and the optional
-//!   payload fields that are set:
-//!   (
-//!     `task_name`, `taskvisor_id`, `subscriber`, `component`, `slot`, `attempt`, `outcome_kind`,
-//!     `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, `exit_code`, `backoff_source`
-//!   ).
+//! - structured fields: `event` (the stable label), `event_seq`, `event_unix_ms`, and these optional
+//!   payload fields when set: `task_name`, `taskvisor_id`, `subscriber`, `component`, `slot`, `attempt`,
+//!   `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, `exit_code`,
+//!   `backoff_source`.
 //!
 //! Unset optional fields are not recorded.
 //! Free-form [`Event::reason`] text is omitted by default.
