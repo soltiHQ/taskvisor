@@ -6,4 +6,4 @@ pub use log::LogWriter;
 #[cfg(feature = "tracing")]
 mod tracing;
 #[cfg(feature = "tracing")]
-pub use self::tracing::TracingBridge;
+pub use self::tracing::{TracingBridge, TracingBridgeWithReasons};
