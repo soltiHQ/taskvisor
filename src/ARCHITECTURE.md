@@ -227,7 +227,7 @@ flowchart LR
     Bus -. best-effort broadcast .-> Relay
     Relay -. event-derived update .-> Alive
     Relay -. bounded enqueue .-> Queues
-    Queues -. blocking-pool delivery .-> Subscribers
+    Queues -. dedicated worker thread .-> Subscribers
 
     Cleanup -->|direct final result| Outcome
     Reject -->|direct rejected result| Outcome

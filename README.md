@@ -314,7 +314,7 @@ async fn wait_for_task(
 
 Events carry a process-local sequence number and, where relevant, task identity, attempt, duration, timeout, delay, and exit code. `TaskFinished` carries `TaskOutcomeKind` for terminal telemetry. Rejected work carries `TaskOutcomeKind::Rejected` plus a `RejectionKind` explaining why it did not start. Treat `reason` as diagnostic text; do not parse it for branching, metrics, or alerts. Stable enum labels are available for telemetry.
 
-Each subscriber has its own bounded FIFO queue. Its synchronous callback runs on Tokio's blocking pool. A slow subscriber cannot block publishers, but its queue may fill and lose events. Keep callbacks short and forward async work to another channel.
+Each subscriber has its own bounded FIFO queue and dedicated worker thread. A slow subscriber cannot block publishers or consume Tokio blocking-pool capacity, but its queue may fill and lose events. Queue drops are coalesced into one direct overflow summary after that subscriber catches up; `Event::dropped` contains the count, and the summary does not re-enter the shared event bus. Keep callbacks short and forward async work to another channel.
 
 See [subscriber.rs](examples/subscriber.rs), the `TracingBridge` in [tracing.rs](examples/tracing.rs), and the Prometheus counters in [metrics.rs](examples/metrics.rs).
 
@@ -405,7 +405,7 @@ Taskvisor defines an in-process lifecycle. Keep these boundaries explicit:
 - Events are best-effort. Do not use them as a durable audit log.
 - Watched outcomes are not durable after the process exits.
 - Cancellation depends on the task reaching an await point that observes `TaskContext`. Force-abort cannot stop synchronous code that blocks a runtime thread.
-- Subscriber callbacks may still run on Tokio's blocking pool after their drain deadline. Tokio runtime shutdown may wait for such callbacks.
+- Subscriber callbacks may continue on their dedicated threads after the drain deadline. Taskvisor stops waiting and drops queued events, but it cannot interrupt synchronous user code already running.
 - Periodic tasks use an interval after completion. They do not provide calendar scheduling or missed-run recovery.
 - The controller coordinates tasks inside one supervisor.
 - Controller slots are admission keys, not cancellation keys. There is no atomic "stop the current owner and purge its slot queue" operation.

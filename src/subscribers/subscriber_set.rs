@@ -2,16 +2,15 @@
 //!
 //! [`SubscriberSet`] sends each event to every registered subscriber.
 //!
-//! Each subscriber has its own bounded queue and one async queue worker.
+//! Each subscriber has its own bounded queue and one dedicated worker thread.
 //!
 //! ## Flow
 //!
 //! ```text
 //! emit(event)
-//!     │
-//!     ├──► [queue 1] ──► worker 1 ──► blocking pool ──► subscriber1.on_event()
-//!     ├──► [queue 2] ──► worker 2 ──► blocking pool ──► subscriber2.on_event()
-//!     └──► [queue N] ──► worker N ──► blocking pool ──► subscriberN.on_event()
+//!     ├──► [queue 1] ──► thread 1 ──► subscriber1.on_event()
+//!     ├──► [queue 2] ──► thread 2 ──► subscriber2.on_event()
+//!     └──► [queue N] ──► thread N ──► subscriberN.on_event()
 //! ```
 //!
 //! ## Rules
@@ -19,13 +18,13 @@
 //! - No cross-subscriber ordering: subscribers may process different events at the same time.
 //! - Diagnostic events are not re-reported on overflow or panic, to avoid feedback loops.
 //! - Per-subscriber FIFO: successfully queued events are processed in queue order.
-//! - Taskvisor tries to report ordinary overflow as `SubscriberOverflow`.
+//! - Queue overflow is counted per subscriber and reported once after that queue catches up.
 //! - Taskvisor tries to report an ordinary panic as `SubscriberPanicked`.
 //! - `emit_arc` is non-blocking and uses `try_send`.
 //!
 //! ## Panic Handling
 //!
-//! Queue workers run `on_event` inside blocking tasks wrapped in `catch_unwind`.
+//! Worker threads run `on_event` directly inside `catch_unwind`.
 //!
 //! This protects the runtime and other subscribers from a panicking subscriber.
 //! It does not protect the subscriber's own shared state.
@@ -33,8 +32,14 @@
 //!
 //! See [`Subscribe`] for the subscriber trait contract.
 
-use std::{sync::Arc, time::Duration};
-use tokio::{sync::mpsc, task::JoinHandle};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::events::{Bus, Event};
 use crate::subscribers::Subscribe;
@@ -47,6 +52,57 @@ pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 struct SubscriberChannel {
     name: Arc<str>,
     sender: mpsc::Sender<Arc<Event>>,
+    overflow: Arc<SubscriberOverflowState>,
+    closed_reported: AtomicBool,
+}
+
+/// Coalesces queue drops until the subscriber worker catches up.
+#[derive(Default)]
+struct SubscriberOverflowState {
+    dropped: AtomicU64,
+}
+
+impl SubscriberOverflowState {
+    fn record_drop(&self) {
+        let _ = self
+            .dropped
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
+    }
+
+    fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0, Ordering::AcqRel)
+    }
+}
+
+/// One dedicated synchronous subscriber worker.
+struct SubscriberWorker {
+    stop: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    done: oneshot::Receiver<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for SubscriberWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// Resolves worker completion even if an unexpected panic escapes its loop.
+struct WorkerCompletion {
+    finished: Arc<AtomicBool>,
+    done: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for WorkerCompletion {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Release);
+        if let Some(done) = self.done.take() {
+            let _ = done.send(());
+        }
+    }
 }
 
 /// Subscriber metadata retained until runtime startup.
@@ -63,7 +119,7 @@ enum SubscriberState {
     /// Per-subscriber queues and workers are active.
     Started {
         channels: Vec<SubscriberChannel>,
-        workers: Vec<JoinHandle<()>>,
+        workers: Vec<SubscriberWorker>,
     },
     /// Queues are closed and startup is permanently disabled.
     Closed,
@@ -73,18 +129,18 @@ enum SubscriberState {
 ///
 /// `SubscriberSet` owns:
 /// - one bounded queue per subscriber,
-/// - one async queue worker per subscriber,
+/// - one dedicated worker thread per subscriber,
 /// - snapshotted subscriber names for diagnostics.
 ///
 /// Delivery is best-effort.
 /// Slow subscribers may lose events from their own queues.
-/// Their callbacks run on Tokio's blocking pool instead of Tokio async workers.
+/// Their callbacks run on dedicated threads and never occupy Tokio's async or blocking pools.
 ///
 /// ## Shutdown
 ///
 /// [`close`](Self::close) drops all senders and gives every worker one shared timeout to drain queued events.
-/// At the deadline, unfinished queue workers are aborted and queued events are dropped.
-/// A callback already running on Tokio's blocking pool may continue after `close` returns.
+/// At the deadline, unfinished workers are told to stop after their current callback and queued events are dropped.
+/// A callback already running may continue on its dedicated thread after `close` returns.
 ///
 /// ## Also
 ///
@@ -137,7 +193,7 @@ impl SubscriberSet {
         }
     }
 
-    /// Starts one queue worker per subscriber inside the active Tokio runtime.
+    /// Starts one dedicated worker thread per subscriber.
     ///
     /// Safe to call more than once. Calls after startup or shutdown are no-ops.
     pub(crate) fn start(&self) {
@@ -164,54 +220,54 @@ impl SubscriberSet {
         let mut channels = Vec::with_capacity(definitions.len());
         let mut workers = Vec::with_capacity(definitions.len());
 
-        for definition in definitions {
+        for (index, definition) in definitions.into_iter().enumerate() {
             let SubscriberDefinition {
                 name,
                 capacity,
                 subscriber,
             } = definition;
-            let (sender, mut receiver) = mpsc::channel::<Arc<Event>>(capacity);
+            let (sender, receiver) = mpsc::channel::<Arc<Event>>(capacity);
+            let overflow = Arc::new(SubscriberOverflowState::default());
+            let stop = Arc::new(AtomicBool::new(false));
+            let finished = Arc::new(AtomicBool::new(false));
+            let (done, done_rx) = oneshot::channel();
             let name_for_worker = Arc::clone(&name);
             let bus_for_worker = self.bus.clone();
+            let overflow_for_worker = Arc::clone(&overflow);
+            let stop_for_worker = Arc::clone(&stop);
+            let finished_for_worker = Arc::clone(&finished);
+            let runtime_for_worker = runtime.clone();
+            let thread = std::thread::Builder::new()
+                .name(format!("taskvisor-subscriber-{index}"))
+                .spawn(move || {
+                    let _runtime = runtime_for_worker.enter();
+                    let _completion = WorkerCompletion {
+                        finished: finished_for_worker,
+                        done: Some(done),
+                    };
+                    run_subscriber_worker(
+                        receiver,
+                        subscriber,
+                        name_for_worker,
+                        bus_for_worker,
+                        overflow_for_worker,
+                        stop_for_worker,
+                    );
+                })
+                .unwrap_or_else(|error| panic!("failed to start subscriber worker: {error}"));
 
-            let worker = runtime.spawn(async move {
-                while let Some(event) = receiver.recv().await {
-                    let is_internal_event = event.is_internal_diagnostic();
-                    let callback_subscriber = Arc::clone(&subscriber);
-                    let result = tokio::task::spawn_blocking(move || {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            callback_subscriber.on_event(event.as_ref());
-                        }))
-                    })
-                    .await;
-
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(panic_err)) => {
-                            if !is_internal_event {
-                                let info = extract_panic_info(&panic_err);
-                                bus_for_worker.publish(Event::subscriber_panicked(
-                                    Arc::clone(&name_for_worker),
-                                    info,
-                                ));
-                            }
-                        }
-                        Err(join_err) if join_err.is_cancelled() => break,
-                        Err(join_err) => {
-                            if !is_internal_event {
-                                bus_for_worker.publish(Event::subscriber_panicked(
-                                    Arc::clone(&name_for_worker),
-                                    format!("callback task failed: {join_err}"),
-                                ));
-                            }
-                            break;
-                        }
-                    }
-                }
+            channels.push(SubscriberChannel {
+                name,
+                sender,
+                overflow,
+                closed_reported: AtomicBool::new(false),
             });
-
-            channels.push(SubscriberChannel { name, sender });
-            workers.push(worker);
+            workers.push(SubscriberWorker {
+                stop,
+                finished,
+                done: done_rx,
+                thread: Some(thread),
+            });
         }
 
         *state = SubscriberState::Started { channels, workers };
@@ -233,14 +289,11 @@ impl SubscriberSet {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if !is_internal_event {
-                        self.bus.publish(Event::subscriber_overflow(
-                            Arc::clone(&channel.name),
-                            "full",
-                        ));
+                        channel.overflow.record_drop();
                     }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    if !is_internal_event {
+                    if !is_internal_event && !channel.closed_reported.swap(true, Ordering::AcqRel) {
                         self.bus.publish(Event::subscriber_overflow(
                             Arc::clone(&channel.name),
                             "closed",
@@ -271,30 +324,89 @@ impl SubscriberSet {
             return;
         }
 
-        let mut joined = 0;
         let drained = if self.shutdown_timeout.is_zero() {
             false
         } else {
             tokio::time::timeout(self.shutdown_timeout, async {
                 for worker in &mut workers {
-                    let _ = worker.await;
-                    joined += 1;
+                    let _ = (&mut worker.done).await;
                 }
             })
             .await
             .is_ok()
         };
 
-        if drained {
-            return;
+        if !drained {
+            for worker in &workers {
+                worker.stop.store(true, Ordering::Release);
+            }
         }
 
-        for worker in workers.iter().skip(joined) {
-            worker.abort();
+        for mut worker in workers {
+            if worker.finished.load(Ordering::Acquire)
+                && let Some(thread) = worker.thread.take()
+            {
+                let _ = thread.join();
+            }
         }
-        for worker in workers.iter_mut().skip(joined) {
-            let _ = worker.await;
+    }
+}
+
+/// Runs one subscriber serially without creating a blocking-pool task per event.
+fn run_subscriber_worker(
+    mut receiver: mpsc::Receiver<Arc<Event>>,
+    subscriber: Arc<dyn Subscribe>,
+    name: Arc<str>,
+    bus: Bus,
+    overflow: Arc<SubscriberOverflowState>,
+    stop: Arc<AtomicBool>,
+) {
+    while let Some(event) = receiver.blocking_recv() {
+        if stop.load(Ordering::Acquire) {
+            break;
         }
+        invoke_subscriber(&subscriber, event.as_ref(), &name, &bus);
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        if receiver.is_empty() {
+            report_overflow(&subscriber, &name, &bus, &overflow);
+        }
+    }
+
+    if !stop.load(Ordering::Acquire) {
+        report_overflow(&subscriber, &name, &bus, &overflow);
+    }
+}
+
+/// Delivers one coalesced overflow report directly to the affected subscriber.
+fn report_overflow(
+    subscriber: &Arc<dyn Subscribe>,
+    name: &Arc<str>,
+    bus: &Bus,
+    overflow: &SubscriberOverflowState,
+) {
+    let dropped = overflow.take_dropped();
+    if dropped == 0 {
+        return;
+    }
+    let event = Event::subscriber_overflow(Arc::clone(name), "full").with_dropped(dropped);
+    invoke_subscriber(subscriber, &event, name, bus);
+}
+
+/// Calls user subscriber code behind its panic boundary.
+fn invoke_subscriber(subscriber: &Arc<dyn Subscribe>, event: &Event, name: &Arc<str>, bus: &Bus) {
+    let is_internal_event = event.is_internal_diagnostic();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        subscriber.on_event(event);
+    }));
+    if let Err(panic_err) = result
+        && !is_internal_event
+    {
+        bus.publish(Event::subscriber_panicked(
+            Arc::clone(name),
+            extract_panic_info(&panic_err),
+        ));
     }
 }
 
@@ -347,20 +459,6 @@ mod tests {
             }
         }
         None
-    }
-
-    async fn diagnostic_count(events: Vec<Arc<Event>>, kind: EventKind) -> usize {
-        let bus = Bus::new(64);
-        let mut rx = bus.subscribe();
-        let (_, subscriber) = CountingSub::new(1);
-        let set = SubscriberSet::new(vec![subscriber], bus);
-        set.start();
-
-        for event in events {
-            set.emit_arc(event);
-        }
-        set.close().await;
-        count(&mut rx, kind)
     }
 
     struct CountingSub {
@@ -513,12 +611,24 @@ mod tests {
         active: AtomicUsize,
         max_active: AtomicUsize,
         seen: Mutex<Vec<String>>,
+        overflow_reports: Mutex<Vec<(String, u64)>>,
     }
 
     impl Subscribe for BlockingOrderSub {
         fn on_event(&self, event: &Event) {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
+
+            if event.kind == EventKind::SubscriberOverflow {
+                if let Some(reason) = event.reason.as_deref() {
+                    self.overflow_reports
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push((reason.to_owned(), event.dropped.unwrap_or(0)));
+                }
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
 
             let task = event.task.as_deref().unwrap_or_default();
             self.seen.lock().unwrap().push(task.to_owned());
@@ -558,6 +668,7 @@ mod tests {
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
             seen: Mutex::new(Vec::new()),
+            overflow_reports: Mutex::new(Vec::new()),
         });
         (sub, first_gate)
     }
@@ -678,8 +789,57 @@ mod tests {
         assert!(sub.second_entered.load(Ordering::Acquire));
     }
 
+    #[test]
+    fn callbacks_do_not_use_tokio_blocking_pool() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("the test runtime must build");
+
+        runtime.block_on(async {
+            let pool_gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+            let pool_gate_for_blocker = Arc::clone(&pool_gate);
+            let blocker = tokio::task::spawn_blocking(move || {
+                let (state, ready) = &*pool_gate_for_blocker;
+                let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+                state.entered = true;
+                ready.notify_all();
+                while !state.released {
+                    state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+                }
+                state.finished = true;
+                ready.notify_all();
+            });
+            let blocking_pool_is_occupied = wait_for_gate(&pool_gate, |state| state.entered).await;
+
+            let (count, subscriber) = CountingSub::new(8);
+            let set = SubscriberSet::new(vec![subscriber], Bus::new(8));
+            set.start();
+            set.emit_arc(ev("dedicated-thread"));
+            let callback_ran_while_pool_was_occupied =
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while count.load(Ordering::Acquire) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .is_ok();
+
+            release_gate(&pool_gate);
+            let _ = blocker.await;
+            set.close().await;
+
+            assert!(blocking_pool_is_occupied);
+            assert!(
+                callback_ran_while_pool_was_occupied,
+                "subscriber callbacks must use their dedicated worker, not Tokio's blocking pool"
+            );
+        });
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn zero_shutdown_timeout_aborts_worker_and_drops_queued_events() {
+    async fn zero_shutdown_timeout_detaches_worker_and_drops_queued_events() {
         let (sub, first_gate) = blocking_order_sub();
         let set = SubscriberSet::new_with_shutdown_timeout(
             vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
@@ -687,15 +847,17 @@ mod tests {
             Duration::ZERO,
         );
         set.start();
-        let worker = {
+        let worker_finished = {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
             let SubscriberState::Started { workers, .. } = &*state else {
                 panic!("subscriber worker must be started")
             };
-            workers
-                .first()
-                .expect("the test configures one subscriber worker")
-                .abort_handle()
+            Arc::clone(
+                &workers
+                    .first()
+                    .expect("the test configures one subscriber worker")
+                    .finished,
+            )
         };
         let watchdog = spawn_gate_watchdog(Arc::clone(&first_gate));
 
@@ -704,7 +866,7 @@ mod tests {
         let first_entered = wait_for_gate(&first_gate, |state| state.entered).await;
 
         let close_result = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
-        let worker_finished_before_release = worker.is_finished();
+        let worker_was_still_running = !worker_finished.load(Ordering::Acquire);
         let first_was_still_running = !first_gate
             .0
             .lock()
@@ -714,6 +876,13 @@ mod tests {
 
         release_gate(&first_gate);
         let first_finished = wait_for_gate(&first_gate, |state| state.finished).await;
+        let worker_stopped_after_release = tokio::time::timeout(Duration::from_secs(1), async {
+            while !worker_finished.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
         watchdog.join().expect("watchdog thread must not panic");
         let seen = sub
             .seen
@@ -728,8 +897,8 @@ mod tests {
             "zero subscriber shutdown timeout must return immediately"
         );
         assert!(
-            worker_finished_before_release,
-            "close must abort and join the queue worker before returning"
+            worker_was_still_running,
+            "close must detach a callback that outlives the zero deadline"
         );
         assert!(
             first_was_still_running,
@@ -740,10 +909,14 @@ mod tests {
             "the second callback must still be queued"
         );
         assert!(first_finished, "cleanup must release the running callback");
+        assert!(
+            worker_stopped_after_release,
+            "the detached worker must stop after its running callback returns"
+        );
         assert_eq!(
             seen,
             ["first"],
-            "once the queue worker is joined, releasing the running callback cannot revive queued callbacks"
+            "releasing the detached worker cannot revive queued callbacks"
         );
         assert!(!sub.second_entered.load(Ordering::Acquire));
         assert!(repeated_close.is_ok(), "repeated close must remain a no-op");
@@ -811,19 +984,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overflow_reported_for_ordinary_but_not_diagnostic_events() {
-        assert!(
-            diagnostic_count(vec![ev("t"); 3], EventKind::SubscriberOverflow).await > 0,
-            "a dropped ordinary event must be reported"
+    async fn overflow_is_coalesced_and_does_not_reenter_the_shared_bus() {
+        let bus = Bus::new(256);
+        let mut bus_events = bus.subscribe();
+        let (sub, gate) = blocking_order_sub();
+        let set = SubscriberSet::new(vec![Arc::clone(&sub) as Arc<dyn Subscribe>], bus.clone());
+        set.start();
+        set.emit_arc(ev("first"));
+        assert!(wait_for_gate(&gate, |state| state.entered).await);
+
+        for _ in 0..4 {
+            set.emit_arc(ev("queued"));
+        }
+        for _ in 0..100 {
+            set.emit_arc(ev("dropped"));
+        }
+
+        release_gate(&gate);
+        set.close().await;
+
+        assert_eq!(
+            *sub.overflow_reports
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            [("full".to_owned(), 100)],
+            "one recovery report must summarize the complete overflow burst"
         );
         assert_eq!(
-            diagnostic_count(
-                vec![kind_ev(EventKind::SubscriberOverflow); 5],
-                EventKind::SubscriberOverflow,
-            )
-            .await,
+            count(&mut bus_events, EventKind::SubscriberOverflow),
             0,
-            "dropping a diagnostic event must not publish further overflow"
+            "queue overflow diagnostics must not reenter the shared event bus"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_internal_diagnostics_do_not_create_an_overflow_report() {
+        let (sub, gate) = blocking_order_sub();
+        let set = SubscriberSet::new(vec![Arc::clone(&sub) as Arc<dyn Subscribe>], Bus::new(64));
+        set.start();
+        set.emit_arc(ev("first"));
+        assert!(wait_for_gate(&gate, |state| state.entered).await);
+
+        for _ in 0..4 {
+            set.emit_arc(kind_ev(EventKind::RuntimeFailure));
+        }
+        for _ in 0..100 {
+            set.emit_arc(kind_ev(EventKind::RuntimeFailure));
+        }
+
+        release_gate(&gate);
+        set.close().await;
+        assert!(
+            sub.overflow_reports
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "dropping internal diagnostics must remain silent"
         );
     }
 

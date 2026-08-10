@@ -5,9 +5,11 @@
 //! Each tracing event uses target `taskvisor` and contains:
 //! - a level based on the event severity (see [`TracingBridge`]),
 //! - structured fields: `event` (the stable label), `event_seq`, `event_unix_ms`, and the optional
-//!   payload fields that are set (`task_name`, `taskvisor_id`, `subscriber`, `component`, `slot`,
-//!   `attempt`, `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`,
-//!   `exit_code`, `backoff_source`).
+//!   payload fields that are set:
+//!   (
+//!     `task_name`, `taskvisor_id`, `subscriber`, `component`, `slot`, `attempt`, `outcome_kind`,
+//!     `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, `exit_code`, `backoff_source`
+//!   ).
 //!
 //! Unset optional fields are not recorded.
 //! Free-form [`Event::reason`] text is omitted by default.
@@ -174,6 +176,7 @@ fn emit_event(e: &Event, include_reason: bool) {
                 delay_ms = e.delay_ms.map(u64::from),
                 timeout_ms = e.timeout_ms.map(u64::from),
                 duration_ms = e.duration_ms.map(u64::from),
+                dropped = e.dropped,
                 exit_code = e.exit_code.map(i64::from),
                 backoff_source = e.backoff_source.map(|source| source.as_label()),
                 rejection_kind = e.rejection_kind.map(|kind| kind.as_label()),
@@ -386,6 +389,13 @@ mod tests {
             );
             assert!(!fields.contains_key("task"));
         }
+
+        let (_, overflow_fields) =
+            capture_one(&Event::subscriber_overflow("subscriber", "full").with_dropped(42));
+        assert_eq!(
+            overflow_fields.get("dropped").map(String::as_str),
+            Some("42")
+        );
 
         #[cfg(feature = "controller")]
         {
