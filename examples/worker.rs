@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = TaskSpec::restartable(worker);
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    supervisor.run(vec![spec]).await?;
+    supervisor.run_with_os_signals(vec![spec]).await?;
 
     Ok(())
 }

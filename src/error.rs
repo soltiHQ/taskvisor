@@ -75,9 +75,9 @@ pub enum RuntimeError {
         timeout: Duration,
     },
 
-    /// OS signal listener setup failed.
+    /// Explicit OS signal listener setup failed.
     ///
-    /// Signal-based shutdown is unavailable.
+    /// Signal-based shutdown requested through [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals) is unavailable.
     /// The I/O error kind, message, and source chain are preserved for callers that join the shared shutdown operation.
     #[error("failed to install shutdown signal handlers: {source}")]
     #[non_exhaustive]
@@ -91,9 +91,12 @@ pub enum RuntimeError {
     #[error("supervisor is shutting down")]
     ShuttingDown,
 
-    /// [`Supervisor::run`](crate::Supervisor::run) was called more than once.
+    /// A static supervisor run method was called more than once.
     ///
-    /// A supervisor run is single-shot.
+    /// [`Supervisor::run`](crate::Supervisor::run),
+    /// [`Supervisor::run_until`](crate::Supervisor::run_until), and
+    /// [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals)
+    /// share one single-shot lifecycle.
     #[error("supervisor run() was already started")]
     AlreadyRunning,
 }

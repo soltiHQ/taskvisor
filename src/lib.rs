@@ -27,7 +27,8 @@
 //! ## Choose a Mode
 //!
 //! - **Static:** call [`Supervisor::run`] with a known task set.
-//!   It waits for all tasks to finish or for an OS shutdown signal.
+//!   It waits for all tasks to finish without installing process signal handlers.
+//!   Use [`Supervisor::run_until`] with an application-owned shutdown future, or explicitly opt into signal handling with [`Supervisor::run_with_os_signals`].
 //! - **Dynamic:** call [`Supervisor::serve`].
 //!   It returns a [`SupervisorHandle`] that can add, remove, cancel, and list tasks while the service is running.
 //!

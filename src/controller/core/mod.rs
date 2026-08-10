@@ -37,6 +37,9 @@
 //! - its Add command is committed and the watcher is handed to the runtime registry,
 //! - the submission is rejected and resolved as `TaskOutcome::Rejected`.
 //!
+//! Admission snapshots user-provided task metadata before parking the sender in controller state.
+//! A panic from `Task::name` is caught by the controller work-unit boundary and the ownership guard resolves the waiter as an admission failure.
+//!
 //! ## Internal Architecture
 //!
 //! `Controller` keeps shared state and construction in this facade.

@@ -6,8 +6,8 @@ use crate::TaskContext;
 use crate::{BackoffPolicy, BoxTaskFuture, RestartPolicy, Task, TaskFn, TaskRef, TaskSpec};
 use std::num::NonZeroUsize;
 use std::sync::{
-    Mutex as StdMutex,
-    atomic::{AtomicBool, Ordering},
+    Mutex as StdMutex, Weak,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -23,13 +23,128 @@ impl Task for PanickingNameTask {
     }
 }
 
+struct NameBombTask {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Task for NameBombTask {
+    fn name(&self) -> &str {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        panic!("injected unexpected task name read")
+    }
+
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        panic!("a policy-rejected task must not spawn")
+    }
+}
+
+struct PanickingDropTask {
+    name: &'static str,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Task for PanickingDropTask {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
+impl Drop for PanickingDropTask {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::AcqRel);
+        panic!("injected task drop panic")
+    }
+}
+
+struct ShutdownDropProbeTask {
+    controller: Weak<Controller>,
+    state_clean_at_drop: Arc<AtomicBool>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Task for ShutdownDropProbeTask {
+    fn name(&self) -> &str {
+        "slot-shutdown-drop-panic"
+    }
+
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
+impl Drop for ShutdownDropProbeTask {
+    fn drop(&mut self) {
+        let state_is_clean = self.controller.upgrade().is_some_and(|controller| {
+            controller.watchers.is_empty() && controller.slots.is_empty()
+        });
+        self.state_clean_at_drop
+            .store(state_is_clean, Ordering::Release);
+        self.drops.fetch_add(1, Ordering::AcqRel);
+        panic!("injected task drop panic")
+    }
+}
+
+struct SingleReadNameTask {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Task for SingleReadNameTask {
+    fn name(&self) -> &str {
+        assert_eq!(
+            self.calls.fetch_add(1, Ordering::AcqRel),
+            0,
+            "controller admission must snapshot Task::name exactly once"
+        );
+        "single-read-name"
+    }
+
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
 fn make_spec(name: &str) -> TaskSpec {
     let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
     TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
 }
 
+fn pending(id: TaskId, task_spec: TaskSpec) -> crate::controller::slot::PendingSubmission {
+    let task_name = Arc::from(task_spec.name());
+    crate::controller::slot::PendingSubmission::new(id, task_name, task_spec)
+}
+
 fn slot_arc_name() -> Arc<str> {
     Arc::from("s")
+}
+
+fn drain_events(events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>) -> Vec<Arc<Event>> {
+    let mut drained = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        drained.push(event);
+    }
+    drained
+}
+
+fn assert_rejection_parity(event: &Event, id: TaskId, outcome: &TaskOutcome) {
+    let TaskOutcome::Rejected { kind, reason, .. } = outcome else {
+        panic!("expected a rejected task outcome, got {outcome:?}");
+    };
+    assert_eq!(event.kind, EventKind::ControllerRejected);
+    assert_eq!(event.id, Some(id));
+    assert_eq!(event.rejection_kind, Some(*kind));
+    assert_eq!(event.outcome_kind, Some(crate::TaskOutcomeKind::Rejected));
+    assert_eq!(event.reason.as_deref(), Some(reason.as_ref()));
+}
+
+async fn receive_oneshot<T>(receiver: oneshot::Receiver<T>, context: &str) -> T {
+    tokio::time::timeout(Duration::from_secs(2), receiver)
+        .await
+        .unwrap_or_else(|_| panic!("{context} timed out"))
+        .unwrap_or_else(|_| panic!("{context} sender was dropped"))
 }
 
 fn admitting_slot(owner: TaskId) -> SlotState {
@@ -67,19 +182,23 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
     let mut rx = ctrl.bus.subscribe();
     let mut slot = SlotState::new();
     let displaced = TaskId::next();
-    slot.queue.push_back((displaced, make_spec("old-head")));
-    slot.queue.push_back((TaskId::next(), make_spec("tail")));
+    slot.queue
+        .push_back(pending(displaced, make_spec("old-head")));
+    slot.queue
+        .push_back(pending(TaskId::next(), make_spec("tail")));
 
-    ctrl.replace_head_or_push(
-        &mut slot,
-        &slot_arc_name(),
-        TaskId::next(),
-        make_spec("new-head"),
-    );
+    let displaced_spec = ctrl
+        .replace_head_or_push(
+            &mut slot,
+            &slot_arc_name(),
+            pending(TaskId::next(), make_spec("new-head")),
+        )
+        .expect("the old queue head must be returned for deferred drop");
 
     assert_eq!(slot.queue.len(), 2, "queue depth should not grow");
-    assert_eq!(slot.queue.front().unwrap().1.name(), "new-head");
-    assert_eq!(slot.queue.back().unwrap().1.name(), "tail");
+    assert_eq!(slot.queue.front().unwrap().task_spec.name(), "new-head");
+    assert_eq!(slot.queue.back().unwrap().task_spec.name(), "tail");
+    assert_eq!(displaced_spec.task_spec.name(), "old-head");
 
     let ev = rx.try_recv().expect("displaced head must be rejected");
     assert_eq!(ev.kind, EventKind::ControllerRejected);
@@ -99,25 +218,40 @@ fn replace_head_or_push_appends_to_empty_then_keeps_only_the_latest_head() {
     let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
     let mut slot = SlotState::new();
     let name = slot_arc_name();
-    ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v1"));
+    assert!(
+        ctrl.replace_head_or_push(&mut slot, &name, pending(TaskId::next(), make_spec("v1")),)
+            .is_none()
+    );
     assert_eq!(slot.queue.len(), 1);
-    assert_eq!(slot.queue.front().unwrap().1.name(), "v1");
+    assert_eq!(slot.queue.front().unwrap().task_spec.name(), "v1");
 
-    ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v2"));
-    ctrl.replace_head_or_push(&mut slot, &name, TaskId::next(), make_spec("v3"));
+    assert_eq!(
+        ctrl.replace_head_or_push(&mut slot, &name, pending(TaskId::next(), make_spec("v2")),)
+            .expect("v1 must be displaced")
+            .task_spec
+            .name(),
+        "v1"
+    );
+    assert_eq!(
+        ctrl.replace_head_or_push(&mut slot, &name, pending(TaskId::next(), make_spec("v3")),)
+            .expect("v2 must be displaced")
+            .task_spec
+            .name(),
+        "v2"
+    );
 
     assert_eq!(slot.queue.len(), 1);
-    assert_eq!(slot.queue.front().unwrap().1.name(), "v3");
+    assert_eq!(slot.queue.front().unwrap().task_spec.name(), "v3");
 }
 
 #[test]
-fn reject_if_full_respects_the_capacity_boundary() {
+fn queue_full_reason_respects_the_capacity_boundary() {
     let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 3);
     let ctrl = make_controller(config, Bus::new(64));
 
     for (depth, expected_rejection) in [(0, false), (2, false), (3, true), (10, true)] {
         assert_eq!(
-            ctrl.reject_if_full("slot", TaskId::next(), depth),
+            ctrl.queue_full_reason(depth).is_some(),
             expected_rejection,
             "unexpected decision at queue depth {depth}"
         );
@@ -184,7 +318,7 @@ async fn removal_not_claimed_keeps_terminating_until_reliable_completion() {
         let mut slot = slot_arc.lock().await;
         *slot = terminating_slot(owner);
         slot.queue
-            .push_back((queued, waiting_spec("after-unclaimed-removal")));
+            .push_back(pending(queued, waiting_spec("after-unclaimed-removal")));
     }
 
     ctrl.handle_removal_result(RemovalResult {
@@ -198,7 +332,7 @@ async fn removal_not_claimed_keeps_terminating_until_reliable_completion() {
         let slot = slot_arc.lock().await;
         assert_eq!(slot.owner_id(), Some(owner));
         assert!(matches!(slot.phase(), SlotPhase::Terminating { .. }));
-        assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(queued));
+        assert_eq!(slot.queue.front().map(|pending| pending.id), Some(queued));
     }
     assert!(
         events.try_recv().is_err(),
@@ -240,7 +374,7 @@ async fn removal_error_preserves_owner_and_queue_and_emits_one_diagnostic() {
         let mut slot = slot_arc.lock().await;
         *slot = terminating_slot(owner);
         slot.queue
-            .push_back((queued, waiting_spec("after-failed-removal")));
+            .push_back(pending(queued, waiting_spec("after-failed-removal")));
     }
 
     ctrl.handle_removal_result(RemovalResult {
@@ -267,7 +401,7 @@ async fn removal_error_preserves_owner_and_queue_and_emits_one_diagnostic() {
     let slot = slot_arc.lock().await;
     assert_eq!(slot.owner_id(), Some(owner));
     assert!(matches!(slot.phase(), SlotPhase::Terminating { .. }));
-    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(queued));
+    assert_eq!(slot.queue.front().map(|pending| pending.id), Some(queued));
 }
 
 #[tokio::test]
@@ -283,7 +417,7 @@ async fn stale_removal_error_does_not_publish_or_mutate_new_owner() {
         let mut slot = slot_arc.lock().await;
         *slot = running_slot(current);
         slot.queue
-            .push_back((queued, waiting_spec("new-owner-queued")));
+            .push_back(pending(queued, waiting_spec("new-owner-queued")));
     }
 
     ctrl.handle_removal_result(RemovalResult {
@@ -297,7 +431,7 @@ async fn stale_removal_error_does_not_publish_or_mutate_new_owner() {
     let slot = slot_arc.lock().await;
     assert_eq!(slot.owner_id(), Some(current));
     assert!(matches!(slot.phase(), SlotPhase::Running { .. }));
-    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(queued));
+    assert_eq!(slot.queue.front().map(|pending| pending.id), Some(queued));
 }
 
 #[tokio::test]
@@ -358,7 +492,7 @@ async fn duplicate_completion_does_not_start_queued_owner_twice() {
         let mut slot = slot_arc.lock().await;
         *slot = running_slot(completed_id);
         slot.queue
-            .push_back((next_id, waiting_spec("duplicate-completion-next")));
+            .push_back(pending(next_id, waiting_spec("duplicate-completion-next")));
     }
 
     let mut admissions = JoinSet::new();
@@ -503,7 +637,7 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
             SlotPhase::CancelPendingAdmission { owner: id, .. } if id == owner
         ));
         assert_eq!(slot.queue.len(), 1);
-        assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(latest));
+        assert_eq!(slot.queue.front().map(|pending| pending.id), Some(latest));
     }
     assert!(removals.is_empty());
 
@@ -526,7 +660,7 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
         slot.phase(),
         SlotPhase::Terminating { owner: id, .. } if id == owner
     ));
-    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(latest));
+    assert_eq!(slot.queue.front().map(|pending| pending.id), Some(latest));
     assert_eq!(completions.len(), 1, "duplicate Add Ok must be stale");
     assert_eq!(
         removals.len(),
@@ -552,7 +686,7 @@ async fn shutdown_finalizes_buffered_submission_as_rejected() {
         .expect("submission accepted into channel");
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
-    ctrl.finalize_pending_on_shutdown(&mut rx);
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
 
     let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
@@ -583,7 +717,7 @@ async fn try_submit_and_watch_is_fail_fast_and_preserves_watched_outcome() {
     ));
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
-    ctrl.finalize_pending_on_shutdown(&mut rx);
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
 
     assert!(matches!(
@@ -606,9 +740,9 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
         let mut slot = slot.lock().await;
         *slot = running_slot(running_id);
         slot.queue
-            .push_back((watched_id, waiting_spec("watched-shutdown-queue")));
+            .push_back(pending(watched_id, waiting_spec("watched-shutdown-queue")));
         slot.queue
-            .push_back((unwatched_id, waiting_spec("plain-shutdown-queue")));
+            .push_back(pending(unwatched_id, waiting_spec("plain-shutdown-queue")));
     }
 
     ctrl.finalize_slot_state_on_shutdown().await;
@@ -626,6 +760,77 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     assert!(ctrl.slots.is_empty());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn slot_shutdown_finishes_all_watchers_before_panicking_task_drop() {
+    let ctrl = Arc::new(make_controller(ControllerConfig::default(), Bus::new(64)));
+    let mut events = ctrl.bus.subscribe();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let state_clean_at_drop = Arc::new(AtomicBool::new(false));
+    let first = TaskId::next();
+    let second = TaskId::next();
+    let (first_done, first_outcome) = oneshot::channel();
+    let (second_done, second_outcome) = oneshot::channel();
+    ctrl.watchers.insert(first, first_done);
+    ctrl.watchers.insert(second, second_done);
+
+    let slot = ctrl.get_or_create_slot("slot-shutdown-drop-panic");
+    {
+        let mut slot = slot.lock().await;
+        slot.queue
+            .push_back(crate::controller::slot::PendingSubmission::new(
+                first,
+                Arc::from("slot-shutdown-drop-panic"),
+                TaskSpec::once(Arc::new(ShutdownDropProbeTask {
+                    controller: Arc::downgrade(&ctrl),
+                    state_clean_at_drop: Arc::clone(&state_clean_at_drop),
+                    drops: Arc::clone(&drops),
+                })),
+            ));
+        slot.queue
+            .push_back(pending(second, waiting_spec("slot-shutdown-after-panic")));
+    }
+
+    ctrl.finalize_slot_state_on_shutdown().await;
+
+    let first_outcome = receive_oneshot(first_outcome, "first slot-shutdown watcher").await;
+    let second_outcome = receive_oneshot(second_outcome, "second slot-shutdown watcher").await;
+    for outcome in [&first_outcome, &second_outcome] {
+        assert!(matches!(
+            outcome,
+            TaskOutcome::Rejected {
+                kind: crate::RejectionKind::ControllerShuttingDown,
+                ..
+            }
+        ));
+    }
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    assert!(
+        state_clean_at_drop.load(Ordering::Acquire),
+        "all controller watchers and slots must be finalized before user Drop"
+    );
+    assert!(ctrl.watchers.is_empty());
+    assert!(ctrl.slots.is_empty());
+
+    let drained = drain_events(&mut events);
+    let first_event = drained
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected && event.id == Some(first))
+        .expect("first slot-shutdown rejection event");
+    let second_event = drained
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected && event.id == Some(second))
+        .expect("second slot-shutdown rejection event");
+    assert_rejection_parity(first_event, first, &first_outcome);
+    assert_rejection_parity(second_event, second, &second_outcome);
+    assert!(drained.iter().any(|event| {
+        event.kind == EventKind::RuntimeFailure
+            && event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected task drop panic"))
+    }));
+}
+
 #[tokio::test]
 async fn shutdown_resolves_buffered_removal_reply() {
     let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
@@ -639,7 +844,7 @@ async fn shutdown_resolves_buffered_removal_reply() {
         .expect("the controller command channel has capacity");
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
-    ctrl.finalize_pending_on_shutdown(&mut rx);
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
 
     assert!(matches!(
         reply_rx.await,
@@ -669,6 +874,73 @@ async fn aborted_identity_worker_sends_explicit_shutdown_reply() {
         tokio::time::timeout(Duration::from_secs(1), reply_rx).await,
         Ok(Ok(Err(RuntimeError::ShuttingDown)))
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_identity_reply_survives_panicking_task_drop() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let id = TaskId::next();
+    let slot_name: Arc<str> = Arc::from("identity-drop-panic-slot");
+    let (done, outcome) = oneshot::channel();
+    ctrl.watchers.insert(id, done);
+    let slot = ctrl.get_or_create_slot(&slot_name);
+    slot.lock()
+        .await
+        .queue
+        .push_back(crate::controller::slot::PendingSubmission::new(
+            id,
+            Arc::from("identity-drop-panic-task"),
+            TaskSpec::once(Arc::new(PanickingDropTask {
+                name: "identity-drop-panic-task",
+                drops: Arc::clone(&drops),
+            })),
+        ));
+
+    let (reply, result) = oneshot::channel();
+    let mut identity_operations = JoinSet::new();
+    ctrl.handle_identity_operation(
+        id,
+        IdentityOperation::Remove,
+        reply,
+        &mut identity_operations,
+    )
+    .await;
+
+    assert!(matches!(
+        receive_oneshot(result, "queued identity result").await,
+        Ok(true)
+    ));
+    let outcome = receive_oneshot(outcome, "queued identity watcher").await;
+    assert!(matches!(
+        outcome,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::RemovedFromQueue,
+            ..
+        }
+    ));
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    assert!(identity_operations.is_empty());
+    assert!(ctrl.watchers.is_empty());
+    assert!(ctrl.slots.get(&*slot_name).is_none());
+
+    let drained = drain_events(&mut events);
+    let rejections: Vec<_> = drained
+        .iter()
+        .filter(|event| event.kind == EventKind::ControllerRejected && event.id == Some(id))
+        .collect();
+    assert_eq!(rejections.len(), 1);
+    assert_rejection_parity(rejections[0], id, &outcome);
+    assert!(drained.iter().any(|event| {
+        event.kind == EventKind::RuntimeFailure
+            && event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected task drop panic"))
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -719,7 +991,7 @@ async fn submit_after_shutdown_finalize_is_rejected_not_leaked() {
     let ctrl = make_controller(ControllerConfig::default(), bus);
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
-    ctrl.finalize_pending_on_shutdown(&mut rx);
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
 
     let task: TaskRef = TaskFn::arc("late", |_ctx: TaskContext| async { Ok(()) });
     let result = ctrl
@@ -766,6 +1038,639 @@ async fn guarded_converts_panic_to_diagnostic_and_survives() {
         "diagnostic must carry the panic message, got {:?}",
         ev.reason
     );
+}
+
+#[tokio::test]
+async fn explicit_slot_shutdown_rejects_without_reading_task_name() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+    ctrl.mark_shutting_down();
+
+    ctrl.handle_submission(
+        Submission {
+            id,
+            spec: ControllerSpec::queue(TaskSpec::once(Arc::new(NameBombTask {
+                calls: Arc::clone(&calls),
+            })))
+            .with_slot("explicit-shutdown"),
+            done: Some(done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    let outcome = receive_oneshot(outcome, "shutdown watcher").await;
+    assert!(matches!(
+        outcome,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ControllerShuttingDown,
+            ..
+        }
+    ));
+    let drained = drain_events(&mut events);
+    let rejections: Vec<_> = drained
+        .iter()
+        .filter(|event| event.kind == EventKind::ControllerRejected)
+        .collect();
+    assert_eq!(rejections.len(), 1);
+    assert_rejection_parity(rejections[0], id, &outcome);
+    assert_eq!(rejections[0].task.as_deref(), Some("explicit-shutdown"));
+    assert!(
+        drained
+            .iter()
+            .all(|event| event.kind != EventKind::RuntimeFailure)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_slot_shutdown_while_waiting_for_lock_skips_task_name() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let slot = ctrl.get_or_create_slot("locked-at-shutdown");
+    let owner = TaskId::next();
+    let mut slot_guard = slot.lock().await;
+    *slot_guard = running_slot(owner);
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+    let mut admission = Box::pin(
+        ctrl.handle_submission(
+            Submission {
+                id,
+                spec: ControllerSpec::queue(TaskSpec::once(Arc::new(NameBombTask {
+                    calls: Arc::clone(&calls),
+                })))
+                .with_slot("locked-at-shutdown"),
+                done: Some(done),
+            },
+            &mut admissions,
+            &mut removals,
+        ),
+    );
+
+    std::future::poll_fn(|cx| match admission.as_mut().poll(cx) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(()) => {
+            panic!("submission must wait for the held explicit-slot lock")
+        }
+    })
+    .await;
+    ctrl.mark_shutting_down();
+    drop(slot_guard);
+    tokio::time::timeout(Duration::from_secs(2), admission)
+        .await
+        .expect("submission must resume after the explicit-slot lock is released");
+
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    let outcome = receive_oneshot(outcome, "lock-wait shutdown watcher").await;
+    assert!(matches!(
+        outcome,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ControllerShuttingDown,
+            ..
+        }
+    ));
+    assert!(admissions.is_empty());
+    assert!(removals.is_empty());
+    assert!(ctrl.watchers.is_empty());
+    let slot = ctrl
+        .slots
+        .get("locked-at-shutdown")
+        .expect("the existing running slot remains owned")
+        .clone();
+    assert_eq!(slot.lock().await.owner_id(), Some(owner));
+
+    let drained = drain_events(&mut events);
+    let rejections: Vec<_> = drained
+        .iter()
+        .filter(|event| event.kind == EventKind::ControllerRejected)
+        .collect();
+    assert_eq!(rejections.len(), 1);
+    assert_rejection_parity(rejections[0], id, &outcome);
+    assert_eq!(rejections[0].task.as_deref(), Some("locked-at-shutdown"));
+    assert!(
+        drained
+            .iter()
+            .all(|event| event.kind != EventKind::RuntimeFailure)
+    );
+}
+
+#[tokio::test]
+async fn explicit_slot_drop_if_running_rejects_without_reading_task_name() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let owner = TaskId::next();
+    ctrl.slots.insert(
+        Arc::from("busy-slot"),
+        Arc::new(Mutex::new(running_slot(owner))),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+
+    ctrl.handle_submission(
+        Submission {
+            id,
+            spec: ControllerSpec::drop_if_running(TaskSpec::once(Arc::new(NameBombTask {
+                calls: Arc::clone(&calls),
+            })))
+            .with_slot("busy-slot"),
+            done: Some(done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    let outcome = receive_oneshot(outcome, "busy-rejection watcher").await;
+    assert!(matches!(
+        outcome,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::SlotBusy,
+            ..
+        }
+    ));
+    let slot = ctrl
+        .slots
+        .get("busy-slot")
+        .expect("busy slot remains")
+        .clone();
+    let slot = slot.lock().await;
+    assert_eq!(slot.owner_id(), Some(owner));
+    assert!(slot.queue.is_empty());
+    drop(slot);
+    let drained = drain_events(&mut events);
+    let rejections: Vec<_> = drained
+        .iter()
+        .filter(|event| event.kind == EventKind::ControllerRejected)
+        .collect();
+    assert_eq!(rejections.len(), 1);
+    assert_rejection_parity(rejections[0], id, &outcome);
+    assert!(
+        drained
+            .iter()
+            .all(|event| event.kind != EventKind::RuntimeFailure)
+    );
+}
+
+#[tokio::test]
+async fn explicit_slot_queue_full_rejects_without_reading_task_name() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 1);
+    let ctrl = Controller::new(config, supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let owner = TaskId::next();
+    let queued = TaskId::next();
+    let mut state = running_slot(owner);
+    state
+        .queue
+        .push_back(pending(queued, waiting_spec("existing-head")));
+    ctrl.slots
+        .insert(Arc::from("full-slot"), Arc::new(Mutex::new(state)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+
+    ctrl.handle_submission(
+        Submission {
+            id,
+            spec: ControllerSpec::queue(TaskSpec::once(Arc::new(NameBombTask {
+                calls: Arc::clone(&calls),
+            })))
+            .with_slot("full-slot"),
+            done: Some(done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    let outcome = receive_oneshot(outcome, "queue-full watcher").await;
+    assert!(matches!(
+        outcome,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::QueueFull,
+            ..
+        }
+    ));
+    let slot = ctrl
+        .slots
+        .get("full-slot")
+        .expect("full slot remains")
+        .clone();
+    let slot = slot.lock().await;
+    assert_eq!(slot.owner_id(), Some(owner));
+    assert_eq!(slot.queue.len(), 1);
+    assert_eq!(slot.queue.front().map(|pending| pending.id), Some(queued));
+    drop(slot);
+    let drained = drain_events(&mut events);
+    let rejections: Vec<_> = drained
+        .iter()
+        .filter(|event| event.kind == EventKind::ControllerRejected)
+        .collect();
+    assert_eq!(rejections.len(), 1);
+    assert_rejection_parity(rejections[0], id, &outcome);
+    assert!(
+        drained
+            .iter()
+            .all(|event| event.kind != EventKind::RuntimeFailure)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_name_panic_publishes_rejection_matching_waiter() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+
+    for explicit_slot in [None, Some("explicit-name-panic")] {
+        let id = TaskId::next();
+        let (done, outcome) = oneshot::channel();
+        let spec = ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingNameTask)));
+        let spec = if let Some(slot) = explicit_slot {
+            spec.with_slot(slot)
+        } else {
+            spec
+        };
+
+        ctrl.handle_submission(
+            Submission {
+                id,
+                spec,
+                done: Some(done),
+            },
+            &mut admissions,
+            &mut removals,
+        )
+        .await;
+
+        let outcome = receive_oneshot(outcome, "task-name panic watcher").await;
+        assert!(matches!(
+            outcome,
+            TaskOutcome::Rejected {
+                kind: crate::RejectionKind::AdmissionFailed,
+                ref reason,
+                ..
+            } if reason.as_ref() == crate::reasons::CONTROLLER_ADMISSION_INTERRUPTED
+        ));
+        let drained = drain_events(&mut events);
+        let rejections: Vec<_> = drained
+            .iter()
+            .filter(|event| event.kind == EventKind::ControllerRejected)
+            .collect();
+        assert_eq!(rejections.len(), 1);
+        assert_rejection_parity(rejections[0], id, &outcome);
+        assert_eq!(rejections[0].task.as_deref(), explicit_slot);
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|event| event.kind == EventKind::RuntimeFailure)
+                .count(),
+            1
+        );
+    }
+
+    assert!(admissions.is_empty());
+    assert!(removals.is_empty());
+    assert!(ctrl.watchers.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_name_panic_rejects_watcher_and_controller_continues() {
+    let supervisor = Supervisor::builder(crate::SupervisorConfig::default())
+        .with_controller(ControllerConfig::default())
+        .build();
+    let handle = supervisor.serve();
+
+    let hostile_specs = [
+        ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingNameTask))),
+        ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingNameTask)))
+            .with_slot("explicit-slot"),
+    ];
+    for spec in hostile_specs {
+        let (_id, waiter) = handle
+            .submit_and_watch(spec)
+            .await
+            .expect("controller intake must accept the hostile submission");
+        let outcome = tokio::time::timeout(Duration::from_secs(2), waiter.wait())
+            .await
+            .expect("a task-name panic must not leave the waiter pending")
+            .expect("panic-safe admission must produce a typed outcome");
+        assert!(matches!(
+            outcome,
+            TaskOutcome::Rejected {
+                kind: crate::RejectionKind::AdmissionFailed,
+                reason,
+                ..
+            } if reason.as_ref() == crate::reasons::CONTROLLER_ADMISSION_INTERRUPTED
+        ));
+    }
+
+    let good: TaskRef = TaskFn::arc("after-name-panic", |_ctx: TaskContext| async { Ok(()) });
+    let (_id, waiter) = handle
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(good)))
+        .await
+        .expect("the controller loop must continue after the caught panic");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), waiter.wait()).await,
+        Ok(Ok(TaskOutcome::Completed))
+    ));
+
+    handle
+        .shutdown()
+        .await
+        .expect("panic-safe controller admission must shut down cleanly");
+}
+
+#[tokio::test]
+async fn controller_registry_commit_reuses_snapshotted_task_name() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let task: TaskRef = Arc::new(SingleReadNameTask {
+        calls: Arc::clone(&calls),
+    });
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+
+    ctrl.handle_submission(
+        Submission {
+            id,
+            spec: ControllerSpec::queue(TaskSpec::once(task)),
+            done: Some(done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert_eq!(admissions.len(), 1);
+    assert!(removals.is_empty());
+    assert!(ctrl.watchers.is_empty());
+    let slot = ctrl
+        .slots
+        .get("single-read-name")
+        .expect("the snapshotted name must become the fallback slot")
+        .clone();
+    assert!(matches!(
+        slot.lock().await.phase(),
+        SlotPhase::Admitting { owner, .. } if owner == id
+    ));
+
+    drop(outcome);
+    abort_and_drain(&mut admissions).await;
+    abort_and_drain(&mut removals).await;
+}
+
+#[tokio::test]
+async fn registry_backpressure_drop_panic_preserves_watcher_and_controller_state() {
+    let supervisor = Supervisor::new(
+        crate::SupervisorConfig::default()
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
+        vec![],
+    );
+    let filler_id = TaskId::next();
+    let (_reply, _completion) = supervisor
+        .core()
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("drop-panic-filler"),
+            waiting_spec("drop-panic-filler"),
+            None,
+        )
+        .expect("the filler must occupy the registry queue");
+    assert_eq!(supervisor.core().registry_command_capacity(), 0);
+
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+
+    ctrl.handle_submission(
+        Submission {
+            id,
+            spec: ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingDropTask {
+                name: "drop-panic-uncommitted",
+                drops: Arc::clone(&drops),
+            })))
+            .with_slot("drop-panic-slot"),
+            done: Some(done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    let outcome = receive_oneshot(outcome, "pre-commit failure watcher").await;
+    assert!(matches!(
+        outcome,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::AdmissionFailed,
+            ..
+        }
+    ));
+    assert!(ctrl.watchers.is_empty());
+    assert!(ctrl.slots.get("drop-panic-slot").is_none());
+    assert!(admissions.is_empty());
+    assert!(removals.is_empty());
+
+    let drained = drain_events(&mut events);
+    let rejection = drained
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected)
+        .expect("pre-commit failure must publish a rejection");
+    assert_rejection_parity(rejection, id, &outcome);
+    let drop_failure = drained
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::RuntimeFailure
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("injected task drop panic"))
+        })
+        .expect("panicking destructor must be isolated and diagnosed");
+    assert_eq!(drop_failure.task.as_deref(), Some("controller"));
+}
+
+#[tokio::test]
+async fn queued_precommit_failures_finish_before_panicking_task_drop() {
+    let supervisor = Supervisor::new(
+        crate::SupervisorConfig::default()
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
+        vec![],
+    );
+    let filler_id = TaskId::next();
+    let (_reply, _completion) = supervisor
+        .core()
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("queued-drop-filler"),
+            waiting_spec("queued-drop-filler"),
+            None,
+        )
+        .expect("the filler must occupy the registry queue");
+
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let first = TaskId::next();
+    let second = TaskId::next();
+    let (first_done, first_outcome) = oneshot::channel();
+    let (second_done, second_outcome) = oneshot::channel();
+    ctrl.watchers.insert(first, first_done);
+    ctrl.watchers.insert(second, second_done);
+    let mut slot = SlotState::new();
+    slot.queue
+        .push_back(crate::controller::slot::PendingSubmission::new(
+            first,
+            Arc::from("queued-drop-panic"),
+            TaskSpec::once(Arc::new(PanickingDropTask {
+                name: "queued-drop-panic",
+                drops: Arc::clone(&drops),
+            })),
+        ));
+    slot.queue
+        .push_back(pending(second, waiting_spec("queued-after-drop-panic")));
+    let mut admissions = JoinSet::new();
+    let slot_name = Arc::from("queued-drop-slot");
+
+    let deferred =
+        ctrl.start_next_from_queue(supervisor.core(), &mut slot, &slot_name, &mut admissions);
+
+    assert!(slot.is_idle());
+    assert!(slot.queue.is_empty());
+    assert!(admissions.is_empty());
+    assert_eq!(deferred.len(), 2);
+    assert!(matches!(
+        receive_oneshot(first_outcome, "first queued pre-commit watcher").await,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::AdmissionFailed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        receive_oneshot(second_outcome, "second queued pre-commit watcher").await,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::AdmissionFailed,
+            ..
+        }
+    ));
+    assert!(ctrl.watchers.is_empty());
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+
+    ctrl.drop_pending_submissions(deferred).await;
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn buffered_shutdown_drain_continues_after_task_drop_panic() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let mut events = ctrl.bus.subscribe();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let first = TaskId::next();
+    let second = TaskId::next();
+    let (first_done, first_outcome) = oneshot::channel();
+    let (second_done, second_outcome) = oneshot::channel();
+    let (identity_reply, identity_result) = oneshot::channel();
+
+    ctrl.tx
+        .try_send(ControllerCommand::Submit(Submission {
+            id: first,
+            spec: ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingDropTask {
+                name: "buffered-drop-panic",
+                drops: Arc::clone(&drops),
+            })))
+            .with_slot("buffered-first"),
+            done: Some(first_done),
+        }))
+        .expect("first buffered submission");
+    ctrl.tx
+        .try_send(ControllerCommand::Submit(Submission {
+            id: second,
+            spec: ControllerSpec::queue(waiting_spec("buffered-after-drop-panic"))
+                .with_slot("buffered-second"),
+            done: Some(second_done),
+        }))
+        .expect("second buffered submission");
+    ctrl.tx
+        .try_send(ControllerCommand::ManageIdentity {
+            id: TaskId::next(),
+            operation: IdentityOperation::Remove,
+            reply: identity_reply,
+        })
+        .expect("buffered identity operation");
+
+    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
+
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    let first_outcome = receive_oneshot(first_outcome, "first shutdown rejection").await;
+    let second_outcome = receive_oneshot(second_outcome, "second shutdown rejection").await;
+    for outcome in [&first_outcome, &second_outcome] {
+        assert!(matches!(
+            outcome,
+            TaskOutcome::Rejected {
+                kind: crate::RejectionKind::ControllerShuttingDown,
+                ..
+            }
+        ));
+    }
+    assert!(matches!(
+        receive_oneshot(identity_result, "buffered shutdown identity reply").await,
+        Err(RuntimeError::ShuttingDown)
+    ));
+
+    let drained = drain_events(&mut events);
+    let first_event = drained
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected && event.id == Some(first))
+        .expect("first shutdown event");
+    let second_event = drained
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected && event.id == Some(second))
+        .expect("second shutdown event");
+    assert_rejection_parity(first_event, first, &first_outcome);
+    assert_rejection_parity(second_event, second, &second_outcome);
+    assert!(drained.iter().any(|event| {
+        event.kind == EventKind::RuntimeFailure
+            && event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected task drop panic"))
+    }));
 }
 
 #[tokio::test]
@@ -1084,7 +1989,7 @@ async fn try_identity_operations_report_full_controller_command_queue() {
     ));
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
-    ctrl.finalize_pending_on_shutdown(&mut rx);
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
     let _ = runtime_handle.shutdown().await;
 }
@@ -1099,7 +2004,12 @@ async fn try_identity_operations_propagate_full_registry_queue_after_controller_
     let filler_id = TaskId::next();
     let (_filler_reply, _filler_completion) = sup
         .core()
-        .add_task_with_id_watched(filler_id, waiting_spec("registry-queue-filler"), None)
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("registry-queue-filler"),
+            waiting_spec("registry-queue-filler"),
+            None,
+        )
         .expect("the filler must occupy the registry queue");
     assert_eq!(sup.core().registry_command_capacity(), 0);
 
@@ -1431,7 +2341,7 @@ async fn replace_is_processed_while_registry_reply_is_pending() {
             };
             let slot = slot.lock().await;
             matches!(slot.phase(), SlotPhase::CancelPendingAdmission { .. })
-                && slot.queue.front().map(|(id, _)| *id) == Some(replacement_id)
+                && slot.queue.front().map(|pending| pending.id) == Some(replacement_id)
         })
         .await,
         "Replace must be processed without waiting for the first registry reply"
@@ -1483,7 +2393,12 @@ async fn replace_stays_responsive_under_registry_backpressure() {
     let filler_id = TaskId::next();
     let (filler_reply, _filler_completion) = sup
         .core()
-        .add_task_with_id_watched(filler_id, waiting_spec("replace-filler"), None)
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("replace-filler"),
+            waiting_spec("replace-filler"),
+            None,
+        )
         .expect("the filler must occupy the registry queue");
     assert_eq!(sup.core().registry_command_capacity(), 0);
 
@@ -1530,7 +2445,10 @@ async fn replace_stays_responsive_under_registry_backpressure() {
         .expect("the slot must remain tracked");
     let slot = slot.lock().await;
     assert!(matches!(slot.phase(), SlotPhase::Terminating { .. }));
-    assert_eq!(slot.queue.front().map(|(id, _)| *id), Some(second_id));
+    assert_eq!(
+        slot.queue.front().map(|pending| pending.id),
+        Some(second_id)
+    );
     drop(slot);
     assert_eq!(
         removals.len(),
@@ -1758,7 +2676,7 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
             let Some(slot) = ctrl.slots.get("s").map(|entry| entry.clone()) else {
                 return false;
             };
-            slot.lock().await.queue.front().map(|(id, _)| *id) == Some(second_id)
+            slot.lock().await.queue.front().map(|pending| pending.id) == Some(second_id)
         })
         .await,
         "the second task must wait behind the first"
@@ -1858,10 +2776,12 @@ async fn queued_admission_skips_registry_rejected_head() {
     {
         let mut slot = slot_arc.lock().await;
         slot.queue
-            .push_back((duplicate_id, waiting_spec("queued-duplicate")));
+            .push_back(pending(duplicate_id, waiting_spec("queued-duplicate")));
         slot.queue
-            .push_back((accepted_id, waiting_spec("queued-accepted")));
-        ctrl.start_next_from_queue(sup.core(), &mut slot, &slot_name, &mut admissions);
+            .push_back(pending(accepted_id, waiting_spec("queued-accepted")));
+        let deferred =
+            ctrl.start_next_from_queue(sup.core(), &mut slot, &slot_name, &mut admissions);
+        assert!(deferred.is_empty());
     }
 
     for _ in 0..2 {
@@ -1902,7 +2822,7 @@ async fn no_queue_advancement_after_shutdown_starts() {
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));
 
     let mut queue = std::collections::VecDeque::new();
-    queue.push_back((TaskId::next(), waiting_spec("queued")));
+    queue.push_back(pending(TaskId::next(), waiting_spec("queued")));
     let mut slot = running_slot(id);
     slot.queue = queue;
     ctrl.slots
@@ -1970,7 +2890,7 @@ async fn snapshot_maps_every_internal_slot_phase_and_owner() {
     let with_queue = |mut slot: SlotState, depth: usize| {
         for _ in 0..depth {
             slot.queue
-                .push_back((TaskId::next(), make_spec("snapshot-queued")));
+                .push_back(pending(TaskId::next(), make_spec("snapshot-queued")));
         }
         slot
     };

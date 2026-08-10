@@ -39,7 +39,7 @@ Once the task is defined, its supervision policy becomes one declaration:
 
 ```rust,ignore
 supervisor
-    .run(vec![TaskSpec::restartable(worker)])
+    .run_with_os_signals(vec![TaskSpec::restartable(worker)])
     .await?;
 ```
 
@@ -177,10 +177,14 @@ Retries for one task run in sequence. Two attempts for the same `TaskId` never r
 
 There are two runtime modes:
 
-| Mode                    | Use it when                | Shutdown owner                                  |
-|-------------------------|----------------------------|-------------------------------------------------|
-| `supervisor.run(specs)` | Tasks are known at startup | Taskvisor waits for completion or an OS signal. |
-| `supervisor.serve()`    | Tasks are added at runtime | Your code calls `handle.shutdown().await`.      |
+| Mode                                    | Use it when                              | Shutdown owner                                      |
+|-----------------------------------------|------------------------------------------|-----------------------------------------------------|
+| `supervisor.run(specs)`                 | Tasks finish naturally                   | No process signal handlers are installed            |
+| `supervisor.run_until(specs, future)`   | The application owns its shutdown source | The supplied future requests graceful shutdown      |
+| `supervisor.run_with_os_signals(specs)` | Taskvisor should own process signals      | Explicit SIGINT/SIGTERM/SIGQUIT or Ctrl-C handling  |
+| `supervisor.serve()`                    | Tasks are added at runtime               | Your code calls `handle.shutdown().await`            |
+
+`run_with_os_signals` is an explicit process-wide opt-in. On Unix, Tokio does not restore the default signal disposition when its listeners are dropped, so the application remains responsible for signal handling after that method returns. `run` and `run_until` never install signal listeners.
 
 `Supervisor::run(...).await == Ok(())` means the supervisor lifecycle and cleanup completed successfully. It does not mean that every task succeeded, and `run` does not return per-task outcomes. Register work through `add_and_watch` or `submit_and_watch` when application logic needs the final result.
 

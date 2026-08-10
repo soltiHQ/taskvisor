@@ -88,10 +88,10 @@ impl Controller {
             if self.is_shutting_down() {
                 return false;
             }
-            let Some(pos) = slot.queue.iter().position(|(qid, _)| *qid == id) else {
+            let Some(pos) = slot.queue.iter().position(|pending| pending.id == id) else {
                 continue;
             };
-            let task_name: Arc<str> = Arc::from(slot.queue[pos].1.name());
+            let task_name = Arc::clone(&slot.queue[pos].task_name);
             let mut request = Event::new(EventKind::TaskRemoveRequested)
                 .with_task(task_name)
                 .with_id(id);
@@ -99,11 +99,10 @@ impl Controller {
                 request = request.with_reason(reason);
             }
             self.bus.publish(request);
-            drop(
-                slot.queue
-                    .remove(pos)
-                    .expect("the queued submission position was checked above"),
-            );
+            let removed = slot
+                .queue
+                .remove(pos)
+                .expect("the queued submission position was checked above");
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(&slot_name))
@@ -117,6 +116,7 @@ impl Controller {
                 crate::reasons::REMOVED_FROM_QUEUE,
             );
             self.gc_if_idle(&slot_name, slot);
+            self.drop_guarded("drop_removed_submission", removed).await;
             return true;
         }
         false

@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = SupervisorConfig::default().with_grace(Duration::from_secs(5));
     let supervisor = Supervisor::new(config, vec![]);
-    supervisor.run(specs).await?;
+    supervisor.run_with_os_signals(specs).await?;
 
     Ok(())
 }

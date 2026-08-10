@@ -1,10 +1,13 @@
 //! # OS shutdown signal helper
 //!
-//! [`Supervisor::run`](crate::Supervisor::run) uses [`wait_for_shutdown_signal`] in static mode.
-//! Dynamic mode through [`Supervisor::serve`](crate::Supervisor::serve) does not install this wait; the application decides when to call `shutdown`.
+//! [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals) uses [`wait_for_shutdown_signal`] as an explicit opt-in.
+//! [`Supervisor::run`](crate::Supervisor::run), [`Supervisor::run_until`](crate::Supervisor::run_until), and dynamic mode through [`Supervisor::serve`](crate::Supervisor::serve) do not install signal listeners.
 //!
 //! This helper installs signal listeners and waits.
 //! It does not publish events or cancel tasks.
+//!
+//! On Unix, Tokio's process-global signal handling is not restored when these listeners are dropped.
+//! Callers remain responsible for process signals after opting in.
 //!
 //! ## Unix Signals
 //!

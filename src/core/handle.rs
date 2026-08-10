@@ -475,8 +475,8 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
-    /// - [`RuntimeError::SignalSetupFailed`] if a concurrent static `run` call started shutdown after signal setup failed.
     /// - [`RuntimeError::ShuttingDown`] when shared runtime cleanup cannot finish normally.
+    /// - [`RuntimeError::SignalSetupFailed`]
     #[doc(alias = "graceful shutdown")]
     #[doc(alias = "graceful stop")]
     pub async fn shutdown(self) -> Result<(), RuntimeError> {

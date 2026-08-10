@@ -31,37 +31,48 @@ impl Controller {
     /// a submission that never reaches the runtime must resolve as [`TaskOutcome::Rejected`], not as a dropped oneshot.
     ///
     /// `rx.close()` prevents new messages from being accepted while the remaining buffered commands are drained.
-    pub(super) fn finalize_pending_on_shutdown(&self, rx: &mut mpsc::Receiver<ControllerCommand>) {
+    pub(super) async fn finalize_pending_on_shutdown(
+        &self,
+        rx: &mut mpsc::Receiver<ControllerCommand>,
+    ) {
         rx.close();
+        let mut deferred_drops = Vec::new();
 
         while let Ok(command) = rx.try_recv() {
             match command {
                 ControllerCommand::Submit(sub) => {
+                    let super::Submission { id, spec, done } = sub;
                     let mut event = Event::new(EventKind::ControllerRejected)
-                        .with_id(sub.id)
+                        .with_id(id)
                         .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                         .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN);
-                    if let Some(slot_name) = sub.spec.slot_override() {
+                    if let Some(slot_name) = spec.slot_override() {
                         event = event.with_task(slot_name.to_owned());
                     }
                     self.bus.publish(event);
 
-                    if let Some(done) = sub.done {
+                    if let Some(done) = done {
                         let _ = done.send(TaskOutcome::Rejected {
                             kind: RejectionKind::ControllerShuttingDown,
                             reason: Arc::from(crate::reasons::CONTROLLER_SHUTTING_DOWN),
                         });
                     }
+                    deferred_drops.push(spec);
                 }
                 ControllerCommand::ManageIdentity { reply, .. } => {
                     let _ = reply.send(Err(RuntimeError::ShuttingDown));
                 }
             }
         }
+
+        for spec in deferred_drops {
+            self.drop_guarded("drop_buffered_submission", spec).await;
+        }
     }
 
     /// Rejects queued slot work, resolves every remaining watcher, and clears slot indexes.
     pub(super) async fn finalize_slot_state_on_shutdown(&self) {
+        let mut pending_to_drop = Vec::new();
         let slot_names: Vec<Arc<str>> = self
             .slots
             .iter()
@@ -73,24 +84,28 @@ impl Controller {
                 continue;
             };
             let mut slot = slot.lock().await;
-            while let Some((id, _spec)) = slot.queue.pop_front() {
+            while let Some(pending) = slot.queue.pop_front() {
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
-                        .with_id(id)
+                        .with_id(pending.id)
                         .with_rejection_kind(RejectionKind::ControllerShuttingDown)
                         .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
                 );
                 self.finalize_rejected(
-                    id,
+                    pending.id,
                     RejectionKind::ControllerShuttingDown,
                     crate::reasons::CONTROLLER_SHUTTING_DOWN,
                 );
+                pending_to_drop.push(pending);
             }
         }
 
         self.finalize_remaining_watchers();
         self.slots.clear();
+        for pending in pending_to_drop {
+            self.drop_guarded("drop_queued_submission", pending).await;
+        }
     }
 
     /// Waits until every already-aborted controller worker has finished cancellation.

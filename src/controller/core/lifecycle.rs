@@ -210,7 +210,7 @@ impl Controller {
             }
         })
         .await;
-        self.finalize_pending_on_shutdown(&mut rx);
+        self.finalize_pending_on_shutdown(&mut rx).await;
         admissions.abort_all();
         completions.abort_all();
         removals.abort_all();
@@ -232,10 +232,6 @@ impl Controller {
     /// Runs one controller work unit behind a panic boundary.
     ///
     /// A panic is converted into a diagnostic `RuntimeFailure` event and the loop continues.
-    ///
-    /// This guard does not repair partially updated slot state by itself.
-    /// Callers that park watcher state must still make sure the watcher is resolved or returned on every failure path.
-    /// Returns the work-unit output on success and `None` after a caught panic.
     pub(super) async fn guarded<T>(
         &self,
         who: &'static str,
@@ -251,5 +247,12 @@ impl Controller {
                 None
             }
         }
+    }
+
+    /// Destroys one user-owned value behind its own panic boundary.
+    ///
+    /// Callers must release controller locks and resolve any waiter before calling this.
+    pub(super) async fn drop_guarded<T>(&self, who: &'static str, value: T) {
+        let _ = self.guarded(who, async move { drop(value) }).await;
     }
 }

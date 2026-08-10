@@ -8,17 +8,17 @@ It shows which module owns each decision and how data moves through the runtime.
 
 Read the code in this order if you are new to the repository:
 
-| Step | Files                                                                                                                                                                          | Question answered                                               |
-|------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| 1    | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                                                                                 | What is public                                                  |
-| 2    | [`tasks/`](tasks), [`policies/`](policies), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                   | What describes a task and its retry rules                       |
-| 3    | [`core/builder.rs`](core/builder.rs), [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)                         | How is the runtime built, owned, and exposed                    |
-| 4    | [`core/runtime.rs`](core/runtime.rs), [`core/runtime/management.rs`](core/runtime/management.rs), [`core/runtime/lifecycle.rs`](core/runtime/lifecycle.rs)                     | How do public calls enter the runtime                           |
-| 5    | [`core/registry.rs`](core/registry.rs), [`core/registry/`](core/registry)                                                                                                      | Which task state is authoritative, and how is it cleaned up     |
-| 6    | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                           | How does one task run, retry, time out, and stop                |
-| 7    | [`core/outcome.rs`](core/outcome.rs), [`events/`](events), [`subscribers/`](subscribers)                                                                                       | Which results are reliable, and which signals are observability |
+| Step | Files                                                                                                                                                                           | Question answered                                               |
+|------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| 1    | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                                                                                  | What is public                                                  |
+| 2    | [`tasks/`](tasks), [`policies/`](policies), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                    | What describes a task and its retry rules                       |
+| 3    | [`core/builder.rs`](core/builder.rs), [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)                          | How is the runtime built, owned, and exposed                    |
+| 4    | [`core/runtime.rs`](core/runtime.rs), [`core/runtime/management.rs`](core/runtime/management.rs), [`core/runtime/lifecycle.rs`](core/runtime/lifecycle.rs)                      | How do public calls enter the runtime                           |
+| 5    | [`core/registry.rs`](core/registry.rs), [`core/registry/`](core/registry)                                                                                                       | Which task state is authoritative, and how is it cleaned up     |
+| 6    | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                            | How does one task run, retry, time out, and stop                |
+| 7    | [`core/outcome.rs`](core/outcome.rs), [`events/`](events), [`subscribers/`](subscribers)                                                                                        | Which results are reliable, and which signals are observability |
 | 8    | [`controller/mod.rs`](controller/mod.rs), [`controller/prepared.rs`](controller/prepared.rs), [`controller/slot.rs`](controller/slot.rs), [`controller/core/`](controller/core) | How does per-slot queue/replace/reject admission work           |
-| 9    | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/shutdown.rs`](core/shutdown.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | How is one shared shutdown coordinated                          |
+| 9    | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/shutdown.rs`](core/shutdown.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs)  | How is one shared shutdown coordinated                          |
 
 After the module documentation, read the integration tests by behavior: [`tests/watch.rs`](../tests/watch.rs), [`tests/identity.rs`](../tests/identity.rs), [`tests/controller.rs`](../tests/controller.rs), and [`tests/shutdown.rs`](../tests/shutdown.rs).
 
@@ -307,13 +307,14 @@ Policy behavior around those phases:
 
 ## Shared shutdown
 
-Explicit shutdown, a received OS signal, and natural completion join one cancellation-safe shutdown operation. The first trigger installs the operation; all callers wait for its cached result.
+Explicit shutdown, an application-owned `run_until` future, an OS signal explicitly enabled through `run_with_os_signals`, and natural completion join one cancellation-safe shutdown operation. The first trigger installs the operation; all callers wait for its cached result. Plain `run` does not install process signal handlers.
 
 ```mermaid
 %%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
     Explicit["Explicit request"]
-    Signal["Received OS signal"]
+    External["Application shutdown future"]
+    Signal["Explicitly configured OS signal"]
     Natural["Registry becomes empty"]
     Coordinator["ShutdownCoordinator: first trigger wins"]
     Close["Close management admission,<br/>fence committed registry commands"]
@@ -323,6 +324,7 @@ flowchart LR
     Result["Cache and return<br/>one shared result"]
 
     Explicit --> Coordinator
+    External --> Coordinator
     Signal --> Coordinator
     Natural --> Coordinator
     Coordinator --> Close
@@ -333,7 +335,7 @@ flowchart LR
     Tail --> Result
 ```
 
-Subscriber shutdown has its own timeout and happens after the task grace phase. Every common cleanup phase is attempted even if an earlier phase reports an internal failure. If OS signal setup itself fails, shutdown still closes admission and runs the common cleanup tail, but it does not run the normal task-drain branch. Dropping the last runtime owner is only a synchronous fallback: it closes admission and cancels tokens, but cannot await or report graceful cleanup.
+Subscriber shutdown has its own timeout and happens after the task grace phase. Every common cleanup phase is attempted even if an earlier phase reports an internal failure. If explicitly requested OS signal setup fails, shutdown still closes admission and runs the common cleanup tail, but it does not run the normal task-drain branch. On Unix, Tokio's process-global handlers are not restored when listeners are dropped; this side effect exists only after the application calls `run_with_os_signals`. Dropping the last runtime owner is only a synchronous fallback: it closes admission and cancels tokens, but cannot await or report graceful cleanup.
 
 ## Where to make a change
 
@@ -348,19 +350,3 @@ Subscriber shutdown has its own timeout and happens after the task grace phase. 
 | Per-slot queue/replace/reject behavior                      | [`controller/slot.rs`](controller/slot.rs), [`controller/core/admission.rs`](controller/core/admission.rs), [`controller/core/queue.rs`](controller/core/queue.rs)                             | [`tests/controller.rs`](../tests/controller.rs), controller unit tests                                                                |
 | Shutdown order or grace behavior                            | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/registry/removal.rs`](core/registry/removal.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |
 | User-facing story                                           | [`../README.md`](../README.md), [`../examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                              | `cargo test --all-features`, `cargo test --doc --all-features`                                                                        |
-
-## Invariants to preserve
-
-Before changing a coordination path, check these constraints in the owning module and its tests:
-
-1. Registry membership is authoritative; events never add or remove membership.
-2. Task ID and name indexes change under the same registry state lock.
-3. A name stays reserved until terminal join cleanup removes it.
-4. Exactly one cleanup owner claims and joins each actor handle.
-5. Accepted task bodies start only after indexing and the admission publication/reply attempts.
-6. Watched outcomes resolve outside the best-effort event path, after the actor join and registry membership removal.
-7. The serialized controller loop owns slot transitions; queued work starts only after the current Add is rejected or the current owner reaches terminal removal completion.
-8. Management admission closes and committed commands are fenced before shutdown drains tasks.
-9. Concurrent shutdown callers join the same operation and receive its cached result.
-
-When a change crosses one of these boundaries, update both the module-level documentation and the relevant diagram in this guide.

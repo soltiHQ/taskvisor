@@ -194,13 +194,12 @@ impl Registry {
     pub(super) async fn spawn_and_register(
         &self,
         id: TaskId,
+        label: Arc<str>,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
         reply: oneshot::Sender<AddReply>,
     ) {
-        let label: Arc<str> = Arc::from(spec.task().name());
-
         let mut st = self.state.write().await;
         if st.by_label.contains_key(&label) {
             drop(st);

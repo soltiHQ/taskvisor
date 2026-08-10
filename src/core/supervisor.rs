@@ -16,7 +16,9 @@
 //! [`run`](Supervisor::run) is for a known initial batch.
 //! [`serve`](Supervisor::serve) is for tasks managed while the service runs.
 //!
-//! After its batch is accepted, `run` waits for natural completion, explicit shutdown, or an OS shutdown signal.
+//! After its batch is accepted, `run` waits for natural completion or shared shutdown.
+//! Use [`run_until`](Supervisor::run_until) with an application-owned shutdown future.
+//! Use [`run_with_os_signals`](Supervisor::run_with_os_signals) only when taskvisor should explicitly install process signal handlers.
 //! `serve` does not install a signal wait; the application decides when to call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
 //!
 //! ## Ownership and Drop
@@ -29,7 +31,7 @@
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use crate::core::{RuntimeOwner, SupervisorConfig, SupervisorCore, builder::SupervisorBuilder};
 use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
@@ -148,8 +150,7 @@ impl Supervisor {
         handle
     }
 
-    /// Runs an initial task batch until natural completion or shared shutdown,
-    /// started explicitly or by an OS signal.
+    /// Runs an initial task batch until natural completion or shared shutdown.
     ///
     /// This is static mode.
     /// The registry accepts the full batch or rejects it.
@@ -186,13 +187,99 @@ impl Supervisor {
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
     /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
-    /// - [`RuntimeError::SignalSetupFailed`] when OS signal handlers cannot be installed.
     /// - [`RuntimeError::AlreadyRunning`] when `run` is called a second time.
     /// - [`RuntimeError::ShuttingDown`] when shutdown has started or cleanup cannot finish normally.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         #[cfg(feature = "controller")]
         self.start_controller();
         self.owner.core().run(tasks).await
+    }
+
+    /// Runs an initial task batch until natural completion, shared shutdown, or an application-owned shutdown future completes.
+    ///
+    /// The shutdown future is polled only after the initial batch has been accepted.
+    /// When it completes first, taskvisor starts the same graceful shutdown used by [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
+    ///
+    /// The future must resolve to `()`.
+    /// Wrap a fallible source so the application decides how to handle its error before requesting shutdown.
+    ///
+    /// This method does not install process signal handlers.
+    /// It is single-shot and shares the same one-call limit as [`run`](Self::run) and [`run_with_os_signals`](Self::run_with_os_signals).
+    ///
+    /// ## Example
+    ///
+    /// ```rust,no_run
+    /// use taskvisor::prelude::*;
+    ///
+    /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    /// let task: TaskRef = TaskFn::arc("worker", |ctx| async move {
+    ///     ctx.cancelled().await;
+    ///     Err(TaskError::Canceled)
+    /// });
+    /// let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    ///
+    /// tokio::spawn(async move {
+    ///     let _ = stop.send(());
+    /// });
+    /// supervisor
+    ///     .run_until(vec![TaskSpec::once(task)], async move {
+    ///         let _ = stopped.await;
+    ///     })
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime must start and there is no active Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
+    /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
+    /// - [`RuntimeError::AlreadyRunning`] when any static run method is called a second time.
+    /// - [`RuntimeError::ShuttingDown`] when shutdown has started or cleanup cannot finish normally.
+    pub async fn run_until<F>(&self, tasks: Vec<TaskSpec>, shutdown: F) -> Result<(), RuntimeError>
+    where
+        F: Future<Output = ()>,
+    {
+        #[cfg(feature = "controller")]
+        self.start_controller();
+        self.owner.core().run_until(tasks, shutdown).await
+    }
+
+    /// Runs an initial task batch with explicit OS-signal shutdown handling.
+    ///
+    /// On Unix this waits for SIGINT, SIGTERM, or SIGQUIT.
+    /// On other platforms it waits for Tokio's Ctrl-C signal.
+    /// A received signal starts graceful shutdown.
+    ///
+    /// # Process-wide side effect
+    ///
+    /// Calling this method explicitly installs process-global Tokio signal handlers.
+    /// On Unix, dropping the signal listeners does not restore the default signal disposition.
+    /// The application remains responsible for signal handling after this method returns.
+    ///
+    /// Use [`run`](Self::run) or [`run_until`](Self::run_until) when the surrounding application owns process signals.
+    ///
+    /// This method is single-shot and shares the same one-call limit as the other static run methods.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime must start and there is no active Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
+    /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
+    /// - [`RuntimeError::SignalSetupFailed`] when OS signal handlers cannot be installed.
+    /// - [`RuntimeError::AlreadyRunning`] when any static run method is called a second time.
+    /// - [`RuntimeError::ShuttingDown`] when shutdown has started or cleanup cannot finish normally.
+    pub async fn run_with_os_signals(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
+        #[cfg(feature = "controller")]
+        self.start_controller();
+        self.owner.core().run_with_os_signals(tasks).await
     }
 
     /// Returns the immutable runtime configuration.

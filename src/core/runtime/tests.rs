@@ -1374,9 +1374,24 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let task: TaskRef = TaskFn::arc("x", |_ctx: TaskContext| async { Ok(()) });
 
-    let res = core.add_task_with_id_watched(TaskId::next(), TaskSpec::once(task), Some(tx));
+    let res = core.add_task_with_id_watched(
+        TaskId::next(),
+        Arc::from("x"),
+        TaskSpec::once(task),
+        Some(tx),
+    );
     match res {
-        Err((RuntimeError::ShuttingDown, Some(returned))) => {
+        Err(uncommitted) => {
+            let crate::core::UncommittedWatchedAdd {
+                error,
+                label,
+                spec,
+                done,
+            } = *uncommitted;
+            assert!(matches!(error, RuntimeError::ShuttingDown));
+            assert_eq!(&*label, "x");
+            assert_eq!(spec.name(), "x");
+            let returned = done.expect("the watcher must be returned with the task spec");
             returned
                 .send(crate::TaskOutcome::Rejected {
                     kind: crate::RejectionKind::AdmissionFailed,
@@ -1385,7 +1400,7 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
                 .expect("returned watcher must still be live");
             assert!(matches!(rx.await, Ok(crate::TaskOutcome::Rejected { .. })));
         }
-        other => panic!("add must hand the watcher back on failure, got {other:?}"),
+        Ok(_) => panic!("add must hand the watcher and task spec back on failure"),
     }
 }
 
@@ -1399,7 +1414,12 @@ async fn controller_completion_waits_for_registry_membership_cleanup() {
     let id = TaskId::next();
     let task: TaskRef = TaskFn::arc("completion-cleanup", |_ctx: TaskContext| async { Ok(()) });
     let (reply, completion) = core
-        .add_task_with_id_watched(id, TaskSpec::once(task), None)
+        .add_task_with_id_watched(
+            id,
+            Arc::from("completion-cleanup"),
+            TaskSpec::once(task),
+            None,
+        )
         .expect("controller Add must enter the registry queue");
 
     assert!(matches!(reply.await, Ok(Ok(()))));
@@ -1427,7 +1447,9 @@ async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
     let mut rx = core.bus.subscribe();
 
     let err = std::io::Error::other("signal registration failed");
-    let out = core.on_shutdown_signal(Err(err)).await;
+    let out = core
+        .join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(err)))
+        .await;
 
     assert!(
         matches!(out, Err(RuntimeError::SignalSetupFailed { .. })),
@@ -1474,7 +1496,10 @@ async fn signal_setup_error_keeps_custom_source_for_late_callers() {
     core.start();
     let original = std::io::Error::new(std::io::ErrorKind::PermissionDenied, Marker);
 
-    let first = signal_setup_source(core.on_shutdown_signal(Err(original)).await);
+    let first = signal_setup_source(
+        core.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(original)))
+            .await,
+    );
     let late = signal_setup_source(core.shutdown().await);
 
     for source in [&first, &late] {
@@ -1493,7 +1518,10 @@ async fn signal_setup_error_keeps_raw_os_code_for_late_callers() {
     core.start();
     let original = std::io::Error::from_raw_os_error(2);
 
-    let first = signal_setup_source(core.on_shutdown_signal(Err(original)).await);
+    let first = signal_setup_source(
+        core.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(original)))
+            .await,
+    );
     let late = signal_setup_source(core.shutdown().await);
     assert_eq!(first.raw_os_error(), Some(2));
     assert_eq!(late.raw_os_error(), Some(2));
@@ -1505,7 +1533,7 @@ async fn real_signal_publishes_shutdown_requested() {
     core.start();
     let mut rx = core.bus.subscribe();
 
-    let out = core.on_shutdown_signal(Ok(())).await;
+    let out = core.join_shutdown(ShutdownTrigger::Requested).await;
     assert!(out.is_ok(), "a real signal drains gracefully: {out:?}");
 
     let mut saw_shutdown = false;
