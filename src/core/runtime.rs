@@ -17,22 +17,24 @@
 //!
 //! ## Modes
 //!
-//! | Entry point  | Behavior                                                                                                                                 |
-//! |--------------|------------------------------------------------------------------------------------------------------------------------------------------|
-//! | `start()`    | Start subscriber workers, the event relay, and the registry listener once                                                                |
-//! | `run(tasks)` | Start the runtime, register a non-empty task set as one atomic batch, then wait for shared shutdown, an OS signal, or registry emptiness |
-//! | `shutdown()` | Start or join shared cleanup and return its cached result                                                                                |
+//! | Entry point                  | Behavior                                                                                                                  |
+//! |------------------------------|---------------------------------------------------------------------------------------------------------------------------|
+//! | `start()`                    | Start subscriber workers, the event relay, and the registry listener once                                                 |
+//! | `run(tasks)`                 | Start the runtime, register a non-empty task set as one atomic batch, then wait for shared shutdown or registry emptiness |
+//! | `run_until(tasks, future)`   | Add one application-owned shutdown trigger without installing process signal handlers                                     |
+//! | `run_with_os_signals(tasks)` | Explicitly opt into OS signal handlers as the shutdown trigger                                                            |
+//! | `shutdown()`                 | Start or join shared cleanup and return its cached result                                                                 |
 //!
 //! ## Rules
 //!
 //! - Management command admission closes once shutdown begins.
 //! - Shutdown processes commands committed before the admission gate closed.
-//! - Explicit, signal, and natural shutdown share one cleanup operation.
+//! - Explicit, caller-provided, signal, and natural shutdown share one cleanup operation.
 //! - Every shutdown caller receives the same cached result.
-//! - The first trigger that installs the shared shutdown operation selects its result. `ShutdownRequested` is emitted only when an explicit request or received OS signal wins that race.
+//! - The first trigger that installs the shared shutdown operation selects its result. `ShutdownRequested` is emitted only when an explicit request, caller-provided trigger, or received OS signal wins that race.
 //! - Static `run()` tasks are accepted or rejected as one batch.
 //! - Registry membership is keyed by `TaskId`.
-//! - `run()` is single-shot. A second call returns `RuntimeError::AlreadyRunning`.
+//! - Static run methods share one single-shot lifecycle. A second call returns `RuntimeError::AlreadyRunning`.
 //! - `snapshot` and `is_alive` are best-effort event-based views.
 //! - `start()` is idempotent.
 

@@ -111,7 +111,7 @@ pub enum EventKind {
 
     /// Shutdown was requested.
     ///
-    /// This can come from an OS signal or an explicit runtime shutdown request.
+    /// This can come from an application-owned shutdown future, an explicitly configured OS signal, or a runtime shutdown request.
     ///
     /// Sets:
     /// - `at`: wall-clock timestamp

@@ -1,6 +1,9 @@
 //! Runtime startup and static-run lifecycle.
 
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    future::Future,
+    sync::{Arc, atomic::Ordering},
+};
 
 use super::{SupervisorCore, shutdown_workflow::ShutdownTrigger};
 use crate::{core::registry::AddBatchItem, error::RuntimeError, identity::TaskId, tasks::TaskSpec};
@@ -33,13 +36,55 @@ impl SupervisorCore {
         self.started.store(true, Ordering::Release);
     }
 
-    /// Runs a static task set until explicit shutdown, an OS signal, or registry emptiness.
+    /// Runs a static task set until shared shutdown or registry emptiness.
     ///
     /// This starts the runtime and, when the task set is non-empty, registers it as one atomic batch.
     /// It then drives shutdown or natural completion.
     ///
     /// Single-shot: a second or concurrent call returns [`RuntimeError::AlreadyRunning`].
     pub(crate) async fn run(self: &Arc<Self>, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
+        self.run_until_trigger(tasks, std::future::pending()).await
+    }
+
+    /// Runs a static task set with one explicit external shutdown trigger.
+    pub(crate) async fn run_until<F>(
+        self: &Arc<Self>,
+        tasks: Vec<TaskSpec>,
+        shutdown: F,
+    ) -> Result<(), RuntimeError>
+    where
+        F: Future<Output = ()>,
+    {
+        self.run_until_trigger(tasks, async move {
+            shutdown.await;
+            ShutdownTrigger::Requested
+        })
+        .await
+    }
+
+    /// Runs a static task set with explicit process-signal handling.
+    pub(crate) async fn run_with_os_signals(
+        self: &Arc<Self>,
+        tasks: Vec<TaskSpec>,
+    ) -> Result<(), RuntimeError> {
+        self.run_until_trigger(tasks, async {
+            match crate::core::shutdown::wait_for_shutdown_signal().await {
+                Ok(()) => ShutdownTrigger::Requested,
+                Err(source) => ShutdownTrigger::SignalSetupFailed(Arc::new(source)),
+            }
+        })
+        .await
+    }
+
+    /// Owns the single-shot static lifecycle for every shutdown-source variant.
+    async fn run_until_trigger<F>(
+        self: &Arc<Self>,
+        tasks: Vec<TaskSpec>,
+        shutdown: F,
+    ) -> Result<(), RuntimeError>
+    where
+        F: Future<Output = ShutdownTrigger>,
+    {
         if self.running.swap(true, Ordering::AcqRel) {
             return Err(RuntimeError::AlreadyRunning);
         }
@@ -49,7 +94,7 @@ impl SupervisorCore {
         self.start();
 
         if tasks.is_empty() {
-            return self.drive_shutdown().await;
+            return self.drive_shutdown(shutdown).await;
         }
 
         let items = tasks
@@ -69,7 +114,7 @@ impl SupervisorCore {
         };
 
         match Self::await_add_batch_reply(reply).await {
-            Ok(()) => self.drive_shutdown().await,
+            Ok(()) => self.drive_shutdown(shutdown).await,
             Err(RuntimeError::ShuttingDown) if self.shutdown.started.is_cancelled() => {
                 self.wait_started_shutdown().await
             }
@@ -81,33 +126,18 @@ impl SupervisorCore {
     ///
     /// Waits for either:
     /// - a shared shutdown already started by another entry point,
-    /// - an OS shutdown signal,
+    /// - the caller-provided shutdown trigger,
     /// - natural completion when the registry becomes empty.
     ///
     /// Every path joins registry and subscriber listeners and closes subscribers before returning.
-    async fn drive_shutdown(self: &Arc<Self>) -> Result<(), RuntimeError> {
+    async fn drive_shutdown<F>(self: &Arc<Self>, shutdown: F) -> Result<(), RuntimeError>
+    where
+        F: Future<Output = ShutdownTrigger>,
+    {
         tokio::select! {
             _ = self.shutdown.started.cancelled() => self.wait_started_shutdown().await,
-            sig = crate::core::shutdown::wait_for_shutdown_signal() => self.on_shutdown_signal(sig).await,
+            trigger = shutdown => self.join_shutdown(trigger).await,
             _ = self.registry.wait_until_empty() => self.join_shutdown(ShutdownTrigger::Natural).await,
-        }
-    }
-
-    /// Handles the result of OS shutdown-signal setup/waiting.
-    ///
-    /// If a received signal wins the shutdown race, it starts graceful shutdown and publishes `ShutdownRequested`.
-    /// If a signal-setup error wins, the shared result is [`RuntimeError::SignalSetupFailed`];
-    /// common cleanup still runs, but `ShutdownRequested` and the graceful task-drain verdict are not emitted.
-    pub(super) async fn on_shutdown_signal(
-        self: &Arc<Self>,
-        res: std::io::Result<()>,
-    ) -> Result<(), RuntimeError> {
-        match res {
-            Ok(()) => self.join_shutdown(ShutdownTrigger::Requested).await,
-            Err(source) => {
-                self.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(source)))
-                    .await
-            }
         }
     }
 }

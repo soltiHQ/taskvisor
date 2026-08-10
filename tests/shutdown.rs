@@ -5,7 +5,10 @@ mod common;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -738,4 +741,49 @@ async fn run_blocks_while_gated_task_alive_then_unblocks_on_completion() {
         .await
         .expect("run() task should not panic")
         .expect("run returns Ok after the gated task completes");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_until_uses_application_owned_shutdown_future() {
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(AtomicBool::new(false));
+    let task_started = Arc::clone(&started);
+    let task_cancellation_seen = Arc::clone(&cancellation_seen);
+    let task = TaskFn::arc("run-until", move |ctx: TaskContext| {
+        let started = Arc::clone(&task_started);
+        let cancellation_seen = Arc::clone(&task_cancellation_seen);
+        async move {
+            started.notify_one();
+            ctx.cancelled().await;
+            cancellation_seen.store(true, Ordering::Release);
+            Err(TaskError::Canceled)
+        }
+    });
+    let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
+    let run_supervisor = Arc::clone(&supervisor);
+    let run = tokio::spawn(async move {
+        run_supervisor
+            .run_until(vec![TaskSpec::once(task)], async move {
+                let _ = shutdown_requested.await;
+            })
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the task must start before the application requests shutdown");
+    request_shutdown
+        .send(())
+        .expect("the run_until shutdown future must still be live");
+    tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .expect("run_until must finish after its shutdown future")
+        .expect("the run_until task must not panic")
+        .expect("cooperative shutdown must succeed");
+
+    assert!(
+        cancellation_seen.load(Ordering::Acquire),
+        "the application-owned future must start graceful task cancellation"
+    );
 }

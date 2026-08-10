@@ -41,7 +41,8 @@
 //!
 //! ## Important Rules
 //!
-//! - [`Supervisor::run`] is single-shot and registers its initial tasks as one batch.
+//! - Static run methods are single-shot and register their initial tasks as one batch.
+//! - [`Supervisor::run`] and [`Supervisor::run_until`] do not install process signal handlers.
 //! - Attempts for one registered task are sequential.
 //! - New task admission closes when shutdown starts.
 //! - Explicit shutdown returns after task, listener, and subscriber cleanup.

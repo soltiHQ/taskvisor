@@ -1427,7 +1427,9 @@ async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
     let mut rx = core.bus.subscribe();
 
     let err = std::io::Error::other("signal registration failed");
-    let out = core.on_shutdown_signal(Err(err)).await;
+    let out = core
+        .join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(err)))
+        .await;
 
     assert!(
         matches!(out, Err(RuntimeError::SignalSetupFailed { .. })),
@@ -1474,7 +1476,10 @@ async fn signal_setup_error_keeps_custom_source_for_late_callers() {
     core.start();
     let original = std::io::Error::new(std::io::ErrorKind::PermissionDenied, Marker);
 
-    let first = signal_setup_source(core.on_shutdown_signal(Err(original)).await);
+    let first = signal_setup_source(
+        core.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(original)))
+            .await,
+    );
     let late = signal_setup_source(core.shutdown().await);
 
     for source in [&first, &late] {
@@ -1493,7 +1498,10 @@ async fn signal_setup_error_keeps_raw_os_code_for_late_callers() {
     core.start();
     let original = std::io::Error::from_raw_os_error(2);
 
-    let first = signal_setup_source(core.on_shutdown_signal(Err(original)).await);
+    let first = signal_setup_source(
+        core.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(original)))
+            .await,
+    );
     let late = signal_setup_source(core.shutdown().await);
     assert_eq!(first.raw_os_error(), Some(2));
     assert_eq!(late.raw_os_error(), Some(2));
@@ -1505,7 +1513,7 @@ async fn real_signal_publishes_shutdown_requested() {
     core.start();
     let mut rx = core.bus.subscribe();
 
-    let out = core.on_shutdown_signal(Ok(())).await;
+    let out = core.join_shutdown(ShutdownTrigger::Requested).await;
     assert!(out.is_ok(), "a real signal drains gracefully: {out:?}");
 
     let mut saw_shutdown = false;
