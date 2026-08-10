@@ -59,7 +59,7 @@ pub use crate::subscribers::LogWriter;
 /// Requires the `tracing` feature.
 #[cfg(feature = "tracing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-pub use crate::subscribers::TracingBridge;
+pub use crate::subscribers::{TracingBridge, TracingBridgeWithReasons};
 
 /// Raw cancellation-token interop.
 ///

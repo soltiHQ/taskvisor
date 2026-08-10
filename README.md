@@ -466,11 +466,11 @@ The full catalog follows.
 
 ### Observability
 
-| Example                                   | What it shows                                    |
-|-------------------------------------------|--------------------------------------------------|
-| [subscriber.rs](examples/subscriber.rs)   | Handle typed lifecycle events.                   |
-| [tracing.rs](examples/tracing.rs)         | Forward events to `tracing` (`tracing` feature). |
-| [metrics.rs](examples/metrics.rs)         | Build Prometheus counters from events.           |
+| Example                                   | What it shows                                      |
+|-------------------------------------------|----------------------------------------------------|
+| [subscriber.rs](examples/subscriber.rs)   | Handle typed lifecycle events.                     |
+| [tracing.rs](examples/tracing.rs)         | Send task and lifecycle events to `tracing`.       |
+| [metrics.rs](examples/metrics.rs)         | Build Prometheus counters from events.             |
 
 ### Dynamic work and outcomes
 

@@ -45,4 +45,4 @@ pub use embedded::LogWriter;
 
 #[cfg(feature = "tracing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-pub use embedded::TracingBridge;
+pub use embedded::{TracingBridge, TracingBridgeWithReasons};

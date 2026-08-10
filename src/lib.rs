@@ -227,4 +227,4 @@ pub use subscribers::LogWriter;
 
 #[cfg(feature = "tracing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-pub use subscribers::TracingBridge;
+pub use subscribers::{TracingBridge, TracingBridgeWithReasons};
