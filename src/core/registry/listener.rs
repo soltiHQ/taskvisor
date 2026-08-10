@@ -141,6 +141,7 @@ impl Registry {
         match command {
             RegistryCommand::Add {
                 id,
+                label,
                 spec,
                 outcome,
                 completion,
@@ -148,7 +149,7 @@ impl Registry {
             } => {
                 self.guarded(
                     "registry",
-                    self.spawn_and_register(id, spec, outcome, completion, reply),
+                    self.spawn_and_register(id, label, spec, outcome, completion, reply),
                 )
                 .await;
             }

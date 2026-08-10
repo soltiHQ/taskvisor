@@ -8,6 +8,27 @@ use crate::{
 use std::{future::Future, pin::Pin, task::Poll};
 use tokio::sync::oneshot;
 
+struct RegistryNameProbe {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    allow_lifecycle_reads: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::Task for RegistryNameProbe {
+    fn name(&self) -> &str {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        assert!(
+            self.allow_lifecycle_reads
+                .load(std::sync::atomic::Ordering::Acquire),
+            "registry admission must consume the cached command label"
+        );
+        "cached-command-label"
+    }
+
+    fn spawn(&self, _ctx: crate::TaskContext) -> crate::BoxTaskFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
 async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
     std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
         Poll::Pending => Poll::Ready(()),
@@ -198,8 +219,10 @@ fn send_add(
     outcome: Option<OutcomeTx>,
 ) -> AddReplyRx {
     let (reply, reply_rx) = oneshot::channel();
+    let label = Arc::from(spec.name());
     tx.try_send(RegistryCommand::Add {
         id,
+        label,
         spec,
         outcome,
         completion: None,
@@ -260,6 +283,56 @@ async fn stop_registry(registry: &Registry, token: &CancellationToken) {
     tokio::time::timeout(Duration::from_secs(2), registry.join_listener())
         .await
         .expect("registry listener must stop");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn add_command_consumes_cached_label_without_reading_task_name() {
+    let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
+    let mut events = bus.subscribe();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let allow_lifecycle_reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let id = TaskId::next();
+    let (reply, reply_rx) = oneshot::channel();
+    let task: crate::TaskRef = Arc::new(RegistryNameProbe {
+        calls: Arc::clone(&calls),
+        allow_lifecycle_reads: Arc::clone(&allow_lifecycle_reads),
+    });
+
+    tx.try_send(RegistryCommand::Add {
+        id,
+        label: Arc::from("cached-command-label"),
+        spec: TaskSpec::once(task),
+        outcome: None,
+        completion: None,
+        reply,
+    })
+    .expect("registry command channel must stay open");
+
+    assert!(matches!(
+        receive_reply(reply_rx, "cached-label Add").await,
+        Ok(())
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 0);
+    assert_eq!(
+        registry.id_for_label("cached-command-label").await,
+        Some(id)
+    );
+
+    let added = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("event bus remains open");
+            if event.kind == EventKind::TaskAdded && event.id == Some(id) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("cached-label TaskAdded event");
+    assert_eq!(added.task.as_deref(), Some("cached-command-label"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 0);
+
+    allow_lifecycle_reads.store(true, std::sync::atomic::Ordering::Release);
+    stop_registry(&registry, &token).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -331,11 +404,11 @@ async fn single_add_publishes_added_before_starting() {
         let registry = Arc::clone(&registry);
         registrations.spawn(async move {
             let id = TaskId::next();
-            let task: TaskRef =
-                TaskFn::arc(format!("ordered-add-{index}"), |_ctx| async { Ok(()) });
+            let name = format!("ordered-add-{index}");
+            let task: TaskRef = TaskFn::arc(name.clone(), |_ctx| async { Ok(()) });
             let (reply, reply_rx) = oneshot::channel();
             registry
-                .spawn_and_register(id, TaskSpec::once(task), None, None, reply)
+                .spawn_and_register(id, Arc::from(name), TaskSpec::once(task), None, None, reply)
                 .await;
             assert!(
                 matches!(reply_rx.await, Ok(Ok(()))),
@@ -1482,6 +1555,7 @@ async fn shutdown_drains_buffered_command_and_never_silently_drops() {
     let id = TaskId::next();
     tx.try_send(RegistryCommand::Add {
         id,
+        label: Arc::from("buffered"),
         spec: TaskSpec::restartable(task),
         outcome: Some(done_tx),
         completion: None,

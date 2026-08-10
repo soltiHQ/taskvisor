@@ -7,12 +7,28 @@
 //! `SlotPhase` owns the current `TaskId` in every occupied phase; an idle slot cannot retain an owner and an occupied slot cannot exist without one.
 //! Transition methods reject stale identities without mutating the current owner.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use tokio::time::Instant;
 
-use crate::TaskSpec;
-use crate::identity::TaskId;
+use crate::{TaskSpec, identity::TaskId};
+
+/// Controller work whose user-provided task name was resolved before queue ownership.
+pub(super) struct PendingSubmission {
+    pub(super) id: TaskId,
+    pub(super) task_name: Arc<str>,
+    pub(super) task_spec: TaskSpec,
+}
+
+impl PendingSubmission {
+    pub(super) fn new(id: TaskId, task_name: Arc<str>, task_spec: TaskSpec) -> Self {
+        Self {
+            id,
+            task_name,
+            task_spec,
+        }
+    }
+}
 
 /// Mutable state for one controller slot.
 pub(super) struct SlotState {
@@ -21,7 +37,7 @@ pub(super) struct SlotState {
     /// Pending submissions for this slot.
     ///
     /// The front item is next after the current admission fails or after terminal cleanup of an accepted owner.
-    pub(super) queue: VecDeque<(TaskId, TaskSpec)>,
+    pub(super) queue: VecDeque<PendingSubmission>,
 }
 
 /// Internal lifecycle phase of one controller slot.
@@ -297,15 +313,19 @@ mod tests {
     #[test]
     fn queue_push_pop_fifo() {
         let mut slot = SlotState::new();
+        let pending = |name: &str| {
+            let task_spec = make_spec(name);
+            PendingSubmission::new(TaskId::next(), Arc::from(name), task_spec)
+        };
 
-        slot.queue.push_back((TaskId::next(), make_spec("a")));
-        slot.queue.push_back((TaskId::next(), make_spec("b")));
-        slot.queue.push_back((TaskId::next(), make_spec("c")));
+        slot.queue.push_back(pending("a"));
+        slot.queue.push_back(pending("b"));
+        slot.queue.push_back(pending("c"));
 
         assert_eq!(slot.queue.len(), 3);
-        assert_eq!(slot.queue.pop_front().unwrap().1.name(), "a");
-        assert_eq!(slot.queue.pop_front().unwrap().1.name(), "b");
-        assert_eq!(slot.queue.pop_front().unwrap().1.name(), "c");
+        assert_eq!(slot.queue.pop_front().unwrap().task_spec.name(), "a");
+        assert_eq!(slot.queue.pop_front().unwrap().task_spec.name(), "b");
+        assert_eq!(slot.queue.pop_front().unwrap().task_spec.name(), "c");
         assert!(slot.queue.is_empty());
     }
 

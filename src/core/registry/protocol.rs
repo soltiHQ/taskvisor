@@ -64,6 +64,7 @@ pub(crate) enum RegistryCommand {
     /// Register a task under a pre-minted runtime identity.
     Add {
         id: TaskId,
+        label: Arc<str>,
         spec: TaskSpec,
         outcome: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,

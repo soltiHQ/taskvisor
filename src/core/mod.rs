@@ -83,3 +83,24 @@ mod shutdown;
 mod registry;
 #[cfg(feature = "controller")]
 pub(crate) use registry::{AddReplyRx, OutcomeTx, RemovalCompletion};
+
+/// Controller add payload returned intact when registry command admission does not commit.
+///
+/// Keeping the user task and outcome sender together lets the controller restore
+/// ownership before any user-provided destructor can run.
+#[cfg(feature = "controller")]
+pub(crate) struct UncommittedWatchedAdd {
+    pub(crate) error: crate::RuntimeError,
+    pub(crate) label: std::sync::Arc<str>,
+    pub(crate) spec: crate::TaskSpec,
+    pub(crate) done: Option<registry::OutcomeTx>,
+}
+
+#[cfg(feature = "controller")]
+impl std::fmt::Debug for UncommittedWatchedAdd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UncommittedWatchedAdd")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}

@@ -50,6 +50,30 @@ impl SupervisorCore {
         }
     }
 
+    /// Reserves fail-fast command capacity and holds the shutdown admission gate.
+    fn try_reserve_command_admission(
+        &self,
+    ) -> Result<
+        (
+            mpsc::Permit<'_, RegistryCommand>,
+            std::sync::MutexGuard<'_, ()>,
+        ),
+        RuntimeError,
+    > {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self.cmd_tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
+            mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
+        })?;
+        let Some(admission) = self.command_admission() else {
+            drop(permit);
+            return Err(RuntimeError::ShuttingDown);
+        };
+        Ok((permit, admission))
+    }
+
     /// Closes command admission and waits until the registry reaches that ordering point.
     ///
     /// Every command committed before the gate closes is ahead of this fence.
@@ -103,12 +127,18 @@ impl SupervisorCore {
     pub(crate) fn add_task_with_id_watched(
         &self,
         id: TaskId,
+        label: Arc<str>,
         spec: TaskSpec,
         done: Option<OutcomeTx>,
-    ) -> Result<(AddReplyRx, RemovalCompletion), (RuntimeError, Option<OutcomeTx>)> {
+    ) -> Result<(AddReplyRx, RemovalCompletion), Box<crate::core::UncommittedWatchedAdd>> {
         let completion = RemovalCompletion::new();
-        let (_id, reply) =
-            self.enqueue_add_task_with_completion(id, spec, done, Some(completion.clone()))?;
+        let (_id, reply) = self.enqueue_named_add_task_with_completion_recovering(
+            id,
+            label,
+            spec,
+            done,
+            Some(completion.clone()),
+        )?;
         Ok((reply, completion))
     }
 
@@ -161,18 +191,33 @@ impl SupervisorCore {
             return Err((RuntimeError::ShuttingDown, done));
         }
         let label: Arc<str> = Arc::from(spec.task().name());
-        let permit = match self.cmd_tx.try_reserve() {
-            Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(())) => {
-                return Err((RuntimeError::CommandQueueFull, done));
-            }
-            Err(mpsc::error::TrySendError::Closed(())) => {
-                return Err((RuntimeError::ShuttingDown, done));
-            }
+        let (permit, _admission) = match self.try_reserve_command_admission() {
+            Ok(admission) => admission,
+            Err(error) => return Err((error, done)),
         };
-        let Some(_admission) = self.command_admission() else {
-            drop(permit);
-            return Err((RuntimeError::ShuttingDown, done));
+        Ok(self.commit_add(permit, id, label, spec, done, completion))
+    }
+
+    /// Queues one add command while returning user-owned values intact on pre-commit failure.
+    #[cfg(feature = "controller")]
+    fn enqueue_named_add_task_with_completion_recovering(
+        &self,
+        id: TaskId,
+        label: Arc<str>,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+        completion: Option<RemovalCompletion>,
+    ) -> Result<(TaskId, AddReplyRx), Box<crate::core::UncommittedWatchedAdd>> {
+        let (permit, _admission) = match self.try_reserve_command_admission() {
+            Ok(admission) => admission,
+            Err(error) => {
+                return Err(Box::new(crate::core::UncommittedWatchedAdd {
+                    error,
+                    label,
+                    spec,
+                    done,
+                }));
+            }
         };
         Ok(self.commit_add(permit, id, label, spec, done, completion))
     }
@@ -214,11 +259,12 @@ impl SupervisorCore {
         let (reply, reply_rx) = oneshot::channel();
         self.bus.publish(
             Event::new(EventKind::TaskAddRequested)
-                .with_task(label)
+                .with_task(Arc::clone(&label))
                 .with_id(id),
         );
         permit.send(RegistryCommand::Add {
             id,
+            label,
             spec,
             outcome: done,
             completion,

@@ -5,9 +5,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::{
-    controller::slot::SlotState,
+    controller::slot::{PendingSubmission, SlotState},
     events::{Event, EventKind, RejectionKind},
-    identity::TaskId,
 };
 
 use super::Controller;
@@ -41,29 +40,20 @@ impl Controller {
         }
     }
 
-    /// Rejects a queued submission if the per-slot queue is already full.
+    /// Builds the rejection reason when the per-slot queue is already full.
     ///
     /// `slot_len` is the current pending queue depth and does not include the current slot owner.
     #[inline]
-    pub(super) fn reject_if_full(&self, slot_name: &str, id: TaskId, slot_len: usize) -> bool {
+    pub(super) fn queue_full_reason(&self, slot_len: usize) -> Option<String> {
         if slot_len >= self.config.max_slot_queue() {
-            let reason = format!(
+            Some(format!(
                 "{}: {}/{}",
                 crate::reasons::QUEUE_FULL,
                 slot_len,
                 self.config.max_slot_queue()
-            );
-            self.bus.publish(
-                Event::new(EventKind::ControllerRejected)
-                    .with_task(slot_name)
-                    .with_id(id)
-                    .with_rejection_kind(RejectionKind::QueueFull)
-                    .with_reason(reason.clone()),
-            );
-            self.finalize_rejected(id, RejectionKind::QueueFull, &reason);
-            true
+            ))
         } else {
-            false
+            None
         }
     }
 
@@ -78,25 +68,26 @@ impl Controller {
         &self,
         slot: &mut SlotState,
         slot_name: &Arc<str>,
-        id: TaskId,
-        task_spec: crate::TaskSpec,
-    ) {
+        pending: PendingSubmission,
+    ) -> Option<PendingSubmission> {
         if let Some(head) = slot.queue.front_mut() {
-            let (displaced_id, _) = std::mem::replace(head, (id, task_spec));
+            let displaced = std::mem::replace(head, pending);
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(slot_name))
-                    .with_id(displaced_id)
+                    .with_id(displaced.id)
                     .with_rejection_kind(RejectionKind::SupersededByReplace)
                     .with_reason(crate::reasons::SUPERSEDED_BY_REPLACE),
             );
             self.finalize_rejected(
-                displaced_id,
+                displaced.id,
                 RejectionKind::SupersededByReplace,
                 crate::reasons::SUPERSEDED_BY_REPLACE,
             );
+            Some(displaced)
         } else {
-            slot.queue.push_front((id, task_spec));
+            slot.queue.push_front(pending);
+            None
         }
     }
 }

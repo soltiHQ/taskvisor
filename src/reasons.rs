@@ -21,6 +21,11 @@ pub(crate) const SUPERSEDED_BY_REPLACE: &str = "superseded by a newer replacemen
 #[cfg(feature = "controller")]
 pub(crate) const CONTROLLER_SHUTTING_DOWN: &str = "controller is shutting down";
 
+/// Rejection reason: controller admission unwound before it could commit ownership.
+#[cfg(feature = "controller")]
+pub(crate) const CONTROLLER_ADMISSION_INTERRUPTED: &str =
+    "controller admission was interrupted before ownership transfer";
+
 /// Diagnostic text used when `DropIfRunning` rejects a busy slot.
 #[cfg(feature = "controller")]
 pub(crate) const DROP_IF_RUNNING: &str = "slot is busy; DropIfRunning rejected the submission";

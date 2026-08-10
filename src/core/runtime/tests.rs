@@ -1374,9 +1374,24 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let task: TaskRef = TaskFn::arc("x", |_ctx: TaskContext| async { Ok(()) });
 
-    let res = core.add_task_with_id_watched(TaskId::next(), TaskSpec::once(task), Some(tx));
+    let res = core.add_task_with_id_watched(
+        TaskId::next(),
+        Arc::from("x"),
+        TaskSpec::once(task),
+        Some(tx),
+    );
     match res {
-        Err((RuntimeError::ShuttingDown, Some(returned))) => {
+        Err(uncommitted) => {
+            let crate::core::UncommittedWatchedAdd {
+                error,
+                label,
+                spec,
+                done,
+            } = *uncommitted;
+            assert!(matches!(error, RuntimeError::ShuttingDown));
+            assert_eq!(&*label, "x");
+            assert_eq!(spec.name(), "x");
+            let returned = done.expect("the watcher must be returned with the task spec");
             returned
                 .send(crate::TaskOutcome::Rejected {
                     kind: crate::RejectionKind::AdmissionFailed,
@@ -1385,7 +1400,7 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
                 .expect("returned watcher must still be live");
             assert!(matches!(rx.await, Ok(crate::TaskOutcome::Rejected { .. })));
         }
-        other => panic!("add must hand the watcher back on failure, got {other:?}"),
+        Ok(_) => panic!("add must hand the watcher and task spec back on failure"),
     }
 }
 
@@ -1399,7 +1414,12 @@ async fn controller_completion_waits_for_registry_membership_cleanup() {
     let id = TaskId::next();
     let task: TaskRef = TaskFn::arc("completion-cleanup", |_ctx: TaskContext| async { Ok(()) });
     let (reply, completion) = core
-        .add_task_with_id_watched(id, TaskSpec::once(task), None)
+        .add_task_with_id_watched(
+            id,
+            Arc::from("completion-cleanup"),
+            TaskSpec::once(task),
+            None,
+        )
         .expect("controller Add must enter the registry queue");
 
     assert!(matches!(reply.await, Ok(Ok(()))));
