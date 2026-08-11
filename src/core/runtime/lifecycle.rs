@@ -14,7 +14,7 @@ impl SupervisorCore {
     /// This starts:
     /// - subscriber queue workers,
     /// - the event relay,
-    /// - the registry listener.
+    /// - the registry listener and central actor scheduler.
     pub(crate) fn start(&self) {
         if self.started.load(Ordering::Acquire) {
             return;

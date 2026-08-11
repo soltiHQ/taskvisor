@@ -35,6 +35,7 @@
 //! - `task`: usually a task name. Subscriber diagnostics use it for the subscriber name, and controller events use it for the slot name.
 //! - `outcome_kind`: machine-readable final outcome for `TaskFinished` and rejected work.
 //! - `rejection_kind`: machine-readable category for a rejected add or controller submission.
+//! - `dropped`: number of events represented by a coalesced overflow report.
 //!
 //! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
 //! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
@@ -104,6 +105,7 @@ pub enum EventKind {
     ///
     /// Sets:
     /// - `task`: subscriber name (or the internal consumer that lagged)
+    /// - `dropped`: number of events lost, when known
     /// - `reason`: `"full"`, `"closed"`, or `"lagged(n)"`
     /// - `at`: wall-clock timestamp
     /// - `seq`: process-local sequence
@@ -474,6 +476,8 @@ pub struct Event {
     pub delay_ms: Option<u32>,
     /// Elapsed duration of the attempt in milliseconds.
     pub duration_ms: Option<u32>,
+    /// Number of events lost in a coalesced overflow report.
+    pub dropped: Option<u64>,
     /// Human-readable diagnostic detail.
     ///
     /// This text is not schema and may change. Use typed fields such as
@@ -524,6 +528,7 @@ impl Event {
             timeout_ms: None,
             delay_ms: None,
             duration_ms: None,
+            dropped: None,
             attempt: None,
             reason: None,
             outcome_kind: None,
@@ -602,6 +607,14 @@ impl Event {
     pub fn with_duration(mut self, d: Duration) -> Self {
         let ms = d.as_millis().min(u128::from(u32::MAX)) as u32;
         self.duration_ms = Some(ms);
+        self
+    }
+
+    /// Attaches the number of events represented by an overflow report.
+    #[inline]
+    #[must_use]
+    pub fn with_dropped(mut self, dropped: u64) -> Self {
+        self.dropped = Some(dropped);
         self
     }
 
@@ -718,6 +731,9 @@ impl std::fmt::Debug for Event {
         if let Some(duration_ms) = self.duration_ms {
             d.field("duration_ms", &duration_ms);
         }
+        if let Some(dropped) = self.dropped {
+            d.field("dropped", &dropped);
+        }
         if let Some(exit_code) = self.exit_code {
             d.field("exit_code", &exit_code);
         }
@@ -782,6 +798,7 @@ mod tests {
         assert_eq!(ev.timeout_ms, None);
         assert_eq!(ev.delay_ms, None);
         assert_eq!(ev.duration_ms, None);
+        assert_eq!(ev.dropped, None);
         assert_eq!(ev.attempt, None);
         assert_eq!(ev.exit_code, None);
         assert_eq!(ev.reason, None);
@@ -870,7 +887,7 @@ mod tests {
 
     #[test]
     fn diagnostic_factories_set_kind_task_and_reason() {
-        let overflow = Event::subscriber_overflow("my-sub", "full");
+        let overflow = Event::subscriber_overflow("my-sub", "full").with_dropped(7);
         assert_eq!(overflow.kind, EventKind::SubscriberOverflow);
         assert_eq!(
             overflow.task.as_deref(),
@@ -882,6 +899,7 @@ mod tests {
             Some("full"),
             "`reason` is the bare cause, not a re-encoding of the subscriber name"
         );
+        assert_eq!(overflow.dropped, Some(7));
 
         let panicked = Event::subscriber_panicked("my-sub", "boom");
         assert_eq!(panicked.kind, EventKind::SubscriberPanicked);

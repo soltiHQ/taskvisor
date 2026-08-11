@@ -6,15 +6,15 @@ use std::{
 };
 
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::completion::{OutcomeTx, RemovalCompletion};
-use crate::{core::actor::ActorExitReason, identity::TaskId};
+use super::scheduler::ActorHandle;
+use crate::identity::TaskId;
 
 /// Registry-owned actor handle for one registered task.
 pub(super) struct Handle {
-    pub(super) join: JoinHandle<ActorExitReason>,
+    pub(super) join: ActorHandle,
     pub(super) cancel: CancellationToken,
     pub(super) done: Option<OutcomeTx>,
     pub(super) completion: RemovalCompletion,

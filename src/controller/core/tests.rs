@@ -79,7 +79,10 @@ impl Task for ShutdownDropProbeTask {
 impl Drop for ShutdownDropProbeTask {
     fn drop(&mut self) {
         let state_is_clean = self.controller.upgrade().is_some_and(|controller| {
-            controller.watchers.is_empty() && controller.slots.is_empty()
+            controller.watchers.is_empty()
+                && controller.slots.is_empty()
+                && controller.queued_slots.is_empty()
+                && controller.capacity_pending.is_empty()
         });
         self.state_clean_at_drop
             .store(state_is_clean, Ordering::Release);
@@ -187,11 +190,12 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
     slot.queue
         .push_back(pending(TaskId::next(), make_spec("tail")));
 
+    let replacement = TaskId::next();
     let displaced_spec = ctrl
         .replace_head_or_push(
             &mut slot,
             &slot_arc_name(),
-            pending(TaskId::next(), make_spec("new-head")),
+            pending(replacement, make_spec("new-head")),
         )
         .expect("the old queue head must be returned for deferred drop");
 
@@ -199,6 +203,13 @@ fn replace_head_or_push_replaces_existing_head_and_rejects_displaced() {
     assert_eq!(slot.queue.front().unwrap().task_spec.name(), "new-head");
     assert_eq!(slot.queue.back().unwrap().task_spec.name(), "tail");
     assert_eq!(displaced_spec.task_spec.name(), "old-head");
+    assert!(!ctrl.queued_slots.contains_key(&displaced));
+    assert_eq!(
+        ctrl.queued_slots
+            .get(&replacement)
+            .map(|entry| Arc::clone(entry.value())),
+        Some(slot_arc_name())
+    );
 
     let ev = rx.try_recv().expect("displaced head must be rejected");
     assert_eq!(ev.kind, EventKind::ControllerRejected);
@@ -256,6 +267,43 @@ fn queue_full_reason_respects_the_capacity_boundary() {
             "unexpected decision at queue depth {depth}"
         );
     }
+}
+
+#[test]
+fn queued_reverse_index_tracks_push_pop_and_position_removal() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let slot_name = slot_arc_name();
+    let mut slot = SlotState::new();
+    let first = TaskId::next();
+    let second = TaskId::next();
+
+    ctrl.push_queued(&mut slot, &slot_name, pending(first, make_spec("first")));
+    ctrl.push_queued(&mut slot, &slot_name, pending(second, make_spec("second")));
+    assert_eq!(
+        ctrl.queued_slots
+            .get(&first)
+            .map(|entry| Arc::clone(entry.value())),
+        Some(Arc::clone(&slot_name))
+    );
+    assert_eq!(
+        ctrl.queued_slots
+            .get(&second)
+            .map(|entry| Arc::clone(entry.value())),
+        Some(Arc::clone(&slot_name))
+    );
+
+    assert_eq!(
+        ctrl.pop_queued_front(&mut slot).map(|pending| pending.id),
+        Some(first)
+    );
+    assert!(!ctrl.queued_slots.contains_key(&first));
+    assert_eq!(
+        ctrl.remove_queued_at(&mut slot, 0)
+            .map(|pending| pending.id),
+        Some(second)
+    );
+    assert!(!ctrl.queued_slots.contains_key(&second));
+    assert!(slot.queue.is_empty());
 }
 
 #[test]
@@ -452,7 +500,7 @@ async fn stale_admission_ok_and_err_do_not_mutate_new_owner() {
         AdmissionResult {
             id: stale_id,
             slot_name: Arc::from("s"),
-            decision: Ok(crate::core::RemovalCompletion::new()),
+            decision: AdmissionDecision::Registry(Ok(crate::core::RemovalCompletion::new())),
         },
         &mut admissions,
         &mut completions,
@@ -463,7 +511,7 @@ async fn stale_admission_ok_and_err_do_not_mutate_new_owner() {
         AdmissionResult {
             id: stale_id,
             slot_name: Arc::from("s"),
-            decision: Err(RuntimeError::ShuttingDown),
+            decision: AdmissionDecision::Registry(Err(RuntimeError::ShuttingDown)),
         },
         &mut admissions,
         &mut completions,
@@ -554,9 +602,9 @@ async fn replace_pending_admission_then_add_err_starts_replacement_without_remov
         AdmissionResult {
             id: owner,
             slot_name: Arc::from("s"),
-            decision: Err(RuntimeError::TaskAlreadyExists {
+            decision: AdmissionDecision::Registry(Err(RuntimeError::TaskAlreadyExists {
                 name: Arc::from("rejected-owner"),
-            }),
+            })),
         },
         &mut admissions,
         &mut completions,
@@ -646,7 +694,7 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
             AdmissionResult {
                 id: owner,
                 slot_name: Arc::from("s"),
-                decision: Ok(crate::core::RemovalCompletion::new()),
+                decision: AdmissionDecision::Registry(Ok(crate::core::RemovalCompletion::new())),
             },
             &mut admissions,
             &mut completions,
@@ -739,10 +787,16 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     {
         let mut slot = slot.lock().await;
         *slot = running_slot(running_id);
-        slot.queue
-            .push_back(pending(watched_id, waiting_spec("watched-shutdown-queue")));
-        slot.queue
-            .push_back(pending(unwatched_id, waiting_spec("plain-shutdown-queue")));
+        ctrl.push_queued(
+            &mut slot,
+            &Arc::from("shutdown-slot"),
+            pending(watched_id, waiting_spec("watched-shutdown-queue")),
+        );
+        ctrl.push_queued(
+            &mut slot,
+            &Arc::from("shutdown-slot"),
+            pending(unwatched_id, waiting_spec("plain-shutdown-queue")),
+        );
     }
 
     ctrl.finalize_slot_state_on_shutdown().await;
@@ -758,6 +812,60 @@ async fn shutdown_rejects_slot_queue_and_clears_controller_state() {
     ));
     assert!(ctrl.watchers.is_empty());
     assert!(ctrl.slots.is_empty());
+    assert!(ctrl.queued_slots.is_empty());
+    assert!(ctrl.capacity_pending.is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_rejects_capacity_waiting_admission() {
+    let supervisor = Supervisor::new(
+        crate::SupervisorConfig::default()
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
+        vec![],
+    );
+    let filler_id = TaskId::next();
+    let (_reply, _completion) = supervisor
+        .core()
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("capacity-shutdown-filler"),
+            waiting_spec("capacity-shutdown-filler"),
+            None,
+        )
+        .expect("the filler must occupy the registry queue");
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let mut admissions = JoinSet::new();
+    let mut removals = JoinSet::new();
+
+    ctrl.handle_submission(
+        Submission {
+            id,
+            spec: ControllerSpec::queue(waiting_spec("capacity-shutdown-target"))
+                .with_slot("capacity-shutdown-slot"),
+            done: Some(done),
+        },
+        &mut admissions,
+        &mut removals,
+    )
+    .await;
+    assert!(ctrl.capacity_pending.contains_key(&id));
+    assert_eq!(admissions.len(), 1);
+
+    ctrl.finalize_slot_state_on_shutdown().await;
+    assert!(matches!(
+        receive_oneshot(outcome, "capacity-waiting shutdown outcome").await,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ControllerShuttingDown,
+            ..
+        }
+    ));
+    assert!(ctrl.capacity_pending.is_empty());
+    assert!(ctrl.watchers.is_empty());
+    assert!(ctrl.slots.is_empty());
+    abort_and_drain(&mut admissions).await;
+    abort_and_drain(&mut removals).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -888,24 +996,29 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
     let (done, outcome) = oneshot::channel();
     ctrl.watchers.insert(id, done);
     let slot = ctrl.get_or_create_slot(&slot_name);
-    slot.lock()
-        .await
-        .queue
-        .push_back(crate::controller::slot::PendingSubmission::new(
+    let mut slot_state = slot.lock().await;
+    ctrl.push_queued(
+        &mut slot_state,
+        &slot_name,
+        crate::controller::slot::PendingSubmission::new(
             id,
             Arc::from("identity-drop-panic-task"),
             TaskSpec::once(Arc::new(PanickingDropTask {
                 name: "identity-drop-panic-task",
                 drops: Arc::clone(&drops),
             })),
-        ));
+        ),
+    );
+    drop(slot_state);
 
     let (reply, result) = oneshot::channel();
+    let mut admissions = JoinSet::new();
     let mut identity_operations = JoinSet::new();
     ctrl.handle_identity_operation(
         id,
         IdentityOperation::Remove,
         reply,
+        &mut admissions,
         &mut identity_operations,
     )
     .await;
@@ -924,7 +1037,9 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
     ));
     assert_eq!(drops.load(Ordering::Acquire), 1);
     assert!(identity_operations.is_empty());
+    assert!(admissions.is_empty());
     assert!(ctrl.watchers.is_empty());
+    assert!(ctrl.queued_slots.is_empty());
     assert!(ctrl.slots.get(&*slot_name).is_none());
 
     let drained = drain_events(&mut events);
@@ -941,6 +1056,24 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("injected task drop panic"))
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_identity_does_not_wait_for_unrelated_slot_lock() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let slot_name = slot_arc_name();
+    let slot = ctrl.get_or_create_slot(&slot_name);
+    let _slot_guard = slot.lock().await;
+    let mut admissions = JoinSet::new();
+
+    let removed = tokio::time::timeout(
+        Duration::from_millis(50),
+        ctrl.remove_queued_submission(TaskId::next(), None, &mut admissions),
+    )
+    .await
+    .expect("an unindexed ID must not inspect or wait for unrelated slots");
+
+    assert!(!removed);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1014,6 +1147,8 @@ fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
         bus,
         shutdown_token: CancellationToken::new(),
         slots: DashMap::new(),
+        queued_slots: DashMap::new(),
+        capacity_pending: DashMap::new(),
         watchers: DashMap::new(),
         tx,
         rx: RwLock::new(Some(rx)),
@@ -1451,7 +1586,7 @@ async fn controller_registry_commit_reuses_snapshotted_task_name() {
 }
 
 #[tokio::test]
-async fn registry_backpressure_drop_panic_preserves_watcher_and_controller_state() {
+async fn registry_precommit_shutdown_drop_panic_preserves_watcher_and_controller_state() {
     let supervisor = Supervisor::new(
         crate::SupervisorConfig::default()
             .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
@@ -1468,6 +1603,7 @@ async fn registry_backpressure_drop_panic_preserves_watcher_and_controller_state
         )
         .expect("the filler must occupy the registry queue");
     assert_eq!(supervisor.core().registry_command_capacity(), 0);
+    supervisor.core().close_registry_admission_for_test();
 
     let bus = Bus::new(64);
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
@@ -1526,6 +1662,226 @@ async fn registry_backpressure_drop_panic_preserves_watcher_and_controller_state
     assert_eq!(drop_failure.task.as_deref(), Some("controller"));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn transient_registry_full_waits_then_admits_without_rejection() {
+    let supervisor = Supervisor::new(
+        crate::SupervisorConfig::default()
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
+        vec![],
+    );
+    let filler_id = TaskId::next();
+    let (filler_reply, _filler_completion) = supervisor
+        .core()
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("transient-full-filler"),
+            waiting_spec("transient-full-filler"),
+            None,
+        )
+        .expect("the filler must occupy the registry queue");
+    assert_eq!(supervisor.core().registry_command_capacity(), 0);
+
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus);
+    let token = CancellationToken::new();
+    let runner = start_controller_loop(&ctrl, &token).await;
+    let task: TaskRef = TaskFn::arc("transient-full-target", |_ctx: TaskContext| async {
+        Ok(())
+    });
+    let (id, outcome) = ctrl
+        .handle()
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("transient-slot"))
+        .await
+        .expect("the controller command queue must accept the target");
+
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            ctrl.capacity_pending.contains_key(&id)
+                && ctrl.watchers.contains_key(&id)
+                && ctrl
+                    .slots
+                    .get("transient-slot")
+                    .map(|entry| entry.clone())
+                    .is_some_and(|slot| {
+                        slot.try_lock().is_ok_and(|slot| {
+                            matches!(slot.phase(), SlotPhase::Admitting { owner, .. } if owner == id)
+                        })
+                    })
+        })
+        .await,
+        "registry backpressure must retain the payload and watcher in an admitting slot"
+    );
+
+    let runtime_handle = supervisor.serve();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), filler_reply).await,
+        Ok(Ok(Ok(())))
+    ));
+    assert!(matches!(
+        receive_oneshot(outcome, "transient registry-full outcome").await,
+        TaskOutcome::Completed
+    ));
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            !ctrl.capacity_pending.contains_key(&id)
+                && !ctrl.watchers.contains_key(&id)
+                && ctrl.slots.get("transient-slot").is_none()
+        })
+        .await,
+        "successful admission must release all controller-owned pending state"
+    );
+    assert!(
+        !drain_events(&mut events)
+            .iter()
+            .any(|event| { event.kind == EventKind::ControllerRejected && event.id == Some(id) })
+    );
+
+    stop_controller_loop(token, runner).await;
+    let _ = runtime_handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn capacity_waiting_admission_remains_removable_by_id() {
+    let supervisor = Supervisor::new(
+        crate::SupervisorConfig::default()
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
+        vec![],
+    );
+    let filler_id = TaskId::next();
+    let (_filler_reply, _filler_completion) = supervisor
+        .core()
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("capacity-cancel-filler"),
+            waiting_spec("capacity-cancel-filler"),
+            None,
+        )
+        .expect("the filler must occupy the registry queue");
+
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
+    let token = CancellationToken::new();
+    let runner = start_controller_loop(&ctrl, &token).await;
+    let (id, outcome) = ctrl
+        .handle()
+        .submit_and_watch(
+            ControllerSpec::queue(waiting_spec("capacity-cancel-target"))
+                .with_slot("capacity-cancel-slot"),
+        )
+        .await
+        .expect("the controller command queue must accept the target");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            ctrl.capacity_pending.contains_key(&id)
+        })
+        .await,
+        "the target must be waiting for registry capacity"
+    );
+
+    assert!(
+        ctrl.handle()
+            .remove(id)
+            .await
+            .expect("capacity-waiting removal must complete")
+    );
+    assert!(matches!(
+        receive_oneshot(outcome, "capacity-waiting removal outcome").await,
+        TaskOutcome::Rejected {
+            kind: crate::RejectionKind::RemovedFromQueue,
+            ..
+        }
+    ));
+    assert!(!ctrl.capacity_pending.contains_key(&id));
+    assert!(!ctrl.watchers.contains_key(&id));
+    assert!(ctrl.slots.get("capacity-cancel-slot").is_none());
+
+    stop_controller_loop(token, runner).await;
+    let runtime_handle = supervisor.serve();
+    let _ = runtime_handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replace_remains_ordered_while_owner_waits_for_registry_capacity() {
+    let supervisor = Supervisor::new(
+        crate::SupervisorConfig::default()
+            .with_registry_queue_capacity(NonZeroUsize::new(1).unwrap()),
+        vec![],
+    );
+    let filler_id = TaskId::next();
+    let (_filler_reply, _filler_completion) = supervisor
+        .core()
+        .add_task_with_id_watched(
+            filler_id,
+            Arc::from("capacity-replace-filler"),
+            waiting_spec("capacity-replace-filler"),
+            None,
+        )
+        .expect("the filler must occupy the registry queue");
+
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
+    let token = CancellationToken::new();
+    let runner = start_controller_loop(&ctrl, &token).await;
+    let (owner_id, owner_outcome) = ctrl
+        .handle()
+        .submit_and_watch(
+            ControllerSpec::queue(waiting_spec("capacity-replace-owner"))
+                .with_slot("capacity-replace-slot"),
+        )
+        .await
+        .expect("the owner must enter controller intake");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            ctrl.capacity_pending.contains_key(&owner_id)
+        })
+        .await
+    );
+
+    let replacement: TaskRef =
+        TaskFn::arc("capacity-replacement", |_ctx: TaskContext| async { Ok(()) });
+    let (replacement_id, replacement_outcome) = ctrl
+        .handle()
+        .submit_and_watch(
+            ControllerSpec::replace(TaskSpec::once(replacement)).with_slot("capacity-replace-slot"),
+        )
+        .await
+        .expect("the replacement must enter controller intake");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            let Some(slot) = ctrl
+                .slots
+                .get("capacity-replace-slot")
+                .map(|entry| entry.clone())
+            else {
+                return false;
+            };
+            let slot = slot.lock().await;
+            matches!(slot.phase(), SlotPhase::CancelPendingAdmission { owner, .. } if owner == owner_id)
+                && slot.queue.front().map(|pending| pending.id) == Some(replacement_id)
+        })
+        .await,
+        "Replace must remain queued behind the capacity-waiting owner"
+    );
+
+    let runtime_handle = supervisor.serve();
+    assert!(matches!(
+        receive_oneshot(owner_outcome, "capacity-waiting replaced owner").await,
+        TaskOutcome::Canceled
+    ));
+    assert!(matches!(
+        receive_oneshot(replacement_outcome, "capacity-waiting replacement").await,
+        TaskOutcome::Completed
+    ));
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            ctrl.slots.get("capacity-replace-slot").is_none() && ctrl.capacity_pending.is_empty()
+        })
+        .await
+    );
+
+    stop_controller_loop(token, runner).await;
+    let _ = runtime_handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn queued_precommit_failures_finish_before_panicking_task_drop() {
     let supervisor = Supervisor::new(
@@ -1543,6 +1899,7 @@ async fn queued_precommit_failures_finish_before_panicking_task_drop() {
             None,
         )
         .expect("the filler must occupy the registry queue");
+    supervisor.core().close_registry_admission_for_test();
 
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
     let drops = Arc::new(AtomicUsize::new(0));
@@ -2519,6 +2876,15 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         .submit_and_watch(ControllerSpec::queue(TaskSpec::once(victim)).with_slot("s"))
         .await
         .expect("the queued submission must enter the controller channel");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            ctrl.queued_slots
+                .get(&victim_id)
+                .is_some_and(|entry| entry.value().as_ref() == "s")
+        })
+        .await,
+        "queued admission must publish its reverse-index route"
+    );
 
     assert!(
         handle
@@ -2533,6 +2899,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
             reason,
             ..
         } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE));
+    assert!(!ctrl.queued_slots.contains_key(&victim_id));
 
     let try_ran = Arc::clone(&victim_ran);
     let try_victim: TaskRef = TaskFn::arc("try-remove-victim", move |_ctx: TaskContext| {
@@ -2609,6 +2976,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         !victim_ran.load(Ordering::SeqCst),
         "a queued submission claimed by cancel must never start"
     );
+    assert!(ctrl.queued_slots.is_empty());
 
     stop_controller_loop(token, runner).await;
     let _ = runtime_handle.shutdown().await;

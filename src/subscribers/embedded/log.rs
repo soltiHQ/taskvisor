@@ -148,9 +148,15 @@ impl LogWriter {
                     format_value(or(e.reason.as_deref(), "none"))
                 );
             }
-
-            // Subscribers: the `task` field carries the subscriber name.
-            EventKind::SubscriberOverflow | EventKind::SubscriberPanicked => {
+            EventKind::SubscriberOverflow => {
+                println!(
+                    "{head} subscriber={} reason={} dropped={}",
+                    format_value(or(e.task.as_deref(), "none")),
+                    format_value(or(e.reason.as_deref(), "unknown")),
+                    e.dropped.unwrap_or(0)
+                );
+            }
+            EventKind::SubscriberPanicked => {
                 println!(
                     "{head} subscriber={} reason={}",
                     format_value(or(e.task.as_deref(), "none")),

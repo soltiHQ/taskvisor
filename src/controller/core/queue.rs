@@ -7,11 +7,61 @@ use tokio::sync::Mutex;
 use crate::{
     controller::slot::{PendingSubmission, SlotState},
     events::{Event, EventKind, RejectionKind},
+    identity::TaskId,
 };
 
 use super::Controller;
 
 impl Controller {
+    /// Records ownership of one submission after it enters a slot queue.
+    #[inline]
+    fn index_queued(&self, id: TaskId, slot_name: &Arc<str>) {
+        let previous = self.queued_slots.insert(id, Arc::clone(slot_name));
+        debug_assert!(
+            previous.is_none(),
+            "a controller TaskId cannot belong to two slot queues"
+        );
+    }
+
+    /// Removes one submission from the reverse index as it leaves queue ownership.
+    #[inline]
+    fn unindex_queued(&self, id: TaskId) {
+        self.queued_slots.remove(&id);
+    }
+
+    /// Appends one submission and updates the reverse index in the same controller transition.
+    #[inline]
+    pub(super) fn push_queued(
+        &self,
+        slot: &mut SlotState,
+        slot_name: &Arc<str>,
+        pending: PendingSubmission,
+    ) {
+        let id = pending.id;
+        slot.queue.push_back(pending);
+        self.index_queued(id, slot_name);
+    }
+
+    /// Pops the next submission and removes its reverse-index entry.
+    #[inline]
+    pub(super) fn pop_queued_front(&self, slot: &mut SlotState) -> Option<PendingSubmission> {
+        let pending = slot.queue.pop_front()?;
+        self.unindex_queued(pending.id);
+        Some(pending)
+    }
+
+    /// Removes a known queue position and its reverse-index entry.
+    #[inline]
+    pub(super) fn remove_queued_at(
+        &self,
+        slot: &mut SlotState,
+        position: usize,
+    ) -> Option<PendingSubmission> {
+        let pending = slot.queue.remove(position)?;
+        self.unindex_queued(pending.id);
+        Some(pending)
+    }
+
     /// Returns the slot state for `slot_name`, creating an idle slot when absent.
     #[inline]
     pub(super) fn get_or_create_slot(&self, slot_name: &str) -> Arc<Mutex<SlotState>> {
@@ -70,8 +120,11 @@ impl Controller {
         slot_name: &Arc<str>,
         pending: PendingSubmission,
     ) -> Option<PendingSubmission> {
+        let pending_id = pending.id;
         if let Some(head) = slot.queue.front_mut() {
             let displaced = std::mem::replace(head, pending);
+            self.unindex_queued(displaced.id);
+            self.index_queued(pending_id, slot_name);
             self.bus.publish(
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(slot_name))
@@ -87,6 +140,7 @@ impl Controller {
             Some(displaced)
         } else {
             slot.queue.push_front(pending);
+            self.index_queued(pending_id, slot_name);
             None
         }
     }

@@ -25,6 +25,14 @@ use crate::{
     tasks::TaskSpec,
 };
 
+/// One owned registry queue slot reserved for a controller admission.
+///
+/// The controller may wait for this without moving user task ownership out of its own state.
+#[cfg(feature = "controller")]
+pub(crate) struct ControllerAddPermit {
+    permit: mpsc::OwnedPermit<RegistryCommand>,
+}
+
 impl SupervisorCore {
     /// Marks the runtime as shutting down.
     ///
@@ -35,6 +43,12 @@ impl SupervisorCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         self.shutting_down.store(true, Ordering::Release);
+    }
+
+    /// Closes registry command admission for cross-component pre-commit tests.
+    #[cfg(all(test, feature = "controller"))]
+    pub(crate) fn close_registry_admission_for_test(&self) {
+        self.mark_shutting_down();
     }
 
     /// Holds the admission gate across a command's final check and queue commit.
@@ -140,6 +154,60 @@ impl SupervisorCore {
             Some(completion.clone()),
         )?;
         Ok((reply, completion))
+    }
+
+    /// Waits for one registry command slot without taking ownership of a controller task payload.
+    #[cfg(feature = "controller")]
+    pub(crate) async fn reserve_controller_add(&self) -> Result<ControllerAddPermit, RuntimeError> {
+        if self.is_shutting_down() {
+            return Err(RuntimeError::ShuttingDown);
+        }
+        let permit = self
+            .cmd_tx
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| RuntimeError::ShuttingDown)?;
+        Ok(ControllerAddPermit { permit })
+    }
+
+    /// Commits one controller Add through a previously reserved registry queue slot.
+    ///
+    /// The shutdown admission gate is checked only after capacity is owned, preserving the registry fence.
+    #[cfg(feature = "controller")]
+    pub(crate) fn commit_reserved_controller_add(
+        &self,
+        permit: ControllerAddPermit,
+        id: TaskId,
+        label: Arc<str>,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+    ) -> Result<(AddReplyRx, RemovalCompletion), Box<crate::core::UncommittedWatchedAdd>> {
+        let Some(_admission) = self.command_admission() else {
+            return Err(Box::new(crate::core::UncommittedWatchedAdd {
+                error: RuntimeError::ShuttingDown,
+                label,
+                spec,
+                done,
+            }));
+        };
+
+        let completion = RemovalCompletion::new();
+        let (reply, reply_rx) = oneshot::channel();
+        self.bus.publish(
+            Event::new(EventKind::TaskAddRequested)
+                .with_task(Arc::clone(&label))
+                .with_id(id),
+        );
+        permit.permit.send(RegistryCommand::Add {
+            id,
+            label,
+            spec,
+            outcome: done,
+            completion: Some(completion.clone()),
+            reply,
+        });
+        Ok((reply_rx, completion))
     }
 
     /// Adds a watched task and waits for the registry registration decision.

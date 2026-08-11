@@ -73,6 +73,29 @@ impl Controller {
     /// Rejects queued slot work, resolves every remaining watcher, and clears slot indexes.
     pub(super) async fn finalize_slot_state_on_shutdown(&self) {
         let mut pending_to_drop = Vec::new();
+        let capacity_ids: Vec<_> = self
+            .capacity_pending
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        for id in capacity_ids {
+            let Some((_, waiting)) = self.capacity_pending.remove(&id) else {
+                continue;
+            };
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(Arc::clone(&waiting.slot_name))
+                    .with_id(id)
+                    .with_rejection_kind(RejectionKind::ControllerShuttingDown)
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
+            );
+            self.finalize_rejected(
+                id,
+                RejectionKind::ControllerShuttingDown,
+                crate::reasons::CONTROLLER_SHUTTING_DOWN,
+            );
+            pending_to_drop.push(waiting.pending);
+        }
         let slot_names: Vec<Arc<str>> = self
             .slots
             .iter()
@@ -84,7 +107,7 @@ impl Controller {
                 continue;
             };
             let mut slot = slot.lock().await;
-            while let Some(pending) = slot.queue.pop_front() {
+            while let Some(pending) = self.pop_queued_front(&mut slot) {
                 self.bus.publish(
                     Event::new(EventKind::ControllerRejected)
                         .with_task(Arc::clone(&slot_name))
@@ -103,6 +126,8 @@ impl Controller {
 
         self.finalize_remaining_watchers();
         self.slots.clear();
+        self.queued_slots.clear();
+        self.capacity_pending.clear();
         for pending in pending_to_drop {
             self.drop_guarded("drop_queued_submission", pending).await;
         }

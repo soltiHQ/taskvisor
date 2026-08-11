@@ -2,15 +2,13 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::{
-    sync::{Notify, RwLock, oneshot},
-    task::{JoinError, JoinHandle},
-};
+use tokio::sync::{Notify, RwLock, oneshot};
 
 use super::{
     Registry,
     completion::{OutcomeTx, RemovalCompletion},
     protocol::{CancelDecision, CancelReply, RemoveReply},
+    scheduler::{ActorHandle, ActorJoinError},
     state::{EntryState, Handle, Inner, PendingJoins},
 };
 use crate::{
@@ -21,7 +19,7 @@ use crate::{
 
 /// Terminal result passed from the single join owner to registry cleanup.
 pub(super) enum JoinCompletion {
-    Joined(Result<ActorExitReason, JoinError>),
+    Joined(Result<ActorExitReason, ActorJoinError>),
     ForceAborted,
 }
 
@@ -147,24 +145,25 @@ impl Registry {
         label: Arc<str>,
         reply: oneshot::Sender<RemoveReply>,
     ) {
-        let claimed = {
+        let resolved = {
             let mut st = self.state.write().await;
-            let Some(id) = st.by_label.get(label.as_ref()).copied() else {
-                drop(st);
-                let _ = reply.send(Ok(false));
-                return;
-            };
-
-            self.bus.publish(
-                Event::new(EventKind::TaskRemoveRequested)
-                    .with_task(Arc::clone(&label))
-                    .with_id(id),
-            );
-            Self::claim_registered(&mut st, &self.pending_joins, id)
-                .map(|(_entry_label, handle, completion)| (id, handle, completion))
+            st.by_label.get(label.as_ref()).copied().map(|id| {
+                let claimed = Self::claim_registered(&mut st, &self.pending_joins, id)
+                    .map(|(_entry_label, handle, completion)| (handle, completion));
+                (id, claimed)
+            })
         };
+        let Some((id, claimed)) = resolved else {
+            let _ = reply.send(Ok(false));
+            return;
+        };
+        self.bus.publish(
+            Event::new(EventKind::TaskRemoveRequested)
+                .with_task(Arc::clone(&label))
+                .with_id(id),
+        );
 
-        if let Some((id, handle, completion)) = claimed {
+        if let Some((handle, completion)) = claimed {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
             self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
@@ -175,19 +174,21 @@ impl Registry {
 
     /// Claims or joins cancellation by identity and returns a shared terminal decision.
     pub(super) async fn cancel_task(&self, id: TaskId, reply: oneshot::Sender<CancelReply>) {
-        let action = {
+        let (found, action) = {
             let mut st = self.state.write().await;
             if !st.tasks.contains_key(&id) {
-                None
+                (false, None)
             } else {
-                self.bus.publish(
-                    Event::new(EventKind::TaskRemoveRequested)
-                        .with_id(id)
-                        .with_reason("manual_cancel"),
-                );
-                Self::cancel_action(&mut st, &self.pending_joins, id)
+                (true, Self::cancel_action(&mut st, &self.pending_joins, id))
             }
         };
+        if found {
+            self.bus.publish(
+                Event::new(EventKind::TaskRemoveRequested)
+                    .with_id(id)
+                    .with_reason("manual_cancel"),
+            );
+        }
         self.resolve_cancel_action(action, reply);
     }
 
@@ -197,22 +198,23 @@ impl Registry {
         label: Arc<str>,
         reply: oneshot::Sender<CancelReply>,
     ) {
-        let action = {
+        let resolved = {
             let mut st = self.state.write().await;
-            let Some(id) = st.by_label.get(label.as_ref()).copied() else {
-                drop(st);
-                let _ = reply.send(Ok(None));
-                return;
-            };
-
-            self.bus.publish(
-                Event::new(EventKind::TaskRemoveRequested)
-                    .with_task(label)
-                    .with_id(id)
-                    .with_reason("manual_cancel"),
-            );
-            Self::cancel_action(&mut st, &self.pending_joins, id)
+            st.by_label.get(label.as_ref()).copied().map(|id| {
+                let action = Self::cancel_action(&mut st, &self.pending_joins, id);
+                (id, action)
+            })
         };
+        let Some((id, action)) = resolved else {
+            let _ = reply.send(Ok(None));
+            return;
+        };
+        self.bus.publish(
+            Event::new(EventKind::TaskRemoveRequested)
+                .with_task(label)
+                .with_id(id)
+                .with_reason("manual_cancel"),
+        );
         self.resolve_cancel_action(action, reply);
     }
 
@@ -331,7 +333,7 @@ impl Registry {
     fn spawn_join_report(
         &self,
         id: TaskId,
-        join: JoinHandle<ActorExitReason>,
+        join: ActorHandle,
         force_after: Option<Duration>,
         done: Option<OutcomeTx>,
         removal_completion: RemovalCompletion,
@@ -386,43 +388,47 @@ impl Registry {
             join,
             completion: removal_completion,
         } = report;
-        let mut st = state.write().await;
-        let is_removing = st
-            .tasks
-            .get(&id)
-            .is_some_and(|entry| matches!(&entry.state, EntryState::Removing { .. }));
-        if !is_removing {
-            drop(st);
+        let removed = {
+            let mut st = state.write().await;
+            let is_removing = st
+                .tasks
+                .get(&id)
+                .is_some_and(|entry| matches!(&entry.state, EntryState::Removing { .. }));
+            if !is_removing {
+                None
+            } else {
+                let entry = st
+                    .tasks
+                    .remove(&id)
+                    .expect("the removing entry was checked above");
+                let EntryState::Removing {
+                    completion: state_completion,
+                } = entry.state
+                else {
+                    unreachable!("the removing entry was checked above")
+                };
+                if st.by_label.get(entry.label.as_ref()) == Some(&id) {
+                    st.by_label.remove(entry.label.as_ref());
+                }
+                let is_empty = st.tasks.is_empty();
+                Some((entry.label, state_completion, is_empty))
+            }
+        };
+        let Some((label, state_completion, is_empty)) = removed else {
             pending_joins.dec(id);
             removal_completion.complete();
             return;
-        }
-
-        let entry = st
-            .tasks
-            .remove(&id)
-            .expect("the removing entry was checked above");
-        let EntryState::Removing {
-            completion: state_completion,
-        } = entry.state
-        else {
-            unreachable!("the removing entry was checked above")
         };
-        if st.by_label.get(entry.label.as_ref()) == Some(&id) {
-            st.by_label.remove(entry.label.as_ref());
-        }
 
         match join {
             JoinCompletion::Joined(res) => {
-                Self::report_join(bus, id, &entry.label, res, outcome);
+                Self::report_join(bus, id, &label, res, outcome);
             }
             JoinCompletion::ForceAborted => {
-                Self::report_outcome(bus, id, &entry.label, TaskOutcome::ForceAborted, outcome);
+                Self::report_outcome(bus, id, &label, TaskOutcome::ForceAborted, outcome);
             }
         }
         pending_joins.dec(id);
-        let is_empty = st.tasks.is_empty();
-        drop(st);
 
         // Wake completion waiters only after id and label membership is removed and the
         // registry state lock is released. A controller may safely admit the next task now.
@@ -440,7 +446,7 @@ impl Registry {
         bus: &Bus,
         id: TaskId,
         name: &str,
-        res: Result<ActorExitReason, JoinError>,
+        res: Result<ActorExitReason, ActorJoinError>,
         done: Option<OutcomeTx>,
     ) {
         let outcome = Self::outcome_of(res);
@@ -494,10 +500,11 @@ impl Registry {
     }
 
     /// Maps a joined actor result to the public [`TaskOutcome`].
-    fn outcome_of(res: Result<ActorExitReason, JoinError>) -> TaskOutcome {
+    fn outcome_of(res: Result<ActorExitReason, ActorJoinError>) -> TaskOutcome {
         match res {
             Ok(ActorExitReason::Completed) => TaskOutcome::Completed,
             Ok(ActorExitReason::Canceled) => TaskOutcome::Canceled,
+            Ok(ActorExitReason::Panicked) => TaskOutcome::Panicked,
             Ok(ActorExitReason::Exhausted {
                 reason,
                 exit_code,

@@ -78,10 +78,13 @@ impl SupervisorCore {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            let arc_e = Arc::new(Event::subscriber_overflow(
-                                "subscriber_listener",
-                                format!("lagged({skipped})"),
-                            ));
+                            let arc_e = Arc::new(
+                                Event::subscriber_overflow(
+                                    "subscriber_listener",
+                                    format!("lagged({skipped})"),
+                                )
+                                .with_dropped(skipped),
+                            );
                             alive.update(&arc_e).await;
                             set.emit_arc(arc_e);
 

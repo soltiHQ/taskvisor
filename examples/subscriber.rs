@@ -5,9 +5,8 @@
 //!
 //! ```text
 //! supervisor events
-//!       │
-//!       ├──► bounded queue ──► worker ──► blocking pool ──► on_event(metrics)
-//!       └──► bounded queue ──► worker ──► blocking pool ──► on_event(other)
+//!       ├──► bounded queue ──► dedicated thread ──► on_event(metrics)
+//!       └──► bounded queue ──► dedicated thread ──► on_event(other)
 //! ```
 //!
 //! A slow subscriber does not block event producers, but its queue can overflow

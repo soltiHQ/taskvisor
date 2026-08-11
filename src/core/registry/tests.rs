@@ -153,6 +153,164 @@ async fn terminal_cleanup_wakes_all_empty_waiters() {
     assert!(registry.pending_joins.is_empty());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_reporting_drops_outcome_sources_after_state_unlock() {
+    use std::{
+        fmt,
+        sync::{
+            Weak,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    #[derive(Debug)]
+    struct StateLockProbe {
+        state: Weak<RwLock<Inner>>,
+        unlocked: Arc<AtomicBool>,
+    }
+
+    impl fmt::Display for StateLockProbe {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("state lock probe")
+        }
+    }
+
+    impl std::error::Error for StateLockProbe {}
+
+    impl Drop for StateLockProbe {
+        fn drop(&mut self) {
+            let unlocked = self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.try_write().is_ok());
+            self.unlocked.store(unlocked, Ordering::Release);
+        }
+    }
+
+    let registry = registry();
+    let id = TaskId::next();
+    let label: Arc<str> = Arc::from("outcome-lock-scope");
+    let completion = RemovalCompletion::new();
+    {
+        let mut state = registry.state.write().await;
+        state.by_label.insert(Arc::clone(&label), id);
+        state.tasks.insert(
+            id,
+            Entry {
+                label: Arc::clone(&label),
+                state: EntryState::Removing {
+                    completion: completion.clone(),
+                },
+            },
+        );
+    }
+    registry.pending_joins.inc(id);
+    registry.pending_joins.label(id, label);
+
+    let source_dropped_unlocked = Arc::new(AtomicBool::new(false));
+    let source: crate::SharedError = Arc::new(StateLockProbe {
+        state: Arc::downgrade(&registry.state),
+        unlocked: Arc::clone(&source_dropped_unlocked),
+    });
+    let (done, done_rx) = oneshot::channel();
+    drop(done_rx);
+
+    Registry::finish_removal(
+        &registry.state,
+        &registry.empty_notify,
+        &registry.pending_joins,
+        &registry.bus,
+        RemovalReport {
+            id,
+            outcome: Some(done),
+            join: JoinCompletion::Joined(Ok(ActorExitReason::Exhausted {
+                reason: Arc::from("finished"),
+                exit_code: None,
+                source: Some(source),
+            })),
+            completion,
+        },
+    )
+    .await;
+
+    assert!(
+        source_dropped_unlocked.load(Ordering::Acquire),
+        "outcome source destruction must not run under the registry write lock"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_admission_drops_prepared_task_after_state_unlock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropProbeTask {
+        state: std::sync::Weak<RwLock<Inner>>,
+        unlocked: Arc<AtomicBool>,
+    }
+
+    impl crate::Task for DropProbeTask {
+        fn name(&self) -> &str {
+            "duplicate-lock-scope"
+        }
+
+        fn spawn(&self, _ctx: crate::TaskContext) -> crate::BoxTaskFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl Drop for DropProbeTask {
+        fn drop(&mut self) {
+            let unlocked = self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.try_write().is_ok());
+            self.unlocked.store(unlocked, Ordering::Release);
+        }
+    }
+
+    let registry = registry();
+    let existing_id = TaskId::next();
+    let label: Arc<str> = Arc::from("duplicate-lock-scope");
+    {
+        let mut state = registry.state.write().await;
+        state.by_label.insert(Arc::clone(&label), existing_id);
+        state.tasks.insert(
+            existing_id,
+            Entry {
+                label: Arc::clone(&label),
+                state: EntryState::Removing {
+                    completion: RemovalCompletion::new(),
+                },
+            },
+        );
+    }
+
+    let task_dropped_unlocked = Arc::new(AtomicBool::new(false));
+    let task: crate::TaskRef = Arc::new(DropProbeTask {
+        state: Arc::downgrade(&registry.state),
+        unlocked: Arc::clone(&task_dropped_unlocked),
+    });
+    let (reply, reply_rx) = oneshot::channel();
+    registry
+        .spawn_and_register(
+            TaskId::next(),
+            label,
+            TaskSpec::once(task),
+            None,
+            None,
+            reply,
+        )
+        .await;
+    assert!(matches!(
+        reply_rx.await,
+        Ok(Err(RuntimeError::TaskAlreadyExists { .. }))
+    ));
+    assert!(
+        task_dropped_unlocked.load(Ordering::Acquire),
+        "prepared task destruction must not run under the registry write lock"
+    );
+}
+
 fn started_registry(
     bus_capacity: usize,
     grace: Duration,
@@ -1160,14 +1318,20 @@ async fn wait_joins_within_reports_stuck_labels_then_drains() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
+    use super::scheduler::{ActorScheduler, ScheduledActor};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+    let scheduler_token = CancellationToken::new();
+    let scheduler = ActorScheduler::new();
+    scheduler.spawn(scheduler_token.clone());
 
     let panic_id = TaskId::next();
-    let panic_handle = Registry::spawn_tracked_actor(panic_id, completion_tx.clone(), async move {
-        panic!("outer actor panic")
-    });
+    let (panic_actor, panic_handle) =
+        ScheduledActor::new(panic_id, completion_tx.clone(), async move {
+            panic!("outer actor panic")
+        });
+    scheduler.schedule(panic_actor).await;
     let panic_result = panic_handle.await;
     assert!(
         panic_result.is_err_and(|error| error.is_panic()),
@@ -1181,12 +1345,13 @@ async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
     let polled = Arc::new(AtomicBool::new(false));
     let polled_by_task = Arc::clone(&polled);
     let abort_id = TaskId::next();
-    let abort_handle = Registry::spawn_tracked_actor(abort_id, completion_tx, async move {
+    let (abort_actor, abort_handle) = ScheduledActor::new(abort_id, completion_tx, async move {
         polled_by_task.store(true, Ordering::SeqCst);
         std::future::pending::<()>().await;
         ActorExitReason::Completed
     });
     abort_handle.abort();
+    scheduler.schedule(abort_actor).await;
     let abort_result = abort_handle.await;
     assert!(
         abort_result.is_err_and(|error| error.is_cancelled()),
@@ -1204,6 +1369,8 @@ async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
         completion_rx.try_recv().is_err(),
         "each actor exit must send one completion identity"
     );
+    scheduler_token.cancel();
+    assert!(scheduler.join().await);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1308,11 +1475,12 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
     let label: Arc<str> = Arc::from("outer-panic");
     let (done, done_rx) = oneshot::channel();
 
+    let (scheduled, join) = super::scheduler::ScheduledActor::new(
+        id,
+        registry.listener.completion_tx.clone(),
+        async move { panic!("outer actor panic") },
+    );
     let mut state = registry.state.write().await;
-    let join =
-        Registry::spawn_tracked_actor(id, registry.listener.completion_tx.clone(), async move {
-            panic!("outer actor panic")
-        });
     state.by_label.insert(Arc::clone(&label), id);
     state.tasks.insert(
         id,
@@ -1327,6 +1495,7 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
         },
     );
     drop(state);
+    registry.scheduler.schedule(scheduled).await;
 
     assert!(matches!(
         receive_reply(done_rx, "panic outcome").await,

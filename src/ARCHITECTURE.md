@@ -40,6 +40,7 @@ flowchart TB
     Supervisor["Supervisor / SupervisorHandle"]
     Core["SupervisorCore"]
     Registry["Registry: authoritative task membership"]
+    Scheduler["Bounded actor scheduler"]
     Actor["TaskActor: one registered task"]
     Runner["run_once: one attempt"]
     Task["Task + TaskSpec + policies"]
@@ -51,8 +52,9 @@ flowchart TB
     Supervisor --> Core
     Builder -->|constructs| Core
     Core -->|bounded command channel| Registry
-    Registry -->|spawns and joins| Actor
-    Actor --> Runner
+    Registry -->|bounded handoff| Scheduler
+    Scheduler -->|polls actor futures| Actor
+    Actor -->|spawns active attempt| Runner
     Runner --> Task
     Core --> Shutdown
     Registry -->|direct one-shot| Waiter
@@ -66,7 +68,7 @@ flowchart TB
     Builder["SupervisorBuilder"]
     Supervisor["Supervisor / SupervisorHandle"]
     Prepared["PreparedSubmission: reserved TaskId + ControllerSpec"]
-    Controller["Controller: per-slot admission"]
+    Controller["Controller: per-slot admission + queued ID index"]
     Core["SupervisorCore"]
     Waiter["TaskWaiter / TaskOutcome"]
 
@@ -99,6 +101,8 @@ flowchart TB
 
 The controller is compiled by the default `controller` feature, but it is a runtime opt-in: it exists only when a builder receives a `ControllerConfig`. Direct `add*` methods bypass slot admission; `submit*` methods use it.
 
+Controller admission does not turn transient registry queue saturation into a rejection. The slot remains `Admitting`, the controller retains the task payload and watcher, and a worker waits only for an owned registry queue permit. The controller loop remains available for later submissions, replacement, identity removal, and shutdown.
+
 `PreparedSubmission` is only a command-side hand-off. It allocates the controller submission's `TaskId` and holds its `ControllerSpec`, but it does not publish or enqueue anything. Consuming it sends the same ordered controller command as the ordinary `submit*` shortcuts. This lets an integrating application install `application ID -> TaskId` correlation before events for that `TaskId` can begin.
 
 ## Direct task lifecycle
@@ -119,8 +123,8 @@ sequenceDiagram
     Handle->>Core: add watched task
     Core->>Queue: Add command + reply + outcome sender
     Queue->>Registry: listener receives command
-    Registry->>Registry: resolve defaults and index ID + name
-    Registry->>TaskActor: spawn behind start gate
+    Registry->>Registry: prepare actor outside lock; index ID + name
+    Registry->>TaskActor: bounded scheduler handoff behind start gate
     Registry-->>Core: direct Add decision
     Registry->>TaskActor: open start gate
     Core-->>Caller: TaskId + TaskWaiter
@@ -142,7 +146,7 @@ For a static `run(tasks)` batch, the registry indexes every accepted entry, atte
 
 `run_once` owns one attempt: task invocation, panic capture, the attempt timeout, and the attempt terminal event. 
 
-`TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts.
+`TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts. Registered actor futures are data inside one central scheduler task. After a permit is acquired, the active attempt runs in its own Tokio task; an actor waiting for a permit or backoff does not consume another Tokio task.
 
 The retry loop and actor exits are shown separately below. Repeated phase names refer to the same actor phases.
 
@@ -202,7 +206,7 @@ Important boundaries:
 - A concurrency permit is held only while `run_once` is active.
 - Task panics caught by `run_once` become retryable `TaskError::Fail` values.
 - The actor returns an internal `ActorExitReason`; the registry maps it to `TaskOutcome` after joining the actor and removing its ID and name indexes.
-- Force-abort and an outer Tokio join failure are cleanup results, not normal actor exits.
+- Force-abort and an outer scheduler failure are cleanup results, not normal actor exits.
 
 ## Events and reliable outcomes are separate paths
 
@@ -227,7 +231,7 @@ flowchart LR
     Bus -. best-effort broadcast .-> Relay
     Relay -. event-derived update .-> Alive
     Relay -. bounded enqueue .-> Queues
-    Queues -. blocking-pool delivery .-> Subscribers
+    Queues -. dedicated worker thread .-> Subscribers
 
     Cleanup -->|direct final result| Outcome
     Reject -->|direct rejected result| Outcome

@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use crate::{
     RuntimeError,
     controller::spec::ControllerSpec,
-    core::{OutcomeTx, RemovalCompletion},
+    core::{ControllerAddPermit, OutcomeTx, RemovalCompletion},
     identity::TaskId,
 };
 
@@ -90,10 +90,18 @@ pub(super) struct Submission {
 pub(super) struct AdmissionResult {
     /// Pre-minted identity used to reject stale results safely.
     pub(super) id: TaskId,
-    /// Slot that owned `id` when the Add command was committed.
+    /// Slot that owns `id` during this admission stage.
     pub(super) slot_name: Arc<str>,
-    /// Direct registry decision and the terminal signal for an accepted task.
-    pub(super) decision: Result<RemovalCompletion, RuntimeError>,
+    /// Capacity or registry decision for the current admission stage.
+    pub(super) decision: AdmissionDecision,
+}
+
+/// One stage completed by an admission worker.
+pub(super) enum AdmissionDecision {
+    /// A registry queue slot was reserved after transient backpressure.
+    Capacity(Result<ControllerAddPermit, RuntimeError>),
+    /// The committed Add reached its authoritative registry decision.
+    Registry(Result<RemovalCompletion, RuntimeError>),
 }
 
 /// Reliable registry cleanup for one admitted slot owner.

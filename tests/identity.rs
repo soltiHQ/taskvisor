@@ -149,19 +149,46 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
             .await
             .expect("add keep");
         let stale = stale_id(&handle).await;
+        assert!(
+            collector
+                .wait_until(Duration::from_secs(2), |events| {
+                    events.iter().any(|event| {
+                        event.id == Some(stale) && event.kind == EventKind::TaskRemoved
+                    })
+                })
+                .await,
+            "the original cancellation must publish its terminal removal"
+        );
+        let removed_before = collector
+            .by_id(stale)
+            .iter()
+            .filter(|event| event.kind == EventKind::TaskRemoved)
+            .count();
 
         assert!(!handle.remove(stale).await.expect("remove stale ok"));
         assert!(!handle.try_remove(stale).await.expect("try_remove stale ok"));
-        handle
+        let barrier = handle
             .add(TaskSpec::restartable(make_coop("remove-unknown-barrier")))
             .await
             .expect("later add confirms that the unknown remove was processed");
         assert!(
             collector
-                .by_id(stale)
-                .iter()
-                .all(|event| event.kind != EventKind::TaskRemoved),
-            "an unknown id has no terminal transition to report"
+                .wait_until(Duration::from_secs(2), |events| {
+                    events.iter().any(|event| {
+                        event.id == Some(barrier) && event.kind == EventKind::TaskAdded
+                    })
+                })
+                .await,
+            "the subscriber must observe the post-remove barrier"
+        );
+        let removed_after = collector
+            .by_id(stale)
+            .iter()
+            .filter(|event| event.kind == EventKind::TaskRemoved)
+            .count();
+        assert_eq!(
+            removed_after, removed_before,
+            "unknown removals must not invent another terminal transition"
         );
         let list = handle.list().await;
         assert!(list.iter().any(|(i, l)| *i == id_keep && &**l == "keep"));
@@ -370,7 +397,7 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
     let (handle, collector) = common::served_with_collector(
         SupervisorConfig::default().with_grace(Duration::from_millis(300)),

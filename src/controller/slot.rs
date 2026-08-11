@@ -46,7 +46,9 @@ pub(super) enum SlotPhase {
     /// No current owner.
     Idle,
 
-    /// The Add command was committed, but the registry decision is still pending.
+    /// Registry admission is in flight.
+    ///
+    /// The controller may still be waiting for bounded registry command capacity, or the Add command was committed and its registry decision is pending.
     Admitting { owner: TaskId, since: Instant },
 
     /// Replacement was requested while Add was pending.

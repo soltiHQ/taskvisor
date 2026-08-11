@@ -35,7 +35,7 @@
 //!
 //! The registry listener serializes management admission and removal-claim decisions.
 //! Shutdown can claim remaining handles directly; the shared state lock arbitrates that work with the listener.
-//! Actor joins run concurrently outside the listener.
+//! Actor joins run concurrently outside the listener. Registered actor futures are polled by one bounded-ingress scheduler instead of one Tokio task per registration; only active attempts use per-attempt Tokio tasks.
 //! Final index removal uses the same state lock.
 //!
 //! Backpressure applies only to the bounded management queue.
@@ -66,6 +66,7 @@ mod completion;
 mod listener;
 mod protocol;
 mod removal;
+mod scheduler;
 mod state;
 
 pub(crate) use completion::{OutcomeTx, RemovalCompletion};
@@ -77,6 +78,7 @@ pub(crate) use protocol::{
 };
 
 use listener::ListenerState;
+use scheduler::ActorScheduler;
 use state::{Inner, PendingJoins};
 
 #[cfg(test)]
@@ -102,6 +104,7 @@ pub(crate) struct Registry {
     task_defaults: TaskDefaults,
     empty_notify: Arc<Notify>,
     pending_joins: Arc<PendingJoins>,
+    scheduler: ActorScheduler,
     listener: ListenerState,
 }
 
@@ -124,6 +127,7 @@ impl Registry {
             task_defaults,
             empty_notify: Arc::new(Notify::new()),
             pending_joins: Arc::new(PendingJoins::default()),
+            scheduler: ActorScheduler::new(),
             listener: ListenerState::new(cmd_rx),
         })
     }
@@ -151,6 +155,7 @@ impl Registry {
             .iter()
             .map(|(id, entry)| (*id, Arc::clone(&entry.label)))
             .collect();
+        drop(st);
         tasks.sort_by_key(|(id, _)| *id);
         tasks
     }

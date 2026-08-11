@@ -234,6 +234,7 @@ async fn subscriber_listener_reports_bus_lag_as_overflow() {
         Duration::from_secs(2),
         recorder.wait_for(|event| {
             event.kind == EventKind::SubscriberOverflow
+                && event.dropped.is_some_and(|dropped| dropped > 0)
                 && event
                     .reason
                     .as_deref()
@@ -246,7 +247,7 @@ async fn subscriber_listener_reports_bus_lag_as_overflow() {
     let _ = core.shutdown().await;
     assert!(
         saw_lag,
-        "subscriber_listener must report bus lag as SubscriberOverflow(lagged(n))"
+        "subscriber_listener must report bus lag with its typed dropped count"
     );
 }
 

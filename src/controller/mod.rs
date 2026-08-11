@@ -125,10 +125,12 @@
 //! The returned `TaskId` is allocated before runtime admission.
 //! If admission succeeds, the runtime uses the same ID.
 //! Before admission, it still identifies queued work for cancellation, outcomes, and event correlation.
+//! The controller keeps a reverse `TaskId`-to-slot index while work is queued, so identity operations inspect only the owning slot before falling back to the runtime registry.
 //! A [`PreparedSubmission`] exposes that ID before controller intake. Preparing
 //! alone does not enqueue work or publish an event.
 //!
 //! [`ControllerConfig::queue_capacity`] bounds the controller command queue and separately caps registry-backed remove/cancel operations.
+//! A temporarily full registry command queue does not reject an otherwise accepted controller admission: the controller retains the payload and waits asynchronously for a reserved registry queue slot.
 //! A new `Queue` submission is rejected when the slot's pending depth is already [`ControllerConfig::max_slot_queue`] or greater.
 //! The current owner is not part of this depth, but a replacement head is.
 //! `Replace` itself may create or replace that head even when the limit is zero.

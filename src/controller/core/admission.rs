@@ -6,6 +6,7 @@ use tokio::{task::JoinSet, time::Instant};
 
 use crate::core::{OutcomeTx, SupervisorCore, TaskOutcome};
 use crate::{
+    RuntimeError,
     controller::{
         admission::AdmissionPolicy,
         slot::{AdmissionTransition, PendingSubmission, ReplaceAction, SlotPhase, SlotState},
@@ -15,7 +16,9 @@ use crate::{
     reasons,
 };
 
-use super::{AdmissionResult, CompletionResult, Controller, RemovalResult, Submission};
+use super::{
+    AdmissionDecision, AdmissionResult, CompletionResult, Controller, RemovalResult, Submission,
+};
 
 /// Keeps one watched admission owned across controller-side pre-commit work.
 ///
@@ -159,7 +162,7 @@ impl Controller {
     /// User-provided task metadata is snapshotted before parking, so a panic from `Task::name` cannot strand the waiter.
     ///
     /// Policy behavior:
-    /// - idle slot: try to commit the registry Add; enter `Admitting` on success, otherwise reject the submission,
+    /// - idle slot: enter `Admitting`; commit the registry Add immediately or wait asynchronously for transient registry capacity,
     /// - busy + `Replace`: retire the current owner if needed and keep this submission as the next queued owner,
     /// - busy + `Queue`: append to the slot queue, unless the queue is full,
     /// - busy + `DropIfRunning`: reject immediately.
@@ -359,7 +362,7 @@ impl Controller {
                         .await;
                     return;
                 }
-                slot.queue.push_back(pending);
+                self.push_queued(&mut slot, &slot_name, pending);
                 watcher.commit();
                 self.bus.publish(
                     Event::new(EventKind::ControllerSubmitted)
@@ -384,8 +387,6 @@ impl Controller {
             }
         }
 
-        // A displaced user task may own an arbitrary destructor.
-        // Release the slot lock before dropping it; its watcher has already reached a terminal result.
         drop(slot);
         if let Some(displaced) = displaced_to_drop {
             self.drop_guarded("drop_superseded_submission", displaced)
@@ -408,6 +409,126 @@ impl Controller {
             slot_name,
             decision,
         } = result;
+        match decision {
+            AdmissionDecision::Capacity(decision) => {
+                self.handle_registry_capacity_result(id, slot_name, decision, admissions)
+                    .await;
+            }
+            AdmissionDecision::Registry(decision) => {
+                self.handle_registry_decision(
+                    id,
+                    slot_name,
+                    decision,
+                    admissions,
+                    completions,
+                    removals,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Commits a capacity-waiting payload or rejects it if registry admission closed.
+    async fn handle_registry_capacity_result(
+        &self,
+        id: TaskId,
+        slot_name: Arc<str>,
+        decision: Result<crate::core::ControllerAddPermit, RuntimeError>,
+        admissions: &mut JoinSet<AdmissionResult>,
+    ) {
+        let Some(slot_arc) = self.slots.get(&*slot_name).map(|entry| entry.clone()) else {
+            return;
+        };
+        let mut slot = slot_arc.lock().await;
+        if slot.owner_id() != Some(id) {
+            return;
+        }
+        let Some((_, waiting)) = self.capacity_pending.remove(&id) else {
+            return;
+        };
+        debug_assert_eq!(waiting.slot_name, slot_name);
+        let PendingSubmission {
+            id: pending_id,
+            task_name,
+            task_spec,
+        } = waiting.pending;
+        debug_assert_eq!(pending_id, id);
+
+        let done = self.watchers.remove(&id).map(|(_, tx)| tx);
+        let commit = match decision {
+            Ok(permit) => match self.supervisor.upgrade() {
+                Some(supervisor) => supervisor
+                    .commit_reserved_controller_add(permit, id, task_name, task_spec, done),
+                None => Err(Box::new(crate::core::UncommittedWatchedAdd {
+                    error: RuntimeError::ShuttingDown,
+                    label: task_name,
+                    spec: task_spec,
+                    done,
+                })),
+            },
+            Err(error) => Err(Box::new(crate::core::UncommittedWatchedAdd {
+                error,
+                label: task_name,
+                spec: task_spec,
+                done,
+            })),
+        };
+
+        match commit {
+            Ok((reply, completion)) => {
+                Self::track_admission(admissions, id, Arc::clone(&slot_name), reply, completion);
+            }
+            Err(mut uncommitted) => {
+                if let Some(tx) = uncommitted.done.take() {
+                    self.watchers.insert(id, tx);
+                }
+                let shutting_down = matches!(uncommitted.error, RuntimeError::ShuttingDown);
+                let (kind, reason) = if shutting_down {
+                    (
+                        RejectionKind::ControllerShuttingDown,
+                        reasons::CONTROLLER_SHUTTING_DOWN.to_owned(),
+                    )
+                } else {
+                    (
+                        RejectionKind::AdmissionFailed,
+                        format!("add_failed: {}", uncommitted.error),
+                    )
+                };
+                self.bus.publish(
+                    Event::new(EventKind::ControllerRejected)
+                        .with_task(Arc::clone(&slot_name))
+                        .with_id(id)
+                        .with_rejection_kind(kind)
+                        .with_reason(reason.clone()),
+                );
+                self.finalize_rejected(id, kind, &reason);
+                let cleared = slot.reject_admission(id);
+                debug_assert!(cleared);
+                let deferred_drops = if !shutting_down
+                    && !self.is_shutting_down()
+                    && let Some(supervisor) = self.supervisor.upgrade()
+                {
+                    self.start_next_from_queue(&supervisor, &mut slot, &slot_name, admissions)
+                } else {
+                    Vec::new()
+                };
+                self.gc_if_idle(&slot_name, slot);
+                self.drop_start_failure(uncommitted).await;
+                self.drop_pending_submissions(deferred_drops).await;
+            }
+        }
+    }
+
+    /// Applies one authoritative registry registration decision.
+    async fn handle_registry_decision(
+        &self,
+        id: TaskId,
+        slot_name: Arc<str>,
+        decision: Result<crate::core::RemovalCompletion, RuntimeError>,
+        admissions: &mut JoinSet<AdmissionResult>,
+        completions: &mut JoinSet<CompletionResult>,
+        removals: &mut JoinSet<RemovalResult>,
+    ) {
         let Some(slot_arc) = self.slots.get(&*slot_name).map(|entry| entry.clone()) else {
             return;
         };
@@ -486,8 +607,8 @@ impl Controller {
 
     /// Hands a submission to the runtime under its pre-minted id.
     ///
-    /// On successful Add-command commit, the slot enters `Admitting` and the watcher is owned by the runtime registry.
-    /// On commit failure, the watcher is put back into `watchers`, the controller can resolve it as rejected instead of dropping the oneshot.
+    /// The slot enters `Admitting` after an immediate Add commit or after the payload is retained for asynchronous registry-capacity admission.
+    /// The watcher stays controller-owned until the Add command commits; non-transient commit failure can therefore resolve it as rejected.
     fn start_in_slot(
         &self,
         sup: &Arc<SupervisorCore>,
@@ -514,7 +635,37 @@ impl Controller {
                 if let Some(tx) = uncommitted.done.take() {
                     self.watchers.insert(id, tx);
                 }
-                Err(uncommitted)
+                if matches!(uncommitted.error, RuntimeError::CommandQueueFull) {
+                    let crate::core::UncommittedWatchedAdd {
+                        error: _,
+                        label,
+                        spec,
+                        done,
+                    } = *uncommitted;
+                    debug_assert!(done.is_none(), "the watcher must remain controller-owned");
+                    let previous = self.capacity_pending.insert(
+                        id,
+                        super::CapacityPending {
+                            slot_name: Arc::clone(slot_name),
+                            pending: PendingSubmission::new(id, label, spec),
+                        },
+                    );
+                    debug_assert!(
+                        previous.is_none(),
+                        "one TaskId cannot wait for registry capacity twice"
+                    );
+                    let started = slot.begin_admission(id, Instant::now());
+                    debug_assert!(started);
+                    Self::track_registry_capacity(
+                        admissions,
+                        Arc::clone(sup),
+                        id,
+                        Arc::clone(slot_name),
+                    );
+                    Ok(())
+                } else {
+                    Err(uncommitted)
+                }
             }
         }
     }
@@ -537,7 +688,7 @@ impl Controller {
         if !slot.is_idle() {
             return deferred_drops;
         }
-        while let Some(next) = slot.queue.pop_front() {
+        while let Some(next) = self.pop_queued_front(slot) {
             let next_id = next.id;
             match self.start_in_slot(sup, slot, slot_name, next, admissions) {
                 Ok(()) => {

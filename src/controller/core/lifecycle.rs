@@ -44,6 +44,8 @@ impl Controller {
         self.mark_shutting_down();
         self.finalize_remaining_watchers();
         self.slots.clear();
+        self.queued_slots.clear();
+        self.capacity_pending.clear();
     }
 
     /// Waits for the owned controller loop exactly once.
@@ -199,6 +201,7 @@ impl Controller {
                                         id,
                                         operation,
                                         reply,
+                                        &mut admissions,
                                         &mut identity_operations,
                                     ),
                                 )
