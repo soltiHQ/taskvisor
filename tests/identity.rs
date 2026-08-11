@@ -397,7 +397,7 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
     let (handle, collector) = common::served_with_collector(
         SupervisorConfig::default().with_grace(Duration::from_millis(300)),

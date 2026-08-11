@@ -390,7 +390,7 @@ async fn concurrent_shutdown_waiters_share_subscriber_drain() {
     );
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn concurrent_shutdown_waiters_share_grace_exceeded() {
     let grace = Duration::from_millis(50);
     let (handle, collector) = served(grace);
@@ -483,7 +483,7 @@ async fn dropping_first_shutdown_waiter_does_not_cancel_owner() {
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_cleanup() {
     let (handle, collector) = served(Duration::from_secs(5));
     let started = Arc::new(tokio::sync::Notify::new());
@@ -623,7 +623,7 @@ async fn run_joins_shutdown_that_started_first() {
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts() {
     let (handle, collector) = served(Duration::from_millis(200));
     let (stubborn, started) = make_stubborn("stubborn");
@@ -655,7 +655,7 @@ async fn shutdown_empty_registry_returns_ok_all_stopped() {
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
     let (handle, collector) = served(Duration::from_millis(500));
     let coop_started = Arc::new(tokio::sync::Notify::new());
