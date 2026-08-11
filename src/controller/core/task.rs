@@ -36,10 +36,9 @@ impl ControllerTask {
         let clean = match handle.await {
             Ok(()) => true,
             Err(error) => {
-                bus.publish(Event::runtime_failure(
-                    "controller",
-                    format!("controller_join_failed: {error}"),
-                ));
+                bus.publish_lazy(|| {
+                    Event::runtime_failure("controller", format!("controller_join_failed: {error}"))
+                });
                 false
             }
         };

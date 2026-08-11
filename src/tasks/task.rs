@@ -55,8 +55,10 @@ pub type TaskRef = Arc<dyn Task>;
 pub trait Task: Send + Sync + 'static {
     /// Returns the stable name used for registration and observability.
     ///
-    /// Names must be unique among registered tasks.
-    /// A name can be used again after the previous task has finished removal and released it.
+    /// Names must be unique among registered tasks and actors retained by the
+    /// physical reaper. After a logical force-abort, the name remains reserved
+    /// until the old actor has physically stopped and its reaper record is
+    /// released; this prevents two attempts with one name from overlapping.
     fn name(&self) -> &str;
 
     /// Creates a new future for one attempt.

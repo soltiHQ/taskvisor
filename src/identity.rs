@@ -44,17 +44,20 @@
 //! | task name        | task       | label used for logs, metrics, and registry uniqueness |
 //! | controller slot  | controller | admission key for "one at a time" scheduling          |
 //!
-//! A task name is unique only while its registry entry exists.
-//! After terminal cleanup removes that entry, a later submission may reuse the same name.
+//! A task name is unique while its registry entry exists or a force-aborted
+//! actor remains under physical reaper ownership.
+//! A later submission may reuse the name only after both registry membership
+//! and any physical reaper reservation are released.
 //! Reusing a name does not reuse its identity:
 //!
 //! ```text
 //! first submission:  name = "worker", slot = "jobs", TaskId = A
-//! terminal cleanup:  removes A and releases the name "worker"
+//! terminal cleanup:  removes A; physical release frees the name "worker"
 //! later submission:  name = "worker", slot = "jobs", TaskId = B (B != A)
 //! ```
 //!
 //! Each `TaskId` is allocated from a process-local `u64` counter.
+//! Exhaustion fails fast; identities never wrap or collide.
 //!
 //! The counter is not stored across process restarts, and a `TaskId` is not a UUID.
 //! If external systems need a persistent identity, store their own ID next to this one.
@@ -66,10 +69,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Process-local allocation counter for task identities.
 ///
-/// Starts at `1`.
-/// Like all `AtomicU64::fetch_add` counters, it wraps after `2^64` allocations;
-/// reaching that limit is outside normal operation.
+/// Starts at `1`; zero is the exhausted sentinel and is never returned.
 static TASK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+fn advance(current: u64) -> Option<u64> {
+    match current {
+        0 => None,
+        u64::MAX => Some(0),
+        value => Some(value + 1),
+    }
+}
 
 /// Opaque process-local identity of one task submission.
 ///
@@ -94,7 +104,10 @@ impl TaskId {
     /// Internal only: Taskvisor owns identity allocation across direct runtime registration and controller pre-admission.
     #[inline]
     pub(crate) fn next() -> Self {
-        TaskId(TASK_ID_SEQ.fetch_add(1, Ordering::Relaxed))
+        let id = TASK_ID_SEQ
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, advance)
+            .unwrap_or_else(|_| panic!("TaskId space exhausted; identities cannot wrap safely"));
+        TaskId(id)
     }
 
     /// Returns the process-local numeric value.
@@ -142,6 +155,14 @@ mod tests {
         assert!(a.get() >= 1, "zero is reserved and must never be minted");
         assert!(b.get() > a.get(), "ids must increase: {a} then {b}");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sequence_uses_zero_as_an_exhausted_sentinel() {
+        assert_eq!(advance(1), Some(2));
+        assert_eq!(advance(u64::MAX - 1), Some(u64::MAX));
+        assert_eq!(advance(u64::MAX), Some(0));
+        assert_eq!(advance(0), None);
     }
 
     #[cfg(feature = "test-util")]

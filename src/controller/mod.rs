@@ -21,7 +21,8 @@
 //! Use [`ControllerSpec::with_slot`] to group several different task names into one slot.
 //!
 //! Task names belong to the runtime registry. They must be unique across all
-//! currently registered tasks, even when those tasks use different slots.
+//! registered tasks and actors still retained by the physical reaper, even
+//! when those tasks use different slots.
 //!
 //! ```text
 //! task "deploy-main-42" ┐
@@ -59,9 +60,9 @@
 //! | `Admitting`   | registry rejects registration                                  | Next / Idle                                          |
 //! | `Admitting`   | `Replace` arrives                                              | `Terminating`                                        |
 //! | `Running`     | `Replace` arrives                                              | `Terminating`                                        |
-//! | `Running`     | terminal registry cleanup completes                            | Next / Idle                                          |
+//! | `Running`     | logical cleanup and physical actor release complete             | Next / Idle                                          |
 //! | `Terminating` | pending registration is accepted                               | stay `Terminating`; request owner removal            |
-//! | `Terminating` | pending registration is rejected or terminal cleanup completes | Next / Idle                                          |
+//! | `Terminating` | registration is rejected, or logical and physical cleanup complete | Next / Idle                                        |
 //! | `Terminating` | another `Replace` arrives                                      | stay `Terminating`; create or replace the queue head |
 //!
 //! Admitting + Replace is shown as `Terminating` in public snapshots.
@@ -70,11 +71,12 @@
 //!
 //! Only `Replace` changes the public status to `Terminating`.
 //! ID-based `remove*` and `cancel*` requests do not change the status by themselves.
-//! The slot advances when the registry reports terminal cleanup.
+//! The slot advances only after logical terminal reporting and physical actor/reaper release.
 //! `Queue` and `DropIfRunning` also leave the current owner's status unchanged.
 //!
-//! After a registered owner, the next queued task starts only after terminal registry cleanup.
-//! At that point, the old managed runner has been joined and its task name is free.
+//! After a registered owner, the next queued task starts only after logical
+//! registry cleanup and physical actor/reaper release. At that point, the old
+//! actor can no longer execute and its task name is free.
 //! If registration is rejected, no registered owner exists; the controller can try the next queued item as soon as it receives that direct decision.
 //! Events are only for observability; they do not drive slot state.
 //!
@@ -156,7 +158,7 @@
 //! - Queued submissions are not handed to the runtime until they become the slot owner.
 //! - `Queue` preserves FIFO order among submissions that remain pending.
 //! - `Replace` creates or overwrites only the queue head; later items stay in order.
-//! - The next owner starts only after reliable registry cleanup of the old owner.
+//! - The next owner starts only after reliable logical cleanup and physical release of the old owner.
 //! - Runtime shutdown closes controller intake, resolves pending work, and joins the controller loop before the shared shutdown result is returned.
 //!
 //! A snapshot is a rolling observability view, not a transaction.

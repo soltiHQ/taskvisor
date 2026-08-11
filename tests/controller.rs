@@ -3,13 +3,14 @@
 mod common;
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
 use taskvisor::prelude::*;
 use taskvisor::{ControllerConfig, ControllerError, ControllerSpec, SlotStatusKind};
+use tokio::sync::Notify;
 
 fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
@@ -54,6 +55,33 @@ fn logging_once(name: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
             Ok(())
         }
     })
+}
+
+fn synchronously_blocked_task(
+    name: &str,
+    release: Arc<AtomicBool>,
+    started: Arc<Notify>,
+) -> TaskRef {
+    TaskFn::arc(name, move |_ctx: TaskContext| {
+        let release = Arc::clone(&release);
+        let started = Arc::clone(&started);
+        async move {
+            started.notify_one();
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    })
+}
+
+struct ReleaseBlockedPoll(Arc<AtomicBool>);
+
+impl Drop for ReleaseBlockedPoll {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 #[test]
@@ -571,6 +599,146 @@ async fn queue_three_drains_in_fifo_order() {
         let _ = handle.shutdown().await;
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slot_waits_for_force_reaped_owner_before_starting_different_label() {
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
+            .with_controller(ControllerConfig::default())
+            .build();
+    let handle = supervisor.serve();
+    let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
+    let started = Arc::new(Notify::new());
+
+    let (owner_id, owner_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::restartable(synchronously_blocked_task(
+                "physical-owner-a",
+                Arc::clone(&release),
+                Arc::clone(&started),
+            )))
+            .with_slot("physical-slot-a"),
+        )
+        .await
+        .expect("the blocking owner must enter controller intake");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the owner must enter its synchronous poll");
+
+    let next_runs = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::clone(&next_runs);
+    let next = TaskFn::arc("physical-next-b", move |_ctx| {
+        let runs = Arc::clone(&runs);
+        async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let (_next_id, next_waiter) = handle
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(next)).with_slot("physical-slot-a"))
+        .await
+        .expect("the next task must enter the same slot queue");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle
+                .controller_snapshot()
+                .await
+                .and_then(|snapshot| snapshot.slot("physical-slot-a").cloned())
+                .is_some_and(|slot| slot.queue_depth == 1)
+        })
+        .await,
+        "the next task must be queued before owner cancellation"
+    );
+
+    assert!(handle.cancel(owner_id).await.expect("cancel blocked owner"));
+    assert!(matches!(
+        owner_waiter.wait().await,
+        Ok(TaskOutcome::ForceAborted)
+    ));
+    let mut next_outcome = Box::pin(next_waiter.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next_outcome.as_mut())
+            .await
+            .is_err(),
+        "logical force-abort must not release the controller slot"
+    );
+    assert_eq!(next_runs.load(Ordering::SeqCst), 0);
+
+    release.store(true, Ordering::Release);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), next_outcome).await,
+        Ok(Ok(TaskOutcome::Completed))
+    ));
+    assert_eq!(next_runs.load(Ordering::SeqCst), 1);
+    handle.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
+            .with_controller(ControllerConfig::default())
+            .build();
+    let handle = supervisor.serve();
+    let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
+    let started = Arc::new(Notify::new());
+    let label = "physical-same-label";
+
+    let (owner_id, owner_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::restartable(synchronously_blocked_task(
+                label,
+                Arc::clone(&release),
+                Arc::clone(&started),
+            )))
+            .with_slot("physical-slot-same"),
+        )
+        .await
+        .expect("the blocking owner must enter controller intake");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the owner must enter its synchronous poll");
+
+    let replacement_runs = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::clone(&replacement_runs);
+    let replacement = TaskFn::arc(label, move |_ctx| {
+        let runs = Arc::clone(&runs);
+        async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let (_replacement_id, replacement_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once(replacement)).with_slot("physical-slot-same"),
+        )
+        .await
+        .expect("the replacement must enter the same slot queue");
+    assert!(handle.cancel(owner_id).await.expect("cancel blocked owner"));
+    assert!(matches!(
+        owner_waiter.wait().await,
+        Ok(TaskOutcome::ForceAborted)
+    ));
+
+    let mut replacement_outcome = Box::pin(replacement_waiter.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), replacement_outcome.as_mut())
+            .await
+            .is_err(),
+        "the queued same-label task must wait while the reaper reserves its label"
+    );
+    assert_eq!(replacement_runs.load(Ordering::SeqCst), 0);
+
+    release.store(true, Ordering::Release);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), replacement_outcome).await,
+        Ok(Ok(TaskOutcome::Completed))
+    ));
+    assert_eq!(replacement_runs.load(Ordering::SeqCst), 1);
+    handle.shutdown().await.expect("shutdown ok");
 }
 
 #[tokio::test(flavor = "current_thread")]

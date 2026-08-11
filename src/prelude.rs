@@ -29,7 +29,7 @@ pub use crate::policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPoli
 pub use crate::events::{BackoffSource, Event, EventKind, RejectionKind};
 
 /// Runtime and task error types.
-pub use crate::error::{Error, RuntimeError, TaskError};
+pub use crate::error::{BuildError, Error, RuntimeError, TaskError};
 
 /// Event subscriber trait.
 pub use crate::subscribers::Subscribe;

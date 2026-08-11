@@ -2,7 +2,7 @@ use std::{
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{Arc, Condvar, Mutex, atomic::Ordering},
     task::Poll,
     time::Duration,
 };
@@ -15,18 +15,74 @@ use tokio_util::sync::CancellationToken;
 
 use super::{CoreSettings, SupervisorCore, shutdown_workflow::ShutdownTrigger};
 use crate::{
-    TaskContext, TaskFn, TaskRef,
+    BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef,
     core::{
         SupervisorConfig, TaskDefaults,
-        alive::AliveTracker,
+        deferred_drop::{OwnedTask, test_reservation},
         registry::{AddBatchItem, Registry, RemoveReplyRx},
     },
     error::RuntimeError,
-    events::{Bus, Event, EventKind},
+    events::{Bus, Event, EventKind, TryRecvError},
     identity::TaskId,
     subscribers::{Subscribe, SubscriberSet},
     tasks::TaskSpec,
 };
+
+#[derive(Default)]
+struct BlockingTaskNameState {
+    entered: bool,
+    released: bool,
+}
+
+struct BlockingTaskName {
+    gate: Arc<(Mutex<BlockingTaskNameState>, Condvar)>,
+}
+
+impl Task for BlockingTaskName {
+    fn name(&self) -> &str {
+        let (state, changed) = &*self.gate;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        changed.notify_all();
+        while !state.released {
+            state = changed
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        "blocking-direct-task-name"
+    }
+
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(std::future::pending())
+    }
+}
+
+async fn wait_for_blocking_name(gate: &Arc<(Mutex<BlockingTaskNameState>, Condvar)>) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if gate
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entered
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fixed metadata worker must enter Task::name");
+}
+
+fn release_blocking_name(gate: &Arc<(Mutex<BlockingTaskNameState>, Condvar)>) {
+    let (state, changed) = &**gate;
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .released = true;
+    changed.notify_all();
+}
 
 struct RecordingSub {
     seen: Arc<Mutex<Vec<Event>>>,
@@ -67,8 +123,27 @@ impl Subscribe for RecordingSub {
     }
 }
 
+struct NoopSub;
+
+impl Subscribe for NoopSub {
+    fn on_event(&self, _event: &Event) {}
+
+    fn name(&self) -> &str {
+        "noop"
+    }
+
+    fn queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(64).expect("the test subscriber queue is non-zero")
+    }
+}
+
 fn core(cfg: SupervisorConfig) -> Arc<SupervisorCore> {
     core_with_subs(cfg, Vec::new())
+}
+
+fn owned_task(spec: TaskSpec) -> OwnedTask<TaskSpec> {
+    let retained = Arc::clone(spec.task());
+    OwnedTask::new(spec, retained, test_reservation())
 }
 
 fn core_with_subs(
@@ -86,14 +161,13 @@ fn core_with_subs(
         None,
         cfg.grace(),
         task_defaults.clone(),
+        cfg.max_registered_tasks(),
         cmd_rx,
     );
-    let alive = Arc::new(AliveTracker::new());
     SupervisorCore::new_internal(
         CoreSettings::new(cfg, task_defaults),
         bus,
         subs,
-        alive,
         registry,
         token,
         cmd_tx,
@@ -256,24 +330,121 @@ async fn drain_pending_delivers_retained_tail_after_a_lag_gap() {
     let (recorder, seen) = RecordingSub::new();
 
     let bus = Bus::new(2);
-    let mut rx = bus.subscribe();
+    let mut rx = bus.take_receiver();
     let set = Arc::new(SubscriberSet::new(vec![recorder], bus.clone()));
-    let alive = AliveTracker::new();
     set.start();
 
     for i in 0..5 {
         bus.publish(Event::new(EventKind::AttemptStarting).with_task(format!("t{i}")));
     }
 
-    SupervisorCore::drain_pending(&mut rx, &alive, &set).await;
+    SupervisorCore::drain_pending(&mut rx, &set).await;
     set.close().await;
 
     let delivered = seen.lock().unwrap();
+    let newest = delivered
+        .iter()
+        .position(|event| {
+            event.kind == EventKind::AttemptStarting && event.task.as_deref() == Some("t4")
+        })
+        .expect("newest retained event must reach subscribers despite a lag gap");
+    let overflow: Vec<_> = delivered
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.kind == EventKind::SubscriberOverflow)
+        .collect();
+    assert_eq!(
+        overflow.len(),
+        1,
+        "bounded shutdown drain must coalesce its lag accounting"
+    );
+    assert_eq!(overflow[0].1.dropped, Some(3));
     assert!(
-        delivered
-            .iter()
-            .any(|e| e.kind == EventKind::AttemptStarting && e.task.as_deref() == Some("t4")),
-        "newest retained event must reach subscribers despite a lag gap"
+        overflow[0].0 > newest,
+        "shutdown drain must prioritize retained real events over its lag diagnostic"
+    );
+    assert!(
+        delivered.iter().any(|event| {
+            event.kind == EventKind::AttemptStarting && event.task.as_deref() == Some("t3")
+        }),
+        "the full retained tail must fit inside the fixed ring-sized drain budget"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_relay_drain_has_a_fixed_work_budget() {
+    let (recorder, seen) = RecordingSub::new();
+    let capacity = super::event_relay::SHUTDOWN_RELAY_DRAIN_LIMIT + 2;
+    let bus = Bus::new(capacity);
+    let mut rx = bus.take_receiver();
+    let set = Arc::new(SubscriberSet::new(vec![recorder], bus.clone()));
+    set.start();
+
+    for index in 0..capacity {
+        bus.publish(Event::new(EventKind::AttemptStarting).with_task(format!("drain-{index}")));
+    }
+
+    SupervisorCore::drain_pending(&mut rx, &set).await;
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    bus.publish(Event::new(EventKind::AttemptStarting).with_task("late-after-relay-close"));
+    assert!(
+        matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+        "publication after the bounded relay drain must not repopulate the ring"
+    );
+    set.close().await;
+
+    let delivered = seen.lock().unwrap_or_else(|error| error.into_inner());
+    let real_events = delivered
+        .iter()
+        .filter(|event| event.kind == EventKind::AttemptStarting)
+        .count();
+    assert_eq!(
+        real_events,
+        super::event_relay::SHUTDOWN_RELAY_DRAIN_LIMIT,
+        "shutdown relay work must not scale past its fixed event budget"
+    );
+    let overflow = delivered
+        .iter()
+        .find(|event| event.kind == EventKind::SubscriberOverflow)
+        .expect("discarded retained events must be represented by one diagnostic");
+    assert_eq!(overflow.dropped, Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuous_event_publication_cannot_extend_relay_shutdown() {
+    let cfg = SupervisorConfig::default()
+        .with_bus_capacity(NonZeroUsize::new(8).expect("the test bus is bounded"));
+    let core = core_with_subs(cfg, vec![Arc::new(NoopSub)]);
+    core.start();
+
+    let bus = core.bus.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_publisher = Arc::clone(&stop);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let publisher = std::thread::spawn(move || {
+        let mut published = 0_u64;
+        while !stop_publisher.load(Ordering::Acquire) {
+            bus.publish_lazy(|| Event::new(EventKind::AttemptStarting));
+            published = published.saturating_add(1);
+            if published == 1_024 {
+                let _ = started_tx.send(());
+            }
+        }
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the publisher must establish a continuous event flood");
+
+    let shutdown = timeout(Duration::from_secs(2), core.shutdown()).await;
+    stop.store(true, Ordering::Release);
+    publisher
+        .join()
+        .expect("the event publisher thread must stop cleanly");
+
+    assert!(
+        matches!(shutdown, Ok(Ok(()))),
+        "continuous publication must not extend relay shutdown: {shutdown:?}"
     );
 }
 
@@ -327,8 +498,8 @@ async fn concurrent_start_waiters_return_only_after_runtime_is_ready() {
         core.subscriber_handle
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .is_some(),
-        "ready state must include an installed subscriber listener"
+            .is_none(),
+        "a runtime without subscribers must not allocate an event-relay task"
     );
     core.shutdown().await.expect("ready runtime must shut down");
 }
@@ -373,6 +544,244 @@ async fn run_is_single_shot() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_cancels_a_saturated_dynamic_ownership_wait() {
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let held = source.try_reserve().expect("the test source has one slot");
+    let core = core(SupervisorConfig::default());
+    core.set_ownership_source_for_test(source);
+    core.start();
+
+    let task = TaskFn::arc("saturated-dynamic-add", |_ctx| async { Ok(()) });
+    let mut add = Box::pin(core.add_task(TaskSpec::once(task)));
+    assert_pending_once(add.as_mut()).await;
+
+    timeout(Duration::from_secs(2), core.shutdown())
+        .await
+        .expect("shutdown must not wait for ownership capacity")
+        .expect("the empty runtime must shut down cleanly");
+    assert!(matches!(
+        timeout(Duration::from_secs(1), add).await,
+        Ok(Err(RuntimeError::ShuttingDown))
+    ));
+    drop(held);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn saturated_static_batch_fails_fast_without_consuming_run_lifecycle() {
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let held = source.try_reserve().expect("the test source has one slot");
+    let core = core(SupervisorConfig::default());
+    core.set_ownership_source_for_test(source);
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_runs = Arc::clone(&runs);
+    let task: crate::TaskRef = TaskFn::arc("saturated-static-run", move |_ctx| {
+        task_runs.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    let rejected = timeout(
+        Duration::from_secs(2),
+        core.run(vec![TaskSpec::once(Arc::clone(&task))]),
+    )
+    .await
+    .expect("static ownership admission must be fail-fast");
+    assert!(matches!(
+        rejected,
+        Err(RuntimeError::ResourceLimitReached {
+            resource: crate::core::deferred_drop::OWNERSHIP_RESOURCE,
+            limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+        })
+    ));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+    drop(held);
+    timeout(Duration::from_secs(2), core.run(vec![TaskSpec::once(task)]))
+        .await
+        .expect("a corrected retry must finish")
+        .expect("pre-start ownership rejection must not consume run");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_direct_task_name_cannot_hold_registry_capacity_or_extend_shutdown() {
+    let _metadata_guard = crate::core::task_metadata::blocking_test_guard().await;
+    let config = SupervisorConfig::default()
+        .with_registry_queue_capacity(NonZeroUsize::new(1).expect("non-zero test capacity"));
+    let core = core(config);
+    core.start();
+
+    let existing = TaskFn::arc("metadata-unrelated-direct", |ctx: TaskContext| async move {
+        ctx.cancelled().await;
+        Err(crate::TaskError::Canceled)
+    });
+    let existing_id = core
+        .add_task(TaskSpec::once(existing))
+        .await
+        .expect("the unrelated task must register");
+
+    let gate = Arc::new((Mutex::new(BlockingTaskNameState::default()), Condvar::new()));
+    let mut blocked_add = Box::pin(core.try_add_task(TaskSpec::once(Arc::new(BlockingTaskName {
+        gate: Arc::clone(&gate),
+    }))));
+    assert_pending_once(blocked_add.as_mut()).await;
+    wait_for_blocking_name(&gate).await;
+
+    let unrelated_cancel = timeout(Duration::from_secs(2), core.cancel(existing_id)).await;
+    let shutdown = timeout(Duration::from_secs(2), core.shutdown()).await;
+
+    // Release before asserting so a failed regression cannot occupy a global
+    // metadata worker for the remainder of the test process.
+    release_blocking_name(&gate);
+    let blocked_result = timeout(Duration::from_secs(2), blocked_add).await;
+
+    assert!(
+        matches!(unrelated_cancel, Ok(Ok(true))),
+        "a blocked try_add name must not hold the registry queue: {unrelated_cancel:?}"
+    );
+    assert!(
+        matches!(shutdown, Ok(Ok(()))),
+        "a blocked direct Task::name must not extend shared shutdown: {shutdown:?}"
+    );
+    assert!(matches!(
+        blocked_result,
+        Ok(Err(RuntimeError::ShuttingDown))
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_static_task_name_cannot_extend_shared_shutdown() {
+    let _metadata_guard = crate::core::task_metadata::blocking_test_guard().await;
+    let core = core(SupervisorConfig::default());
+    // `serve()` starts these listeners before exposing a public shutdown
+    // handle; starting explicitly reproduces that public static-plus-handle path.
+    core.start();
+    let gate = Arc::new((Mutex::new(BlockingTaskNameState::default()), Condvar::new()));
+    let mut run = Box::pin(core.run(vec![TaskSpec::once(Arc::new(BlockingTaskName {
+        gate: Arc::clone(&gate),
+    }))]));
+    assert_pending_once(run.as_mut()).await;
+    wait_for_blocking_name(&gate).await;
+
+    let shutdown = timeout(Duration::from_secs(2), core.shutdown()).await;
+    release_blocking_name(&gate);
+    let run_result = timeout(Duration::from_secs(2), run).await;
+
+    assert!(
+        matches!(shutdown, Ok(Ok(()))),
+        "static Task::name must run outside the Tokio shutdown path: {shutdown:?}"
+    );
+    assert!(matches!(run_result, Ok(Ok(()))));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn oversized_static_batch_is_rejected_before_task_metadata() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountedName {
+        calls: Arc<AtomicUsize>,
+        name: &'static str,
+    }
+
+    impl Task for CountedName {
+        fn name(&self) -> &str {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.name
+        }
+
+        fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+            unreachable!("an oversized static batch must not spawn")
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let core = core(SupervisorConfig::default().with_max_registered_tasks(NonZeroUsize::new(1)));
+    let tasks = ["oversized-a", "oversized-b"]
+        .into_iter()
+        .map(|name| {
+            TaskSpec::once(Arc::new(CountedName {
+                calls: Arc::clone(&calls),
+                name,
+            }) as TaskRef)
+        })
+        .collect();
+
+    let result = core.run(tasks).await;
+    assert!(matches!(
+        result,
+        Err(RuntimeError::ResourceLimitReached {
+            resource: "registered_tasks",
+            limit: 1,
+        })
+    ));
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        0,
+        "a deterministically oversized batch must not invoke Task::name"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn static_batch_that_cannot_fit_beside_subscribers_fails_without_waiting() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_calls = Arc::clone(&calls);
+    let task: TaskRef = TaskFn::arc("ownership-self-deadlock", move |_ctx| {
+        task_calls.fetch_add(1, Ordering::AcqRel);
+        async { Ok(()) }
+    });
+    let core = core_with_subs(
+        SupervisorConfig::default().with_max_registered_tasks(None),
+        vec![Arc::new(NoopSub)],
+    );
+    let tasks = (0..crate::core::deferred_drop::OWNERSHIP_CAPACITY)
+        .map(|_| TaskSpec::once(Arc::clone(&task)))
+        .collect();
+
+    let result = timeout(Duration::from_secs(1), core.run(tasks))
+        .await
+        .expect("an impossible self-owned batch must fail without waiting");
+    assert!(matches!(
+        result,
+        Err(RuntimeError::ResourceLimitReached {
+            resource: crate::core::deferred_drop::OWNERSHIP_RESOURCE,
+            limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+        })
+    ));
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        0,
+        "an impossible ownership batch must be rejected before task execution"
+    );
+}
+
+#[tokio::test]
+async fn task_name_panic_does_not_consume_static_run_lifecycle() {
+    struct PanickingName;
+
+    impl crate::Task for PanickingName {
+        fn name(&self) -> &str {
+            panic!("injected static task-name panic")
+        }
+
+        fn spawn(&self, _ctx: TaskContext) -> crate::BoxTaskFuture {
+            unreachable!("a task with invalid metadata must never be admitted")
+        }
+    }
+
+    let core = core(SupervisorConfig::default());
+    let bad: TaskRef = Arc::new(PanickingName);
+    let first = crate::core::panic_guard::guarded(core.run(vec![TaskSpec::once(bad)])).await;
+    assert!(
+        first.is_err(),
+        "the injected metadata panic must cross the static-run panic boundary"
+    );
+
+    let good: TaskRef = TaskFn::arc("after-name-panic", |_ctx| async { Ok(()) });
+    let second = timeout(Duration::from_secs(5), core.run(vec![TaskSpec::once(good)]))
+        .await
+        .expect("a valid retry must not hang");
+    assert_eq!(second.map_err(|error| error.as_label()), Ok(()));
+}
+
 #[tokio::test]
 async fn shutdown_panic_still_runs_cleanup_before_caching_result() {
     let (recorder, seen) = RecordingSub::new();
@@ -411,7 +820,12 @@ async fn shutdown_panic_still_runs_cleanup_before_caching_result() {
 #[tokio::test]
 async fn listener_join_failures_mark_shutdown_unclean() {
     for listener in ["registry", "subscriber"] {
-        let core = core(SupervisorConfig::default());
+        let core = if listener == "subscriber" {
+            let (subscriber, _seen) = RecordingSub::new();
+            core_with_subs(SupervisorConfig::default(), vec![subscriber])
+        } else {
+            core(SupervisorConfig::default())
+        };
         core.start();
         match listener {
             "registry" => core.registry.abort_listener_for_test(),
@@ -477,6 +891,7 @@ async fn shutdown_fence_processes_committed_add_before_drain() {
     let (outcome, outcome_rx) = oneshot::channel();
     let (_, add_reply) = core
         .enqueue_add_task(accepted_id, TaskSpec::restartable(accepted), Some(outcome))
+        .await
         .expect("the Add command must be committed before shutdown starts");
 
     let mut shutdown = Box::pin(core.shutdown());
@@ -535,7 +950,7 @@ async fn shutdown_fence_processes_whole_committed_batch_before_drain() {
         items.push(AddBatchItem {
             id,
             label: Arc::from(label),
-            spec: TaskSpec::restartable(task),
+            owned: owned_task(TaskSpec::restartable(task)),
         });
     }
     let batch_reply = core
@@ -593,7 +1008,7 @@ async fn committed_duplicate_batch_keeps_its_error_during_shutdown() {
         items.push(AddBatchItem {
             id: TaskId::next(),
             label: Arc::from(label),
-            spec: TaskSpec::once(task),
+            owned: owned_task(TaskSpec::once(task)),
         });
     }
     let batch_reply = core
@@ -674,7 +1089,7 @@ async fn backpressured_batch_loses_whole_admission_race_to_shutdown() {
         items.push(AddBatchItem {
             id,
             label: Arc::from(label),
-            spec: TaskSpec::once(task),
+            owned: owned_task(TaskSpec::once(task)),
         });
     }
 
@@ -906,6 +1321,7 @@ async fn remove_by_label_orders_after_an_already_queued_add() {
     let id = TaskId::next();
     let (_, add_reply) = core
         .enqueue_add_task(id, TaskSpec::restartable(task), None)
+        .await
         .expect("the Add command must enter the queue first");
 
     let mut remove = Box::pin(core.remove_by_label(Arc::from("ordered-label")));
@@ -951,6 +1367,7 @@ async fn cancel_by_label_orders_after_an_already_queued_add() {
     let id = TaskId::next();
     let (_, add_reply) = core
         .enqueue_add_task(id, TaskSpec::restartable(task), None)
+        .await
         .expect("the Add command must enter the queue first");
 
     let mut cancel = Box::pin(core.cancel_by_label(Arc::from("ordered-cancel-label")));
@@ -1168,8 +1585,28 @@ async fn dropping_add_after_enqueue_does_not_roll_command_back() {
         }
     });
 
+    let mut events = core.bus.subscribe();
     let mut add = Box::pin(core.add_task(TaskSpec::once(task)));
-    assert_pending_once(add.as_mut()).await;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            assert_pending_once(add.as_mut()).await;
+            let mut committed = false;
+            while let Ok(event) = events.try_recv() {
+                if event.kind == EventKind::TaskAddRequested
+                    && event.task.as_deref() == Some("dropped-after-enqueue")
+                {
+                    committed = true;
+                    break;
+                }
+            }
+            if committed {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the add must cross its documented command-acceptance boundary");
     drop(add);
 
     core.start();
@@ -1199,7 +1636,9 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
     });
     let rejected_id = TaskId::next();
     let (outcome, outcome_rx) = oneshot::channel();
-    let full_add = core.enqueue_add_task(rejected_id, TaskSpec::once(rejected), Some(outcome));
+    let full_add = core
+        .enqueue_add_task(rejected_id, TaskSpec::once(rejected), Some(outcome))
+        .await;
     match full_add {
         Err((RuntimeError::CommandQueueFull, Some(returned))) => {
             returned
@@ -1261,6 +1700,7 @@ async fn bounded_command_queue_reports_full_and_recovers_capacity() {
     let accepted_id = TaskId::next();
     let (_, accepted_reply) = core
         .enqueue_add_task(accepted_id, TaskSpec::restartable(accepted), None)
+        .await
         .expect("capacity must recover after the filler is received");
     assert!(matches!(
         timeout(Duration::from_secs(2), accepted_reply)
@@ -1344,7 +1784,10 @@ async fn closed_command_queue_returns_shutting_down_and_watcher() {
         async { Ok(()) }
     });
     let (outcome, outcome_rx) = oneshot::channel();
-    match core.enqueue_add_task(TaskId::next(), TaskSpec::once(task), Some(outcome)) {
+    match core
+        .enqueue_add_task(TaskId::next(), TaskSpec::once(task), Some(outcome))
+        .await
+    {
         Err((RuntimeError::ShuttingDown, Some(returned))) => {
             returned
                 .send(TaskOutcome::Rejected {
@@ -1378,7 +1821,7 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
     let res = core.add_task_with_id_watched(
         TaskId::next(),
         Arc::from("x"),
-        TaskSpec::once(task),
+        owned_task(TaskSpec::once(task)),
         Some(tx),
     );
     match res {
@@ -1386,12 +1829,12 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
             let crate::core::UncommittedWatchedAdd {
                 error,
                 label,
-                spec,
+                owned,
                 done,
             } = *uncommitted;
             assert!(matches!(error, RuntimeError::ShuttingDown));
             assert_eq!(&*label, "x");
-            assert_eq!(spec.name(), "x");
+            assert_eq!(owned.value.name(), "x");
             let returned = done.expect("the watcher must be returned with the task spec");
             returned
                 .send(crate::TaskOutcome::Rejected {
@@ -1418,13 +1861,13 @@ async fn controller_completion_waits_for_registry_membership_cleanup() {
         .add_task_with_id_watched(
             id,
             Arc::from("completion-cleanup"),
-            TaskSpec::once(task),
+            owned_task(TaskSpec::once(task)),
             None,
         )
         .expect("controller Add must enter the registry queue");
 
     assert!(matches!(reply.await, Ok(Ok(()))));
-    timeout(Duration::from_secs(2), completion.wait())
+    timeout(Duration::from_secs(2), completion.wait_physical())
         .await
         .expect("controller completion must arrive after terminal cleanup");
     assert!(
@@ -1467,6 +1910,46 @@ async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
         !saw_shutdown,
         "a signal-setup error must NOT masquerade as a shutdown request"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn signal_setup_error_bounds_a_preexisting_removal_reporter() {
+    let core = core(SupervisorConfig::default().with_grace(Duration::from_secs(60)));
+    core.start();
+
+    let controlled = controlled_cancellation_task("signal-setup-removing");
+    let id = core
+        .add_task(TaskSpec::once(Arc::clone(&controlled.task)))
+        .await
+        .expect("the stubborn task must register");
+    let cancel_core = Arc::clone(&core);
+    let cancel = tokio::spawn(async move { cancel_core.cancel(id).await });
+    timeout(
+        Duration::from_millis(10),
+        controlled.cancellation_seen.notified(),
+    )
+    .await
+    .expect("the prior cancellation must create a removal reporter");
+
+    let original = std::io::Error::other("bounded signal setup failure");
+    let result = timeout(
+        Duration::from_millis(10),
+        core.join_shutdown(ShutdownTrigger::SignalSetupFailed(Arc::new(original))),
+    )
+    .await
+    .expect("signal-setup cleanup must not wait for the reporter's original grace");
+    let source = signal_setup_source(result);
+    assert_eq!(source.to_string(), "bounded signal setup failure");
+    assert!(
+        matches!(
+            cancel.await.expect("the cancellation task must join"),
+            Ok(true)
+        ),
+        "the prior cancellation must resolve after forced reporter cleanup"
+    );
+
+    let cached = signal_setup_source(core.shutdown().await);
+    assert_eq!(cached.to_string(), "bounded signal setup failure");
 }
 
 #[tokio::test]

@@ -17,6 +17,10 @@ use super::{
 };
 use crate::{error::RuntimeError, events::Event, identity::TaskId};
 
+/// Completion cleanup gets a bounded burst before management/control ingress
+/// receives an explicit turn.
+pub(super) const COMPLETION_BURST_LIMIT: usize = 64;
+
 /// Listener-owned channel endpoints and the single listener task handle.
 pub(super) struct ListenerState {
     cmd_rx: Mutex<Option<mpsc::Receiver<RegistryCommand>>>,
@@ -56,7 +60,7 @@ impl Registry {
         reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }
 
-    /// Starts the registry listener and central actor scheduler tasks.
+    /// Starts the registry listener and physical reaper coordinator.
     ///
     /// The listener consumes receivers stored during construction.
     /// It listens to:
@@ -67,7 +71,7 @@ impl Registry {
     /// On runtime cancellation, it closes the command receiver and processes commands already buffered without waiting for uncommitted reservations.
     /// It then claims entries still in `Registered` with zero additional grace and waits for both existing and newly created join owners to finish.
     pub fn spawn_listener(self: Arc<Self>) {
-        self.scheduler.spawn(self.runtime_token.clone());
+        self.actors.spawn();
         let mut cmd_rx = self
             .listener
             .cmd_rx
@@ -94,24 +98,48 @@ impl Registry {
         let me = self.clone();
 
         let handle = tokio::spawn(async move {
+            let mut completion_burst = 0usize;
             loop {
+                if rt.is_cancelled() {
+                    break;
+                }
+                if completion_burst >= COMPLETION_BURST_LIMIT {
+                    if let Ok(control) = control_rx.try_recv() {
+                        me.handle_control(control, &mut cmd_rx).await;
+                        completion_burst = 0;
+                        continue;
+                    }
+                    if let Ok(command) = cmd_rx.try_recv() {
+                        me.handle_command(command).await;
+                        completion_burst = 0;
+                        continue;
+                    }
+                    completion_burst = 0;
+                }
                 tokio::select! {
-                    biased;
-
                     _ = rt.cancelled() => break,
 
                     completed = completion_rx.recv() => match completed {
-                        Some(id) => me.guarded("registry", me.cleanup_task(id)).await,
+                        Some(id) => {
+                            me.guarded("registry", me.cleanup_completed_task(id)).await;
+                            completion_burst = completion_burst.saturating_add(1);
+                        }
                         None => break,
                     },
 
                     control = control_rx.recv() => match control {
-                        Some(control) => me.handle_control(control, &mut cmd_rx).await,
+                        Some(control) => {
+                            me.handle_control(control, &mut cmd_rx).await;
+                            completion_burst = 0;
+                        }
                         None => break,
                     },
 
                     cmd = cmd_rx.recv() => match cmd {
-                        Some(command) => me.handle_command(command).await,
+                        Some(command) => {
+                            me.handle_command(command).await;
+                            completion_burst = 0;
+                        }
                         None => break,
                     }
                 }
@@ -143,14 +171,14 @@ impl Registry {
             RegistryCommand::Add {
                 id,
                 label,
-                spec,
+                owned,
                 outcome,
                 completion,
                 reply,
             } => {
                 self.guarded(
                     "registry",
-                    self.spawn_and_register(id, label, spec, outcome, completion, reply),
+                    self.spawn_and_register(id, label, *owned, outcome, completion, reply),
                 )
                 .await;
             }
@@ -210,21 +238,18 @@ impl Registry {
         let listener_clean = match handle.await {
             Ok(()) => true,
             Err(error) => {
-                self.bus.publish(Event::runtime_failure(
-                    "registry",
-                    format!("listener join failed: {error}"),
-                ));
+                self.bus.publish_lazy(|| {
+                    Event::runtime_failure("registry", format!("listener join failed: {error}"))
+                });
                 false
             }
         };
-        let scheduler_clean = self.scheduler.join().await;
-        if !scheduler_clean {
-            self.bus.publish(Event::runtime_failure(
-                "registry",
-                "actor scheduler join failed",
-            ));
+        let actors_clean = self.actors.join().await;
+        if !actors_clean {
+            self.bus
+                .publish_lazy(|| Event::runtime_failure("registry", "actor runtime join failed"));
         }
-        listener_clean && scheduler_clean
+        listener_clean && actors_clean
     }
 
     /// Aborts the listener so shutdown join-failure handling can be tested.
@@ -246,10 +271,8 @@ impl Registry {
     /// A panic while processing one command or completion is reported as a diagnostic event instead of killing the registry listener.
     async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
         if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
-            self.bus.publish(Event::runtime_failure(
-                who,
-                format!("listener panic: {msg}"),
-            ));
+            self.bus
+                .publish_lazy(|| Event::runtime_failure(who, format!("listener panic: {msg}")));
         }
     }
 }

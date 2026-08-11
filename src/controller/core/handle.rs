@@ -1,23 +1,109 @@
 //! Cloneable command-side handle for controller submissions and identity operations.
 
+use std::future::Future;
+
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     RuntimeError, TaskOutcome,
     controller::{ControllerError, ControllerSpec},
+    core::deferred_drop::{
+        DropCapacityError, DropReservation, OWNERSHIP_RESOURCE, OwnedTask, reserve, try_reserve,
+    },
+    events::{Bus, Event},
     identity::TaskId,
 };
+
+#[cfg(test)]
+use crate::core::deferred_drop::TestReservationSource;
 
 use super::{ControllerCommand, IdentityOperation, Submission};
 
 #[derive(Clone)]
 pub(crate) struct ControllerHandle {
     tx: mpsc::Sender<ControllerCommand>,
+    bus: Bus,
+    #[cfg(test)]
+    reservation_source: Option<TestReservationSource>,
 }
 
 impl ControllerHandle {
-    pub(super) fn new(tx: mpsc::Sender<ControllerCommand>) -> Self {
-        Self { tx }
+    pub(super) fn new(tx: mpsc::Sender<ControllerCommand>, bus: Bus) -> Self {
+        Self {
+            tx,
+            bus,
+            #[cfg(test)]
+            reservation_source: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_reservation_source(mut self, source: TestReservationSource) -> Self {
+        self.reservation_source = Some(source);
+        self
+    }
+
+    /// Waits for ownership without hiding controller closure behind global backpressure.
+    async fn reserve_or_closed(
+        &self,
+        reservation: impl Future<Output = Result<DropReservation, DropCapacityError>>,
+    ) -> Result<DropReservation, ControllerError> {
+        tokio::pin!(reservation);
+        tokio::select! {
+            biased;
+            _ = self.tx.closed() => Err(ControllerError::Closed),
+            result = &mut reservation => result.map_err(|error| ControllerError::ResourceLimit {
+                resource: OWNERSHIP_RESOURCE,
+                limit: error.limit(),
+            }),
+        }
+    }
+
+    /// Acquires destructor ownership before a task crosses the controller command boundary.
+    async fn own(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<OwnedTask<ControllerSpec>, ControllerError> {
+        #[cfg(test)]
+        let reservation = match &self.reservation_source {
+            Some(source) => self.reserve_or_closed(source.reserve()).await?,
+            None => self.reserve_or_closed(reserve()).await?,
+        };
+        #[cfg(not(test))]
+        let reservation = self.reserve_or_closed(reserve()).await?;
+        let retained = spec.task_spec().task().clone();
+        let mut owned = OwnedTask::new(spec, retained, reservation);
+        let bus = self.bus.clone();
+        owned.cleanup.set_panic_reporter(move |message| {
+            bus.publish_lazy(|| {
+                Event::runtime_failure("controller", format!("task_drop_panicked: {message}"))
+            });
+        });
+        Ok(owned)
+    }
+
+    /// Acquires destructor ownership without waiting.
+    fn try_own(&self, spec: ControllerSpec) -> Result<OwnedTask<ControllerSpec>, ControllerError> {
+        #[cfg(test)]
+        let reservation = match &self.reservation_source {
+            Some(source) => source.try_reserve(),
+            None => try_reserve(),
+        };
+        #[cfg(not(test))]
+        let reservation = try_reserve();
+        let reservation = reservation.map_err(|error| ControllerError::ResourceLimit {
+            resource: OWNERSHIP_RESOURCE,
+            limit: error.limit(),
+        })?;
+        let retained = spec.task_spec().task().clone();
+        let mut owned = OwnedTask::new(spec, retained, reservation);
+        let bus = self.bus.clone();
+        owned.cleanup.set_panic_reporter(move |message| {
+            bus.publish_lazy(|| {
+                Event::runtime_failure("controller", format!("task_drop_panicked: {message}"))
+            });
+        });
+        Ok(owned)
     }
 
     /// Sends a submission to the ordered controller command channel.
@@ -37,12 +123,13 @@ impl ControllerHandle {
         id: TaskId,
         spec: ControllerSpec,
     ) -> Result<TaskId, ControllerError> {
+        let owned = self.own(spec).await?;
         self.tx
-            .send(ControllerCommand::Submit(Submission {
+            .send(ControllerCommand::Submit(Box::new(Submission {
                 id,
-                spec,
+                owned,
                 done: None,
-            }))
+            })))
             .await
             .map_err(|_| ControllerError::Closed)?;
         Ok(id)
@@ -63,16 +150,16 @@ impl ControllerHandle {
         id: TaskId,
         spec: ControllerSpec,
     ) -> Result<TaskId, ControllerError> {
-        self.tx
-            .try_send(ControllerCommand::Submit(Submission {
-                id,
-                spec,
-                done: None,
-            }))
-            .map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => ControllerError::Full,
-                mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
-            })?;
+        let permit = self.tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => ControllerError::Full,
+            mpsc::error::TrySendError::Closed(()) => ControllerError::Closed,
+        })?;
+        let owned = self.try_own(spec)?;
+        permit.send(ControllerCommand::Submit(Box::new(Submission {
+            id,
+            owned,
+            done: None,
+        })));
         Ok(id)
     }
 
@@ -98,13 +185,14 @@ impl ControllerHandle {
         id: TaskId,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
+        let owned = self.own(spec).await?;
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(ControllerCommand::Submit(Submission {
+            .send(ControllerCommand::Submit(Box::new(Submission {
                 id,
-                spec,
+                owned,
                 done: Some(tx),
-            }))
+            })))
             .await
             .map_err(|_| ControllerError::Closed)?;
         Ok((id, rx))
@@ -129,17 +217,17 @@ impl ControllerHandle {
         id: TaskId,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
+        let permit = self.tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => ControllerError::Full,
+            mpsc::error::TrySendError::Closed(()) => ControllerError::Closed,
+        })?;
+        let owned = self.try_own(spec)?;
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .try_send(ControllerCommand::Submit(Submission {
-                id,
-                spec,
-                done: Some(tx),
-            }))
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => ControllerError::Full,
-                mpsc::error::TrySendError::Closed(_) => ControllerError::Closed,
-            })?;
+        permit.send(ControllerCommand::Submit(Box::new(Submission {
+            id,
+            owned,
+            done: Some(tx),
+        })));
         Ok((id, rx))
     }
 

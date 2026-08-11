@@ -2,9 +2,11 @@
 
 mod common;
 
+use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+use std::process::Command;
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -52,6 +54,69 @@ struct CallbackGateState {
 }
 
 type CallbackGate = Arc<(Mutex<CallbackGateState>, Condvar)>;
+
+#[derive(Default)]
+struct DestructorGateState {
+    entered: bool,
+    released: bool,
+    finished: bool,
+}
+
+type DestructorGate = Arc<(Mutex<DestructorGateState>, Condvar)>;
+
+struct BlockingDropTask {
+    started: Arc<tokio::sync::Notify>,
+    gate: DestructorGate,
+}
+
+#[derive(Debug)]
+struct PanickingSourceDrop {
+    dropped: Arc<AtomicBool>,
+}
+
+impl fmt::Display for PanickingSourceDrop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("panicking source destructor")
+    }
+}
+
+impl std::error::Error for PanickingSourceDrop {}
+
+impl Drop for PanickingSourceDrop {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+        panic!("injected source destructor panic");
+    }
+}
+
+impl Task for BlockingDropTask {
+    fn name(&self) -> &str {
+        "blocking-task-drop"
+    }
+
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        let started = Arc::clone(&self.started);
+        Box::pin(async move {
+            started.notify_one();
+            std::future::pending::<()>().await;
+            Ok(())
+        })
+    }
+}
+
+impl Drop for BlockingDropTask {
+    fn drop(&mut self) {
+        let (state, ready) = &*self.gate;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        ready.notify_all();
+        while !state.released {
+            state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        state.finished = true;
+        ready.notify_all();
+    }
+}
 
 struct BlockingSubscriber {
     gate: CallbackGate,
@@ -137,6 +202,35 @@ async fn wait_for_callback(
     })
     .await
     .is_ok()
+}
+
+async fn wait_for_destructor(
+    gate: &DestructorGate,
+    predicate: impl Fn(&DestructorGateState) -> bool,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let matches = {
+                let state = gate.0.lock().unwrap_or_else(|error| error.into_inner());
+                predicate(&state)
+            };
+            if matches {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn release_destructor(gate: &DestructorGate) {
+    let (state, ready) = &**gate;
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .released = true;
+    ready.notify_all();
 }
 
 fn served(grace: Duration) -> (SupervisorHandle, Arc<EventCollector>) {
@@ -643,6 +737,123 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn blocking_task_destructor_cannot_extend_public_shutdown() {
+    let grace = Duration::from_millis(20);
+    let (handle, _collector) = served(grace);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new((Mutex::new(DestructorGateState::default()), Condvar::new()));
+    let task: TaskRef = Arc::new(BlockingDropTask {
+        started: Arc::clone(&started),
+        gate: Arc::clone(&gate),
+    });
+
+    handle
+        .add(TaskSpec::once(task))
+        .await
+        .expect("the blocking-drop task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the blocking-drop task must start");
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(1), handle.shutdown()).await;
+    let destructor_entered = wait_for_destructor(&gate, |state| state.entered).await;
+
+    // Always release the isolated thread before evaluating assertions so a
+    // failed regression does not contaminate later tests in this process.
+    release_destructor(&gate);
+    let destructor_finished = wait_for_destructor(&gate, |state| state.finished).await;
+
+    assert!(
+        matches!(
+            shutdown,
+            Ok(Err(RuntimeError::GraceExceeded {
+                grace: reported,
+                ..
+            })) if reported == grace
+        ),
+        "shutdown must report its configured deadline without waiting for Task::drop: {shutdown:?}"
+    );
+    assert!(
+        destructor_entered,
+        "terminal cleanup must hand the final task reference to destructor isolation"
+    );
+    assert!(
+        destructor_finished,
+        "the isolated destructor must finish after the test releases it"
+    );
+}
+
+const PANICKING_SOURCE_DROP_CHILD: &str = "TASKVISOR_PANICKING_SOURCE_DROP_CHILD";
+
+#[test]
+fn panicking_error_source_destructor_cannot_break_public_shutdown() {
+    if std::env::var_os(PANICKING_SOURCE_DROP_CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the isolated Tokio runtime must build");
+        runtime.block_on(panicking_error_source_destructor_child());
+        return;
+    }
+
+    let status = Command::new(std::env::current_exe().expect("the test binary path must exist"))
+        .arg("--exact")
+        .arg("panicking_error_source_destructor_cannot_break_public_shutdown")
+        .arg("--nocapture")
+        .env(PANICKING_SOURCE_DROP_CHILD, "1")
+        .status()
+        .expect("the isolated destructor-panic test process must start");
+    assert!(
+        status.success(),
+        "the isolated destructor-panic regression failed: {status}"
+    );
+}
+
+async fn panicking_error_source_destructor_child() {
+    let (handle, _collector) = served(Duration::from_secs(1));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let task_started = Arc::clone(&started);
+    let source_dropped = Arc::clone(&dropped);
+    let task = TaskFn::arc("panicking-source-drop", move |ctx: TaskContext| {
+        let started = Arc::clone(&task_started);
+        let dropped = Arc::clone(&source_dropped);
+        async move {
+            started.notify_one();
+            ctx.cancelled().await;
+            Err(TaskError::fatal("terminal failure")
+                .with_source(Box::new(PanickingSourceDrop { dropped })))
+        }
+    });
+
+    handle
+        .add(TaskSpec::once(task))
+        .await
+        .expect("the source-drop task must register");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the source-drop task must start");
+
+    let shutdown = tokio::time::timeout(Duration::from_secs(1), handle.shutdown()).await;
+    let source_drop_attempted = tokio::time::timeout(Duration::from_secs(1), async {
+        while !dropped.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+
+    assert!(
+        matches!(shutdown, Ok(Ok(()))),
+        "a panicking source destructor must not poison shutdown: {shutdown:?}"
+    );
+    assert!(
+        source_drop_attempted,
+        "the isolated executor must attempt the source destructor"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn shutdown_empty_registry_returns_ok_all_stopped() {
     let (handle, collector) = served(SupervisorConfig::default().grace());
 
@@ -705,7 +916,9 @@ async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
     assert!(collector.find(EventKind::GraceExceeded).is_some());
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+// Static task metadata runs on a native isolation worker. Paused Tokio time
+// may auto-advance these assertion deadlines before that OS thread is scheduled.
+#[tokio::test(flavor = "current_thread")]
 async fn run_blocks_while_gated_task_alive_then_unblocks_on_completion() {
     let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
     let gate = Arc::new(tokio::sync::Notify::new());

@@ -10,13 +10,13 @@ use crate::{
     identity::TaskId,
 };
 
-use super::Controller;
+use super::{CapacityPending, Controller};
 
 impl Controller {
     /// Records ownership of one submission after it enters a slot queue.
     #[inline]
     fn index_queued(&self, id: TaskId, slot_name: &Arc<str>) {
-        let previous = self.queued_slots.insert(id, Arc::clone(slot_name));
+        let previous = self.state().queued_slots.insert(id, Arc::clone(slot_name));
         debug_assert!(
             previous.is_none(),
             "a controller TaskId cannot belong to two slot queues"
@@ -26,11 +26,12 @@ impl Controller {
     /// Removes one submission from the reverse index as it leaves queue ownership.
     #[inline]
     fn unindex_queued(&self, id: TaskId) {
-        self.queued_slots.remove(&id);
+        self.state().queued_slots.remove(&id);
     }
 
     /// Appends one submission and updates the reverse index in the same controller transition.
     #[inline]
+    #[cfg(test)]
     pub(super) fn push_queued(
         &self,
         slot: &mut SlotState,
@@ -40,6 +41,29 @@ impl Controller {
         let id = pending.id;
         slot.queue.push_back(pending);
         self.index_queued(id, slot_name);
+    }
+
+    /// Appends one submission when the aggregate pending budget has capacity.
+    #[inline]
+    pub(super) fn try_push_queued(
+        &self,
+        slot: &mut SlotState,
+        slot_name: &Arc<str>,
+        pending: PendingSubmission,
+    ) -> Result<(), Box<PendingSubmission>> {
+        let id = pending.id;
+        {
+            let mut state = self.state();
+            if let Some(limit) = self.config.max_total_pending()
+                && state.pending_len() >= limit.get()
+            {
+                return Err(Box::new(pending));
+            }
+            let previous = state.queued_slots.insert(id, Arc::clone(slot_name));
+            debug_assert!(previous.is_none());
+        }
+        slot.queue.push_back(pending);
+        Ok(())
     }
 
     /// Pops the next submission and removes its reverse-index entry.
@@ -64,14 +88,43 @@ impl Controller {
 
     /// Returns the slot state for `slot_name`, creating an idle slot when absent.
     #[inline]
+    #[cfg(test)]
     pub(super) fn get_or_create_slot(&self, slot_name: &str) -> Arc<Mutex<SlotState>> {
-        if let Some(slot) = self.slots.get(slot_name) {
+        let mut state = self.state();
+        if let Some(slot) = state.slots.get(slot_name) {
             return slot.clone();
         }
-        self.slots
+        state
+            .slots
             .entry(Arc::from(slot_name))
             .or_insert_with(|| Arc::new(Mutex::new(SlotState::new())))
             .clone()
+    }
+
+    /// Returns an existing slot or creates one without exceeding the aggregate slot budget.
+    ///
+    /// Production calls are serialized by the controller loop, so the limit check and insertion
+    /// form one controller-state transition.
+    #[inline]
+    pub(super) fn try_get_or_create_slot(
+        &self,
+        slot_name: &str,
+    ) -> Result<Arc<Mutex<SlotState>>, usize> {
+        let mut state = self.state();
+        if let Some(slot) = state.slots.get(slot_name) {
+            return Ok(slot.clone());
+        }
+        if let Some(limit) = self.config.max_controller_slots() {
+            let limit = limit.get();
+            if state.slots.len() >= limit {
+                return Err(limit);
+            }
+        }
+        Ok(state
+            .slots
+            .entry(Arc::from(slot_name))
+            .or_insert_with(|| Arc::new(Mutex::new(SlotState::new())))
+            .clone())
     }
 
     /// Removes an idle, empty slot from the slot map.
@@ -86,7 +139,7 @@ impl Controller {
         let collect = slot.is_idle() && slot.queue.is_empty();
         drop(slot);
         if collect {
-            self.slots.remove(&**slot_name);
+            self.state().slots.remove(&**slot_name);
         }
     }
 
@@ -107,6 +160,50 @@ impl Controller {
         }
     }
 
+    /// Atomically validates and indexes one registry-capacity waiter under the aggregate budget.
+    #[inline]
+    pub(super) fn try_index_capacity_pending(
+        &self,
+        id: TaskId,
+        pending: CapacityPending,
+    ) -> Result<(), (usize, Box<CapacityPending>)> {
+        let mut state = self.state();
+        if let Some(limit) = self.config.max_total_pending()
+            && state.pending_len() >= limit.get()
+        {
+            return Err((limit.get(), Box::new(pending)));
+        }
+        let previous = state.capacity_pending.insert(id, pending);
+        debug_assert!(previous.is_none());
+        Ok(())
+    }
+
+    /// Rolls back a capacity index before the controller transition becomes externally visible.
+    #[inline]
+    pub(super) fn unindex_capacity_pending(&self, id: TaskId) -> CapacityPending {
+        self.state()
+            .capacity_pending
+            .remove(&id)
+            .expect("the capacity waiter was indexed by this transition")
+    }
+
+    /// Builds the aggregate pending-limit rejection reason from the current controller state.
+    #[inline]
+    pub(super) fn pending_limit_reason(&self) -> String {
+        match self.config.max_total_pending() {
+            Some(limit) => {
+                let state = self.state();
+                format!(
+                    "{}: {}/{}",
+                    crate::reasons::CONTROLLER_PENDING_LIMIT,
+                    state.pending_len(),
+                    limit.get()
+                )
+            }
+            None => crate::reasons::CONTROLLER_PENDING_LIMIT.to_owned(),
+        }
+    }
+
     /// Implements latest-wins replacement for the queue head only.
     ///
     /// If the queue has a head, that head is rejected with [`RejectionKind::SupersededByReplace`] and replaced by the new submission.
@@ -122,26 +219,59 @@ impl Controller {
     ) -> Option<PendingSubmission> {
         let pending_id = pending.id;
         if let Some(head) = slot.queue.front_mut() {
-            let displaced = std::mem::replace(head, pending);
-            self.unindex_queued(displaced.id);
-            self.index_queued(pending_id, slot_name);
-            self.bus.publish(
+            let mut displaced = std::mem::replace(head, pending);
+            {
+                let mut state = self.state();
+                state.queued_slots.remove(&displaced.id);
+                let previous = state.queued_slots.insert(pending_id, Arc::clone(slot_name));
+                debug_assert!(previous.is_none());
+            }
+            self.bus.publish_lazy(|| {
                 Event::new(EventKind::ControllerRejected)
                     .with_task(Arc::clone(slot_name))
                     .with_id(displaced.id)
                     .with_rejection_kind(RejectionKind::SupersededByReplace)
-                    .with_reason(crate::reasons::SUPERSEDED_BY_REPLACE),
-            );
-            self.finalize_rejected(
+                    .with_reason(crate::reasons::SUPERSEDED_BY_REPLACE)
+            });
+            let terminal = self.finalize_rejected(
                 displaced.id,
                 RejectionKind::SupersededByReplace,
                 crate::reasons::SUPERSEDED_BY_REPLACE,
             );
+            if let Some(terminal) = terminal {
+                displaced.owned.cleanup.attach_outcome(terminal);
+            }
             Some(displaced)
         } else {
             slot.queue.push_front(pending);
             self.index_queued(pending_id, slot_name);
             None
         }
+    }
+
+    /// Implements latest-wins head replacement while enforcing aggregate pending depth.
+    ///
+    /// Replacing an existing head does not consume another pending slot. Pushing into an empty
+    /// queue does, and is rejected when the aggregate limit is exhausted.
+    pub(super) fn try_replace_head_or_push(
+        &self,
+        slot: &mut SlotState,
+        slot_name: &Arc<str>,
+        pending: PendingSubmission,
+    ) -> Result<Option<PendingSubmission>, Box<PendingSubmission>> {
+        if slot.queue.is_empty() {
+            let id = pending.id;
+            let mut state = self.state();
+            if let Some(limit) = self.config.max_total_pending()
+                && state.pending_len() >= limit.get()
+            {
+                return Err(Box::new(pending));
+            }
+            slot.queue.push_front(pending);
+            let previous = state.queued_slots.insert(id, Arc::clone(slot_name));
+            debug_assert!(previous.is_none());
+            return Ok(None);
+        }
+        Ok(self.replace_head_or_push(slot, slot_name, pending))
     }
 }

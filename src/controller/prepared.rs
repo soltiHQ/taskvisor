@@ -79,7 +79,8 @@ impl PreparedSubmission {
     ///
     /// # Errors
     ///
-    /// Returns [`ControllerError::Closed`] if the controller command channel is closed.
+    /// - [`ControllerError::ResourceLimit`] when process-wide task ownership admission has closed.
+    /// - [`ControllerError::Closed`] if the controller command channel is closed.
     pub async fn submit(self) -> Result<TaskId, ControllerError> {
         let Self {
             controller,
@@ -94,6 +95,7 @@ impl PreparedSubmission {
     /// # Errors
     ///
     /// - [`ControllerError::Full`] when the controller command queue has no capacity.
+    /// - [`ControllerError::ResourceLimit`] when no process-wide task ownership slot is available.
     /// - [`ControllerError::Closed`] when the controller command channel is closed.
     pub fn try_submit(self) -> Result<TaskId, ControllerError> {
         let Self {
@@ -110,7 +112,8 @@ impl PreparedSubmission {
     ///
     /// # Errors
     ///
-    /// Returns [`ControllerError::Closed`] if the controller command channel is closed.
+    /// - [`ControllerError::ResourceLimit`] when process-wide task ownership admission has closed.
+    /// - [`ControllerError::Closed`] if the controller command channel is closed.
     pub async fn submit_and_watch(self) -> Result<(TaskId, TaskWaiter), ControllerError> {
         let Self {
             controller,
@@ -126,6 +129,7 @@ impl PreparedSubmission {
     /// # Errors
     ///
     /// - [`ControllerError::Full`] when the controller command queue has no capacity.
+    /// - [`ControllerError::ResourceLimit`] when no process-wide task ownership slot is available.
     /// - [`ControllerError::Closed`] when the controller command channel is closed.
     pub fn try_submit_and_watch(self) -> Result<(TaskId, TaskWaiter), ControllerError> {
         let Self {

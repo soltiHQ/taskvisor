@@ -2,28 +2,125 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::completion::{OutcomeTx, RemovalCompletion};
-use super::scheduler::ActorHandle;
-use crate::identity::TaskId;
+use super::scheduler::{ActorHandle, AttemptReaper};
+use crate::{core::deferred_drop::DropBundle, identity::TaskId};
 
 /// Registry-owned actor handle for one registered task.
 pub(super) struct Handle {
-    pub(super) join: ActorHandle,
+    join: ActorHandle,
     pub(super) cancel: CancellationToken,
     pub(super) done: Option<OutcomeTx>,
     pub(super) completion: RemovalCompletion,
+    /// Keeps the user task alive until its actor has reached terminal cleanup.
+    ///
+    /// The wrapper prevents the final library-owned `Arc` from running a user
+    /// destructor on the actor task or registry listener.
+    cleanup: HandleCleanup,
+}
+
+impl Handle {
+    pub(super) fn new(
+        join: ActorHandle,
+        cancel: CancellationToken,
+        done: Option<OutcomeTx>,
+        completion: RemovalCompletion,
+        cleanup: HandleCleanup,
+    ) -> Self {
+        Self {
+            join,
+            cancel,
+            done,
+            completion,
+            cleanup,
+        }
+    }
+
+    pub(super) fn result_ready(&mut self) -> bool {
+        self.join.result_ready()
+    }
+
+    pub(super) fn join_mut(&mut self) -> &mut ActorHandle {
+        &mut self.join
+    }
+
+    pub(super) fn abort(&mut self) {
+        self.join.abort();
+    }
+
+    /// Separates reporting data only after the actor is physically joined or
+    /// has already transferred itself to the reaper.
+    ///
+    /// Dropping `join` first preserves the same ownership ordering as ordinary
+    /// `Handle` teardown before the charged terminal bundle is extracted.
+    pub(super) fn into_report_parts(self) -> (Option<OutcomeTx>, DropBundle) {
+        let Self {
+            join,
+            done,
+            cleanup,
+            ..
+        } = self;
+        drop(join);
+        (done, cleanup.into_bundle())
+    }
+}
+
+/// Couples raw registry teardown to the physical reaper.
+///
+/// `Handle::join` is declared before this field, so ordinary field teardown
+/// first lets `ActorHandle::drop` register physical ownership. This wrapper
+/// then attaches the already charged terminal bundle to that record. Normal
+/// removal extracts the bundle explicitly and leaves this Drop path empty.
+pub(super) struct HandleCleanup {
+    id: TaskId,
+    reaper: AttemptReaper,
+    completion: RemovalCompletion,
+    bundle: Option<DropBundle>,
+}
+
+impl HandleCleanup {
+    pub(super) fn new(
+        id: TaskId,
+        reaper: AttemptReaper,
+        completion: RemovalCompletion,
+        bundle: DropBundle,
+    ) -> Self {
+        Self {
+            id,
+            reaper,
+            completion,
+            bundle: Some(bundle),
+        }
+    }
+
+    pub(super) fn into_bundle(mut self) -> DropBundle {
+        self.bundle
+            .take()
+            .expect("registry handle owns one terminal cleanup bundle")
+    }
+}
+
+impl Drop for HandleCleanup {
+    fn drop(&mut self) {
+        let Some(bundle) = self.bundle.take() else {
+            return;
+        };
+        self.reaper
+            .attach_terminal(self.id, bundle, None, self.completion.clone());
+        self.completion.complete_logical();
+    }
 }
 
 /// Lifecycle phase of one authoritative registry entry.
 pub(super) enum EntryState {
     /// The actor can still be claimed by remove, completion, or shutdown.
-    Registered(Handle),
+    Registered(Box<Handle>),
     /// One owner has the actor handle and is waiting for its terminal join.
     Removing { completion: RemovalCompletion },
 }
@@ -31,6 +128,8 @@ pub(super) enum EntryState {
 /// Authoritative membership record kept until terminal join cleanup finishes.
 pub(super) struct Entry {
     pub(super) label: Arc<str>,
+    /// Authoritative indication that this task is currently inside an attempt.
+    pub(super) activity: Arc<AtomicBool>,
     pub(super) state: EntryState,
 }
 
@@ -91,10 +190,11 @@ impl PendingJoins {
     pub(super) fn dec(&self, id: TaskId) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = g.counts.get_mut(&id) {
-            *n -= 1;
-            if *n == 0 {
+            if *n <= 1 {
                 g.counts.remove(&id);
                 g.labels.remove(&id);
+            } else {
+                *n -= 1;
             }
         }
         if g.counts.is_empty() {

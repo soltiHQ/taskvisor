@@ -25,7 +25,9 @@
 //! ```
 //!
 //! A successful removal request does not release a slot.
-//! The controller starts queued work only after the terminal completion confirms that the previous actor is joined and its ID and label are removed.
+//! The controller starts queued work only after logical terminal reporting has
+//! removed the previous ID and label and the physical actor/reaper owner has
+//! released execution.
 //! Task lifecycle events are observability only and never decide slot state.
 //!
 //! Removal replies and completed identity-operation workers also return to the loop.
@@ -39,8 +41,10 @@
 //! - its Add command is committed and the watcher is handed to the runtime registry,
 //! - the submission is rejected and resolved as `TaskOutcome::Rejected`.
 //!
-//! Admission snapshots user-provided task metadata before parking the sender in controller state.
-//! A panic from `Task::name` is caught by the controller work-unit boundary and the ownership guard resolves the waiter as an admission failure.
+//! Admission evaluates user-provided task metadata on a fixed worker set. The
+//! controller retains the watcher and a cancellation record while that work is
+//! pending, so later commands and shutdown do not wait for `Task::name`.
+//! A metadata panic resolves the waiter as an admission failure.
 //!
 //! ## Internal Architecture
 //!
@@ -50,9 +54,11 @@
 //! Admission, identity operations, registry worker tracking, and slot queue mechanics live in dedicated workflow modules.
 //! Shutdown and introspection are separate read/drain concerns.
 
-use std::sync::{Arc, OnceLock, Weak};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, Weak},
+};
 
-use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -73,14 +79,52 @@ struct CapacityPending {
     pending: PendingSubmission,
 }
 
+/// Submission waiting for an isolated `Task::name` callback.
+struct MetadataPending {
+    sequence: u64,
+    event_task: Option<Arc<str>>,
+    cancel: CancellationToken,
+}
+
+/// Values released when an identity operation cancels metadata preparation.
+struct MetadataCancellation {
+    pending: MetadataPending,
+    done: Option<OutcomeTx>,
+    discarded: Option<metadata::MetadataResult>,
+    unblocked: Vec<metadata::MetadataResult>,
+}
+
+/// Controller-owned indexes changed by one serialized transition loop.
+#[derive(Default)]
+struct ControllerState {
+    slots: HashMap<Arc<str>, Arc<Mutex<SlotState>>>,
+    metadata_pending: HashMap<TaskId, MetadataPending>,
+    /// Live metadata identities in submission order. Retired sequences are
+    /// removed instead of accumulating one tombstone per canceled submission.
+    metadata_order: BTreeMap<u64, TaskId>,
+    metadata_ready: BTreeMap<u64, metadata::MetadataResult>,
+    next_metadata_sequence: u64,
+    queued_slots: HashMap<TaskId, Arc<str>>,
+    capacity_pending: HashMap<TaskId, CapacityPending>,
+    watchers: HashMap<TaskId, OutcomeTx>,
+}
+
+impl ControllerState {
+    fn pending_len(&self) -> usize {
+        self.metadata_pending.len() + self.queued_slots.len() + self.capacity_pending.len()
+    }
+}
+
 mod protocol;
 use protocol::{
-    AdmissionDecision, AdmissionResult, CompletionResult, ControllerCommand, IdentityOperation,
-    IdentityReply, RemovalResult, Submission,
+    AdmissionResult, CompletionResult, ControllerCommand, IdentityOperation, IdentityReply,
+    RemovalResult, Submission,
 };
 
 mod handle;
 pub(crate) use handle::ControllerHandle;
+
+mod metadata;
 
 mod task;
 use task::ControllerTask;
@@ -90,6 +134,9 @@ mod identity;
 mod lifecycle;
 mod queue;
 mod workers;
+use workers::ControllerWorkers;
+#[cfg(test)]
+use workers::WorkerSet;
 
 mod introspect;
 mod shutdown;
@@ -105,7 +152,7 @@ use crate::RuntimeError;
 #[cfg(test)]
 use std::future::Future;
 #[cfg(test)]
-use tokio::{sync::oneshot, task::JoinSet, time::Instant};
+use tokio::{sync::oneshot, time::Instant};
 
 /// Slot-based admission controller.
 ///
@@ -127,16 +174,11 @@ pub(crate) struct Controller {
     bus: Bus,
     /// Reliable signal fired when the runtime's shared shutdown operation starts.
     shutdown_token: CancellationToken,
-    /// Per-slot mutable state.
-    slots: DashMap<Arc<str>, Arc<Mutex<SlotState>>>,
-    /// Reverse index for submissions that are still waiting in a slot queue.
+    /// Per-slot state, reverse indexes, and pre-commit watcher ownership.
     ///
-    /// Admitting and running IDs are registry-owned and therefore intentionally absent.
-    queued_slots: DashMap<TaskId, Arc<str>>,
-    /// Payloads whose slots are admitting but whose registry Add has not committed yet.
-    capacity_pending: DashMap<TaskId, CapacityPending>,
-    /// Watched submissions not yet handed to the runtime registry.
-    watchers: DashMap<TaskId, OutcomeTx>,
+    /// This lock is never held across `.await`, event publication, reply delivery, or user-value
+    /// destruction. One lock makes aggregate limits and cross-index updates atomic.
+    state: StdMutex<ControllerState>,
     /// Ordered command sender cloned into `ControllerHandle`.
     tx: mpsc::Sender<ControllerCommand>,
     /// Single-use command receiver owned by the controller loop.
@@ -148,6 +190,16 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
+    /// Locks consolidated controller state, recovering after an internal panic.
+    fn state(&self) -> StdMutexGuard<'_, ControllerState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Clones one slot reference without extending the controller-state lock into async work.
+    fn slot(&self, name: &str) -> Option<Arc<Mutex<SlotState>>> {
+        self.state().slots.get(name).cloned()
+    }
+
     /// Creates a controller and its bounded ordered command channel.
     ///
     /// The controller is inert until [`run`](Self::run) is called.
@@ -160,10 +212,7 @@ impl Controller {
             supervisor: Arc::downgrade(supervisor),
             bus,
             shutdown_token,
-            slots: DashMap::new(),
-            queued_slots: DashMap::new(),
-            capacity_pending: DashMap::new(),
-            watchers: DashMap::new(),
+            state: StdMutex::new(ControllerState::default()),
             tx,
             rx: RwLock::new(Some(rx)),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
@@ -174,13 +223,28 @@ impl Controller {
     /// Resolves a parked watched submission as `Rejected`.
     ///
     /// This is a no-op for unwatched submissions and for watched submissions already handed to the runtime registry.
-    fn finalize_rejected(&self, id: TaskId, kind: RejectionKind, reason: &str) {
-        if let Some((_, tx)) = self.watchers.remove(&id) {
-            let _ = tx.send(TaskOutcome::Rejected {
+    fn finalize_rejected(
+        &self,
+        id: TaskId,
+        kind: RejectionKind,
+        reason: &str,
+    ) -> Option<TaskOutcome> {
+        let tx = self.state().watchers.remove(&id)?;
+        Self::send_rejected(Some(tx), kind, reason)
+    }
+
+    /// Delivers one controller rejection and returns a terminal value rejected by its receiver.
+    fn send_rejected(
+        done: Option<OutcomeTx>,
+        kind: RejectionKind,
+        reason: &str,
+    ) -> Option<TaskOutcome> {
+        done?
+            .send(TaskOutcome::Rejected {
                 kind,
                 reason: Arc::from(reason),
-            });
-        }
+            })
+            .err()
     }
 
     /// Marks the controller as no longer admitting or advancing queued work.
@@ -202,25 +266,29 @@ impl Controller {
 
     /// Rejects any watcher retained after normal or abnormal loop exit.
     fn finalize_remaining_watchers(&self) {
-        let pending: Vec<TaskId> = self.watchers.iter().map(|entry| *entry.key()).collect();
+        let pending: Vec<TaskId> = self.state().watchers.keys().copied().collect();
         for id in pending {
-            self.bus.publish(
+            self.bus.publish_lazy(|| {
                 Event::new(EventKind::ControllerRejected)
                     .with_id(id)
                     .with_rejection_kind(RejectionKind::ControllerShuttingDown)
-                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN),
-            );
-            self.finalize_rejected(
+                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN)
+            });
+            let undelivered = self.finalize_rejected(
                 id,
                 RejectionKind::ControllerShuttingDown,
                 crate::reasons::CONTROLLER_SHUTTING_DOWN,
             );
+            if let Some(outcome) = undelivered {
+                // Controller rejection outcomes contain no user-provided source value.
+                drop(outcome);
+            }
         }
     }
 
     /// Returns a cloneable handle for sending controller submissions.
     pub fn handle(&self) -> ControllerHandle {
-        ControllerHandle::new(self.tx.clone())
+        ControllerHandle::new(self.tx.clone(), self.bus.clone())
     }
 }
 

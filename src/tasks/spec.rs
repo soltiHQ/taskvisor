@@ -141,7 +141,10 @@ impl std::fmt::Debug for TaskSpec {
             .field("restart", &self.restart)
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
-            .field("task", &self.task.name())
+            // `Debug` must stay observational. Calling user-provided metadata
+            // here could panic or perform arbitrary work while an unrelated
+            // diagnostic is being formatted.
+            .field("task", &"<dyn Task>")
             .field("max_retries", &self.max_retries)
             .finish()
     }
@@ -153,7 +156,7 @@ impl std::fmt::Debug for ResolvedTaskSpec {
             .field("restart", &self.restart)
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
-            .field("task", &self.task.name())
+            .field("task", &"<dyn Task>")
             .field("max_retries", &self.max_retries)
             .finish()
     }
@@ -410,7 +413,9 @@ impl ResolvedTaskSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{JitterPolicy, TaskContext, TaskFn};
+    use std::sync::Arc;
+
+    use crate::{BoxTaskFuture, JitterPolicy, Task, TaskContext, TaskFn};
 
     fn task(name: &str) -> TaskRef {
         TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) })
@@ -611,5 +616,28 @@ mod tests {
                 field: "max_retries"
             }
         );
+    }
+
+    #[test]
+    fn debug_never_calls_user_task_metadata() {
+        struct PanickingName;
+
+        impl Task for PanickingName {
+            fn name(&self) -> &str {
+                panic!("Debug must not call Task::name")
+            }
+
+            fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+                unreachable!("formatting a spec must not spawn its task")
+            }
+        }
+
+        let spec = TaskSpec::once(Arc::new(PanickingName));
+        let rendered = format!("{spec:?}");
+        assert!(rendered.contains("<dyn Task>"));
+
+        let resolved = spec.resolve(&TaskDefaults::default());
+        let rendered = format!("{resolved:?}");
+        assert!(rendered.contains("<dyn Task>"));
     }
 }

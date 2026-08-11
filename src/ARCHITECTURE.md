@@ -40,7 +40,7 @@ flowchart TB
     Supervisor["Supervisor / SupervisorHandle"]
     Core["SupervisorCore"]
     Registry["Registry: authoritative task membership"]
-    Scheduler["Bounded actor scheduler"]
+    Actors["Actor runtime + physical reaper"]
     Actor["TaskActor: one registered task"]
     Runner["run_once: one attempt"]
     Task["Task + TaskSpec + policies"]
@@ -52,9 +52,9 @@ flowchart TB
     Supervisor --> Core
     Builder -->|constructs| Core
     Core -->|bounded command channel| Registry
-    Registry -->|bounded handoff| Scheduler
-    Scheduler -->|polls actor futures| Actor
-    Actor -->|spawns active attempt| Runner
+    Registry -->|spawn after commit| Actors
+    Actors -->|one bounded Tokio task| Actor
+    Actor -->|polls attempt inline| Runner
     Runner --> Task
     Core --> Shutdown
     Registry -->|direct one-shot| Waiter
@@ -89,25 +89,25 @@ flowchart TB
     Actor["TaskActor: one registered task"]
     Controller["Controller: per-slot admission"]
     Shutdown["ShutdownCoordinator"]
-    Bus["Bus: best-effort broadcast"]
-    Observability["Event relay: alive view + subscriber queues"]
+    Bus["Bus: bounded event ingress"]
+    Observability["Event relay: subscriber queues"]
 
     Registry -. lifecycle events .-> Bus
     Actor -. attempt events .-> Bus
     Controller -. admission events .-> Bus
     Shutdown -. shutdown events .-> Bus
-    Bus -. best-effort broadcast .-> Observability
+    Bus -. best-effort events .-> Observability
 ```
 
 The controller is compiled by the default `controller` feature, but it is a runtime opt-in: it exists only when a builder receives a `ControllerConfig`. Direct `add*` methods bypass slot admission; `submit*` methods use it.
 
-Controller admission does not turn transient registry queue saturation into a rejection. The slot remains `Admitting`, the controller retains the task payload and watcher, and a worker waits only for an owned registry queue permit. The controller loop remains available for later submissions, replacement, identity removal, and shutdown.
+Controller admission does not normally turn transient registry queue saturation into a rejection. The slot remains `Admitting`, the controller retains the task payload and watcher, and one bounded FIFO pump owns at most one registry reservation future. Removing a waiting ID drops its reservation future immediately. The controller loop remains available for later submissions, replacement, identity removal, and shutdown; exhaustion of the configured admission or aggregate pending budget is reported as a resource-limit rejection.
 
 `PreparedSubmission` is only a command-side hand-off. It allocates the controller submission's `TaskId` and holds its `ControllerSpec`, but it does not publish or enqueue anything. Consuming it sends the same ordered controller command as the ordinary `submit*` shortcuts. This lets an integrating application install `application ID -> TaskId` correlation before events for that `TaskId` can begin.
 
 ## Direct task lifecycle
 
-The registry, not the event stream, owns task identity and cleanup. A watched add uses direct replies in both directions: one reply for admission and one final outcome after the actor join and membership removal.
+The registry, not the event stream, owns task identity and cleanup. A watched add uses direct replies in both directions: one reply for admission and one final outcome after membership removal and outcome classification. Except for logical force-abort, the actor is physically joined first; a force-aborted actor remains reaper-owned until physical exit.
 
 ```mermaid
 sequenceDiagram
@@ -124,7 +124,7 @@ sequenceDiagram
     Core->>Queue: Add command + reply + outcome sender
     Queue->>Registry: listener receives command
     Registry->>Registry: prepare actor outside lock; index ID + name
-    Registry->>TaskActor: bounded scheduler handoff behind start gate
+    Registry->>TaskActor: spawn actor task behind start gate
     Registry-->>Core: direct Add decision
     Registry->>TaskActor: open start gate
     Core-->>Caller: TaskId + TaskWaiter
@@ -144,9 +144,11 @@ For a static `run(tasks)` batch, the registry indexes every accepted entry, atte
 
 ## One actor and its attempts
 
-`run_once` owns one attempt: task invocation, panic capture, the attempt timeout, and the attempt terminal event. 
+`run_once` owns one attempt: task invocation, panic capture, the attempt timeout, and the attempt terminal event.
 
-`TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts. Registered actor futures are data inside one central scheduler task. After a permit is acquired, the active attempt runs in its own Tokio task; an actor waiting for a permit or backoff does not consume another Tokio task.
+`TaskActor` owns the surrounding loop: restart policy, backoff, retry budget, and cancellation between attempts. Each accepted registration has one Tokio actor task, bounded by the process-wide ownership budget and optional registry limit. After a permit is acquired, `run_once` is polled inline by that actor and owns the permit and activity guard through attempt result classification and synchronous cleanup. Backoff retains the actor task but not an attempt permit.
+
+Force-abort is a logical registry deadline, not proof that an uncooperative Tokio task has physically stopped. If an attempt is stuck inside one synchronous poll, aborting its actor first reserves its name in the reaper and then transfers the whole actor `JoinHandle`, concurrency permit, activity guard, and physical-release latch. Public cancellation can complete at the logical deadline; controller slot reuse waits for physical release. Public shutdown does not await a non-empty reaper. The reaper continues ownership while the host Tokio runtime remains alive; destroying that runtime is an external lifetime boundary that Taskvisor cannot extend.
 
 The retry loop and actor exits are shown separately below. Repeated phase names refer to the same actor phases.
 
@@ -203,24 +205,26 @@ Important boundaries:
 - Attempt numbers start at `1`.
 - `max_retries` counts retries after the first failed attempt, not total attempts.
 - A success resets the failure retry counter.
-- A concurrency permit is held only while `run_once` is active.
+- A concurrency permit is held until the inline attempt physically exits; logical force-abort does not release it early.
 - Task panics caught by `run_once` become retryable `TaskError::Fail` values.
 - The actor returns an internal `ActorExitReason`; the registry maps it to `TaskOutcome` after joining the actor and removing its ID and name indexes.
-- Force-abort and an outer scheduler failure are cleanup results, not normal actor exits.
+- Force-abort and an outer actor-wrapper failure are cleanup results, not normal actor exits.
 
 ## Events and reliable outcomes are separate paths
 
-Events support diagnostics, metrics, and best-effort liveness views. They do not drive cleanup, watched outcomes, or controller slot ownership.
+Events support diagnostics and metrics. They do not drive attempt activity, cleanup, watched outcomes, or controller slot ownership.
 
 ```mermaid
 %%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
     Runtime["Runtime components"]
-    Bus["Broadcast Bus"]
+    Bus["Bounded event ingress"]
     Relay["Event relay"]
-    Alive["AliveTracker"]
     Queues["Per-subscriber bounded queues"]
     Subscribers["Subscriber callbacks"]
+
+    Activity["Registry attempt activity"]
+    Query["alive_snapshot / is_alive"]
 
     Cleanup["Registry terminal cleanup"]
     Reject["Controller rejection"]
@@ -228,10 +232,12 @@ flowchart LR
     Waiter["TaskWaiter"]
 
     Runtime -. best-effort events .-> Bus
-    Bus -. best-effort broadcast .-> Relay
-    Relay -. event-derived update .-> Alive
+    Bus -. single-consumer ring .-> Relay
     Relay -. bounded enqueue .-> Queues
     Queues -. dedicated worker thread .-> Subscribers
+
+    Runtime -->|RAII attempt guard| Activity
+    Activity --> Query
 
     Cleanup -->|direct final result| Outcome
     Reject -->|direct rejected result| Outcome
@@ -245,7 +251,7 @@ Use the following source according to the question being asked:
 | Is a task still registered or being removed? | `SupervisorHandle::list`, backed by the registry |
 | What final result did this watched task produce? | `TaskWaiter`, backed by a direct one-shot |
 | What happened for logging or metrics? | Events and subscribers |
-| Which tasks look alive from observed lifecycle events? | `alive_snapshot` / `is_alive`; these views may lag |
+| Which registered tasks are physically inside an attempt? | `alive_snapshot` / `is_alive`, backed by registry activity bits |
 | What is the current controller view? | `controller_snapshot`; it is a rolling diagnostic snapshot, not a transaction |
 
 "Reliable" here means that a watched result does not depend on the lossy event path. It does not add persistence across process termination.
@@ -261,6 +267,7 @@ flowchart LR
     AddDecision["Direct registry Add decision"]
     Completion["Terminal RemovalCompletion"]
     Shutdown["Runtime shutdown token"]
+    Metadata["Process-wide Task::name workers"]
     Loop["Single controller loop"]
     Slots["Per-slot state + queue"]
     Registry["SupervisorCore / Registry"]
@@ -268,6 +275,8 @@ flowchart LR
     Events["Best-effort controller events"]
 
     Commands --> Loop
+    Loop -->|bounded metadata job| Metadata
+    Metadata -->|sequence-ordered result| Loop
     AddDecision --> Loop
     Completion --> Loop
     Shutdown --> Loop
@@ -306,8 +315,10 @@ Policy behavior around those phases:
 - `Queue` appends work in FIFO order until `ControllerConfig::max_slot_queue` is reached.
 - `Replace` replaces the queued head and rejects the displaced head as `SupersededByReplace`. Existing FIFO work behind the head remains queued.
 - `DropIfRunning` rejects new work while the slot has an owner.
-- A successful removal request does not free the slot. Only terminal `RemovalCompletion`, after the registry has joined the actor and removed both identity indexes, frees it.
+- A successful removal request does not free the slot. The controller waits for both logical terminal reporting and physical actor/reaper release; only then can it free the slot.
 - A task name and a controller slot are different keys. The registry still enforces global task-name uniqueness.
+
+`Task::name` is synchronous user code. Static-run batches, direct adds, and controller submissions transfer already charged task ownership to the same two fixed process-wide metadata workers. A blocked callback therefore consumes bounded ownership and one metadata worker without blocking a Tokio worker or public shutdown. The controller loop continues processing identity operations while metadata is pending. Ready controller results are buffered by submission sequence and applied only as a contiguous ordered prefix, so a later fast callback cannot overtake an earlier slow callback. Canceling an earlier metadata-stage ID retires its sequence and unblocks the next ready submission. Metadata-stage records count against `max_total_pending`; their owned tasks also remain bounded by the process-wide ownership budget.
 
 ## Shared shutdown
 
@@ -341,6 +352,12 @@ flowchart LR
 
 Subscriber shutdown has its own timeout and happens after the task grace phase. Every common cleanup phase is attempted even if an earlier phase reports an internal failure. If explicitly requested OS signal setup fails, shutdown still closes admission and runs the common cleanup tail, but it does not run the normal task-drain branch. On Unix, Tokio's process-global handlers are not restored when listeners are dropped; this side effect exists only after the application calls `run_with_os_signals`. Dropping the last runtime owner is only a synchronous fallback: it closes admission and cancels tokens, but cannot await or report graceful cleanup.
 
+User `Drop` implementations are not part of the cooperative grace contract: synchronous Rust destructors cannot be interrupted safely. Taskvisor shares 1024 process-wide ownership slots across accepted tasks and configured subscribers. A task reservation follows controller queues, registry membership, logical force-abort, and the physical attempt reaper. A subscriber reservation is acquired atomically for the complete configured set before metadata callbacks and follows pending configuration, its dedicated callback worker, and detached physical completion. Terminal cleanup transfers retained final references and auxiliary terminal values to at most two process-wide destructor threads. Because every running or queued destructor bundle already owns a slot, their combined retained memory is strictly bounded by that admission budget.
+
+Ordinary async task admission waits for an ownership slot; fail-fast task admission and `SupervisorBuilder::try_build` return resource-limit errors. Subscriber builds reserve their complete batch without waiting, before calling subscriber names or queue capacities. Cancellation before task hand-off leaves destruction in the caller's execution context because the library has not accepted ownership yet. Once a watched outcome is delivered successfully, that outcome belongs to the caller and dropping its waiter destroys it in the caller's context.
+
+A destructor panic is caught after its panic payload is retained under the same charged slot. The executor permanently consumes that slot and closes ownership admission, waking current and future admission waiters with a resource-limit error instead of allowing repeated uncharged leaks. Blocking destructors can occupy the two isolation workers, but cannot extend the public shutdown deadline. Terminal cleanup removes membership before the finalizer hands the charged bundle to the reaper, decrements pending joins, completes the logical removal signals, and wakes the empty-registry barrier, even if terminal reporting unwinds. Physical completion is signaled separately, only after the actor/reaper owner has released the task.
+
 ## Where to make a change
 
 | Change                                                      | Start here                                                                                                                                                                                     | Verify here                                                                                                                           |
@@ -349,7 +366,7 @@ Subscriber shutdown has its own timeout and happens after the task grace phase. 
 | Attempt timeout, panic, or terminal event                   | [`core/runner.rs`](core/runner.rs)                                                                                                                                                             | unit tests in that module, [`tests/timeout.rs`](../tests/timeout.rs), [`tests/failure.rs`](../tests/failure.rs)                       |
 | Restart, retry, backoff, or cancellation between attempts   | [`core/actor.rs`](core/actor.rs), [`policies/`](policies)                                                                                                                                      | actor unit tests, [`tests/failure.rs`](../tests/failure.rs), [`tests/lifecycle.rs`](../tests/lifecycle.rs)                            |
 | Task identity, duplicate names, add/remove/cancel semantics | [`core/registry/`](core/registry), [`core/runtime/management.rs`](core/runtime/management.rs)                                                                                                  | [`tests/identity.rs`](../tests/identity.rs), [`tests/watch.rs`](../tests/watch.rs), [`tests/concurrency.rs`](../tests/concurrency.rs) |
-| Final watched outcomes                                      | [`core/outcome.rs`](core/outcome.rs), [`core/registry/removal.rs`](core/registry/removal.rs)                                                                                                   | [`tests/watch.rs`](../tests/watch.rs)                                                                                                 |
+| Final watched outcomes or destructor isolation              | [`core/outcome.rs`](core/outcome.rs), [`core/deferred_drop.rs`](core/deferred_drop.rs), [`core/registry/removal.rs`](core/registry/removal.rs)                                                   | [`tests/watch.rs`](../tests/watch.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                                     |
 | Event fields or delivery                                    | [`events/`](events), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs), [`subscribers/`](subscribers)                                                                               | [`tests/lifecycle.rs`](../tests/lifecycle.rs), subscriber unit tests                                                                  |
 | Per-slot queue/replace/reject behavior                      | [`controller/slot.rs`](controller/slot.rs), [`controller/core/admission.rs`](controller/core/admission.rs), [`controller/core/queue.rs`](controller/core/queue.rs)                             | [`tests/controller.rs`](../tests/controller.rs), controller unit tests                                                                |
 | Shutdown order or grace behavior                            | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/registry/removal.rs`](core/registry/removal.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |

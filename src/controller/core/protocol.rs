@@ -7,13 +7,13 @@ use tokio::sync::oneshot;
 use crate::{
     RuntimeError,
     controller::spec::ControllerSpec,
-    core::{ControllerAddPermit, OutcomeTx, RemovalCompletion},
+    core::{OutcomeTx, RemovalCompletion, deferred_drop::OwnedTask},
     identity::TaskId,
 };
 
 pub(super) enum ControllerCommand {
     /// Apply admission policy for one new submission.
-    Submit(Submission),
+    Submit(Box<Submission>),
     /// Start one identity operation after earlier controller commands are handled.
     ///
     /// Queued-work lookup happens inline in command order.
@@ -80,8 +80,8 @@ impl Drop for IdentityReply {
 pub(super) struct Submission {
     /// Pre-minted identity used for events, slot state, and final outcome correlation.
     pub(super) id: TaskId,
-    /// Admission policy, task spec, and optional slot key.
-    pub(super) spec: ControllerSpec,
+    /// Admission policy and task spec coupled to pre-reserved destructor ownership.
+    pub(super) owned: OwnedTask<ControllerSpec>,
     /// Optional watched-outcome sender for `submit_and_watch`.
     pub(super) done: Option<OutcomeTx>,
 }
@@ -92,16 +92,8 @@ pub(super) struct AdmissionResult {
     pub(super) id: TaskId,
     /// Slot that owns `id` during this admission stage.
     pub(super) slot_name: Arc<str>,
-    /// Capacity or registry decision for the current admission stage.
-    pub(super) decision: AdmissionDecision,
-}
-
-/// One stage completed by an admission worker.
-pub(super) enum AdmissionDecision {
-    /// A registry queue slot was reserved after transient backpressure.
-    Capacity(Result<ControllerAddPermit, RuntimeError>),
-    /// The committed Add reached its authoritative registry decision.
-    Registry(Result<RemovalCompletion, RuntimeError>),
+    /// The committed Add's authoritative registry decision.
+    pub(super) decision: Result<RemovalCompletion, RuntimeError>,
 }
 
 /// Reliable registry cleanup for one admitted slot owner.

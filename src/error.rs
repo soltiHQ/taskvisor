@@ -15,6 +15,48 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// [`TaskOutcome`](crate::TaskOutcome) can be cloned without requiring the original source error to implement `Clone`.
 pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Errors returned while building a stopped supervisor.
+///
+/// Building reserves process-wide ownership for every configured subscriber
+/// before Taskvisor calls subscriber metadata or stores those user values.
+/// Match with a wildcard arm because this enum and its data-carrying variants
+/// are non-exhaustive.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum BuildError {
+    /// A process-wide library-owned user-lifetime budget was exhausted.
+    #[error("resource limit reached for {resource}: {limit}")]
+    #[non_exhaustive]
+    ResourceLimitReached {
+        /// Stable resource name suitable for diagnostics.
+        resource: &'static str,
+        /// Effective process-wide maximum at the rejected build.
+        limit: usize,
+    },
+    /// A bounded async capacity exceeds the implementation's structural maximum.
+    #[error("{field} must not exceed {max}; got {value}")]
+    #[non_exhaustive]
+    CapacityTooLarge {
+        /// Stable configuration field name.
+        field: &'static str,
+        /// Rejected value.
+        value: usize,
+        /// Largest accepted value.
+        max: usize,
+    },
+}
+
+impl BuildError {
+    /// Returns a stable machine-readable label for logs and metrics.
+    #[must_use]
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            BuildError::ResourceLimitReached { .. } => "build_resource_limit_reached",
+            BuildError::CapacityTooLarge { .. } => "build_capacity_too_large",
+        }
+    }
+}
+
 /// Errors from supervisor lifecycle and management operations.
 ///
 /// These errors come from add, remove, cancel, shutdown, and run operations.
@@ -36,9 +78,12 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 pub enum RuntimeError {
     /// Shutdown grace period was exceeded.
     ///
-    /// Some managed task runners did not stop in time and were force-terminated.
-    /// Work detached by user code is outside this guarantee.
-    #[error("shutdown timeout {grace:?} exceeded; stuck: {stuck:?}; forcing termination")]
+    /// Some managed task runners did not stop cooperatively before the deadline.
+    /// Taskvisor committed their logical force-abort and retained physical
+    /// ownership in its reaper. Synchronous task code can keep running until it
+    /// returns control to Tokio.
+    /// Work detached by user code is outside this ownership guarantee.
+    #[error("shutdown timeout {grace:?} exceeded; logically force-aborted: {stuck:?}")]
     #[non_exhaustive]
     GraceExceeded {
         /// Configured shutdown grace duration.
@@ -53,6 +98,17 @@ pub enum RuntimeError {
     TaskAlreadyExists {
         /// Duplicate task name.
         name: Arc<str>,
+    },
+
+    /// A configured runtime resource budget or the shared process-wide
+    /// library-owned user-lifetime budget was exhausted.
+    #[error("resource limit reached for {resource}: {limit}")]
+    #[non_exhaustive]
+    ResourceLimitReached {
+        /// Stable resource name suitable for diagnostics.
+        resource: &'static str,
+        /// Effective maximum at the rejected admission point.
+        limit: usize,
     },
 
     /// A bounded management command queue has no free capacity.
@@ -73,6 +129,14 @@ pub enum RuntimeError {
         id: TaskId,
         /// Wait duration before timing out.
         timeout: Duration,
+    },
+
+    /// The reliable outcome channel closed without a terminal result.
+    #[error("final outcome for task {id} is unavailable")]
+    #[non_exhaustive]
+    OutcomeUnavailable {
+        /// Task identity whose outcome could not be delivered.
+        id: TaskId,
     },
 
     /// Explicit OS signal listener setup failed.
@@ -110,8 +174,10 @@ impl RuntimeError {
         match self {
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
+            RuntimeError::ResourceLimitReached { .. } => "runtime_resource_limit_reached",
             RuntimeError::CommandQueueFull => "runtime_command_queue_full",
             RuntimeError::TaskTerminationTimeout { .. } => "runtime_task_termination_timeout",
+            RuntimeError::OutcomeUnavailable { .. } => "runtime_outcome_unavailable",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
             RuntimeError::ShuttingDown => "runtime_shutting_down",
             RuntimeError::AlreadyRunning => "runtime_already_running",
@@ -366,6 +432,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_resource_error_preserves_public_diagnostics() {
+        let error = BuildError::ResourceLimitReached {
+            resource: "owned_user_lifetimes",
+            limit: 1024,
+        };
+        assert_eq!(error.as_label(), "build_resource_limit_reached");
+        assert_eq!(
+            error.to_string(),
+            "resource limit reached for owned_user_lifetimes: 1024"
+        );
+    }
+
+    #[test]
+    fn build_capacity_error_preserves_public_diagnostics() {
+        let error = BuildError::CapacityTooLarge {
+            field: "subscriber_queue_capacity",
+            value: 17,
+            max: 16,
+        };
+        assert_eq!(error.as_label(), "build_capacity_too_large");
+        assert_eq!(
+            error.to_string(),
+            "subscriber_queue_capacity must not exceed 16; got 17"
+        );
+    }
+
+    #[test]
     fn runtime_error_labels_are_stable() {
         let id = TaskId::next();
         let cases = [
@@ -389,6 +482,10 @@ mod tests {
                     timeout: Duration::from_secs(1),
                 },
                 "runtime_task_termination_timeout",
+            ),
+            (
+                RuntimeError::OutcomeUnavailable { id },
+                "runtime_outcome_unavailable",
             ),
             (
                 RuntimeError::SignalSetupFailed {

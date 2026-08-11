@@ -132,7 +132,7 @@ let outcome = waiter.wait().await?;
 Restart and backoff are the baseline.
 
 Taskvisor also provides:
-- **Cooperative shutdown with a deadline.** Tasks observe `TaskContext`; tasks that miss the grace period are force-aborted.
+- **Cooperative shutdown with a deadline.** Tasks observe `TaskContext`; after grace expires Taskvisor commits a logical force-abort and retains any still-running physical actor in its reaper.
 - **Reliable final outcomes.** `TaskWaiter` reports how watched work ended even when best-effort events are dropped.
 - **Typed lifecycle events.** Logs, metrics, traces, and live status consume one structured event model.
 - **Dynamic management.** Add, list, cancel, remove, and watch tasks through `SupervisorHandle`.
@@ -165,7 +165,7 @@ These type groups form the main API:
 | `TaskWaiter` and `TaskOutcome`         | Deliver the reliable final result of watched work.         |
 | `ControllerSpec` and `AdmissionPolicy` | Resolve queue, replace, or reject conflicts per slot.      |
 | `PreparedSubmission`                   | Expose a submission ID before controller events can start. |
-| `ControllerConfig`                     | Sets controller queue and command limits.                  |
+| `ControllerConfig`                     | Sets controller queues, execution budgets, and aggregate limits. |
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/soltiHQ/.github/main/assets/schema/taskvisor-process.png" alt="Taskvisor core lifecycle: the Supervisor runs one task attempt, then either schedules another after failure backoff or an optional interval, or produces a final outcome for watched tasks" width="556">
@@ -173,7 +173,7 @@ These type groups form the main API:
 
 The diagram shows common registered-task outcomes. `TaskOutcome` also distinguishes fatal failure, force-abort, and task-runner panic. Controller rejection produces `TaskOutcome::Rejected` before task registration.
 
-Retries for one task run in sequence. Two attempts for the same `TaskId` never run at the same time. Active task names must be unique; the name can be reused after terminal cleanup, with a new `TaskId`.
+Retries for one task run in sequence. Two attempts for the same `TaskId` never run at the same time. Active task names must be unique; the name can be reused with a new `TaskId` only after registry cleanup and any physical reaper reservation are both released.
 
 There are two runtime modes:
 
@@ -186,7 +186,7 @@ There are two runtime modes:
 
 `run_with_os_signals` is an explicit process-wide opt-in. On Unix, Tokio does not restore the default signal disposition when its listeners are dropped, so the application remains responsible for signal handling after that method returns. `run` and `run_until` never install signal listeners.
 
-`Supervisor::run(...).await == Ok(())` means the supervisor lifecycle and cleanup completed successfully. It does not mean that every task succeeded, and `run` does not return per-task outcomes. Register work through `add_and_watch` or `submit_and_watch` when application logic needs the final result.
+`Supervisor::run(...).await == Ok(())` means the bounded supervisor lifecycle and cleanup workflow completed successfully. It does not mean that every task succeeded, and it does not prove physical exit of a force-reaped synchronous poll, detached subscriber callback, or isolated user destructor. `run` does not return per-task outcomes. Register work through `add_and_watch` or `submit_and_watch` when application logic needs the final result.
 
 ## Choose task behavior
 
@@ -259,10 +259,10 @@ The joined shutdown path:
 1. Closes admission for new work.
 2. Sends cancellation to active tasks.
 3. Waits for the configured grace period.
-4. Force-aborts tasks that did not stop.
+4. Logically force-aborts tasks that did not stop; a synchronous poll remains reaper-owned until it physically returns.
 5. Drains subscriber queues for their separate shutdown timeout.
 
-Call `handle.shutdown().await` to wait for cleanup and receive its result. Dropping the last public owner starts non-blocking cancellation but cannot report cleanup errors.
+Call `handle.shutdown().await` to wait for the bounded shutdown workflow and receive its result. A force-reaped synchronous poll, detached subscriber callback, or isolated user destructor may remain physically active afterward. Dropping the last public owner starts non-blocking cancellation but cannot report cleanup errors.
 
 Dynamic management uses `TaskId`:
 
@@ -350,7 +350,7 @@ async fn submit_to_slot(
 
 `submit().await?` confirms controller intake; admission happens later. `submit_and_watch` returns a final outcome. A submission rejected before registry admission resolves to `TaskOutcome::Rejected`; admitted work resolves to the registered task's terminal outcome.
 
-Queue depth is bounded per slot. `Replace` changes only the queue head; FIFO items behind it remain queued. `controller_snapshot()` returns a best-effort, non-transactional view of slot status and queue depth.
+Queue depth is bounded per slot and across the controller. Registry-capacity waiters, identity-operation concurrency, and distinct slots have separate budgets. `Replace` changes only the queue head; FIFO items behind it remain queued. `controller_snapshot()` returns a best-effort, non-transactional view of slot status and queue depth.
 
 Slots govern admission, not lifecycle addressing. Cancellation and removal operate by `TaskId` or registered task name; there is no slot-wide cancel/remove operation. Stopping the current owner does not automatically purge a queued replacement in the same slot.
 
@@ -389,8 +389,10 @@ Main defaults:
 | Graceful task shutdown          | 60 seconds                                      |
 | Subscriber drain                | 5 seconds, shared by all subscriber queues      |
 | Global task-attempt concurrency | Unlimited                                       |
+| Registered and reaped actors    | 1024                                             |
 | Event bus capacity              | 1024                                            |
 | Registry command capacity       | 1024                                            |
+| Library-owned user lifetimes    | 1024 process-wide across tasks and subscribers |
 | Restart policy                  | On failure                                      |
 | Failure backoff                 | Exponential: 200 ms to 30 seconds, equal jitter |
 | Attempt timeout                 | None                                            |
@@ -406,6 +408,9 @@ Taskvisor defines an in-process lifecycle. Keep these boundaries explicit:
 - Watched outcomes are not durable after the process exits.
 - Cancellation depends on the task reaching an await point that observes `TaskContext`. Force-abort cannot stop synchronous code that blocks a runtime thread.
 - Subscriber callbacks may continue on their dedicated threads after the drain deadline. Taskvisor stops waiting and drops queued events, but it cannot interrupt synchronous user code already running.
+- User destructors run synchronously and cannot be interrupted. Taskvisor shares 1024 process-wide ownership slots across accepted tasks and configured subscribers, moves final library-owned destruction to two dedicated threads, and keeps public shutdown bounded. If a destructor panics, ownership admission fails closed with a resource-limit error; a blocking destructor occupies one isolation thread until it returns.
+- Static-run, direct-add, and controller task-name callbacks share two fixed process-wide metadata threads. A blocking `Task::name` retains its charged ownership slot but cannot block Tokio workers, controller identity operations, or shutdown. Controller results re-enter admission in submission order.
+- A successfully delivered watched outcome belongs to its caller. Dropping `TaskWaiter` after delivery destroys that outcome in the caller's execution context.
 - Periodic tasks use an interval after completion. They do not provide calendar scheduling or missed-run recovery.
 - The controller coordinates tasks inside one supervisor.
 - Controller slots are admission keys, not cancellation keys. There is no atomic "stop the current owner and purge its slot queue" operation.
@@ -417,11 +422,11 @@ The crate forbids unsafe Rust with `#![forbid(unsafe_code)]`.
 
 ## Feature flags
 
-The `controller` feature is enabled by default so the keyed admission API is present in the standard install. The controller still has no runtime effect unless configured with `with_controller`. Use `default-features = false` to omit it and its `dashmap` dependency.
+The `controller` feature is enabled by default so the keyed admission API is present in the standard install. The controller still has no runtime effect unless configured with `with_controller`. Use `default-features = false` to omit the keyed admission API.
 
 | Feature              | Default | Adds                                                          |
 |----------------------|---------|---------------------------------------------------------------|
-| `controller`         | yes     | Slot-based admission control; adds `dashmap`.                 |
+| `controller`         | yes     | Slot-based admission control.                                |
 | `tracing`            | no      | `TracingBridge` for the `tracing` ecosystem.                  |
 | `logging`            | no      | `LogWriter`, a simple event writer for demos and small tools. |
 | `tokio-util-interop` | no      | Access to the raw cancellation token in `TaskContext`.        |

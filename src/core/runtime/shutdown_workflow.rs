@@ -164,7 +164,8 @@ impl SupervisorCore {
             .operation_installed
             .store(true, Ordering::Release);
         if matches!(&trigger, ShutdownTrigger::Requested) {
-            self.bus.publish(Event::new(EventKind::ShutdownRequested));
+            self.bus
+                .publish_lazy(|| Event::new(EventKind::ShutdownRequested));
         }
         self.shutdown.started.cancel();
         drop(operation);
@@ -295,10 +296,9 @@ impl SupervisorCore {
 
     /// Reports an internal shutdown panic without interrupting later cleanup phases.
     fn report_shutdown_panic(&self, phase: &str, panic: String) {
-        self.bus.publish(Event::runtime_failure(
-            "shutdown_owner",
-            format!("{phase} panic: {panic}"),
-        ));
+        self.bus.publish_lazy(|| {
+            Event::runtime_failure("shutdown_owner", format!("{phase} panic: {panic}"))
+        });
     }
 
     /// Cancels tasks and waits for them within the configured grace window.
@@ -313,17 +313,17 @@ impl SupervisorCore {
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         self.close_admission_and_fence_registry().await?;
         let grace = self.settings.runtime.grace();
-        let effective_grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
         let started = tokio::time::Instant::now();
-        let mut stuck = self.registry.cancel_all_within(effective_grace).await;
-        let remaining = effective_grace.saturating_sub(started.elapsed());
+        let mut stuck = self.registry.cancel_all_within(grace).await;
+        let remaining = grace.saturating_sub(started.elapsed());
         stuck.extend(self.registry.wait_joins_within(remaining).await);
         if stuck.is_empty() {
             self.bus
-                .publish(Event::new(EventKind::AllStoppedWithinGrace));
+                .publish_lazy(|| Event::new(EventKind::AllStoppedWithinGrace));
             Ok(())
         } else {
-            self.bus.publish(Event::new(EventKind::GraceExceeded));
+            self.bus
+                .publish_lazy(|| Event::new(EventKind::GraceExceeded));
             Err(RuntimeError::GraceExceeded { grace, stuck })
         }
     }

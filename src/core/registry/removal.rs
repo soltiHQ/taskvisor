@@ -8,11 +8,11 @@ use super::{
     Registry,
     completion::{OutcomeTx, RemovalCompletion},
     protocol::{CancelDecision, CancelReply, RemoveReply},
-    scheduler::{ActorHandle, ActorJoinError},
+    scheduler::{ActorJoinError, AttemptReaper},
     state::{EntryState, Handle, Inner, PendingJoins},
 };
 use crate::{
-    core::{actor::ActorExitReason, outcome::TaskOutcome},
+    core::{actor::ActorExitReason, deferred_drop::DropBundle, outcome::TaskOutcome},
     events::{Bus, Event, EventKind},
     identity::TaskId,
 };
@@ -29,12 +29,138 @@ pub(super) struct RemovalReport {
     pub(super) outcome: Option<OutcomeTx>,
     pub(super) join: JoinCompletion,
     pub(super) completion: RemovalCompletion,
+    pub(super) cleanup: DropBundle,
+}
+
+/// Keeps an undelivered terminal outcome on the isolated destruction path even
+/// if event publication or future reporting code unwinds before channel send.
+struct OutcomeDropGuard<'a> {
+    outcome: Option<TaskOutcome>,
+    cleanup: &'a mut DropBundle,
+}
+
+impl<'a> OutcomeDropGuard<'a> {
+    fn new(outcome: TaskOutcome, cleanup: &'a mut DropBundle) -> Self {
+        Self {
+            outcome: Some(outcome),
+            cleanup,
+        }
+    }
+
+    fn get(&self) -> &TaskOutcome {
+        self.outcome
+            .as_ref()
+            .expect("the terminal outcome remains guarded until delivery")
+    }
+
+    fn take(&mut self) -> TaskOutcome {
+        self.outcome
+            .take()
+            .expect("the terminal outcome is delivered at most once")
+    }
+}
+
+impl Drop for OutcomeDropGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(outcome) = self.outcome.take() {
+            self.cleanup.attach_outcome(outcome);
+        }
+    }
+}
+
+/// Owns every user-bearing part of a terminal report before its first await.
+///
+/// If the reporting future is canceled while waiting for the registry lock,
+/// this guard still transfers the classified outcome and charged cleanup
+/// bundle to their terminal owners. The physical reaper therefore cannot be
+/// left holding an uncharged actor result.
+struct PendingTerminalReport<'a> {
+    id: TaskId,
+    outcome: Option<TaskOutcome>,
+    done: Option<OutcomeTx>,
+    cleanup: Option<DropBundle>,
+    reaper: AttemptReaper,
+    completion: RemovalCompletion,
+    pending_joins: &'a PendingJoins,
+}
+
+impl PendingTerminalReport<'_> {
+    fn take(&mut self) -> (TaskOutcome, Option<OutcomeTx>, DropBundle) {
+        (
+            self.outcome
+                .take()
+                .expect("one terminal outcome is classified"),
+            self.done.take(),
+            self.cleanup
+                .take()
+                .expect("one charged terminal bundle is retained"),
+        )
+    }
+}
+
+impl Drop for PendingTerminalReport<'_> {
+    fn drop(&mut self) {
+        let Some(mut cleanup) = self.cleanup.take() else {
+            return;
+        };
+        if let Some(outcome) = self.outcome.take() {
+            match self.done.take() {
+                Some(done) => {
+                    if let Err(undelivered) = done.send(outcome) {
+                        cleanup.attach_outcome(undelivered);
+                    }
+                }
+                None => cleanup.attach_outcome(outcome),
+            }
+        }
+        self.reaper
+            .attach_terminal(self.id, cleanup, None, self.completion.clone());
+        self.pending_joins.dec(self.id);
+        self.completion.complete_logical();
+    }
 }
 
 /// Registry-side work selected for one cancel command.
 struct CancelAction {
     decision: CancelDecision,
     handle: Option<Handle>,
+}
+
+/// Commits the non-negotiable tail of one terminal registry transition.
+///
+/// Reporting a watched outcome can transfer user-owned error sources, and a
+/// defensive future change could panic while publishing diagnostics. Keeping
+/// this tail in a drop guard prevents either case from stranding registry
+/// capacity or shutdown waiters.
+pub(super) struct TerminalFinalizer<'a> {
+    pub(super) id: TaskId,
+    pub(super) empty_notify: &'a Notify,
+    pub(super) pending_joins: &'a PendingJoins,
+    pub(super) state_completion: Option<RemovalCompletion>,
+    pub(super) report_completion: RemovalCompletion,
+    pub(super) is_empty: bool,
+    pub(super) terminal: Option<(AttemptReaper, DropBundle)>,
+}
+
+impl Drop for TerminalFinalizer<'_> {
+    fn drop(&mut self) {
+        if let Some((reaper, bundle)) = self.terminal.take() {
+            reaper.attach_terminal(
+                self.id,
+                bundle,
+                self.state_completion.clone(),
+                self.report_completion.clone(),
+            );
+        }
+        self.pending_joins.dec(self.id);
+        if let Some(completion) = &self.state_completion {
+            completion.complete_logical();
+        }
+        self.report_completion.complete_logical();
+        if self.is_empty {
+            self.empty_notify.notify_waiters();
+        }
+    }
 }
 
 impl Registry {
@@ -59,7 +185,6 @@ impl Registry {
     /// Returns labels of actors claimed here that had to be force-aborted.
     /// [`wait_joins_within`](Self::wait_joins_within) reports older join reporters that remain in flight.
     pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
-        let grace = grace.min(Duration::from_secs(60 * 60 * 24 * 365 * 30));
         let handles: Vec<(TaskId, Arc<str>, Handle, RemovalCompletion)> = {
             let mut st = self.state.write().await;
             let ids: Vec<TaskId> = st.tasks.keys().copied().collect();
@@ -76,44 +201,34 @@ impl Registry {
 
         let deadline = tokio::time::Instant::now() + grace;
         let mut stuck = Vec::new();
+        let reaper = self.actors.attempt_reaper();
 
-        for (id, label, h, removal_completion) in handles {
-            let mut join = h.join;
-            match tokio::time::timeout_at(deadline, &mut join).await {
-                Ok(res) => {
-                    Self::finish_removal(
-                        &self.state,
-                        &self.empty_notify,
-                        &self.pending_joins,
-                        &self.bus,
-                        RemovalReport {
-                            id,
-                            outcome: h.done,
-                            join: JoinCompletion::Joined(res),
-                            completion: removal_completion,
-                        },
-                    )
-                    .await;
-                }
+        for (id, label, mut handle, removal_completion) in handles {
+            let join = match tokio::time::timeout_at(deadline, handle.join_mut()).await {
+                Ok(res) => JoinCompletion::Joined(res),
                 Err(_elapsed) => {
-                    join.abort();
-                    let _ = join.await;
+                    handle.abort();
+                    let _ = handle.join_mut().await;
                     stuck.push(Arc::clone(&label));
-                    Self::finish_removal(
-                        &self.state,
-                        &self.empty_notify,
-                        &self.pending_joins,
-                        &self.bus,
-                        RemovalReport {
-                            id,
-                            outcome: h.done,
-                            join: JoinCompletion::ForceAborted,
-                            completion: removal_completion,
-                        },
-                    )
-                    .await;
+                    JoinCompletion::ForceAborted
                 }
-            }
+            };
+            let (done, cleanup) = handle.into_report_parts();
+            Self::finish_removal(
+                &self.state,
+                &self.empty_notify,
+                &self.pending_joins,
+                &self.bus,
+                &reaper,
+                RemovalReport {
+                    id,
+                    outcome: done,
+                    join,
+                    completion: removal_completion,
+                    cleanup,
+                },
+            )
+            .await;
         }
         let _ = tokio::time::timeout_at(deadline, self.pending_joins.wait_drained()).await;
         stuck
@@ -130,7 +245,7 @@ impl Registry {
         if let Some((_label, handle, completion)) = self.claim_task(id).await {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
+            self.spawn_join_report(id, handle, Some(self.grace), completion);
         } else {
             let _ = reply.send(Ok(false));
         }
@@ -157,16 +272,16 @@ impl Registry {
             let _ = reply.send(Ok(false));
             return;
         };
-        self.bus.publish(
+        self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskRemoveRequested)
                 .with_task(Arc::clone(&label))
-                .with_id(id),
-        );
+                .with_id(id)
+        });
 
         if let Some((handle, completion)) = claimed {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
+            self.spawn_join_report(id, handle, Some(self.grace), completion);
         } else {
             let _ = reply.send(Ok(false));
         }
@@ -183,11 +298,11 @@ impl Registry {
             }
         };
         if found {
-            self.bus.publish(
+            self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskRemoveRequested)
                     .with_id(id)
-                    .with_reason("manual_cancel"),
-            );
+                    .with_reason("manual_cancel")
+            });
         }
         self.resolve_cancel_action(action, reply);
     }
@@ -209,12 +324,12 @@ impl Registry {
             let _ = reply.send(Ok(None));
             return;
         };
-        self.bus.publish(
+        self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskRemoveRequested)
-                .with_task(label)
+                .with_task(Arc::clone(&label))
                 .with_id(id)
-                .with_reason("manual_cancel"),
-        );
+                .with_reason("manual_cancel")
+        });
         self.resolve_cancel_action(action, reply);
     }
 
@@ -270,7 +385,7 @@ impl Registry {
             let completion = decision.completion.clone();
             let id = decision.id;
             let _ = reply.send(Ok(Some(decision)));
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
+            self.spawn_join_report(id, handle, Some(self.grace), completion);
         } else {
             let _ = reply.send(Ok(Some(decision)));
         }
@@ -280,10 +395,38 @@ impl Registry {
     ///
     /// Called after the actor's reliable completion signal is received.
     /// Duplicate or stale completion signals are no-ops.
-    pub(super) async fn cleanup_task(&self, id: TaskId) {
-        if let Some((_label, handle, completion)) = self.claim_task(id).await {
-            self.spawn_join_report(id, handle.join, Some(self.grace), handle.done, completion);
+    pub(super) async fn cleanup_completed_task(&self, id: TaskId) {
+        let Some((_label, mut handle, removal_completion)) = self.claim_task(id).await else {
+            return;
+        };
+        if !handle.result_ready() {
+            // Completion identities are internal and normally follow the result
+            // send. Keep the listener responsive if a defensive early signal is
+            // nevertheless observed.
+            self.spawn_join_report(id, handle, Some(self.grace), removal_completion);
+            return;
         }
+        // The wrapper publishes the result before the completion id. Its tail
+        // contains no user values, so collecting it here is immediate in the
+        // genuine path and avoids a detached task, timer, or reaper record.
+        let collected = handle.join_mut().await;
+        let (done, cleanup) = handle.into_report_parts();
+        let reaper = self.actors.attempt_reaper();
+        Self::finish_removal(
+            &self.state,
+            &self.empty_notify,
+            &self.pending_joins,
+            &self.bus,
+            &reaper,
+            RemovalReport {
+                id,
+                outcome: done,
+                join: JoinCompletion::Joined(collected),
+                completion: removal_completion,
+                cleanup,
+            },
+        )
+        .await;
     }
 
     /// Changes one task from `Registered` to `Removing`.
@@ -321,7 +464,7 @@ impl Registry {
         let label = Arc::clone(&entry.label);
         pending_joins.inc(id);
         pending_joins.label(id, Arc::clone(&label));
-        Some((label, handle, completion))
+        Some((label, *handle, completion))
     }
 
     /// Joins an actor in a detached task and commits its final result.
@@ -333,39 +476,61 @@ impl Registry {
     fn spawn_join_report(
         &self,
         id: TaskId,
-        join: ActorHandle,
+        handle: Handle,
         force_after: Option<Duration>,
-        done: Option<OutcomeTx>,
         removal_completion: RemovalCompletion,
     ) {
         let bus = self.bus.clone();
         let state = Arc::clone(&self.state);
         let empty_notify = Arc::clone(&self.empty_notify);
         let pending = Arc::clone(&self.pending_joins);
+        let reaper = self.actors.attempt_reaper();
+        let runtime_token = self.runtime_token.clone();
         tokio::spawn(async move {
-            let mut join = join;
+            let mut handle = handle;
             let completion = match force_after {
-                Some(grace) => match tokio::time::timeout(grace, &mut join).await {
-                    Ok(res) => JoinCompletion::Joined(res),
-                    Err(_) => {
-                        join.abort();
-                        let _ = join.await;
-                        JoinCompletion::ForceAborted
+                Some(grace) => {
+                    tokio::select! {
+                        biased;
+                        res = handle.join_mut() => JoinCompletion::Joined(res),
+                        _ = runtime_token.cancelled() => {
+                            handle.abort();
+                            let _ = handle.join_mut().await;
+                            JoinCompletion::ForceAborted
+                        }
+                        _ = tokio::time::sleep(grace) => {
+                            handle.abort();
+                            let _ = handle.join_mut().await;
+                            JoinCompletion::ForceAborted
+                        }
                     }
-                },
-                None => JoinCompletion::Joined(join.await),
+                }
+                None => {
+                    tokio::select! {
+                        biased;
+                        res = handle.join_mut() => JoinCompletion::Joined(res),
+                        _ = runtime_token.cancelled() => {
+                            handle.abort();
+                            let _ = handle.join_mut().await;
+                            JoinCompletion::ForceAborted
+                        }
+                    }
+                }
             };
+            let (done, cleanup) = handle.into_report_parts();
 
             Self::finish_removal(
                 &state,
                 &empty_notify,
                 &pending,
                 &bus,
+                &reaper,
                 RemovalReport {
                     id,
                     outcome: done,
                     join: completion,
                     completion: removal_completion,
+                    cleanup,
                 },
             )
             .await;
@@ -380,6 +545,7 @@ impl Registry {
         empty_notify: &Notify,
         pending_joins: &PendingJoins,
         bus: &Bus,
+        reaper: &AttemptReaper,
         report: RemovalReport,
     ) {
         let RemovalReport {
@@ -387,7 +553,21 @@ impl Registry {
             outcome,
             join,
             completion: removal_completion,
+            mut cleanup,
         } = report;
+        let terminal_outcome = match join {
+            JoinCompletion::Joined(result) => Self::outcome_of(result, &mut cleanup),
+            JoinCompletion::ForceAborted => TaskOutcome::ForceAborted,
+        };
+        let mut pending_report = PendingTerminalReport {
+            id,
+            outcome: Some(terminal_outcome),
+            done: outcome,
+            cleanup: Some(cleanup),
+            reaper: reaper.clone(),
+            completion: removal_completion.clone(),
+            pending_joins,
+        };
         let removed = {
             let mut st = state.write().await;
             let is_removing = st
@@ -415,42 +595,30 @@ impl Registry {
             }
         };
         let Some((label, state_completion, is_empty)) = removed else {
-            pending_joins.dec(id);
-            removal_completion.complete();
             return;
         };
 
-        match join {
-            JoinCompletion::Joined(res) => {
-                Self::report_join(bus, id, &label, res, outcome);
-            }
-            JoinCompletion::ForceAborted => {
-                Self::report_outcome(bus, id, &label, TaskOutcome::ForceAborted, outcome);
-            }
-        }
-        pending_joins.dec(id);
+        let (terminal_outcome, outcome, cleanup) = pending_report.take();
 
-        // Wake completion waiters only after id and label membership is removed and the
-        // registry state lock is released. A controller may safely admit the next task now.
-        state_completion.complete();
-        removal_completion.complete();
-        if is_empty {
-            empty_notify.notify_waiters();
-        }
-    }
+        let mut finalizer = TerminalFinalizer {
+            id,
+            empty_notify,
+            pending_joins,
+            state_completion: Some(state_completion),
+            report_completion: removal_completion,
+            is_empty,
+            terminal: Some((reaper.clone(), cleanup)),
+        };
+        let cleanup = &mut finalizer
+            .terminal
+            .as_mut()
+            .expect("terminal ownership is installed")
+            .1;
 
-    /// Reports the result of a joined actor.
-    ///
-    /// Maps the join result once, then publishes and delivers the same final outcome.
-    fn report_join(
-        bus: &Bus,
-        id: TaskId,
-        name: &str,
-        res: Result<ActorExitReason, ActorJoinError>,
-        done: Option<OutcomeTx>,
-    ) {
-        let outcome = Self::outcome_of(res);
-        Self::report_outcome(bus, id, name, outcome, done);
+        Self::report_outcome(bus, id, &label, terminal_outcome, outcome, cleanup);
+        // Wake completion waiters only after id and label membership is removed,
+        // reporting has been attempted, and the registry state lock is released.
+        drop(finalizer);
     }
 
     /// Publishes one typed terminal event, delivers the watched outcome, then publishes registry removal.
@@ -463,48 +631,63 @@ impl Registry {
         name: &str,
         outcome: TaskOutcome,
         done: Option<OutcomeTx>,
+        cleanup: &mut DropBundle,
     ) {
-        let mut finished = Event::new(EventKind::TaskFinished)
-            .with_task(name)
-            .with_id(id)
-            .with_outcome_kind(outcome.kind());
-        match &outcome {
-            TaskOutcome::Failed {
-                reason, exit_code, ..
-            }
-            | TaskOutcome::Fatal {
-                reason, exit_code, ..
-            } => {
-                finished = finished.with_reason(Arc::clone(reason));
-                if let Some(code) = exit_code {
-                    finished = finished.with_exit_code(*code);
+        let mut outcome = OutcomeDropGuard::new(outcome, cleanup);
+        bus.publish_lazy(|| {
+            let mut finished = Event::new(EventKind::TaskFinished)
+                .with_task(name)
+                .with_id(id)
+                .with_outcome_kind(outcome.get().kind());
+            match outcome.get() {
+                TaskOutcome::Failed {
+                    reason, exit_code, ..
                 }
+                | TaskOutcome::Fatal {
+                    reason, exit_code, ..
+                } => {
+                    finished = finished.with_reason(Arc::clone(reason));
+                    if let Some(code) = exit_code {
+                        finished = finished.with_exit_code(*code);
+                    }
+                }
+                TaskOutcome::ForceAborted => {
+                    finished =
+                        finished.with_reason("task did not stop within grace; force-aborted");
+                }
+                TaskOutcome::Panicked => {
+                    finished = finished.with_reason("internal task runner panicked");
+                }
+                TaskOutcome::Completed | TaskOutcome::Canceled | TaskOutcome::Rejected { .. } => {}
             }
-            TaskOutcome::ForceAborted => {
-                finished = finished.with_reason("task did not stop within grace; force-aborted");
-            }
-            TaskOutcome::Panicked => {
-                finished = finished.with_reason("internal task runner panicked");
-            }
-            TaskOutcome::Completed | TaskOutcome::Canceled | TaskOutcome::Rejected { .. } => {}
+            finished
+        });
+        if let Some(done) = done
+            && let Err(undelivered) = done.send(outcome.take())
+        {
+            outcome.cleanup.attach_outcome(undelivered);
         }
-        bus.publish(finished);
-        if let Some(done) = done {
-            let _ = done.send(outcome);
-        }
-        bus.publish(
+        bus.publish_lazy(|| {
             Event::new(EventKind::TaskRemoved)
                 .with_task(name)
-                .with_id(id),
-        );
+                .with_id(id)
+        });
     }
 
     /// Maps a joined actor result to the public [`TaskOutcome`].
-    fn outcome_of(res: Result<ActorExitReason, ActorJoinError>) -> TaskOutcome {
+    fn outcome_of(
+        res: Result<ActorExitReason, ActorJoinError>,
+        cleanup: &mut DropBundle,
+    ) -> TaskOutcome {
         match res {
             Ok(ActorExitReason::Completed) => TaskOutcome::Completed,
             Ok(ActorExitReason::Canceled) => TaskOutcome::Canceled,
-            Ok(ActorExitReason::Panicked) => TaskOutcome::Panicked,
+            Ok(ActorExitReason::Panicked { cleanup_poisoned }) => {
+                if cleanup_poisoned {
+                    cleanup.poison();
+                }
+                TaskOutcome::Panicked
+            }
             Ok(ActorExitReason::Exhausted {
                 reason,
                 exit_code,
@@ -523,7 +706,12 @@ impl Registry {
                 exit_code,
                 source,
             },
-            Err(e) if e.is_panic() => TaskOutcome::Panicked,
+            Err(e) if e.is_panic() => {
+                if e.cleanup_poisoned() {
+                    cleanup.poison();
+                }
+                TaskOutcome::Panicked
+            }
             Err(_aborted) => TaskOutcome::ForceAborted,
         }
     }

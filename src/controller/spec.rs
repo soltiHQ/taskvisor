@@ -76,7 +76,9 @@ impl std::fmt::Debug for ControllerSpec {
         f.debug_struct("ControllerSpec")
             .field("admission", &self.admission)
             .field("task_spec", &self.task_spec)
-            .field("slot", &self.slot_name())
+            // Falling back to `Task::name` is part of admission, not Debug.
+            // Keep diagnostics free of user callbacks.
+            .field("slot", &self.slot.as_deref().unwrap_or("<task-name>"))
             .finish()
     }
 }
@@ -199,8 +201,10 @@ impl ControllerSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::TaskContext;
-    use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef};
+    use crate::{BackoffPolicy, BoxTaskFuture, RestartPolicy, Task, TaskFn, TaskRef};
 
     fn make_spec(name: &str) -> TaskSpec {
         let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
@@ -239,5 +243,24 @@ mod tests {
         assert_eq!(cs.slot_name(), "web");
         assert_eq!(cs.slot_override(), Some("web"));
         assert_eq!(cs.task_spec().name(), "runner-web-7");
+    }
+
+    #[test]
+    fn debug_does_not_resolve_implicit_slot_through_user_metadata() {
+        struct PanickingName;
+
+        impl Task for PanickingName {
+            fn name(&self) -> &str {
+                panic!("Debug must not call Task::name")
+            }
+
+            fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+                unreachable!("formatting a controller spec must not spawn its task")
+            }
+        }
+
+        let spec = ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingName)));
+        let rendered = format!("{spec:?}");
+        assert!(rendered.contains("<task-name>"));
     }
 }

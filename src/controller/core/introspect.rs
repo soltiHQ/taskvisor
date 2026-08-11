@@ -22,14 +22,17 @@ impl Controller {
     ///
     /// The result is sorted by slot key for stable output in tests, logs, and dashboards.
     pub(crate) async fn snapshot(&self) -> ControllerSnapshot {
-        let keys: Vec<Arc<str>> = self.slots.iter().map(|e| Arc::clone(e.key())).collect();
+        let tracked_slots: Vec<_> = {
+            let state = self.state();
+            state
+                .slots
+                .iter()
+                .map(|(key, slot)| (Arc::clone(key), Arc::clone(slot)))
+                .collect()
+        };
 
-        let mut slots = Vec::with_capacity(keys.len());
-        for key in keys {
-            let Some(slot_arc) = self.slots.get(&*key).map(|e| e.clone()) else {
-                continue;
-            };
-
+        let mut slots = Vec::with_capacity(tracked_slots.len());
+        for (key, slot_arc) in tracked_slots {
             let slot = slot_arc.lock().await;
             let phase = slot.phase();
             let (status, status_for) = match phase {

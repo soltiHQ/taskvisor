@@ -1,19 +1,20 @@
 //! # Runtime coordinator
 //!
-//! [`SupervisorCore`] connects the registry, event bus, subscribers, alive tracker, and shutdown state behind the public [`Supervisor`](super::supervisor::Supervisor).
+//! [`SupervisorCore`] connects the registry, event ingress, subscribers, and shutdown state behind the public [`Supervisor`](super::supervisor::Supervisor).
 //!
 //! ## Data Paths
 //!
 //! | Path                | Route                                                                                              |
 //! |---------------------|----------------------------------------------------------------------------------------------------|
 //! | Management          | handle -> core -> bounded registry queue -> registry -> direct reply                               |
-//! | Events              | runtime components -> event bus -> event relay -> alive tracker and subscriber queues              |
+//! | Events              | runtime components -> bounded event ingress -> event relay -> subscriber queues                     |
+//! | Attempt activity    | actor attempt guard -> registry atomic activity bit -> handle query                                  |
 //! | Shared shutdown     | winning trigger -> shared owner -> admission fence -> task drain when applicable -> common cleanup |
 //! | Last-owner fallback | close management admission -> cancel shutdown and runtime tokens; no shared result                 |
 //!
 //! Management commands use direct replies.
 //! They do not depend on the best-effort event bus.
-//! Alive snapshots do use the event bus and may lag.
+//! Attempt-activity queries read registry-owned state and do not depend on event delivery.
 //!
 //! ## Modes
 //!
@@ -35,7 +36,7 @@
 //! - Static `run()` tasks are accepted or rejected as one batch.
 //! - Registry membership is keyed by `TaskId`.
 //! - Static run methods share one single-shot lifecycle. A second call returns `RuntimeError::AlreadyRunning`.
-//! - `snapshot` and `is_alive` are best-effort event-based views.
+//! - `snapshot` and `is_alive` read authoritative per-entry attempt activity.
 //! - `start()` is idempotent.
 
 mod event_relay;
@@ -59,7 +60,6 @@ use tokio_util::sync::CancellationToken;
 use self::shutdown_workflow::ShutdownCoordinator;
 use crate::core::{
     SupervisorConfig, TaskDefaults,
-    alive::AliveTracker,
     registry::{Registry, RegistryCommand},
 };
 use crate::{events::Bus, subscribers::SubscriberSet};
@@ -71,7 +71,6 @@ pub(crate) struct SupervisorCore {
     settings: CoreSettings,
     pub(super) bus: Bus,
     subs: Arc<SubscriberSet>,
-    alive: Arc<AliveTracker>,
     registry: Arc<Registry>,
     runtime_token: CancellationToken,
     started: AtomicBool,
@@ -79,6 +78,8 @@ pub(crate) struct SupervisorCore {
     running: AtomicBool,
     shutting_down: AtomicBool,
     shutdown: ShutdownCoordinator,
+    #[cfg(test)]
+    ownership_source: std::sync::Mutex<Option<crate::core::deferred_drop::TestReservationSource>>,
     #[cfg(feature = "controller")]
     controller: std::sync::OnceLock<std::sync::Weak<crate::controller::Controller>>,
     admission_gate: std::sync::Mutex<()>,
@@ -119,7 +120,6 @@ impl SupervisorCore {
         settings: CoreSettings,
         bus: Bus,
         subs: Arc<SubscriberSet>,
-        alive: Arc<AliveTracker>,
         registry: Arc<Registry>,
         runtime_token: CancellationToken,
         cmd_tx: mpsc::Sender<RegistryCommand>,
@@ -128,7 +128,6 @@ impl SupervisorCore {
             settings,
             bus,
             subs,
-            alive,
             registry,
             runtime_token,
             started: AtomicBool::new(false),
@@ -136,6 +135,8 @@ impl SupervisorCore {
             running: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             shutdown: ShutdownCoordinator::new(),
+            #[cfg(test)]
+            ownership_source: std::sync::Mutex::new(None),
             #[cfg(feature = "controller")]
             controller: std::sync::OnceLock::new(),
             admission_gate: std::sync::Mutex::new(()),

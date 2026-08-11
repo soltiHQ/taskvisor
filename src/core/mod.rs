@@ -3,6 +3,7 @@
 //! This module contains the public runtime types:
 //!
 //! - [`Supervisor`] and [`SupervisorBuilder`] create and start a runtime.
+//! - [`BuildError`](crate::BuildError) reports process-wide ownership exhaustion while building.
 //! - [`SupervisorHandle`] manages tasks in dynamic mode.
 //! - [`SupervisorConfig`] sets runtime limits.
 //! - [`TaskDefaults`] sets inherited task behavior.
@@ -17,11 +18,12 @@
 //! | Direct `add*`, label operations, and identity stops without a controller | `SupervisorHandle` -> registry -> direct reply                                  |
 //! | `submit*` and identity stops with a controller                           | `SupervisorHandle` -> controller -> registry when needed                        |
 //! | Watched final result                                                     | registry or controller -> direct one-shot -> `TaskWaiter`                       |
-//! | Observability                                                            | runtime components -> event bus -> event relay -> alive tracker and subscribers |
+//! | Observability                                                            | runtime components -> bounded event ingress -> event relay -> subscribers       |
+//! | Attempt activity                                                         | attempt guard -> registry activity bit -> handle query                          |
 //!
 //! The registry is the source of truth for registered identities and names.
 //! Events are for observability and may be lost when consumers are slow.
-//! Alive snapshots are based on those events. They can lag or miss state.
+//! Attempt-activity queries are backed by registry state and are independent of events.
 //!
 //! ## When a Command Returns
 //!
@@ -29,15 +31,15 @@
 //! |------------|---------------------------------------------------------------------------------------------|
 //! | `add*`     | The registry accepted or rejected the task. The first attempt may not have started yet.     |
 //! | `remove*`  | Whether this caller claimed the stop request. Registered task cleanup may still be running. |
-//! | `cancel*`  | Known work reached terminal cleanup, unless the caller's explicit wait timeout expired.     |
-//! | `shutdown` | Shared runtime cleanup finished. The result reports its final status.                       |
+//! | `cancel*`  | Known work reached logical terminal cleanup, unless the explicit wait timeout expired.     |
+//! | `shutdown` | The bounded shared cleanup workflow finished. The result reports its final status.          |
 //!
 //! Regular management methods wait for capacity in every bounded queue they use.
 //! Their `try_*` versions fail fast at those queue boundaries.
 //!
 //! After a command is accepted, both forms may still wait for a direct decision or terminal cleanup.
 //! [`SupervisorHandle::list`] reads authoritative registry membership.
-//! [`SupervisorHandle::alive_snapshot`] and [`SupervisorHandle::is_alive`] are best-effort views built from events.
+//! [`SupervisorHandle::alive_snapshot`] and [`SupervisorHandle::is_alive`] read authoritative attempt activity from registry entries.
 //!
 //! ## Important Rules
 //!
@@ -45,7 +47,8 @@
 //! - [`Supervisor::run`] and [`Supervisor::run_until`] do not install process signal handlers.
 //! - Attempts for one registered task are sequential.
 //! - New task admission closes when shutdown starts.
-//! - Explicit shutdown returns after task, listener, and subscriber cleanup.
+//! - Explicit shutdown completes the bounded task, listener, and subscriber cleanup workflow.
+//! - A force-reaped synchronous task, detached subscriber callback, or isolated user destructor can remain physically active afterward.
 //! - Dropping the last public owner only starts best-effort cancellation.
 //! - Event sequence numbers help sort observations, but do not prove causal order between concurrent tasks.
 
@@ -59,6 +62,9 @@ mod builder;
 pub use builder::SupervisorBuilder;
 
 mod config;
+pub(crate) use config::MAX_ASYNC_CAPACITY;
+#[cfg(feature = "controller")]
+pub(crate) use config::validate_async_capacity;
 pub use config::{ConfigError, SupervisorConfig};
 
 mod task_defaults;
@@ -73,10 +79,11 @@ pub use supervisor::Supervisor;
 mod owner;
 pub(crate) use owner::RuntimeOwner;
 
+pub(crate) mod deferred_drop;
 pub(crate) mod panic_guard;
+pub(crate) mod task_metadata;
 
 mod actor;
-mod alive;
 mod runner;
 mod shutdown;
 
@@ -94,7 +101,7 @@ pub(crate) use runtime::ControllerAddPermit;
 pub(crate) struct UncommittedWatchedAdd {
     pub(crate) error: crate::RuntimeError,
     pub(crate) label: std::sync::Arc<str>,
-    pub(crate) spec: crate::TaskSpec,
+    pub(crate) owned: deferred_drop::OwnedTask<crate::TaskSpec>,
     pub(crate) done: Option<registry::OutcomeTx>,
 }
 

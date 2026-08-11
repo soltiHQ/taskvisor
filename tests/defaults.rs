@@ -71,7 +71,9 @@ async fn fully_inherited_spec_uses_default_restart_policy() {
     handle.shutdown().await.expect("shutdown must join");
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+// Task metadata runs on a native isolation worker. Paused Tokio time may
+// auto-advance the outer timeout before that OS thread is scheduled.
+#[tokio::test(flavor = "current_thread")]
 async fn static_batch_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())
@@ -184,7 +186,9 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
 }
 
 #[cfg(feature = "controller")]
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+// Controller submission acknowledges command intake before its native
+// metadata worker completes, so a paused-clock watchdog can race that worker.
+#[tokio::test(flavor = "current_thread")]
 async fn controller_admission_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())

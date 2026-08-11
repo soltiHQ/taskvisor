@@ -57,11 +57,13 @@
 //! Cancellation is cooperative first.
 //! A long-running task should await [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`], then return [`TaskError::Canceled`].
 //! During shutdown, taskvisor waits for the configured grace period.
-//! It aborts tasks that still have not stopped.
+//! It commits a logical force-abort for tasks that still have not stopped.
+//! A synchronous poll can remain physically active under reaper ownership; its name and execution resources stay reserved until it returns control to Tokio.
 //!
 //! Dropping one supervisor or handle clone does not stop the runtime.
 //! Dropping the last public owner sends best-effort cancellation, but cannot wait for cleanup.
-//! Call [`SupervisorHandle::shutdown`] when cleanup must be complete before your code continues.
+//! Call [`SupervisorHandle::shutdown`] to wait for the bounded shutdown workflow and receive its result.
+//! A force-reaped synchronous task, detached subscriber callback, or isolated user destructor may remain physically active after shutdown returns.
 //!
 //! ## Events or Final Outcomes?
 //!
@@ -72,7 +74,8 @@
 //! A [`TaskWaiter`] uses a direct completion channel.
 //! Event-bus lag does not affect it.
 //!
-//! It normally returns the final [`TaskOutcome`] after retries and registry cleanup;
+//! It normally returns the final [`TaskOutcome`] after retries and logical registry cleanup;
+//! [`TaskOutcome::ForceAborted`] can arrive before physical actor exit.
 //! it returns a runtime error if the completion channel closes first.
 //!
 //! Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast `try_*` form.
@@ -107,7 +110,7 @@
 //! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]         |
 //! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                        |
 //! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]           |
-//! | Admit keyed work | [`ControllerSpec`], [`PreparedSubmission`], [`AdmissionPolicy`], [`ControllerConfig`] |
+//! | Admit keyed work | `ControllerSpec`, `PreparedSubmission`, `AdmissionPolicy`, `ControllerConfig` |
 //! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]                     |
 //!
 //! Main types are re-exported at the crate root.
@@ -117,7 +120,7 @@
 //! ## Keyed Admission
 //!
 //! The default `controller` feature provides per-slot admission. Configure it with
-//! [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`] that
+//! `SupervisorBuilder::with_controller`, then submit a `ControllerSpec` that
 //! queues, replaces, or rejects work when the slot already has an owner.
 //! Different slots are independent, subject to the supervisor's global limits.
 //!
@@ -197,7 +200,7 @@ pub mod policies;
 pub use policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
 pub mod error;
-pub use error::{BoxError, Error, RuntimeError, SharedError, TaskError};
+pub use error::{BoxError, BuildError, Error, RuntimeError, SharedError, TaskError};
 
 pub mod events;
 pub use events::{BackoffSource, Event, EventKind, RejectionKind};

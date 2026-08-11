@@ -1,62 +1,72 @@
-//! Lossy event-bus relay, alive tracking, and subscriber listener lifecycle.
+//! Lossy event-bus relay and subscriber listener lifecycle.
 
 use std::sync::Arc;
 
-use tokio::sync::broadcast;
-
 use super::SupervisorCore;
 use crate::{
-    core::alive::AliveTracker, events::Event, identity::TaskId, subscribers::SubscriberSet,
+    events::{BusMessage, BusReceiver, Event, TryRecvError},
+    subscribers::SubscriberSet,
 };
 
+/// Maximum number of retained real events replayed during shutdown.
+/// Remaining observability data stays lossy; lifecycle cleanup never scales
+/// with an arbitrarily large configured ring.
+pub(super) const SHUTDOWN_RELAY_DRAIN_LIMIT: usize = 1024;
+
 impl SupervisorCore {
-    /// Returns a best-effort sorted list of task names currently marked alive.
-    ///
-    /// This is an event-derived activity view, not registry membership.
-    /// A registered actor can be marked not alive while it waits to retry.
+    /// Returns an authoritative sorted list of registered tasks inside an attempt.
     pub(crate) async fn snapshot(&self) -> Vec<Arc<str>> {
-        self.alive.snapshot().await
+        self.registry.alive_snapshot().await
     }
 
-    /// Returns true if any task with this name is currently marked alive.
-    ///
-    /// This is a best-effort activity query from the alive tracker, not a registry membership check.
+    /// Returns whether the registered task is currently inside an attempt.
     pub(crate) async fn is_alive(&self, name: &str) -> bool {
-        self.alive.is_alive(name).await
-    }
-
-    /// Applies one event to alive tracking and subscriber fan-out.
-    async fn distribute(alive: &AliveTracker, set: &SubscriberSet, ev: Arc<Event>) {
-        alive.update(&ev).await;
-        set.emit_arc(ev);
+        self.registry.is_alive(name).await
     }
 
     /// Drains retained events from a bus receiver.
     ///
     /// Used when the subscriber listener is shutting down.
-    /// Broadcast lag gaps are skipped so the retained tail can still be delivered to alive tracking and subscribers.
-    pub(super) async fn drain_pending(
-        rx: &mut broadcast::Receiver<Arc<Event>>,
-        alive: &AliveTracker,
-        set: &SubscriberSet,
-    ) {
-        loop {
+    /// Retained events are delivered before one coalesced lag diagnostic.
+    pub(super) async fn drain_pending(rx: &mut BusReceiver, set: &SubscriberSet) {
+        // Publishers may still be active while shutdown runs. Consuming at most
+        // one retained ring's worth of real events keeps this phase bounded.
+        let mut dropped = 0_u64;
+        for _ in 0..rx.retained_capacity().min(SHUTDOWN_RELAY_DRAIN_LIMIT) {
             match rx.try_recv() {
-                Ok(ev) => Self::distribute(alive, set, ev).await,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(_) => break,
+                Ok(BusMessage::Event(event)) => set.emit_arc(Arc::new(event)),
+                Ok(BusMessage::Lagged {
+                    dropped: skipped,
+                    event,
+                }) => {
+                    set.emit_arc(Arc::new(event));
+                    dropped = dropped.saturating_add(skipped);
+                }
+                Err(TryRecvError::Empty) => break,
             }
+        }
+        // Close publication and detach the remainder in one ring-mutex
+        // critical section. Publishers that passed the atomic fast path before
+        // this point are rejected by the ring's closed-state recheck.
+        let (pending, skipped) = rx.close_and_take_pending();
+        let discarded = u64::try_from(pending.len()).unwrap_or(u64::MAX);
+        dropped = dropped.saturating_add(skipped).saturating_add(discarded);
+        // Event-owned values are destroyed after the ring mutex is released.
+        drop(pending);
+        if dropped != 0 {
+            set.emit_arc(Arc::new(
+                Event::subscriber_overflow("subscriber_listener", format!("lagged({dropped})"))
+                    .with_dropped(dropped),
+            ));
         }
     }
 
     /// Starts the subscriber listener task.
     ///
-    /// The listener relays bus events to the alive tracker and subscriber queues.
+    /// The listener relays bus events to subscriber queues.
     pub(super) fn subscriber_listener(&self) {
-        let mut rx = self.bus.subscribe();
+        let mut rx = self.bus.take_receiver();
         let set = Arc::clone(&self.subs);
-        let alive = Arc::clone(&self.alive);
-        let registry = Arc::clone(&self.registry);
         let rt = self.runtime_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -64,20 +74,20 @@ impl SupervisorCore {
                 tokio::select! {
                     biased;
 
+                    _ = rt.cancelled() => {
+                        Self::drain_pending(&mut rx, &set).await;
+                        break;
+                    }
+
                     msg = rx.recv() => match msg {
-                        Ok(arc_ev) => {
-                            if let Err(panic) = crate::core::panic_guard::guarded(
-                                Self::distribute(&alive, &set, arc_ev),
-                            )
-                            .await
-                            {
-                                set.emit_arc(Arc::new(Event::runtime_failure(
-                                    "subscriber_listener",
-                                    format!("listener panic: {panic}"),
-                                )));
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        BusMessage::Event(ev) => set.emit_arc(Arc::new(ev)),
+                        BusMessage::Lagged {
+                            dropped: skipped,
+                            event,
+                        } => {
+                            // Real retained events have priority over synthetic
+                            // diagnostics in downstream bounded queues.
+                            set.emit_arc(Arc::new(event));
                             let arc_e = Arc::new(
                                 Event::subscriber_overflow(
                                     "subscriber_listener",
@@ -85,23 +95,8 @@ impl SupervisorCore {
                                 )
                                 .with_dropped(skipped),
                             );
-                            alive.update(&arc_e).await;
                             set.emit_arc(arc_e);
-
-                            let live: std::collections::HashSet<TaskId> = registry
-                                .list()
-                                .await
-                                .into_iter()
-                                .map(|(id, _)| id)
-                                .collect();
-                            alive.reconcile(&live).await;
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    },
-
-                    _ = rt.cancelled() => {
-                        Self::drain_pending(&mut rx, &alive, &set).await;
-                        break;
                     }
                 }
             }

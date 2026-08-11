@@ -21,10 +21,14 @@
 //! - Queue overflow is counted per subscriber and reported once after that queue catches up.
 //! - Taskvisor tries to report an ordinary panic as `SubscriberPanicked`.
 //! - `emit_arc` is non-blocking and uses `try_send`.
+//! - Each configured subscriber holds one slot in the shared process-wide
+//!   library-owned user-lifetime budget through physical worker completion.
 //!
 //! ## Panic Handling
 //!
-//! Worker threads run `on_event` directly inside `catch_unwind`.
+//! Worker threads run `on_event` directly inside `catch_unwind`. Final
+//! library-owned subscriber destruction runs on the bounded destructor
+//! executor after the worker physically exits.
 //!
 //! This protects the runtime and other subscribers from a panicking subscriber.
 //! It does not protect the subscriber's own shared state.
@@ -41,8 +45,15 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::events::{Bus, Event};
-use crate::subscribers::Subscribe;
+use crate::{
+    BuildError,
+    core::{
+        MAX_ASYNC_CAPACITY,
+        deferred_drop::{DropBundle, DropReservation},
+    },
+    events::{Bus, Event},
+    subscribers::Subscribe,
+};
 
 /// Default time allowed for subscriber queues to drain during shutdown.
 #[cfg(test)]
@@ -62,6 +73,8 @@ struct SubscriberOverflowState {
     dropped: AtomicU64,
 }
 
+type SharedSubscriberReceiver = Arc<std::sync::Mutex<Option<mpsc::Receiver<Arc<Event>>>>>;
+
 impl SubscriberOverflowState {
     fn record_drop(&self) {
         let _ = self
@@ -79,14 +92,28 @@ impl SubscriberOverflowState {
 /// One dedicated synchronous subscriber worker.
 struct SubscriberWorker {
     stop: Arc<AtomicBool>,
+    receiver: SharedSubscriberReceiver,
     finished: Arc<AtomicBool>,
     done: oneshot::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+impl SubscriberWorker {
+    fn take_receiver(&self) -> Option<mpsc::Receiver<Arc<Event>>> {
+        self.receiver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+}
+
 impl Drop for SubscriberWorker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        let receiver = self.take_receiver();
+        // Queued events may own externally visible values. Destroy them after
+        // releasing the receiver mutex.
+        drop(receiver);
     }
 }
 
@@ -109,7 +136,78 @@ impl Drop for WorkerCompletion {
 struct SubscriberDefinition {
     name: Arc<str>,
     capacity: usize,
+    ownership: OwnedSubscriber,
+}
+
+/// Subscriber ownership installed before any synchronous metadata callback.
+///
+/// Field order is deliberate: unwinding drops the callback reference while the
+/// cleanup bundle still retains the final globally charged reference.
+struct OwnedSubscriber {
     subscriber: Arc<dyn Subscribe>,
+    cleanup: DropBundle,
+}
+
+/// Complete ownership transferred to one OS worker in a single closure capture.
+///
+/// Keeping `ownership` intact is required for `std::thread::Builder::spawn`
+/// failure: dropping the rejected closure first drops the callback reference,
+/// then submits the retained final reference through its charged bundle.
+struct SubscriberThread {
+    ownership: OwnedSubscriber,
+    receiver: SharedSubscriberReceiver,
+    name: Arc<str>,
+    bus: Bus,
+    overflow: Arc<SubscriberOverflowState>,
+    stop: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    runtime: tokio::runtime::Handle,
+    done: oneshot::Sender<()>,
+}
+
+impl SubscriberThread {
+    fn run(self) {
+        let Self {
+            ownership,
+            receiver,
+            name,
+            bus,
+            overflow,
+            stop,
+            finished,
+            runtime,
+            done,
+        } = self;
+        let _completion = WorkerCompletion {
+            finished,
+            done: Some(done),
+        };
+        let OwnedSubscriber {
+            subscriber,
+            cleanup,
+        } = ownership;
+        let mut cleanup = cleanup;
+        // Every user-bearing worker value stays inside this panic boundary.
+        // The charged cleanup bundle remains outside so it can contain an
+        // escaped payload and submit the final subscriber reference after
+        // physical worker exit.
+        let worker = || {
+            let _runtime = runtime.enter();
+            run_subscriber_worker(
+                receiver,
+                subscriber,
+                name,
+                bus,
+                overflow,
+                stop,
+                &mut cleanup,
+            );
+        };
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker)) {
+            let _ = destroy_worker_panic_payload(payload, &mut cleanup);
+        }
+        cleanup.submit();
+    }
 }
 
 /// Lifecycle state shared by startup, delivery, and shutdown.
@@ -121,6 +219,11 @@ enum SubscriberState {
         channels: Vec<SubscriberChannel>,
         workers: Vec<SubscriberWorker>,
     },
+    /// Worker startup unwound after runtime validation.
+    ///
+    /// Definitions and any partially started workers clean themselves up while
+    /// unwinding. Retrying must not silently publish an empty Started state.
+    Failed,
     /// Queues are closed and startup is permanently disabled.
     Closed,
 }
@@ -156,6 +259,9 @@ pub(crate) struct SubscriberSet {
     shutdown_timeout: Duration,
 
     bus: Bus,
+
+    /// Persistent ownership reservations held by this subscriber set.
+    ownership_slots: usize,
 }
 
 impl SubscriberSet {
@@ -170,36 +276,136 @@ impl SubscriberSet {
         Self::new_with_shutdown_timeout(subs, bus, DEFAULT_SHUTDOWN_TIMEOUT)
     }
 
-    /// Creates a subscriber set with an explicit shared shutdown timeout.
+    /// Creates an isolated test subscriber set with an explicit shared shutdown timeout.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new_with_shutdown_timeout(
         subs: Vec<Arc<dyn Subscribe>>,
         bus: Bus,
         shutdown_timeout: Duration,
     ) -> Self {
-        let definitions = subs
+        let source = crate::core::deferred_drop::TestReservationSource::new(subs.len().max(1));
+        Self::from_test_source(subs, bus, shutdown_timeout, &source)
+            .expect("the isolated subscriber test budget fits every definition")
+    }
+
+    #[cfg(test)]
+    fn from_test_source(
+        subs: Vec<Arc<dyn Subscribe>>,
+        bus: Bus,
+        shutdown_timeout: Duration,
+        source: &crate::core::deferred_drop::TestReservationSource,
+    ) -> Result<Self, crate::core::deferred_drop::DropCapacityError> {
+        let reservations = source.try_reserve_many(subs.len())?;
+        Ok(
+            Self::from_reserved(subs, reservations, bus, shutdown_timeout)
+                .expect("subscriber test capacities fit the async structural limit"),
+        )
+    }
+
+    /// Creates a subscriber set from an atomically reserved ownership batch.
+    ///
+    /// Reservations must be acquired before this function snapshots any
+    /// user-provided subscriber metadata.
+    pub(crate) fn from_reserved(
+        subs: Vec<Arc<dyn Subscribe>>,
+        reservations: Vec<DropReservation>,
+        bus: Bus,
+        shutdown_timeout: Duration,
+    ) -> Result<Self, BuildError> {
+        assert_eq!(
+            subs.len(),
+            reservations.len(),
+            "every subscriber must have one ownership reservation"
+        );
+        // Complete ownership transfer for the whole atomic batch before the
+        // first user metadata callback. If one callback unwinds, current and
+        // not-yet-visited subscribers all retain charged final references.
+        let owned: Vec<OwnedSubscriber> = subs
             .into_iter()
-            .map(|subscriber| SubscriberDefinition {
-                capacity: subscriber.queue_capacity().get(),
-                name: Arc::from(subscriber.name()),
-                subscriber,
+            .zip(reservations)
+            .map(|(subscriber, reservation)| {
+                let cleanup = reservation.bundle(Arc::clone(&subscriber));
+                OwnedSubscriber {
+                    subscriber,
+                    cleanup,
+                }
             })
             .collect();
+        let ownership_slots = owned.len();
+        let definitions: Vec<SubscriberDefinition> = owned
+            .into_iter()
+            .map(|mut owned| {
+                let metadata = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let capacity = owned.subscriber.queue_capacity().get();
+                    let name = Arc::from(owned.subscriber.name());
+                    (name, capacity)
+                }));
+                match metadata {
+                    Ok((name, capacity)) if capacity <= MAX_ASYNC_CAPACITY => {
+                        Ok(SubscriberDefinition {
+                            name,
+                            capacity,
+                            ownership: owned,
+                        })
+                    }
+                    Ok((_name, capacity)) => Err(BuildError::CapacityTooLarge {
+                        field: "subscriber_queue_capacity",
+                        value: capacity,
+                        max: MAX_ASYNC_CAPACITY,
+                    }),
+                    Err(payload) => {
+                        let message = extract_panic_info(&payload);
+                        owned.cleanup.attach_panic_payload(payload);
+                        drop(owned);
+                        panic!("subscriber metadata panicked: {message}")
+                    }
+                }
+            })
+            .collect::<Result<_, _>>()?;
 
-        Self {
+        if !definitions.is_empty() {
+            bus.enable();
+        }
+
+        Ok(Self {
             state: std::sync::Mutex::new(SubscriberState::Pending(definitions)),
             shutdown_timeout,
             bus,
-        }
+            ownership_slots,
+        })
+    }
+
+    /// Returns the process-wide ownership slots permanently held by this set.
+    pub(crate) fn ownership_slots(&self) -> usize {
+        self.ownership_slots
     }
 
     /// Starts one dedicated worker thread per subscriber.
     ///
     /// Safe to call more than once. Calls after startup or shutdown are no-ops.
     pub(crate) fn start(&self) {
+        self.start_with(|index, worker| {
+            std::thread::Builder::new()
+                .name(format!("taskvisor-subscriber-{index}"))
+                .spawn(move || worker.run())
+        });
+    }
+
+    fn start_with(
+        &self,
+        mut spawn_worker: impl FnMut(
+            usize,
+            SubscriberThread,
+        ) -> std::io::Result<std::thread::JoinHandle<()>>,
+    ) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let SubscriberState::Pending(definitions) = &mut *state else {
-            return;
+        let definitions = match &mut *state {
+            SubscriberState::Pending(definitions) => definitions,
+            SubscriberState::Started { .. } | SubscriberState::Closed => return,
+            SubscriberState::Failed => {
+                panic!("subscriber worker startup previously failed")
+            }
         };
         if definitions.is_empty() {
             *state = SubscriberState::Started {
@@ -216,44 +422,41 @@ impl SubscriberSet {
                 panic!("SubscriberSet::start requires an active Tokio runtime: {error}");
             }
         };
-        let definitions = std::mem::take(definitions);
-        let mut channels = Vec::with_capacity(definitions.len());
+        let definitions = match std::mem::replace(&mut *state, SubscriberState::Failed) {
+            SubscriberState::Pending(definitions) => definitions,
+            _ => unreachable!("startup owns the validated pending subscriber state"),
+        };
+        // Declaration order is deliberate. On partial startup unwind,
+        // channels must drop before worker controls so a worker blocked in
+        // `blocking_recv` wakes before `SubscriberWorker::drop` takes its
+        // receiver.
         let mut workers = Vec::with_capacity(definitions.len());
+        let mut channels = Vec::with_capacity(definitions.len());
 
         for (index, definition) in definitions.into_iter().enumerate() {
             let SubscriberDefinition {
                 name,
                 capacity,
-                subscriber,
+                ownership,
             } = definition;
             let (sender, receiver) = mpsc::channel::<Arc<Event>>(capacity);
+            let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
             let overflow = Arc::new(SubscriberOverflowState::default());
             let stop = Arc::new(AtomicBool::new(false));
             let finished = Arc::new(AtomicBool::new(false));
             let (done, done_rx) = oneshot::channel();
-            let name_for_worker = Arc::clone(&name);
-            let bus_for_worker = self.bus.clone();
-            let overflow_for_worker = Arc::clone(&overflow);
-            let stop_for_worker = Arc::clone(&stop);
-            let finished_for_worker = Arc::clone(&finished);
-            let runtime_for_worker = runtime.clone();
-            let thread = std::thread::Builder::new()
-                .name(format!("taskvisor-subscriber-{index}"))
-                .spawn(move || {
-                    let _runtime = runtime_for_worker.enter();
-                    let _completion = WorkerCompletion {
-                        finished: finished_for_worker,
-                        done: Some(done),
-                    };
-                    run_subscriber_worker(
-                        receiver,
-                        subscriber,
-                        name_for_worker,
-                        bus_for_worker,
-                        overflow_for_worker,
-                        stop_for_worker,
-                    );
-                })
+            let worker = SubscriberThread {
+                ownership,
+                receiver: Arc::clone(&receiver),
+                name: Arc::clone(&name),
+                bus: self.bus.clone(),
+                overflow: Arc::clone(&overflow),
+                stop: Arc::clone(&stop),
+                finished: Arc::clone(&finished),
+                runtime: runtime.clone(),
+                done,
+            };
+            let thread = spawn_worker(index, worker)
                 .unwrap_or_else(|error| panic!("failed to start subscriber worker: {error}"));
 
             channels.push(SubscriberChannel {
@@ -264,6 +467,7 @@ impl SubscriberSet {
             });
             workers.push(SubscriberWorker {
                 stop,
+                receiver,
                 finished,
                 done: done_rx,
                 thread: Some(thread),
@@ -294,10 +498,9 @@ impl SubscriberSet {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     if !is_internal_event && !channel.closed_reported.swap(true, Ordering::AcqRel) {
-                        self.bus.publish(Event::subscriber_overflow(
-                            Arc::clone(&channel.name),
-                            "closed",
-                        ));
+                        self.bus.publish_lazy(|| {
+                            Event::subscriber_overflow(Arc::clone(&channel.name), "closed")
+                        });
                     }
                 }
             }
@@ -312,7 +515,9 @@ impl SubscriberSet {
         let mut workers = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             match std::mem::replace(&mut *state, SubscriberState::Closed) {
-                SubscriberState::Pending(_) | SubscriberState::Closed => Vec::new(),
+                SubscriberState::Pending(_) | SubscriberState::Failed | SubscriberState::Closed => {
+                    Vec::new()
+                }
                 SubscriberState::Started { channels, workers } => {
                     drop(channels);
                     workers
@@ -340,6 +545,16 @@ impl SubscriberSet {
             for worker in &workers {
                 worker.stop.store(true, Ordering::Release);
             }
+            let mut abandoned_receivers = Vec::with_capacity(workers.len());
+            for worker in &workers {
+                if let Some(receiver) = worker.take_receiver() {
+                    abandoned_receivers.push(receiver);
+                }
+            }
+            // Drop every queued event after all receiver mutexes have been
+            // released. A currently running user callback remains detached on
+            // its dedicated worker.
+            drop(abandoned_receivers);
         }
 
         for mut worker in workers {
@@ -352,31 +567,74 @@ impl SubscriberSet {
     }
 }
 
+/// Destroys a caught panic payload only on that subscriber's dedicated thread.
+///
+/// A blocking payload destructor keeps the worker and its process-wide
+/// ownership reservation alive, so it cannot extend the public shutdown
+/// deadline or become uncharged. If destruction panics again, the nested
+/// payload is retained under that reservation and the shared ownership budget
+/// fails closed when the worker submits its poisoned cleanup bundle.
+fn destroy_worker_panic_payload(
+    payload: Box<dyn std::any::Any + Send>,
+    cleanup: &mut DropBundle,
+) -> bool {
+    if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))) {
+        std::mem::forget(nested);
+        cleanup.poison();
+        return false;
+    }
+    true
+}
+
 /// Runs one subscriber serially without creating a blocking-pool task per event.
 fn run_subscriber_worker(
-    mut receiver: mpsc::Receiver<Arc<Event>>,
+    receiver: SharedSubscriberReceiver,
     subscriber: Arc<dyn Subscribe>,
     name: Arc<str>,
     bus: Bus,
     overflow: Arc<SubscriberOverflowState>,
     stop: Arc<AtomicBool>,
+    cleanup: &mut DropBundle,
 ) {
-    while let Some(event) = receiver.blocking_recv() {
+    while let Some(event) = blocking_recv(&receiver) {
         if stop.load(Ordering::Acquire) {
             break;
         }
-        invoke_subscriber(&subscriber, event.as_ref(), &name, &bus);
+        if !invoke_subscriber(&subscriber, event.as_ref(), &name, &bus, cleanup) {
+            return;
+        }
         if stop.load(Ordering::Acquire) {
             break;
         }
-        if receiver.is_empty() {
-            report_overflow(&subscriber, &name, &bus, &overflow);
+        let Some(receiver_is_empty) = receiver_is_empty(&receiver) else {
+            break;
+        };
+        if receiver_is_empty && !report_overflow(&subscriber, &name, &bus, &overflow, cleanup) {
+            return;
         }
     }
 
     if !stop.load(Ordering::Acquire) {
-        report_overflow(&subscriber, &name, &bus, &overflow);
+        let _ = report_overflow(&subscriber, &name, &bus, &overflow, cleanup);
     }
+}
+
+/// Receives one event while holding exclusive access to the externally
+/// detachable receiver. The mutex is released before any subscriber callback.
+fn blocking_recv(receiver: &SharedSubscriberReceiver) -> Option<Arc<Event>> {
+    receiver
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()?
+        .blocking_recv()
+}
+
+fn receiver_is_empty(receiver: &SharedSubscriberReceiver) -> Option<bool> {
+    receiver
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map(mpsc::Receiver::is_empty)
 }
 
 /// Delivers one coalesced overflow report directly to the affected subscriber.
@@ -385,29 +643,46 @@ fn report_overflow(
     name: &Arc<str>,
     bus: &Bus,
     overflow: &SubscriberOverflowState,
-) {
+    cleanup: &mut DropBundle,
+) -> bool {
     let dropped = overflow.take_dropped();
     if dropped == 0 {
-        return;
+        return true;
     }
     let event = Event::subscriber_overflow(Arc::clone(name), "full").with_dropped(dropped);
-    invoke_subscriber(subscriber, &event, name, bus);
+    invoke_subscriber(subscriber, &event, name, bus, cleanup)
 }
 
 /// Calls user subscriber code behind its panic boundary.
-fn invoke_subscriber(subscriber: &Arc<dyn Subscribe>, event: &Event, name: &Arc<str>, bus: &Bus) {
+///
+/// Returns `false` when destroying a caught panic payload itself panics. That
+/// worker then stops permanently, preventing one hostile subscriber from
+/// accumulating a new retained nested panic payload for every later event.
+fn invoke_subscriber(
+    subscriber: &Arc<dyn Subscribe>,
+    event: &Event,
+    name: &Arc<str>,
+    bus: &Bus,
+    cleanup: &mut DropBundle,
+) -> bool {
     let is_internal_event = event.is_internal_diagnostic();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         subscriber.on_event(event);
     }));
-    if let Err(panic_err) = result
-        && !is_internal_event
-    {
-        bus.publish(Event::subscriber_panicked(
-            Arc::clone(name),
-            extract_panic_info(&panic_err),
-        ));
+    if let Err(panic_err) = result {
+        let message = extract_panic_info(&panic_err);
+        // This callback already runs on its own subscriber OS thread. Keep a
+        // blocking destructor there instead of consuming global destructor
+        // isolation capacity; shutdown detaches a worker at its configured
+        // subscriber deadline. Contain a destructor panic separately because
+        // its panic payload may itself have a hostile destructor.
+        let cleanup_succeeded = destroy_worker_panic_payload(panic_err, cleanup);
+        if !is_internal_event {
+            bus.publish_lazy(|| Event::subscriber_panicked(Arc::clone(name), message));
+        }
+        return cleanup_succeeded;
     }
+    true
 }
 
 /// Extracts a readable message from a panic payload.
@@ -430,6 +705,7 @@ mod tests {
     use std::sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc as std_mpsc,
     };
     use std::time::Duration;
     use tokio::sync::broadcast;
@@ -459,6 +735,23 @@ mod tests {
             }
         }
         None
+    }
+
+    fn wait_for_test_reservations(
+        source: &crate::core::deferred_drop::TestReservationSource,
+        count: usize,
+    ) -> Vec<crate::core::deferred_drop::DropReservation> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(reservations) = source.try_reserve_many(count) {
+                return reservations;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clean subscriber ownership was not released"
+            );
+            std::thread::yield_now();
+        }
     }
 
     struct CountingSub {
@@ -508,6 +801,188 @@ mod tests {
         assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 
+    #[test]
+    fn metadata_panic_keeps_current_and_unvisited_subscribers_isolated() {
+        for panic_behavior in [MetadataBehavior::PanicCapacity, MetadataBehavior::PanicName] {
+            let source = crate::core::deferred_drop::TestReservationSource::new(2);
+            let caller = std::thread::current().id();
+            let (dropped_on, drops) = std_mpsc::channel();
+            let subscribers: Vec<Arc<dyn Subscribe>> = vec![
+                Arc::new(MetadataOwnershipProbe {
+                    behavior: panic_behavior,
+                    dropped_on: Some(dropped_on.clone()),
+                }),
+                Arc::new(MetadataOwnershipProbe {
+                    behavior: MetadataBehavior::Ready,
+                    dropped_on: Some(dropped_on),
+                }),
+            ];
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = SubscriberSet::from_test_source(
+                    subscribers,
+                    Bus::new(8),
+                    Duration::from_secs(1),
+                    &source,
+                );
+            }));
+
+            assert!(result.is_err(), "subscriber metadata panic must propagate");
+            for _ in 0..2 {
+                let destructor_thread = drops
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("every reserved subscriber must reach destructor isolation");
+                assert_ne!(
+                    destructor_thread, caller,
+                    "neither the current nor an unvisited subscriber may Drop on the metadata caller"
+                );
+            }
+            drop(wait_for_test_reservations(&source, 2));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metadata_panic_payload_stays_under_its_subscriber_reservation() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let watchdog = spawn_gate_watchdog(Arc::clone(&gate));
+        let subscriber: Arc<dyn Subscribe> = Arc::new(MetadataOwnershipProbe {
+            behavior: MetadataBehavior::PanicCapacityPayload(Arc::clone(&gate)),
+            dropped_on: None,
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = SubscriberSet::from_test_source(
+                vec![subscriber],
+                Bus::new(8),
+                Duration::from_secs(1),
+                &source,
+            );
+        }));
+        let payload_isolated = wait_for_gate(&gate, |state| state.entered).await;
+        let ownership_still_charged = source.try_reserve().is_err();
+
+        release_gate(&gate);
+        let payload_finished = wait_for_gate(&gate, |state| state.finished).await;
+        let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("released metadata panic payload must return ownership")
+            .expect("clean panic-payload destruction keeps admission open");
+        drop(released);
+        watchdog.join().expect("metadata watchdog must not panic");
+
+        assert!(
+            result.is_err(),
+            "metadata panic must propagate to its caller"
+        );
+        assert!(
+            payload_isolated,
+            "the original panic payload must Drop in isolation"
+        );
+        assert!(
+            ownership_still_charged,
+            "the isolated payload must retain its slot"
+        );
+        assert!(payload_finished, "released payload destructor must finish");
+    }
+
+    #[test]
+    fn blocking_metadata_holds_the_complete_atomic_batch() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(2);
+        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let subscribers: Vec<Arc<dyn Subscribe>> = vec![
+            Arc::new(MetadataOwnershipProbe {
+                behavior: MetadataBehavior::BlockCapacity(Arc::clone(&gate)),
+                dropped_on: None,
+            }),
+            Arc::new(MetadataOwnershipProbe {
+                behavior: MetadataBehavior::Ready,
+                dropped_on: None,
+            }),
+        ];
+        let source_for_builder = source.clone();
+        let build_thread = std::thread::spawn(move || {
+            SubscriberSet::from_test_source(
+                subscribers,
+                Bus::new(8),
+                Duration::from_secs(1),
+                &source_for_builder,
+            )
+            .expect("the isolated budget fits the complete batch")
+        });
+
+        let (state, ready) = &*gate;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        while !state.entered {
+            state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        drop(state);
+        assert!(
+            source.try_reserve().is_err(),
+            "the second subscriber slot must already be charged while first metadata blocks"
+        );
+
+        release_gate(&gate);
+        let set = build_thread
+            .join()
+            .expect("metadata builder must not panic");
+        drop(set);
+        drop(wait_for_test_reservations(&source, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn partial_thread_spawn_failure_preserves_every_subscriber_reservation() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(3);
+        let caller = std::thread::current().id();
+        let (dropped_on, drops) = std_mpsc::channel();
+        let subscribers: Vec<Arc<dyn Subscribe>> = (0..3)
+            .map(|_| {
+                Arc::new(MetadataOwnershipProbe {
+                    behavior: MetadataBehavior::Ready,
+                    dropped_on: Some(dropped_on.clone()),
+                }) as Arc<dyn Subscribe>
+            })
+            .collect();
+        drop(dropped_on);
+        let set = SubscriberSet::from_test_source(
+            subscribers,
+            Bus::new(8),
+            Duration::from_secs(1),
+            &source,
+        )
+        .expect("the isolated budget fits every subscriber");
+
+        let start_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            set.start_with(|index, worker| {
+                if index == 1 {
+                    return Err(std::io::Error::other("injected subscriber spawn failure"));
+                }
+                std::thread::Builder::new().spawn(move || worker.run())
+            });
+        }));
+        assert!(
+            start_result.is_err(),
+            "the injected spawn failure must propagate"
+        );
+        let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| set.start()));
+        assert!(
+            retry.is_err(),
+            "a failed partial startup cannot retry as a silent empty subscriber set"
+        );
+        drop(set);
+
+        for _ in 0..3 {
+            let destructor_thread = drops
+                .recv_timeout(Duration::from_secs(2))
+                .expect("started, rejected, and unvisited subscribers must all clean up");
+            assert_ne!(
+                destructor_thread, caller,
+                "spawn failure cannot destroy a final subscriber on its caller"
+            );
+        }
+        drop(wait_for_test_reservations(&source, 3));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn start_is_idempotent_and_close_drains_delivery() {
         let (count, subscriber) = CountingSub::new(8);
@@ -529,6 +1004,78 @@ mod tests {
             *set.state.lock().unwrap_or_else(|e| e.into_inner()),
             SubscriberState::Closed
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn normal_worker_exit_releases_subscriber_ownership() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+        let (_count, subscriber) = CountingSub::new(8);
+        let set = SubscriberSet::from_test_source(
+            vec![subscriber],
+            Bus::new(8),
+            Duration::from_secs(1),
+            &source,
+        )
+        .expect("the isolated budget has one subscriber slot");
+
+        set.start();
+        set.close().await;
+
+        let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("clean physical worker exit must release ownership")
+            .expect("clean subscriber destruction keeps admission open");
+        drop(released);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_never_started_set_isolates_final_subscriber_destructor() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let subscriber: Arc<dyn Subscribe> = Arc::new(BlockingFinalSubscriberDrop {
+            gate: Arc::clone(&gate),
+        });
+        let set = SubscriberSet::from_test_source(
+            vec![subscriber],
+            Bus::new(8),
+            Duration::from_secs(1),
+            &source,
+        )
+        .expect("the isolated budget has one subscriber slot");
+        let (drop_done, dropped) = oneshot::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(set);
+            let _ = drop_done.send(());
+        });
+
+        let caller_returned = tokio::time::timeout(Duration::from_millis(500), dropped)
+            .await
+            .is_ok();
+        let destructor_isolated = wait_for_gate(&gate, |state| state.entered).await;
+        let ownership_still_charged = source.try_reserve().is_err();
+
+        release_gate(&gate);
+        let destructor_finished = wait_for_gate(&gate, |state| state.finished).await;
+        let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("released destructor must return subscriber ownership")
+            .expect("clean subscriber destruction keeps admission open");
+        drop(released);
+        drop_thread.join().expect("drop caller must not panic");
+
+        assert!(
+            caller_returned,
+            "pending-set Drop cannot run user Drop inline"
+        );
+        assert!(
+            destructor_isolated,
+            "the final Drop must reach its isolated worker"
+        );
+        assert!(
+            ownership_still_charged,
+            "blocking Drop must retain its slot"
+        );
+        assert!(destructor_finished, "released final Drop must finish");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -574,6 +1121,33 @@ mod tests {
         }
         fn queue_capacity(&self) -> NonZeroUsize {
             NonZeroUsize::new(16).unwrap()
+        }
+    }
+
+    struct PanicPayloadWithPanickingDrop;
+
+    impl Drop for PanicPayloadWithPanickingDrop {
+        fn drop(&mut self) {
+            panic!("nested panic while destroying subscriber panic payload");
+        }
+    }
+
+    struct NestedDropPanicSub {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Subscribe for NestedDropPanicSub {
+        fn on_event(&self, _event: &Event) {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            std::panic::panic_any(PanicPayloadWithPanickingDrop);
+        }
+
+        fn name(&self) -> &str {
+            "nested-drop-panic"
+        }
+
+        fn queue_capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(16).expect("test capacity is non-zero")
         }
     }
 
@@ -699,6 +1273,118 @@ mod tests {
         let (state, ready) = &**gate;
         state.lock().unwrap_or_else(|e| e.into_inner()).released = true;
         ready.notify_all();
+    }
+
+    struct BlockingPanicPayload(BlockingGate);
+
+    impl Drop for BlockingPanicPayload {
+        fn drop(&mut self) {
+            let (state, ready) = &*self.0;
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state.entered = true;
+            ready.notify_all();
+            while !state.released {
+                state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+            }
+            state.finished = true;
+            ready.notify_all();
+        }
+    }
+
+    struct PanickingFinalSubscriberDrop {
+        gate: BlockingGate,
+    }
+
+    impl Subscribe for PanickingFinalSubscriberDrop {
+        fn on_event(&self, _event: &Event) {}
+
+        fn name(&self) -> &str {
+            "panicking-final-drop"
+        }
+    }
+
+    impl Drop for PanickingFinalSubscriberDrop {
+        fn drop(&mut self) {
+            std::panic::panic_any(BlockingPanicPayload(Arc::clone(&self.gate)));
+        }
+    }
+
+    struct BlockingFinalSubscriberDrop {
+        gate: BlockingGate,
+    }
+
+    impl Subscribe for BlockingFinalSubscriberDrop {
+        fn on_event(&self, _event: &Event) {}
+
+        fn name(&self) -> &str {
+            "blocking-final-drop"
+        }
+    }
+
+    impl Drop for BlockingFinalSubscriberDrop {
+        fn drop(&mut self) {
+            let (state, ready) = &*self.gate;
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state.entered = true;
+            ready.notify_all();
+            while !state.released {
+                state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+            }
+            state.finished = true;
+            ready.notify_all();
+        }
+    }
+
+    enum MetadataBehavior {
+        Ready,
+        PanicName,
+        PanicCapacity,
+        PanicCapacityPayload(BlockingGate),
+        BlockCapacity(BlockingGate),
+    }
+
+    struct MetadataOwnershipProbe {
+        behavior: MetadataBehavior,
+        dropped_on: Option<std_mpsc::Sender<std::thread::ThreadId>>,
+    }
+
+    impl Subscribe for MetadataOwnershipProbe {
+        fn on_event(&self, _event: &Event) {}
+
+        fn name(&self) -> &str {
+            if matches!(&self.behavior, MetadataBehavior::PanicName) {
+                panic!("subscriber name panic")
+            }
+            "metadata-ownership-probe"
+        }
+
+        fn queue_capacity(&self) -> NonZeroUsize {
+            match &self.behavior {
+                MetadataBehavior::PanicCapacity => panic!("subscriber capacity panic"),
+                MetadataBehavior::PanicCapacityPayload(gate) => {
+                    std::panic::panic_any(BlockingPanicPayload(Arc::clone(gate)))
+                }
+                MetadataBehavior::BlockCapacity(gate) => {
+                    let (state, ready) = &**gate;
+                    let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.entered = true;
+                    ready.notify_all();
+                    while !state.released {
+                        state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+                    }
+                }
+                MetadataBehavior::Ready | MetadataBehavior::PanicName => {}
+            }
+            NonZeroUsize::new(8).expect("test capacity is non-zero")
+        }
+    }
+
+    impl Drop for MetadataOwnershipProbe {
+        fn drop(&mut self) {
+            if let Some(dropped_on) = &self.dropped_on {
+                let _ = dropped_on.send(std::thread::current().id());
+            }
+        }
     }
 
     async fn wait_for_gate(
@@ -840,12 +1526,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn zero_shutdown_timeout_detaches_worker_and_drops_queued_events() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
         let (sub, first_gate) = blocking_order_sub();
-        let set = SubscriberSet::new_with_shutdown_timeout(
+        let set = SubscriberSet::from_test_source(
             vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
             Bus::new(64),
             Duration::ZERO,
-        );
+            &source,
+        )
+        .expect("the isolated budget has one subscriber slot");
         set.start();
         let worker_finished = {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -862,7 +1551,9 @@ mod tests {
         let watchdog = spawn_gate_watchdog(Arc::clone(&first_gate));
 
         set.emit_arc(ev("first"));
-        set.emit_arc(ev("second"));
+        let queued_event = ev("second");
+        let queued_event_drop_probe = Arc::downgrade(&queued_event);
+        set.emit_arc(queued_event);
         let first_entered = wait_for_gate(&first_gate, |state| state.entered).await;
 
         let close_result = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
@@ -873,6 +1564,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .finished;
         let second_was_waiting = !sub.second_entered.load(Ordering::Acquire);
+        let queued_event_was_dropped = queued_event_drop_probe.upgrade().is_none();
+        let ownership_stayed_charged = source.try_reserve().is_err();
 
         release_gate(&first_gate);
         let first_finished = wait_for_gate(&first_gate, |state| state.finished).await;
@@ -890,6 +1583,11 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         let repeated_close = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
+        let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("physical worker exit must release subscriber ownership")
+            .expect("clean subscriber destruction keeps admission open");
+        drop(released);
 
         assert!(first_entered, "the first callback must start before close");
         assert!(
@@ -908,6 +1606,14 @@ mod tests {
             second_was_waiting,
             "the second callback must still be queued"
         );
+        assert!(
+            queued_event_was_dropped,
+            "the detached receiver must release queued events before close returns"
+        );
+        assert!(
+            ownership_stayed_charged,
+            "detached callback ownership must remain charged until physical return"
+        );
         assert!(first_finished, "cleanup must release the running callback");
         assert!(
             worker_stopped_after_release,
@@ -920,6 +1626,46 @@ mod tests {
         );
         assert!(!sub.second_entered.load(Ordering::Acquire));
         assert!(repeated_close.is_ok(), "repeated close must remain a no-op");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn final_subscriber_drop_panic_payload_cannot_extend_close_deadline() {
+        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+        let subscriber: Arc<dyn Subscribe> = Arc::new(PanickingFinalSubscriberDrop {
+            gate: Arc::clone(&gate),
+        });
+        let set = SubscriberSet::from_test_source(
+            vec![subscriber],
+            Bus::new(8),
+            Duration::from_millis(25),
+            &source,
+        )
+        .expect("the isolated budget has one subscriber slot");
+        set.start();
+
+        let close_result = tokio::time::timeout(Duration::from_millis(500), set.close()).await;
+        let payload_destructor_ran = gate
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entered;
+        let later_reservation = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("poisoned cleanup must resolve ownership admission");
+
+        assert!(
+            close_result.is_ok(),
+            "a subscriber destructor panic payload cannot extend close"
+        );
+        assert!(
+            !payload_destructor_ran,
+            "the globally charged executor must retain, not destroy, a hostile destructor panic payload"
+        );
+        assert!(
+            later_reservation.is_err(),
+            "a subscriber destructor panic must fail-close its isolated ownership budget"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1061,6 +1807,42 @@ mod tests {
             count(&mut rx, EventKind::SubscriberPanicked),
             3,
             "each ordinary-event panic must be reported, and the worker must continue"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn panic_payload_destructor_panic_stops_that_subscriber_worker() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+        let bus = Bus::new(64);
+        let mut events = bus.subscribe();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let subscriber: Arc<dyn Subscribe> = Arc::new(NestedDropPanicSub {
+            calls: Arc::clone(&calls),
+        });
+        let set =
+            SubscriberSet::from_test_source(vec![subscriber], bus, Duration::from_secs(1), &source)
+                .expect("the isolated budget has one subscriber slot");
+        set.start();
+
+        for _ in 0..3 {
+            set.emit_arc(ev("nested-drop"));
+        }
+        tokio::time::timeout(Duration::from_secs(1), set.close())
+            .await
+            .expect("the poisoned subscriber worker must terminate");
+        let later_reservation = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("poisoned cleanup must resolve ownership admission");
+
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            1,
+            "a nested panic-payload destructor failure must permanently stop that worker"
+        );
+        assert_eq!(count(&mut events, EventKind::SubscriberPanicked), 1);
+        assert!(
+            later_reservation.is_err(),
+            "a nested panic-payload destructor must fail-close its isolated budget"
         );
     }
 

@@ -4,6 +4,7 @@
 //! The same mutex covers that re-check and command commit, while shutdown closes the gate before awaiting the registry fence.
 
 use std::{
+    future::Future,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -15,10 +16,12 @@ use tokio::{
 
 use super::SupervisorCore;
 use crate::{
+    core::deferred_drop::{self, OwnedTask},
     core::registry::{
         AddBatchItem, AddReplyRx, CancelDecision, CancelReplyRx, OutcomeTx, RegistryCommand,
         RemovalCompletion, RemoveReplyRx,
     },
+    core::task_metadata::{self, TaskNameSnapshot},
     error::RuntimeError,
     events::{Event, EventKind},
     identity::TaskId,
@@ -34,6 +37,127 @@ pub(crate) struct ControllerAddPermit {
 }
 
 impl SupervisorCore {
+    async fn reserve_ownership(
+        &self,
+    ) -> Result<deferred_drop::DropReservation, deferred_drop::DropCapacityError> {
+        #[cfg(test)]
+        let source = {
+            self.ownership_source
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        };
+        #[cfg(test)]
+        if let Some(source) = source {
+            return source.reserve().await;
+        }
+        deferred_drop::reserve().await
+    }
+
+    /// Atomically reserves a static batch without entering the global waiter queue.
+    pub(super) fn try_reserve_ownership_many(
+        &self,
+        count: usize,
+    ) -> Result<Vec<deferred_drop::DropReservation>, deferred_drop::DropCapacityError> {
+        #[cfg(test)]
+        let source = {
+            self.ownership_source
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        };
+        #[cfg(test)]
+        if let Some(source) = source {
+            return source.try_reserve_many(count);
+        }
+        deferred_drop::try_reserve_many(count)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ownership_source_for_test(
+        &self,
+        source: deferred_drop::TestReservationSource,
+    ) {
+        *self
+            .ownership_source
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(source);
+    }
+
+    /// Waits for destructor ownership without allowing shutdown or registry
+    /// closure to strand an admission future behind saturated capacity.
+    pub(super) async fn wait_for_ownership<T, F>(&self, reserve: F) -> Result<T, RuntimeError>
+    where
+        F: Future<Output = Result<T, deferred_drop::DropCapacityError>>,
+    {
+        tokio::select! {
+            biased;
+            _ = self.shutdown.started.cancelled() => Err(RuntimeError::ShuttingDown),
+            _ = self.cmd_tx.closed() => Err(RuntimeError::ShuttingDown),
+            reservation = reserve => reservation.map_err(|error| {
+                RuntimeError::ResourceLimitReached {
+                    resource: deferred_drop::OWNERSHIP_RESOURCE,
+                    limit: error.limit(),
+                }
+            }),
+        }
+    }
+
+    /// Couples one directly submitted task to its ownership reservation and
+    /// terminal destructor diagnostic.
+    pub(super) fn own_task(
+        &self,
+        spec: TaskSpec,
+        reservation: deferred_drop::DropReservation,
+    ) -> OwnedTask<TaskSpec> {
+        let retained = Arc::clone(spec.task());
+        let mut owned = OwnedTask::new(spec, retained, reservation);
+        let bus = self.bus.clone();
+        owned.cleanup.set_panic_reporter(move |message| {
+            bus.publish_lazy(|| {
+                Event::runtime_failure("task_destructor", format!("task_drop_panicked: {message}"))
+            });
+        });
+        owned
+    }
+
+    /// Resolves user-provided task metadata without polling it on a Tokio
+    /// worker. Cancellation stops only this caller's wait; the fixed metadata
+    /// worker retains charged ownership until the callback really returns.
+    pub(super) async fn snapshot_owned_task_name(
+        &self,
+        owned: OwnedTask<TaskSpec>,
+    ) -> Result<(Arc<str>, OwnedTask<TaskSpec>), RuntimeError> {
+        let receiver = match task_metadata::snapshot_task_name(owned, |spec| {
+            Arc::<str>::from(spec.task().name())
+        }) {
+            Ok(receiver) => receiver,
+            Err(owned) => {
+                drop(owned);
+                return Err(RuntimeError::ResourceLimitReached {
+                    resource: "task_metadata",
+                    limit: deferred_drop::OWNERSHIP_CAPACITY,
+                });
+            }
+        };
+        let snapshot = tokio::select! {
+            biased;
+            _ = self.shutdown.started.cancelled() => return Err(RuntimeError::ShuttingDown),
+            _ = self.cmd_tx.closed() => return Err(RuntimeError::ShuttingDown),
+            snapshot = receiver => snapshot.map_err(|_| RuntimeError::ResourceLimitReached {
+                resource: "task_metadata",
+                limit: deferred_drop::OWNERSHIP_CAPACITY,
+            })?,
+        };
+        match snapshot {
+            TaskNameSnapshot::Ready { owned, task_name } => Ok((task_name, owned)),
+            TaskNameSnapshot::Panicked { owned, message } => {
+                drop(owned);
+                panic!("Task::name panicked: {message}")
+            }
+        }
+    }
+
     /// Marks the runtime as shutting down.
     ///
     /// The gate lock waits for every command that already passed its final admission check to become visible in the registry queue.
@@ -114,6 +238,7 @@ impl SupervisorCore {
     pub(crate) async fn try_add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         let (id, reply) = self
             .enqueue_add_task(TaskId::next(), spec, None)
+            .await
             .map_err(|(error, _done)| error)?;
         Self::await_add_reply(id, reply).await
     }
@@ -128,6 +253,7 @@ impl SupervisorCore {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let (id, reply) = self
             .enqueue_add_task(TaskId::next(), spec, Some(tx))
+            .await
             .map_err(|(error, _done)| error)?;
         let id = Self::await_add_reply(id, reply).await?;
         Ok((id, rx))
@@ -142,14 +268,14 @@ impl SupervisorCore {
         &self,
         id: TaskId,
         label: Arc<str>,
-        spec: TaskSpec,
+        owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
     ) -> Result<(AddReplyRx, RemovalCompletion), Box<crate::core::UncommittedWatchedAdd>> {
         let completion = RemovalCompletion::new();
         let (_id, reply) = self.enqueue_named_add_task_with_completion_recovering(
             id,
             label,
-            spec,
+            owned,
             done,
             Some(completion.clone()),
         )?;
@@ -180,29 +306,29 @@ impl SupervisorCore {
         permit: ControllerAddPermit,
         id: TaskId,
         label: Arc<str>,
-        spec: TaskSpec,
+        owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
     ) -> Result<(AddReplyRx, RemovalCompletion), Box<crate::core::UncommittedWatchedAdd>> {
         let Some(_admission) = self.command_admission() else {
             return Err(Box::new(crate::core::UncommittedWatchedAdd {
                 error: RuntimeError::ShuttingDown,
                 label,
-                spec,
+                owned,
                 done,
             }));
         };
 
         let completion = RemovalCompletion::new();
         let (reply, reply_rx) = oneshot::channel();
-        self.bus.publish(
+        self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskAddRequested)
                 .with_task(Arc::clone(&label))
-                .with_id(id),
-        );
+                .with_id(id)
+        });
         permit.permit.send(RegistryCommand::Add {
             id,
             label,
-            spec,
+            owned: Box::new(owned),
             outcome: done,
             completion: Some(completion.clone()),
             reply,
@@ -238,32 +364,45 @@ impl SupervisorCore {
     /// Queues one add command and returns its authoritative registry reply.
     ///
     /// Used by `try_add` and the controller's fail-fast admission path.
-    pub(super) fn enqueue_add_task(
+    pub(super) async fn enqueue_add_task(
         &self,
         id: TaskId,
         spec: TaskSpec,
-        done: Option<OutcomeTx>,
-    ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
-        self.enqueue_add_task_with_completion(id, spec, done, None)
-    }
-
-    /// Queues one Add command with an optional shared terminal completion signal.
-    fn enqueue_add_task_with_completion(
-        &self,
-        id: TaskId,
-        spec: TaskSpec,
-        done: Option<OutcomeTx>,
-        completion: Option<RemovalCompletion>,
+        mut done: Option<OutcomeTx>,
     ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
-        let label: Arc<str> = Arc::from(spec.task().name());
+        // A fail-fast add must observe command backpressure before running user
+        // metadata. The permit is not committed until the shutdown gate is
+        // checked after metadata completes.
+        let initial_permit = self.cmd_tx.try_reserve().map_err(|error| {
+            let error = match error {
+                mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
+                mpsc::error::TrySendError::Closed(()) => RuntimeError::ShuttingDown,
+            };
+            (error, done.take())
+        })?;
+        drop(initial_permit);
+        let reservation = deferred_drop::try_reserve().map_err(|error| {
+            (
+                RuntimeError::ResourceLimitReached {
+                    resource: deferred_drop::OWNERSHIP_RESOURCE,
+                    limit: error.limit(),
+                },
+                done.take(),
+            )
+        })?;
+        let owned = self.own_task(spec, reservation);
+        let (label, owned) = match self.snapshot_owned_task_name(owned).await {
+            Ok(named) => named,
+            Err(error) => return Err((error, done)),
+        };
         let (permit, _admission) = match self.try_reserve_command_admission() {
             Ok(admission) => admission,
             Err(error) => return Err((error, done)),
         };
-        Ok(self.commit_add(permit, id, label, spec, done, completion))
+        Ok(self.commit_add(permit, id, label, owned, done, None))
     }
 
     /// Queues one add command while returning user-owned values intact on pre-commit failure.
@@ -272,7 +411,7 @@ impl SupervisorCore {
         &self,
         id: TaskId,
         label: Arc<str>,
-        spec: TaskSpec,
+        owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
     ) -> Result<(TaskId, AddReplyRx), Box<crate::core::UncommittedWatchedAdd>> {
@@ -282,12 +421,12 @@ impl SupervisorCore {
                 return Err(Box::new(crate::core::UncommittedWatchedAdd {
                     error,
                     label,
-                    spec,
+                    owned,
                     done,
                 }));
             }
         };
-        Ok(self.commit_add(permit, id, label, spec, done, completion))
+        Ok(self.commit_add(permit, id, label, owned, done, completion))
     }
 
     /// Waits for bounded queue capacity, then queues one Add command.
@@ -295,21 +434,33 @@ impl SupervisorCore {
         &self,
         id: TaskId,
         spec: TaskSpec,
-        done: Option<OutcomeTx>,
+        mut done: Option<OutcomeTx>,
     ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
-        let label: Arc<str> = Arc::from(spec.task().name());
-        let permit = match self.cmd_tx.reserve().await {
+        let reservation = self
+            .wait_for_ownership(self.reserve_ownership())
+            .await
+            .map_err(|error| (error, done.take()))?;
+        let owned = self.own_task(spec, reservation);
+        let (label, owned) = self
+            .snapshot_owned_task_name(owned)
+            .await
+            .map_err(|error| (error, done.take()))?;
+        let permit = match tokio::select! {
+            biased;
+            _ = self.shutdown.started.cancelled() => Err(()),
+            permit = self.cmd_tx.reserve() => permit.map_err(|_| ()),
+        } {
             Ok(permit) => permit,
-            Err(_) => return Err((RuntimeError::ShuttingDown, done)),
+            Err(()) => return Err((RuntimeError::ShuttingDown, done)),
         };
         let Some(_admission) = self.command_admission() else {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
         };
-        Ok(self.commit_add(permit, id, label, spec, done, None))
+        Ok(self.commit_add(permit, id, label, owned, done, None))
     }
 
     /// Publishes the request event and makes an already-reserved Add visible.
@@ -320,20 +471,20 @@ impl SupervisorCore {
         permit: mpsc::Permit<'_, RegistryCommand>,
         id: TaskId,
         label: Arc<str>,
-        spec: TaskSpec,
+        owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
     ) -> (TaskId, AddReplyRx) {
         let (reply, reply_rx) = oneshot::channel();
-        self.bus.publish(
+        self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskAddRequested)
                 .with_task(Arc::clone(&label))
-                .with_id(id),
-        );
+                .with_id(id)
+        });
         permit.send(RegistryCommand::Add {
             id,
             label,
-            spec,
+            owned: Box::new(owned),
             outcome: done,
             completion,
             reply,
@@ -361,11 +512,11 @@ impl SupervisorCore {
 
         let (reply, reply_rx) = oneshot::channel();
         for item in &items {
-            self.bus.publish(
+            self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskAddRequested)
                     .with_task(Arc::clone(&item.label))
-                    .with_id(item.id),
-            );
+                    .with_id(item.id)
+            });
         }
         permit.send(RegistryCommand::AddBatch { items, reply });
         Ok(reply_rx)
@@ -516,11 +667,13 @@ impl SupervisorCore {
         reason: Option<&'static str>,
     ) -> RemoveReplyRx {
         let (reply, reply_rx) = oneshot::channel();
-        let mut event = Event::new(EventKind::TaskRemoveRequested).with_id(id);
-        if let Some(reason) = reason {
-            event = event.with_reason(reason);
-        }
-        self.bus.publish(event);
+        self.bus.publish_lazy(|| {
+            let mut event = Event::new(EventKind::TaskRemoveRequested).with_id(id);
+            if let Some(reason) = reason {
+                event = event.with_reason(reason);
+            }
+            event
+        });
         permit.send(RegistryCommand::Remove { id, reply });
         reply_rx
     }

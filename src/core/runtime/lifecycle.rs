@@ -6,7 +6,16 @@ use std::{
 };
 
 use super::{SupervisorCore, shutdown_workflow::ShutdownTrigger};
-use crate::{core::registry::AddBatchItem, error::RuntimeError, identity::TaskId, tasks::TaskSpec};
+use crate::{
+    core::{
+        deferred_drop,
+        registry::AddBatchItem,
+        task_metadata::{self, TaskNameSnapshot},
+    },
+    error::RuntimeError,
+    identity::TaskId,
+    tasks::TaskSpec,
+};
 
 impl SupervisorCore {
     /// Starts runtime workers and listeners.
@@ -14,7 +23,7 @@ impl SupervisorCore {
     /// This starts:
     /// - subscriber queue workers,
     /// - the event relay,
-    /// - the registry listener and central actor scheduler.
+    /// - the registry listener and actor runtime/reaper coordinator.
     pub(crate) fn start(&self) {
         if self.started.load(Ordering::Acquire) {
             return;
@@ -31,7 +40,9 @@ impl SupervisorCore {
         tokio::runtime::Handle::try_current()
             .expect("Supervisor::serve requires an active Tokio runtime");
         self.subs.start();
-        self.subscriber_listener();
+        if self.bus.is_enabled() {
+            self.subscriber_listener();
+        }
         self.registry.clone().spawn_listener();
         self.started.store(true, Ordering::Release);
     }
@@ -85,7 +96,139 @@ impl SupervisorCore {
     where
         F: Future<Output = ShutdownTrigger>,
     {
-        if self.running.swap(true, Ordering::AcqRel) {
+        if self.running.load(Ordering::Acquire) {
+            return Err(RuntimeError::AlreadyRunning);
+        }
+
+        if let Some(limit) = self.runtime_config().max_registered_tasks()
+            && tasks.len() > limit.get()
+        {
+            return Err(RuntimeError::ResourceLimitReached {
+                resource: "registered_tasks",
+                limit: limit.get(),
+            });
+        }
+
+        // Subscriber reservations live for this supervisor's whole lifetime.
+        // A static batch that cannot fit beside them can never acquire the
+        // process-wide ownership broker, so reject before enqueueing an
+        // impossible waiter that would also obstruct unrelated admissions.
+        if tasks.len()
+            > deferred_drop::OWNERSHIP_CAPACITY.saturating_sub(self.subs.ownership_slots())
+        {
+            return Err(RuntimeError::ResourceLimitReached {
+                resource: deferred_drop::OWNERSHIP_RESOURCE,
+                limit: deferred_drop::OWNERSHIP_CAPACITY,
+            });
+        }
+
+        if tasks.is_empty() {
+            if self
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err(RuntimeError::AlreadyRunning);
+            }
+            if self.is_shutting_down() {
+                return self.wait_started_shutdown().await;
+            }
+            self.start();
+            return self.drive_shutdown(shutdown).await;
+        }
+
+        tokio::pin!(shutdown);
+        tokio::select! {
+            biased;
+            _ = self.shutdown.started.cancelled() => {
+                return self.wait_started_shutdown().await;
+            }
+            trigger = shutdown.as_mut() => {
+                if self.running.compare_exchange(
+                    false,
+                    true,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ).is_err() {
+                    return Err(RuntimeError::AlreadyRunning);
+                }
+                self.start();
+                return self.join_shutdown(trigger).await;
+            }
+            _ = std::future::ready(()) => {}
+        }
+        let reservations = self
+            .try_reserve_ownership_many(tasks.len())
+            .map_err(|error| RuntimeError::ResourceLimitReached {
+                resource: deferred_drop::OWNERSHIP_RESOURCE,
+                limit: error.limit(),
+            })?;
+
+        // Charge every task before handing synchronous user metadata to the
+        // process-wide fixed worker set. A name panic still occurs before the
+        // single-shot lifecycle is consumed, so a corrected batch may retry.
+        let owned_tasks: Vec<_> = tasks
+            .into_iter()
+            .zip(reservations)
+            .map(|(spec, reservation)| self.own_task(spec, reservation))
+            .collect();
+        let mut metadata = Vec::with_capacity(owned_tasks.len());
+        for owned in owned_tasks {
+            let receiver = match task_metadata::snapshot_task_name(owned, |spec| {
+                Arc::<str>::from(spec.task().name())
+            }) {
+                Ok(receiver) => receiver,
+                Err(owned) => {
+                    drop(owned);
+                    return Err(RuntimeError::ResourceLimitReached {
+                        resource: "task_metadata",
+                        limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+                    });
+                }
+            };
+            metadata.push(receiver);
+        }
+
+        let mut tasks = Vec::with_capacity(metadata.len());
+        for receiver in metadata {
+            let snapshot = tokio::select! {
+                biased;
+                _ = self.shutdown.started.cancelled() => {
+                    return self.wait_started_shutdown().await;
+                }
+                trigger = shutdown.as_mut() => {
+                    if self.running.compare_exchange(
+                        false,
+                        true,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ).is_err() {
+                        return Err(RuntimeError::AlreadyRunning);
+                    }
+                    self.start();
+                    return self.join_shutdown(trigger).await;
+                }
+                snapshot = receiver => snapshot.map_err(|_| RuntimeError::ResourceLimitReached {
+                    resource: "task_metadata",
+                    limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+                })?,
+            };
+            match snapshot {
+                TaskNameSnapshot::Ready { owned, task_name } => {
+                    tasks.push((task_name, owned));
+                }
+                TaskNameSnapshot::Panicked { owned, message } => {
+                    drop(owned);
+                    panic!("Task::name panicked: {message}")
+                }
+            }
+        }
+
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Err(RuntimeError::AlreadyRunning);
         }
         if self.is_shutting_down() {
@@ -93,19 +236,25 @@ impl SupervisorCore {
         }
         self.start();
 
-        if tasks.is_empty() {
-            return self.drive_shutdown(shutdown).await;
-        }
-
         let items = tasks
             .into_iter()
-            .map(|spec| AddBatchItem {
+            .map(|(label, owned)| AddBatchItem {
                 id: TaskId::next(),
-                label: Arc::from(spec.task().name()),
-                spec,
+                label,
+                owned,
             })
             .collect();
-        let reply = match self.enqueue_add_batch_wait(items).await {
+        let admission = tokio::select! {
+            biased;
+            _ = self.shutdown.started.cancelled() => {
+                return self.wait_started_shutdown().await;
+            }
+            trigger = shutdown.as_mut() => {
+                return self.join_shutdown(trigger).await;
+            }
+            admission = self.enqueue_add_batch_wait(items) => admission,
+        };
+        let reply = match admission {
             Ok(reply) => reply,
             Err(RuntimeError::ShuttingDown) if self.shutdown.started.is_cancelled() => {
                 return self.wait_started_shutdown().await;

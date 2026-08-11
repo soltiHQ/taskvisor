@@ -364,6 +364,7 @@ mod tests {
         for (kind, expected) in [
             (RejectionKind::AlreadyExists, Level::DEBUG),
             (RejectionKind::QueueFull, Level::DEBUG),
+            (RejectionKind::ResourceLimit, Level::DEBUG),
             (RejectionKind::AdmissionFailed, Level::WARN),
         ] {
             let event = Event::new(EventKind::TaskAddFailed).with_rejection_kind(kind);

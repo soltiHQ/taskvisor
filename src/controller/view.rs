@@ -24,7 +24,7 @@ pub enum SlotStatusKind {
     ///
     /// Registry acceptance is still pending from the controller's point of view.
     Admitting,
-    /// The registry accepted the task, and the controller has not yet applied its terminal cleanup signal.
+    /// The registry accepted the task, and the controller has not yet observed both logical cleanup and physical actor release.
     ///
     /// This does not prove that the task body is executing now.
     /// It may be waiting for the supervisor's global concurrency permit, sleeping between attempts, or finishing cleanup.
@@ -32,7 +32,7 @@ pub enum SlotStatusKind {
     /// A replacement is waiting for the current submission to leave the slot.
     ///
     /// The controller is either waiting for a pending registration decision before it can order removal,
-    /// or waiting for reliable terminal registry cleanup after removal was ordered.
+    /// or waiting for reliable logical cleanup and physical actor release after removal was ordered.
     ///
     /// `Replace` enters this state.
     /// An ID-based `remove*` or `cancel*` request does not change the public status by itself.
@@ -98,7 +98,7 @@ pub struct ControllerSnapshot {
 impl ControllerSnapshot {
     /// Number of entries in this snapshot whose status is `Running`.
     ///
-    /// This counts owners whose registration was accepted and whose terminal completion has not yet been applied by the controller.
+    /// This counts owners whose registration was accepted and whose logical and physical completion has not yet been applied by the controller.
     /// It does not count task bodies executing at this exact moment, or `Admitting` and `Terminating` slots.
     #[must_use]
     pub fn running_count(&self) -> usize {

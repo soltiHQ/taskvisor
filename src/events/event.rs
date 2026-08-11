@@ -17,6 +17,7 @@
 //! [`Event::new`] gives each event a process-local increasing `seq`.
 //! Use it to sort observed events and detect gaps.
 //! It is not stored across process restarts.
+//! The sequence fails fast on `u64` exhaustion instead of wrapping.
 //!
 //! With concurrent publishers, it shows event construction order, not a guaranteed order of runtime effects or subscriber callbacks.
 //!
@@ -70,8 +71,28 @@ use crate::{TaskOutcomeKind, identity::TaskId};
 
 /// Process-local counter for `seq` values.
 ///
-/// It wraps after `2^64` allocations.
+/// Zero is the exhausted sentinel and is never returned.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+fn advance_event_seq(current: u64) -> Option<u64> {
+    match current {
+        0 => None,
+        u64::MAX => Some(0),
+        value => Some(value + 1),
+    }
+}
+
+#[inline]
+fn next_event_seq() -> u64 {
+    EVENT_SEQ
+        .fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            advance_event_seq,
+        )
+        .unwrap_or_else(|_| panic!("event sequence exhausted; ordering cannot wrap safely"))
+}
 
 /// Describes what happened in the runtime.
 ///
@@ -120,7 +141,10 @@ pub enum EventKind {
     /// - `seq`: process-local sequence
     ShutdownRequested,
 
-    /// All tasks stopped within configured grace period.
+    /// Bounded registry cleanup completed without a new grace overrun.
+    ///
+    /// This does not prove physical exit of any actor retained by the
+    /// force-abort reaper.
     ///
     /// Sets:
     /// - `at`: wall-clock timestamp
@@ -216,7 +240,7 @@ pub enum EventKind {
     /// - `seq`: process-local sequence
     TaskAddRequested,
 
-    /// A task was registered and its managed runner was spawned.
+    /// A task was registered and its actor task was started.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -227,8 +251,8 @@ pub enum EventKind {
 
     /// A task was not added because its name conflicted or its all-or-nothing batch was rejected.
     ///
-    /// No task runner is spawned for a rejected dynamic add.
-    /// If an all-or-nothing batch is rejected, no task runner is spawned for any item.
+    /// No task actor is constructed for a rejected dynamic add.
+    /// If an all-or-nothing batch is rejected, no task actor is constructed for any item.
     ///
     /// Sets:
     /// - `id`: task run identity of the rejected add request
@@ -253,7 +277,11 @@ pub enum EventKind {
     /// - `seq`: process-local sequence
     TaskRemoveRequested,
 
-    /// Task was removed from the supervisor after terminal cleanup.
+    /// Task registry membership was removed and terminal reporting was committed.
+    ///
+    /// This event can race with the internal logical-completion latch.
+    /// For [`TaskOutcomeKind::ForceAborted`], it does not prove physical actor exit.
+    /// The reaper retains the task name and execution resources until that exit.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -264,9 +292,10 @@ pub enum EventKind {
 
     /// A registered task reached its final outcome and will not start another attempt.
     ///
-    /// This is emitted once after the task runner is joined and before
-    /// [`TaskRemoved`](Self::TaskRemoved). It also covers force-abort and an
-    /// internal runner panic, even when no attempt-level terminal event exists.
+    /// This is emitted once after the final outcome is committed and before
+    /// [`TaskRemoved`](Self::TaskRemoved). Except for force-abort, the task
+    /// runner is physically joined first. A force-aborted synchronous poll may
+    /// remain active under reaper ownership even after both events.
     ///
     /// Sets:
     /// - `id`: task run identity
@@ -425,6 +454,8 @@ pub enum RejectionKind {
     ControllerShuttingDown,
     /// The controller could not commit the submission to the runtime registry.
     AdmissionFailed,
+    /// A configured registry or controller resource budget rejected admission.
+    ResourceLimit,
 }
 
 impl RejectionKind {
@@ -440,6 +471,7 @@ impl RejectionKind {
             Self::RemovedFromQueue => "removed_from_queue",
             Self::ControllerShuttingDown => "controller_shutting_down",
             Self::AdmissionFailed => "admission_failed",
+            Self::ResourceLimit => "resource_limit",
         }
     }
 }
@@ -463,7 +495,7 @@ impl RejectionKind {
 pub struct Event {
     /// Process-local sequence number allocated when the event was created.
     ///
-    /// It increases until the `u64` counter wraps and is not stored across process restarts.
+    /// It increases without wrapping and is not stored across process restarts.
     pub seq: u64,
     /// Wall-clock timestamp captured when the event was created.
     ///
@@ -521,7 +553,7 @@ impl Event {
     #[must_use]
     pub fn new(kind: EventKind) -> Self {
         Self {
-            seq: EVENT_SEQ.fetch_add(1, AtomicOrdering::Relaxed),
+            seq: next_event_seq(),
             kind,
             at: SystemTime::now(),
             backoff_source: None,
@@ -756,6 +788,14 @@ mod tests {
     }
 
     #[test]
+    fn sequence_uses_zero_as_an_exhausted_sentinel() {
+        assert_eq!(advance_event_seq(1), Some(2));
+        assert_eq!(advance_event_seq(u64::MAX - 1), Some(u64::MAX));
+        assert_eq!(advance_event_seq(u64::MAX), Some(0));
+        assert_eq!(advance_event_seq(0), None);
+    }
+
+    #[test]
     fn event_kind_labels_are_stable() {
         let cases = [
             (EventKind::SubscriberPanicked, "subscriber_panicked"),
@@ -823,6 +863,7 @@ mod tests {
                 "controller_shutting_down",
             ),
             (RejectionKind::AdmissionFailed, "admission_failed"),
+            (RejectionKind::ResourceLimit, "resource_limit"),
         ];
 
         for (kind, expected) in cases {

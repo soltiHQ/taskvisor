@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use super::completion::{OutcomeTx, RemovalCompletion};
-use crate::{error::RuntimeError, identity::TaskId, tasks::TaskSpec};
+use crate::{
+    core::deferred_drop::OwnedTask, error::RuntimeError, identity::TaskId, tasks::TaskSpec,
+};
 
 /// Authoritative result of one single-task or batch registry add command.
 pub(crate) type AddReply = Result<(), RuntimeError>;
@@ -17,7 +19,7 @@ pub(crate) type AddReplyRx = oneshot::Receiver<AddReply>;
 pub(crate) struct AddBatchItem {
     pub(crate) id: TaskId,
     pub(crate) label: Arc<str>,
-    pub(crate) spec: TaskSpec,
+    pub(crate) owned: OwnedTask<TaskSpec>,
 }
 
 /// Authoritative result of one registry remove command.
@@ -65,7 +67,7 @@ pub(crate) enum RegistryCommand {
     Add {
         id: TaskId,
         label: Arc<str>,
-        spec: TaskSpec,
+        owned: Box<OwnedTask<TaskSpec>>,
         outcome: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
         reply: oneshot::Sender<AddReply>,

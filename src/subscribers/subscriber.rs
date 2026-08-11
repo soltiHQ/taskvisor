@@ -92,6 +92,9 @@ pub trait Subscribe: Send + Sync + 'static {
     /// Returns this subscriber's queue capacity.
     ///
     /// The return type guarantees that the queue can hold at least one event.
+    /// Values above Tokio's structural bounded-channel maximum make
+    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build)
+    /// return [`BuildError::CapacityTooLarge`](crate::BuildError::CapacityTooLarge).
     /// If the queue is full, Taskvisor drops the new ordinary event and increments this subscriber's overflow counter.
     /// After the queue catches up, the same worker delivers one direct `SubscriberOverflow` summary with the number of dropped events.
     ///

@@ -5,7 +5,9 @@
 //!
 //! A [`TaskWaiter`] answers "how did this task end?" for one [`TaskId`].
 //! It receives one final [`TaskOutcome`] through a direct one-shot channel, outside the event bus.
-//! For an admitted task, the registry sends the outcome after joining its managed runner and removing registry membership.
+//! For an admitted task, the registry sends the outcome after removing registry membership and classifying the final result.
+//! Except for [`TaskOutcome::ForceAborted`], the managed runner is physically joined first.
+//! A force-aborted synchronous poll can remain active under reaper ownership after delivery.
 //! Event-bus lag does not affect this path. If the outcome cannot be delivered, [`TaskWaiter::wait`] returns an error instead of guessing the result.
 //!
 //! ## Successful Direct-Add Flow
@@ -19,9 +21,11 @@
 //!   │                               │                                │ attempts / retries
 //!   │ await waiter.wait()           │                                │
 //!   │                               │◄─────── terminal signal ───────┤
-//!   │                               │ join runner                    │
-//!   │                               │ remove TaskId and name         │
+//!   │                               │ join runner or commit          │
+//!   │                               │ logical force-abort            │
+//!   │                               │ remove registry membership     │
 //!   │◄──── TaskOutcome (oneshot) ───┤                                │
+//!   │                               │          force-aborted runner ─┼─► reaper until physical exit
 //! ```
 //!
 //! With the `controller` feature, `submit_and_watch` can also return a waiter before slot admission.
@@ -30,8 +34,13 @@
 //! ## Guarantees
 //!
 //! - One waiter follows one [`TaskId`].
-//! - For admitted work, it resolves after all retries end and the registry joins the managed runner.
+//! - For admitted work, it resolves after all retries end, registry membership is removed, and the final result is classified and sent.
+//! - Delivery can race with the subsequent best-effort `TaskRemoved` event and internal logical-completion latch.
+//! - Except for [`TaskOutcome::ForceAborted`], the registry physically joins the managed runner before resolution.
+//! - `ForceAborted` can resolve while a synchronous poll remains reaper-owned; its name and execution resources stay reserved until physical exit.
 //! - Dropping a waiter is safe and does not cancel the task.
+//! - After delivery, the outcome belongs to the caller. Dropping its waiter
+//!   destroys that outcome synchronously in the caller's execution context.
 //! - If the runtime drops the sender before it creates an outcome, [`TaskWaiter::wait`] returns an error instead of inventing a result.
 //!
 //! Direct [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
@@ -64,7 +73,8 @@ pub enum TaskOutcomeKind {
     Fatal,
     /// Cancellation was requested or reported cooperatively.
     Canceled,
-    /// The runtime aborted the task before cooperative stop completed.
+    /// The registry stopped waiting and requested abort before cooperative stop completed.
+    /// Synchronous task code may still be physically running under reaper ownership.
     ForceAborted,
     /// The internal task runner panicked.
     Panicked,
@@ -90,7 +100,10 @@ impl TaskOutcomeKind {
 
 /// Final result of one watched task or controller submission.
 ///
-/// For admitted work, this value is sent after the retry loop ends, the managed runner is joined, and registry membership is removed.
+/// For admitted work, this value is sent after the retry loop ends, registry membership is removed, and the final result is classified.
+/// Delivery can race with the subsequent best-effort `TaskRemoved` event and internal logical-completion latch.
+/// Except for [`ForceAborted`](Self::ForceAborted), the managed runner is physically joined first.
+/// `ForceAborted` can be delivered while a synchronous poll remains active under reaper ownership.
 /// A controller can instead return [`Rejected`](Self::Rejected) before the task starts.
 ///
 /// This enum is non-exhaustive.
@@ -109,7 +122,7 @@ impl TaskOutcomeKind {
 /// | [`Failed`](Self::Failed)             | Retryable failure reached a stop condition |
 /// | [`Fatal`](Self::Fatal)               | Task reported a permanent failure          |
 /// | [`Canceled`](Self::Canceled)         | Cooperative cancellation                   |
-/// | [`ForceAborted`](Self::ForceAborted) | Runtime aborted before cooperative stop    |
+/// | [`ForceAborted`](Self::ForceAborted) | Logical deadline expired before cooperative stop |
 /// | [`Panicked`](Self::Panicked)         | Internal task runner panicked              |
 /// | [`Rejected`](Self::Rejected)         | Task body never ran                        |
 ///
@@ -169,10 +182,12 @@ pub enum TaskOutcome {
     /// This can come from shutdown, explicit removal, or the task returning [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
-    /// The runtime aborted the managed task runner before cooperative stop completed.
+    /// The registry stopped waiting and requested abort before cooperative stop completed.
     ///
     /// This normally happens after the configured grace period.
     /// Last-owner fallback and signal-setup failure cleanup cannot wait for that period.
+    /// A synchronous poll can remain physically active under internal reaper
+    /// ownership until it returns control to Tokio.
     ForceAborted,
 
     /// The internal task runner panicked.
@@ -370,17 +385,78 @@ impl TaskWaiter {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::ShuttingDown`] if the runtime drops its sender before producing an outcome.
+    /// Returns [`RuntimeError::OutcomeUnavailable`] if the runtime drops its sender before producing an outcome.
     ///
     /// > No final result is available in that case.
     pub async fn wait(self) -> Result<TaskOutcome, RuntimeError> {
-        self.rx.await.map_err(|_| RuntimeError::ShuttingDown)
+        let id = self.id;
+        self.rx
+            .await
+            .map_err(|_| RuntimeError::OutcomeUnavailable { id })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_waiter_after_delivery_drops_caller_owned_outcome_locally() {
+        use std::{
+            fmt,
+            sync::atomic::{AtomicBool, Ordering},
+        };
+
+        #[derive(Debug)]
+        struct DropThreadProbe {
+            dropped: Arc<AtomicBool>,
+            isolated: Arc<AtomicBool>,
+        }
+
+        impl fmt::Display for DropThreadProbe {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("waiter drop probe")
+            }
+        }
+
+        impl std::error::Error for DropThreadProbe {}
+
+        impl Drop for DropThreadProbe {
+            fn drop(&mut self) {
+                let isolated = std::thread::current()
+                    .name()
+                    .is_some_and(|name| name.starts_with("taskvisor-drop-"));
+                self.isolated.store(isolated, Ordering::Release);
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let isolated = Arc::new(AtomicBool::new(false));
+        let source: SharedError = Arc::new(DropThreadProbe {
+            dropped: Arc::clone(&dropped),
+            isolated: Arc::clone(&isolated),
+        });
+        let (tx, rx) = oneshot::channel();
+        let waiter = TaskWaiter::new(TaskId::next(), rx);
+
+        tx.send(TaskOutcome::Failed {
+            reason: Arc::from("failed"),
+            exit_code: None,
+            source: Some(source),
+        })
+        .expect("the waiter receiver must be live");
+
+        drop(waiter);
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "a delivered outcome belongs to the waiter caller"
+        );
+        assert!(
+            !isolated.load(Ordering::Acquire),
+            "the library reservation ends when outcome delivery succeeds"
+        );
+    }
 
     #[cfg(feature = "test-util")]
     #[test]
@@ -526,11 +602,12 @@ mod tests {
         ));
 
         let (tx, rx) = oneshot::channel::<TaskOutcome>();
-        let waiter = TaskWaiter::new(TaskId::next(), rx);
+        let id = TaskId::next();
+        let waiter = TaskWaiter::new(id, rx);
         drop(tx);
         assert!(matches!(
             waiter.wait().await,
-            Err(RuntimeError::ShuttingDown)
+            Err(RuntimeError::OutcomeUnavailable { id: unavailable }) if unavailable == id
         ));
     }
 }

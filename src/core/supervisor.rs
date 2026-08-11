@@ -27,7 +27,8 @@
 //! Dropping one owner does nothing while another owner is alive.
 //! Dropping the last owner sends best-effort cancellation, but `Drop` cannot wait.
 //!
-//! Call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown) to wait for cleanup and get its result.
+//! Call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown) to wait for the bounded shutdown workflow and get its result.
+//! A force-reaped synchronous task, detached subscriber callback, or isolated user destructor may remain physically active afterward.
 //!
 //! [`SupervisorCore`]: crate::core::SupervisorCore
 
@@ -90,6 +91,13 @@ impl Supervisor {
     ///
     /// This method does not start Tokio tasks.
     /// Call [`run`](Self::run) or [`serve`](Self::serve) later.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the process-wide library-owned user-lifetime budget cannot
+    /// reserve one slot per subscriber, when a bounded async capacity is
+    /// structurally too large, or when subscriber metadata panics.
+    /// Use [`SupervisorBuilder::try_build`] for typed build errors.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
@@ -157,9 +165,11 @@ impl Supervisor {
     /// If a name is repeated or already registered, no task from the batch starts.
     ///
     /// `run` can be called only once for a supervisor.
-    /// A rejected batch does not stop tasks that were added earlier through [`serve`](Self::serve), but the `run` call is still used and cannot be retried.
+    /// A pre-start ownership-limit or task-metadata failure leaves the single-shot lifecycle unused, so a corrected batch may retry.
+    /// Once the lifecycle reaches registry admission, a rejected batch does not stop tasks added earlier through [`serve`](Self::serve), but that `run` call is consumed and cannot be retried.
     ///
-    /// `Ok(())` means the supervisor lifecycle and cleanup completed successfully.
+    /// `Ok(())` means the bounded supervisor lifecycle and cleanup workflow completed successfully.
+    /// It does not prove physical exit of a force-reaped synchronous task, detached subscriber callback, or isolated user destructor.
     /// It does not mean that every managed task completed successfully.
     /// Task failures, fatal errors, and panics remain task-level outcomes; use [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch) when application logic needs a reliable outcome for one task.
     ///
@@ -197,8 +207,10 @@ impl Supervisor {
 
     /// Runs an initial task batch until natural completion, shared shutdown, or an application-owned shutdown future completes.
     ///
-    /// The shutdown future is polled only after the initial batch has been accepted.
-    /// When it completes first, taskvisor starts the same graceful shutdown used by [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
+    /// The shutdown future is polled while the initial batch waits for bounded
+    /// ownership, isolated task metadata, and registry admission. When it
+    /// completes first, taskvisor starts the same graceful shutdown used by
+    /// [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
     ///
     /// The future must resolve to `()`.
     /// Wrap a fallible source so the application decides how to handle its error before requesting shutdown.

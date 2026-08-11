@@ -3,9 +3,10 @@
 mod common;
 
 use std::collections::HashSet;
+use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -48,6 +49,55 @@ fn tracked_coop(
     })
 }
 
+fn synchronously_blocked_task(
+    name: &str,
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    release: Arc<AtomicBool>,
+    started: Arc<Notify>,
+) -> TaskRef {
+    TaskFn::arc(name, move |_ctx: TaskContext| {
+        let active = Arc::clone(&active);
+        let peak = Arc::clone(&peak);
+        let release = Arc::clone(&release);
+        let started = Arc::clone(&started);
+        async move {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            started.notify_one();
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            active.fetch_sub(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    })
+}
+
+#[derive(Debug)]
+struct BlockingRetrySource {
+    release: Arc<AtomicBool>,
+    drop_started: Arc<Notify>,
+}
+
+impl fmt::Display for BlockingRetrySource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("blocking retry source")
+    }
+}
+
+impl std::error::Error for BlockingRetrySource {}
+
+impl Drop for BlockingRetrySource {
+    fn drop(&mut self) {
+        self.drop_started.notify_one();
+        while !self.release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+}
+
 async fn wait_for_count(counter: &AtomicUsize, target: usize, changed: &Notify) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while counter.load(Ordering::SeqCst) < target {
@@ -56,6 +106,281 @@ async fn wait_for_count(counter: &AtomicUsize, target: usize, changed: &Notify) 
     })
     .await
     .unwrap_or_else(|_| panic!("counter did not reach {target}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
+    let handle = Supervisor::builder(
+        SupervisorConfig::default()
+            .with_grace(Duration::from_millis(20))
+            .with_max_concurrent(NonZeroUsize::new(1)),
+    )
+    .build()
+    .serve();
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let first_started = Arc::new(Notify::new());
+
+    let first = synchronously_blocked_task(
+        "blocked-poll",
+        Arc::clone(&active),
+        Arc::clone(&peak),
+        Arc::clone(&release),
+        Arc::clone(&first_started),
+    );
+
+    let first_id = handle
+        .add(TaskSpec::restartable(first))
+        .await
+        .expect("register blocked poll");
+    tokio::time::timeout(Duration::from_secs(2), first_started.notified())
+        .await
+        .expect("first attempt must enter its blocking poll");
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), handle.cancel(first_id))
+            .await
+            .expect("logical force-abort must remain grace-bounded")
+            .expect("cancel request")
+    );
+
+    let second_starts = Arc::new(AtomicUsize::new(0));
+    let changed = Arc::new(Notify::new());
+    let second = tracked_coop(
+        "replacement",
+        Arc::clone(&active),
+        Arc::clone(&peak),
+        Arc::clone(&second_starts),
+        Arc::clone(&changed),
+    );
+    handle
+        .add(TaskSpec::restartable(second))
+        .await
+        .expect("register replacement");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        second_starts.load(Ordering::SeqCst),
+        0,
+        "replacement must wait while the force-aborted poll still owns the permit"
+    );
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+
+    release.store(true, Ordering::Release);
+    wait_for_count(&second_starts, 1, &changed).await;
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+
+    let _ = handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
+    let handle = Supervisor::builder(
+        SupervisorConfig::default()
+            .with_grace(Duration::from_millis(20))
+            .with_max_concurrent(NonZeroUsize::new(2)),
+    )
+    .build()
+    .serve();
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
+    let first = synchronously_blocked_task(
+        "physically-reserved",
+        active,
+        peak,
+        Arc::clone(&release),
+        Arc::clone(&started),
+    );
+    let first_id = handle
+        .add(TaskSpec::restartable(first))
+        .await
+        .expect("register blocked task");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("blocked attempt must start");
+    assert!(handle.cancel(first_id).await.expect("cancel blocked task"));
+    assert!(
+        handle.is_alive("physically-reserved").await,
+        "logical removal must still report a physically running reaped attempt"
+    );
+    assert!(
+        handle
+            .alive_snapshot()
+            .await
+            .iter()
+            .any(|label| label.as_ref() == "physically-reserved")
+    );
+
+    let replacement_runs = Arc::new(AtomicUsize::new(0));
+    let rejected_runs = Arc::clone(&replacement_runs);
+    let rejected = TaskFn::arc("physically-reserved", move |_ctx| {
+        rejected_runs.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    let duplicate = handle.add(TaskSpec::once(rejected)).await;
+    assert!(
+        matches!(
+            duplicate,
+            Err(RuntimeError::TaskAlreadyExists { ref name, .. })
+                if name.as_ref() == "physically-reserved"
+        ),
+        "the label must remain reserved while the old attempt is physically alive: {duplicate:?}"
+    );
+    assert_eq!(replacement_runs.load(Ordering::SeqCst), 0);
+
+    release.store(true, Ordering::Release);
+    let replacement_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let runs = Arc::clone(&replacement_runs);
+            let replacement = TaskFn::arc("physically-reserved", move |_ctx| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            match handle.add(TaskSpec::once(replacement)).await {
+                Ok(id) => break id,
+                Err(RuntimeError::TaskAlreadyExists { .. }) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected replacement admission failure: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the label must release after physical attempt exit");
+    assert!(replacement_id.get() > first_id.get());
+
+    let _ = handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
+    let handle = Supervisor::builder(
+        SupervisorConfig::default()
+            .with_grace(Duration::from_millis(20))
+            .with_max_registered_tasks(NonZeroUsize::new(1)),
+    )
+    .build()
+    .serve();
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
+    let first = synchronously_blocked_task(
+        "budget-blocked-poll",
+        active,
+        peak,
+        Arc::clone(&release),
+        Arc::clone(&started),
+    );
+    let first_id = handle
+        .add(TaskSpec::restartable(first))
+        .await
+        .expect("register blocked poll");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("blocked attempt must start");
+    assert!(handle.cancel(first_id).await.expect("cancel blocked poll"));
+
+    let rejected = handle
+        .add(TaskSpec::once(make_ok_once("budget-after-reap")))
+        .await;
+    assert!(
+        matches!(
+            rejected,
+            Err(RuntimeError::ResourceLimitReached {
+                resource: "registered_tasks",
+                limit: 1,
+                ..
+            })
+        ),
+        "a physically running reaped attempt must retain one global task-budget unit: {rejected:?}"
+    );
+
+    release.store(true, Ordering::Release);
+    let admitted = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match handle
+                .add(TaskSpec::once(make_ok_once("budget-after-reap")))
+                .await
+            {
+                Ok(id) => break id,
+                Err(RuntimeError::ResourceLimitReached { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(error) => panic!("unexpected admission error after reap: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("budget must be released after the blocked poll physically exits");
+    assert!(admitted.get() > first_id.get());
+
+    let _ = handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
+    let handle = Supervisor::builder(
+        SupervisorConfig::default()
+            .with_grace(Duration::from_millis(20))
+            .with_max_concurrent(NonZeroUsize::new(1)),
+    )
+    .build()
+    .serve();
+
+    let release = Arc::new(AtomicBool::new(false));
+    let drop_started = Arc::new(Notify::new());
+    let source_release = Arc::clone(&release);
+    let source_started = Arc::clone(&drop_started);
+    let failing = TaskFn::arc("blocking-retry-drop", move |_ctx: TaskContext| {
+        let source = BlockingRetrySource {
+            release: Arc::clone(&source_release),
+            drop_started: Arc::clone(&source_started),
+        };
+        async move { Err(TaskError::fail_from(source)) }
+    });
+    let first_id = handle
+        .add(TaskSpec::restartable(failing))
+        .await
+        .expect("register retrying task");
+    tokio::time::timeout(Duration::from_secs(2), drop_started.notified())
+        .await
+        .expect("retry source destructor must start inside the attempt");
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), handle.cancel(first_id))
+            .await
+            .expect("logical cancellation must remain grace-bounded")
+            .expect("cancel retrying task")
+    );
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let changed = Arc::new(Notify::new());
+    let replacement = tracked_coop(
+        "after-blocking-retry-drop",
+        active,
+        peak,
+        Arc::clone(&starts),
+        Arc::clone(&changed),
+    );
+    handle
+        .add(TaskSpec::restartable(replacement))
+        .await
+        .expect("register replacement");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        0,
+        "retry error destruction must keep the physical attempt permit"
+    );
+
+    release.store(true, Ordering::Release);
+    wait_for_count(&starts, 1, &changed).await;
+    let _ = handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

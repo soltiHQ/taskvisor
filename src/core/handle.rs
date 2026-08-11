@@ -21,20 +21,21 @@
 //! | Method family                              | A successful return confirms                                                                          | It does not confirm                                                     |
 //! |--------------------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
 //! | `add`, `try_add`                           | Registry admission and runner creation                                                                | First attempt started                                                   |
-//! | `add_and_watch`, `try_add_and_watch`       | Registry admission; the returned waiter later confirms terminal cleanup                               | Task success at method return                                           |
+//! | `add_and_watch`, `try_add_and_watch`       | Registry admission; the waiter later confirms membership removal and a classified final outcome       | Task success or physical release at method return                       |
 //! | `prepare_submission`                       | A controller `TaskId` is reserved and visible to the caller                                            | Queue intake; preparation publishes no event                            |
 //! | `submit`, `try_submit`                     | Controller command-queue acceptance                                                                   | Slot admission, registry admission, or task start                       |
-//! | `submit_and_watch`, `try_submit_and_watch` | Controller command-queue acceptance; the returned waiter later confirms rejection or terminal cleanup | Slot or registry admission at method return                             |
+//! | `submit_and_watch`, `try_submit_and_watch` | Controller queue acceptance; the waiter later confirms rejection or a classified admitted outcome     | Slot or registry admission at method return                             |
 //! | `remove`, `try_remove`                     | The stop claim was decided; queued controller work is removed before return                           | Terminal cleanup of registered work                                     |
 //! | `remove_by_label`, `try_remove_by_label`   | The registry name lookup and stop claim were decided                                                  | Terminal cleanup                                                        |
-//! | `cancel`, `try_cancel`                     | Terminal cleanup for known registered work; queued controller removal is complete                     | That this caller was the first stop claimant when the result is `false` |
-//! | `cancel_by_label*`, `try_cancel_by_label*` | Terminal cleanup when the call returns `Ok`; timeout variants bound only the cleanup wait             | Cleanup after `TaskTerminationTimeout`                                  |
+//! | `cancel`, `try_cancel`                     | Logical terminal cleanup for known registered work; queued controller removal is complete             | Physical actor exit after `ForceAborted`                                |
+//! | `cancel_by_label*`, `try_cancel_by_label*` | Logical terminal cleanup on `Ok`; timeout variants bound only that wait                               | Cleanup after `TaskTerminationTimeout`; physical force-abort release    |
 //! | `list`                                     | One authoritative registry snapshot                                                                   | That entries are currently executing an attempt                         |
-//! | `alive_snapshot`, `is_alive`               | One best-effort event-derived cache read                                                              | Authoritative registry membership                                       |
+//! | `alive_snapshot`, `is_alive`               | Authoritative current-attempt activity from registry entries and the physical reaper                   | Registry membership while an entry is idle                              |
 //! | `controller_snapshot`                      | One best-effort rolling slot snapshot                                                                 | An atomic view across every slot                                        |
-//! | `shutdown`                                 | Shared runtime cleanup completed with the returned result                                             | -                                                                       |
+//! | `shutdown`                                 | The bounded shared shutdown workflow completed with the returned result                               | Physical exit of force-reaped code, detached callbacks, or destructors  |
 //!
-//! A `try_*` method changes queue admission only: it fails immediately when the relevant bounded queue is full.
+//! A `try_*` method never waits for bounded queue or ownership capacity.
+//! After fail-fast admission succeeds, it has the same downstream decision boundary as its regular counterpart.
 
 use std::{sync::Arc, time::Duration};
 
@@ -53,7 +54,8 @@ use super::outcome::TaskWaiter;
 /// Call [`shutdown`](Self::shutdown) for a confirmed shutdown result.
 ///
 /// > Use [`remove`](Self::remove) to request a stop and return after the request is accepted.
-/// > Use [`cancel`](Self::cancel) to wait until the task is joined and its name and identity are released.
+/// > Use [`cancel`](Self::cancel) to wait for bounded logical terminal cleanup.
+/// > A [`TaskOutcome::ForceAborted`](crate::TaskOutcome::ForceAborted) task can remain physically active under reaper ownership; its name and execution resources stay reserved until physical exit.
 ///
 /// ## Example
 ///
@@ -151,7 +153,9 @@ impl SupervisorHandle {
     /// Adds a task and returns a waiter for its final outcome.
     ///
     /// Registration is the same as [`add`](Self::add).
-    /// The [`TaskWaiter`] resolves after all retries end, the registry joins the managed runner, and registry membership is removed.
+    /// The [`TaskWaiter`] resolves after all retries end, registry membership is removed, and the final outcome is classified and sent.
+    /// Except for [`TaskOutcome::ForceAborted`](crate::TaskOutcome::ForceAborted), the managed runner is physically joined first.
+    /// A force-aborted synchronous poll may remain active under reaper ownership, with its name and execution resources reserved until physical exit.
     ///
     /// > It uses a direct completion channel, not best-effort lifecycle events.
     ///
@@ -272,26 +276,27 @@ impl SupervisorHandle {
     /// The list comes from the registry and is sorted by [`TaskId`].
     /// It includes every registry entry, whether its managed task is running, waiting for a permit, in backoff or a restart interval, already finished but not cleaned up, or being removed.
     ///
-    /// See [`alive_snapshot`](Self::alive_snapshot) for the best-effort list of task names currently marked alive.
+    /// See [`alive_snapshot`](Self::alive_snapshot) for the authoritative list of tasks currently executing an attempt.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.core().list_tasks().await
     }
 
-    /// Returns task names currently marked alive by lifecycle events.
+    /// Returns registered task names currently executing an attempt.
     ///
-    /// This is a best-effort event-derived cache.
-    /// It can lag or miss state after event loss.
-    /// The result is sorted and deduplicated by name.
+    /// The activity bit belongs to the same registry entry as the task identity
+    /// and remains true until the physical attempt task finishes, including
+    /// after force-abort has been requested. Event loss does not affect it.
+    /// The result is sorted by name.
     ///
     /// See [`list`](Self::list) for the authoritative registry view of registered tasks.
     pub async fn alive_snapshot(&self) -> Vec<Arc<str>> {
         self.core().snapshot().await
     }
 
-    /// Returns whether the cache currently marks any run with this name as alive.
+    /// Returns whether the registered task with this name is executing an attempt.
     ///
-    /// This best-effort query does not check a specific [`TaskId`] and can miss state after event loss.
-    /// > Use [`list`](Self::list) for registry membership.
+    /// Waiting for a permit, retry backoff, or terminal cleanup is not alive.
+    /// Use [`list`](Self::list) when registry membership is the desired state.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
     }
@@ -308,9 +313,11 @@ impl SupervisorHandle {
         self.core().task_defaults()
     }
 
-    /// Cancels work by identity and waits for terminal cleanup.
+    /// Cancels work by identity and waits for bounded logical terminal cleanup.
     ///
-    /// For registered work, this returns after the managed runner is joined and its name and identity are released.
+    /// For registered work, this returns after registry membership is removed and the final outcome is committed.
+    /// Except for [`TaskOutcome::ForceAborted`](crate::TaskOutcome::ForceAborted), the managed runner is physically joined first.
+    /// After force-abort, a synchronous poll can remain reaper-owned; its name and execution resources remain reserved until physical exit.
     /// For queued controller work, removal is already complete when this method returns.
     ///
     /// `Ok(true)` is returned only to the call that claimed the stop.
@@ -464,11 +471,13 @@ impl SupervisorHandle {
         self.core().try_cancel_with_timeout(id, wait_for).await
     }
 
-    /// Shuts down the runtime and waits for cleanup.
+    /// Shuts down the runtime and waits for its bounded cleanup workflow.
     ///
-    /// This closes admission, cancels registered tasks, waits for the configured grace period, and joins internal workers.
+    /// This closes admission, cancels registered tasks, waits for the configured grace period, and joins runtime listeners and workers that have not entered one of the physical-lifetime exceptions below.
     /// Subscriber queues are drained up to their configured deadline.
     /// With a controller, pending submissions are also resolved and the controller worker is joined.
+    /// A force-reaped synchronous task, a detached subscriber callback, or an isolated user destructor may remain physically active after this method returns.
+    /// Their ownership remains charged to the corresponding process-wide resource budget until physical release.
     ///
     /// Shutdown is shared.
     /// Concurrent or later shutdown calls on other handles receive the same cached result.
@@ -477,7 +486,6 @@ impl SupervisorHandle {
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
     /// - [`RuntimeError::ShuttingDown`] when shared runtime cleanup cannot finish normally.
-    /// - [`RuntimeError::SignalSetupFailed`]
     #[doc(alias = "graceful shutdown")]
     #[doc(alias = "graceful stop")]
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
@@ -525,6 +533,7 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
+    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when process-wide library-owned user-lifetime admission has closed.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
@@ -545,6 +554,7 @@ impl SupervisorHandle {
     ///
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
     /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
+    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when no process-wide library-owned user-lifetime slot is available.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
@@ -559,14 +569,16 @@ impl SupervisorHandle {
     ///
     /// The waiter uses the direct completion channel, not the best-effort event bus.
     /// It normally resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) when controller or registry admission rejects the submission.
-    /// If the completion sender closes first, [`TaskWaiter::wait`] returns [`RuntimeError::ShuttingDown`].
-    /// If admitted, the waiter resolves after the task finishes and its managed runner is joined.
+    /// If the completion sender closes first, [`TaskWaiter::wait`] returns [`RuntimeError::OutcomeUnavailable`].
+    /// If admitted, the waiter resolves after registry membership is removed and the final outcome is classified and sent.
+    /// A [`TaskOutcome::ForceAborted`](crate::TaskOutcome::ForceAborted) result can precede physical runner exit; the controller keeps the slot reserved until that exit.
     ///
     /// Requires the `controller` feature.
     ///
     /// # Errors
     ///
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
+    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when process-wide library-owned user-lifetime admission has closed.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
@@ -588,6 +600,7 @@ impl SupervisorHandle {
     ///
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
     /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
+    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when no process-wide library-owned user-lifetime slot is available.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]

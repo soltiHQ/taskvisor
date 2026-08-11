@@ -1,7 +1,10 @@
 use super::*;
 use crate::{
     RuntimeError, TaskOutcome, TaskSpec,
-    core::actor::ActorExitReason,
+    core::{
+        actor::ActorExitReason,
+        deferred_drop::{DropBundle, OwnedTask, isolated_test_reservation, test_reservation},
+    },
     events::{Event, EventKind},
     reasons,
 };
@@ -77,8 +80,164 @@ fn registry() -> Arc<Registry> {
         None,
         Duration::from_secs(5),
         TaskDefaults::default(),
+        None,
         rx,
     )
+}
+
+fn registry_with_limit(limit: usize) -> Arc<Registry> {
+    let bus = Bus::new(64);
+    let token = CancellationToken::new();
+    let (_tx, rx) = mpsc::channel(64);
+    Registry::new(
+        bus,
+        token,
+        None,
+        Duration::from_secs(5),
+        TaskDefaults::default(),
+        std::num::NonZeroUsize::new(limit),
+        rx,
+    )
+}
+
+fn waiting_task_spec(name: &str) -> TaskSpec {
+    let task: crate::TaskRef = crate::TaskFn::arc(name, |_ctx: crate::TaskContext| async move {
+        std::future::pending().await
+    });
+    TaskSpec::once(task)
+}
+
+fn owned_task(spec: TaskSpec) -> OwnedTask<TaskSpec> {
+    let retained = Arc::clone(spec.task());
+    OwnedTask::new(spec, retained, test_reservation())
+}
+
+fn cleanup_bundle(name: &'static str) -> DropBundle {
+    let retained = crate::TaskFn::arc(name, |_ctx| async { Ok(()) });
+    test_reservation().bundle(retained)
+}
+
+fn isolated_cleanup_bundle(name: &'static str) -> DropBundle {
+    let retained = crate::TaskFn::arc(name, |_ctx| async { Ok(()) });
+    isolated_test_reservation().bundle(retained)
+}
+
+fn scheduled_actor_for_test<F>(
+    scheduler: &super::scheduler::ActorRuntime,
+    id: TaskId,
+    label: Arc<str>,
+    completion_tx: mpsc::UnboundedSender<TaskId>,
+    future: F,
+) -> (
+    super::scheduler::ScheduledActor,
+    super::scheduler::ActorHandle,
+    Arc<std::sync::atomic::AtomicBool>,
+)
+where
+    F: Future<Output = ActorExitReason> + Send + 'static,
+{
+    let activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanup_poisoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (scheduled, handle) = super::scheduler::ScheduledActor::new(
+        super::scheduler::ActorRegistration {
+            id,
+            label,
+            activity: Arc::clone(&activity),
+            cleanup_poisoned,
+            physical_release: RemovalCompletion::new(),
+            reaper: scheduler.attempt_reaper(),
+            completion_tx,
+        },
+        future,
+    );
+    (scheduled, handle, activity)
+}
+
+#[tokio::test]
+async fn registered_task_limit_rejects_single_without_changing_indexes() {
+    let registry = registry_with_limit(1);
+    let first = TaskId::next();
+    let (first_reply, first_reply_rx) = oneshot::channel();
+    registry
+        .spawn_and_register(
+            first,
+            Arc::from("limit-first"),
+            owned_task(waiting_task_spec("limit-first")),
+            None,
+            None,
+            first_reply,
+        )
+        .await;
+    assert!(matches!(first_reply_rx.await, Ok(Ok(()))));
+
+    let rejected = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let (reply, reply_rx) = oneshot::channel();
+    registry
+        .spawn_and_register(
+            rejected,
+            Arc::from("limit-rejected"),
+            owned_task(waiting_task_spec("limit-rejected")),
+            Some(done),
+            None,
+            reply,
+        )
+        .await;
+
+    assert!(matches!(
+        reply_rx.await,
+        Ok(Err(RuntimeError::ResourceLimitReached {
+            resource: "registered_tasks",
+            limit: 1,
+        }))
+    ));
+    assert!(matches!(
+        outcome.await,
+        Ok(TaskOutcome::Rejected {
+            kind: crate::RejectionKind::ResourceLimit,
+            ..
+        })
+    ));
+    assert!(registry.contains(first).await);
+    assert!(!registry.contains(rejected).await);
+    assert_eq!(registry.state.read().await.tasks.len(), 1);
+}
+
+#[tokio::test]
+async fn registered_task_limit_rejects_batch_atomically() {
+    let registry = registry_with_limit(1);
+    let mut events = registry.bus.subscribe();
+    let items = ["batch-limit-a", "batch-limit-b"]
+        .into_iter()
+        .map(|name| AddBatchItem {
+            id: TaskId::next(),
+            label: Arc::from(name),
+            owned: owned_task(waiting_task_spec(name)),
+        })
+        .collect();
+    let (reply, reply_rx) = oneshot::channel();
+
+    registry.spawn_and_register_batch(items, reply).await;
+
+    assert!(matches!(
+        reply_rx.await,
+        Ok(Err(RuntimeError::ResourceLimitReached {
+            resource: "registered_tasks",
+            limit: 1,
+        }))
+    ));
+    assert!(registry.state.read().await.tasks.is_empty());
+    let mut rejected = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.kind == EventKind::TaskAddFailed {
+            assert_eq!(
+                event.rejection_kind,
+                Some(crate::RejectionKind::ResourceLimit)
+            );
+            rejected += 1;
+        }
+    }
+    assert_eq!(rejected, 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -88,13 +247,14 @@ async fn terminal_cleanup_wakes_all_empty_waiters() {
     let registry = registry();
     let id = TaskId::next();
     let label: Arc<str> = Arc::from("empty-waiters");
-    let completion = RemovalCompletion::new();
     let mut state = registry.state.write().await;
     state.by_label.insert(Arc::clone(&label), id);
+    let completion = RemovalCompletion::new();
     state.tasks.insert(
         id,
         Entry {
             label: Arc::clone(&label),
+            activity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             state: EntryState::Removing {
                 completion: completion.clone(),
             },
@@ -131,11 +291,13 @@ async fn terminal_cleanup_wakes_all_empty_waiters() {
         &registry.empty_notify,
         &registry.pending_joins,
         &registry.bus,
+        &registry.actors.attempt_reaper(),
         RemovalReport {
             id,
             outcome: None,
             join: JoinCompletion::Joined(Ok(ActorExitReason::Completed)),
             completion,
+            cleanup: cleanup_bundle("empty-waiter-cleanup"),
         },
     )
     .await;
@@ -151,6 +313,46 @@ async fn terminal_cleanup_wakes_all_empty_waiters() {
     assert!(registry.is_empty().await);
     assert_eq!(registry.id_for_label("empty-waiters").await, None);
     assert!(registry.pending_joins.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_finalizer_commits_every_latch_during_unwind() {
+    let pending = PendingJoins::default();
+    let empty_notify = Notify::new();
+    let id = TaskId::next();
+    pending.inc(id);
+
+    let state_completion = RemovalCompletion::new();
+    let report_completion = RemovalCompletion::new();
+    let mut empty = Box::pin(empty_notify.notified());
+    assert_pending_once(empty.as_mut()).await;
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _finalizer = TerminalFinalizer {
+            id,
+            empty_notify: &empty_notify,
+            pending_joins: &pending,
+            state_completion: Some(state_completion.clone()),
+            report_completion: report_completion.clone(),
+            is_empty: true,
+            terminal: None,
+        };
+        panic!("injected terminal reporting panic");
+    }));
+
+    assert!(panic.is_err(), "the injected panic must cross the guard");
+    assert!(pending.is_empty(), "the pending join must always decrement");
+    assert!(
+        state_completion.is_complete(),
+        "the authoritative entry completion must always resolve"
+    );
+    assert!(
+        report_completion.is_complete(),
+        "the join reporter completion must always resolve"
+    );
+    tokio::time::timeout(Duration::from_secs(1), empty)
+        .await
+        .expect("the empty-registry signal must always wake");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -198,6 +400,7 @@ async fn terminal_reporting_drops_outcome_sources_after_state_unlock() {
             id,
             Entry {
                 label: Arc::clone(&label),
+                activity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 state: EntryState::Removing {
                     completion: completion.clone(),
                 },
@@ -220,6 +423,7 @@ async fn terminal_reporting_drops_outcome_sources_after_state_unlock() {
         &registry.empty_notify,
         &registry.pending_joins,
         &registry.bus,
+        &registry.actors.attempt_reaper(),
         RemovalReport {
             id,
             outcome: Some(done),
@@ -229,14 +433,118 @@ async fn terminal_reporting_drops_outcome_sources_after_state_unlock() {
                 source: Some(source),
             })),
             completion,
+            cleanup: cleanup_bundle("outcome-lock-cleanup"),
         },
     )
     .await;
 
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !source_dropped_unlocked.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("outcome source destruction must run after terminal reporting");
     assert!(
         source_dropped_unlocked.load(Ordering::Acquire),
         "outcome source destruction must not run under the registry write lock"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn panicking_outcome_destructor_cannot_strand_terminal_cleanup() {
+    use std::{
+        fmt,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    #[derive(Debug)]
+    struct PanickingDrop {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl fmt::Display for PanickingDrop {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("panicking destructor")
+        }
+    }
+
+    impl std::error::Error for PanickingDrop {}
+
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+            panic!("injected source destructor panic");
+        }
+    }
+
+    let registry = registry();
+    let id = TaskId::next();
+    let label: Arc<str> = Arc::from("panicking-outcome-drop");
+    let state_completion = RemovalCompletion::new();
+    let report_completion = RemovalCompletion::new();
+    {
+        let mut state = registry.state.write().await;
+        state.by_label.insert(Arc::clone(&label), id);
+        state.tasks.insert(
+            id,
+            Entry {
+                label: Arc::clone(&label),
+                activity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                state: EntryState::Removing {
+                    completion: state_completion.clone(),
+                },
+            },
+        );
+    }
+    registry.pending_joins.inc(id);
+    registry.pending_joins.label(id, label);
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let source: crate::SharedError = Arc::new(PanickingDrop {
+        dropped: Arc::clone(&dropped),
+    });
+    let (done, done_rx) = oneshot::channel();
+    drop(done_rx);
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        Registry::finish_removal(
+            &registry.state,
+            &registry.empty_notify,
+            &registry.pending_joins,
+            &registry.bus,
+            &registry.actors.attempt_reaper(),
+            RemovalReport {
+                id,
+                outcome: Some(done),
+                join: JoinCompletion::Joined(Ok(ActorExitReason::Exhausted {
+                    reason: Arc::from("finished"),
+                    exit_code: None,
+                    source: Some(source),
+                })),
+                completion: report_completion.clone(),
+                cleanup: crate::core::deferred_drop::isolated_test_reservation().bundle(
+                    crate::TaskFn::arc("panic-outcome-cleanup", |_ctx| async { Ok(()) }),
+                ),
+            },
+        ),
+    )
+    .await
+    .expect("a user destructor must not delay terminal cleanup");
+
+    assert!(registry.pending_joins.is_empty());
+    assert!(state_completion.is_complete());
+    assert!(report_completion.is_complete());
+    assert!(registry.is_empty().await);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !dropped.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the isolated executor must attempt the user destructor");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -278,6 +586,7 @@ async fn duplicate_admission_drops_prepared_task_after_state_unlock() {
             existing_id,
             Entry {
                 label: Arc::clone(&label),
+                activity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 state: EntryState::Removing {
                     completion: RemovalCompletion::new(),
                 },
@@ -295,7 +604,7 @@ async fn duplicate_admission_drops_prepared_task_after_state_unlock() {
         .spawn_and_register(
             TaskId::next(),
             label,
-            TaskSpec::once(task),
+            owned_task(TaskSpec::once(task)),
             None,
             None,
             reply,
@@ -305,6 +614,13 @@ async fn duplicate_admission_drops_prepared_task_after_state_unlock() {
         reply_rx.await,
         Ok(Err(RuntimeError::TaskAlreadyExists { .. }))
     ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !task_dropped_unlocked.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("prepared task destruction must be attempted by the isolated executor");
     assert!(
         task_dropped_unlocked.load(Ordering::Acquire),
         "prepared task destruction must not run under the registry write lock"
@@ -329,6 +645,7 @@ fn started_registry(
         None,
         grace,
         TaskDefaults::default(),
+        None,
         rx,
     );
     registry.clone().spawn_listener();
@@ -381,7 +698,7 @@ fn send_add(
     tx.try_send(RegistryCommand::Add {
         id,
         label,
-        spec,
+        owned: Box::new(owned_task(spec)),
         outcome,
         completion: None,
         reply,
@@ -394,7 +711,7 @@ fn batch_item(id: TaskId, spec: TaskSpec) -> AddBatchItem {
     AddBatchItem {
         id,
         label: Arc::from(spec.task().name()),
-        spec,
+        owned: owned_task(spec),
     }
 }
 
@@ -459,7 +776,7 @@ async fn add_command_consumes_cached_label_without_reading_task_name() {
     tx.try_send(RegistryCommand::Add {
         id,
         label: Arc::from("cached-command-label"),
-        spec: TaskSpec::once(task),
+        owned: Box::new(owned_task(TaskSpec::once(task))),
         outcome: None,
         completion: None,
         reply,
@@ -553,6 +870,7 @@ async fn single_add_publishes_added_before_starting() {
         None,
         Duration::from_secs(1),
         TaskDefaults::default(),
+        None,
         rx,
     );
     registry.clone().spawn_listener();
@@ -566,7 +884,14 @@ async fn single_add_publishes_added_before_starting() {
             let task: TaskRef = TaskFn::arc(name.clone(), |_ctx| async { Ok(()) });
             let (reply, reply_rx) = oneshot::channel();
             registry
-                .spawn_and_register(id, Arc::from(name), TaskSpec::once(task), None, None, reply)
+                .spawn_and_register(
+                    id,
+                    Arc::from(name),
+                    owned_task(TaskSpec::once(task)),
+                    None,
+                    None,
+                    reply,
+                )
                 .await;
             assert!(
                 matches!(reply_rx.await, Ok(Ok(()))),
@@ -1317,21 +1642,23 @@ async fn wait_joins_within_reports_stuck_labels_then_drains() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
-    use super::scheduler::{ActorScheduler, ScheduledActor};
+async fn actor_wrapper_signals_panics_and_force_abort_owns_unpolled_actor() {
+    use super::scheduler::ActorRuntime;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
-    let scheduler_token = CancellationToken::new();
-    let scheduler = ActorScheduler::new();
-    scheduler.spawn(scheduler_token.clone());
+    let scheduler = ActorRuntime::new();
+    scheduler.spawn();
 
     let panic_id = TaskId::next();
-    let (panic_actor, panic_handle) =
-        ScheduledActor::new(panic_id, completion_tx.clone(), async move {
-            panic!("outer actor panic")
-        });
-    scheduler.schedule(panic_actor).await;
+    let (panic_actor, panic_handle, _) = scheduled_actor_for_test(
+        &scheduler,
+        panic_id,
+        Arc::from("panic-wrapper"),
+        completion_tx.clone(),
+        async move { panic!("outer actor panic") },
+    );
+    scheduler.schedule(panic_actor);
     let panic_result = panic_handle.await;
     assert!(
         panic_result.is_err_and(|error| error.is_panic()),
@@ -1345,13 +1672,19 @@ async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
     let polled = Arc::new(AtomicBool::new(false));
     let polled_by_task = Arc::clone(&polled);
     let abort_id = TaskId::next();
-    let (abort_actor, abort_handle) = ScheduledActor::new(abort_id, completion_tx, async move {
-        polled_by_task.store(true, Ordering::SeqCst);
-        std::future::pending::<()>().await;
-        ActorExitReason::Completed
-    });
+    let (abort_actor, mut abort_handle, _) = scheduled_actor_for_test(
+        &scheduler,
+        abort_id,
+        Arc::from("aborted-wrapper"),
+        completion_tx,
+        async move {
+            polled_by_task.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            ActorExitReason::Completed
+        },
+    );
+    scheduler.schedule(abort_actor);
     abort_handle.abort();
-    scheduler.schedule(abort_actor).await;
     let abort_result = abort_handle.await;
     assert!(
         abort_result.is_err_and(|error| error.is_cancelled()),
@@ -1361,15 +1694,238 @@ async fn completion_guard_signals_on_panic_and_abort_before_first_poll() {
         !polled.load(Ordering::SeqCst),
         "the abort regression requires abort-before-first-poll"
     );
-    assert_eq!(
-        receive_completion(&mut completion_rx, "abort completion").await,
-        abort_id
-    );
     assert!(
         completion_rx.try_recv().is_err(),
-        "each actor exit must send one completion identity"
+        "a wrapper aborted before first poll has no natural completion identity"
     );
-    scheduler_token.cancel();
+    scheduler.attempt_reaper().attach_terminal(
+        abort_id,
+        cleanup_bundle("aborted-wrapper-cleanup"),
+        None,
+        RemovalCompletion::new(),
+    );
+    tokio::task::yield_now().await;
+    assert!(scheduler.join().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_outer_panic_payload_destructor_cannot_block_scheduler() {
+    use super::scheduler::ActorRuntime;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct BlockingPanicPayload(Arc<AtomicBool>);
+
+    impl Drop for BlockingPanicPayload {
+        fn drop(&mut self) {
+            while !self.0.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+    let scheduler = ActorRuntime::new();
+    scheduler.spawn();
+    let release = Arc::new(AtomicBool::new(false));
+    let payload_release = Arc::clone(&release);
+    let id = TaskId::next();
+    let (actor, handle, _) = scheduled_actor_for_test(
+        &scheduler,
+        id,
+        Arc::from("hostile-panic"),
+        completion_tx.clone(),
+        async move {
+            std::panic::panic_any(BlockingPanicPayload(payload_release));
+        },
+    );
+    scheduler.schedule(actor);
+
+    let next_id = TaskId::next();
+    let (next, next_handle, _) = scheduled_actor_for_test(
+        &scheduler,
+        next_id,
+        Arc::from("independent-actor"),
+        completion_tx,
+        async { ActorExitReason::Completed },
+    );
+    scheduler.schedule(next);
+    let next_result = tokio::time::timeout(Duration::from_millis(100), next_handle)
+        .await
+        .expect("one hostile actor destructor must not block another actor task");
+    assert!(matches!(next_result, Ok(ActorExitReason::Completed)));
+
+    let mut handle = Box::pin(handle);
+    assert_pending_once(handle.as_mut()).await;
+    // Release even on regression so a failing test cannot strand a worker.
+    release.store(true, Ordering::Release);
+    let joined = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("panic payload destruction must finish after release");
+    assert!(joined.is_err_and(|error| error.is_panic()));
+
+    assert!(scheduler.join().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_join_is_bounded_while_reaper_keeps_attempt_ownership() {
+    use super::scheduler::{ActorRuntime, AttemptReservation};
+    use crate::{TaskFn, core::deferred_drop};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let scheduler = ActorRuntime::new();
+    scheduler.spawn();
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let task_entered = Arc::clone(&entered);
+    let task_release = Arc::clone(&release);
+    let blocked = tokio::spawn(async move {
+        task_entered.store(true, Ordering::Release);
+        while !task_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("attempt must enter its synchronous poll");
+
+    let reaped_id = TaskId::next();
+    let reaped_label: Arc<str> = Arc::from("bounded-reaper");
+    let reaped_activity = Arc::new(AtomicBool::new(true));
+    let physical_release = RemovalCompletion::new();
+    let retained_task = TaskFn::arc("bounded-reaper", |_ctx| async { Ok(()) });
+    scheduler.attempt_reaper().abort_and_reap(
+        blocked,
+        AttemptReservation::new(
+            reaped_id,
+            reaped_label,
+            reaped_activity,
+            Arc::new(AtomicBool::new(false)),
+            physical_release.clone(),
+        ),
+    );
+    scheduler.attempt_reaper().attach_terminal(
+        reaped_id,
+        deferred_drop::reserve()
+            .await
+            .expect("test ownership reservation")
+            .bundle(retained_task),
+        None,
+        physical_release.clone(),
+    );
+    assert!(!physical_release.is_physical_complete());
+    assert_eq!(scheduler.reaping_attempts(), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), scheduler.join())
+            .await
+            .expect("scheduler join must not wait for a physically blocked reaper")
+    );
+    assert_eq!(
+        scheduler.reaping_attempts(),
+        1,
+        "bounded join must leave the attempt charged to its live reaper"
+    );
+
+    release.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while scheduler.reaping_attempts() != 0 || !physical_release.is_physical_complete() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reaper must eventually join the released attempt");
+    assert!(physical_release.is_physical_complete());
+
+    // The first bounded join retained the coordinator handle. A later join can
+    // observe and collect its clean completion without spawning another task.
+    assert!(scheduler.join().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_terminal_attach_preserves_bounded_physical_release_waiters() {
+    use super::scheduler::{ActorRuntime, AttemptReservation};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let scheduler = ActorRuntime::new();
+    scheduler.spawn();
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let actor_entered = Arc::clone(&entered);
+    let actor_release = Arc::clone(&release);
+    let blocked = tokio::spawn(async move {
+        actor_entered.store(true, Ordering::Release);
+        while !actor_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("physical owner must enter its blocking poll");
+
+    let id = TaskId::next();
+    let canonical = RemovalCompletion::new();
+    let first_terminal = RemovalCompletion::new();
+    let duplicate_terminal = RemovalCompletion::new();
+    let overflow_terminal = RemovalCompletion::new();
+    scheduler.attempt_reaper().abort_and_reap(
+        blocked,
+        AttemptReservation::new(
+            id,
+            Arc::from("duplicate-terminal-attach"),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            canonical.clone(),
+        ),
+    );
+    scheduler.attempt_reaper().attach_terminal(
+        id,
+        isolated_cleanup_bundle("first-terminal-bundle"),
+        None,
+        first_terminal.clone(),
+    );
+    scheduler.attempt_reaper().attach_terminal(
+        id,
+        isolated_cleanup_bundle("duplicate-terminal-bundle"),
+        None,
+        duplicate_terminal.clone(),
+    );
+    scheduler.attempt_reaper().attach_terminal(
+        id,
+        isolated_cleanup_bundle("overflow-terminal-bundle"),
+        None,
+        overflow_terminal.clone(),
+    );
+    assert!(!canonical.is_physical_complete());
+    assert!(!first_terminal.is_physical_complete());
+    assert!(!duplicate_terminal.is_physical_complete());
+    assert!(
+        overflow_terminal.is_physical_complete(),
+        "a bounded duplicate overflow must fail closed without stranding its waiter"
+    );
+
+    release.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while scheduler.reaping_attempts() != 0
+            || !canonical.is_physical_complete()
+            || !first_terminal.is_physical_complete()
+            || !duplicate_terminal.is_physical_complete()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released physical owner must be collected");
+    assert!(canonical.is_physical_complete());
+    assert!(first_terminal.is_physical_complete());
+    assert!(duplicate_terminal.is_physical_complete());
     assert!(scheduler.join().await);
 }
 
@@ -1474,9 +2030,14 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
     let id = TaskId::next();
     let label: Arc<str> = Arc::from("outer-panic");
     let (done, done_rx) = oneshot::channel();
+    let completion = RemovalCompletion::new();
+    let retained_task: crate::TaskRef =
+        crate::TaskFn::arc("outer-panic-retained", |_ctx| async { Ok(()) });
 
-    let (scheduled, join) = super::scheduler::ScheduledActor::new(
+    let (scheduled, join, activity) = scheduled_actor_for_test(
+        &registry.actors,
         id,
+        Arc::clone(&label),
         registry.listener.completion_tx.clone(),
         async move { panic!("outer actor panic") },
     );
@@ -1486,16 +2047,23 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
         id,
         Entry {
             label: Arc::clone(&label),
-            state: EntryState::Registered(Handle {
+            activity,
+            state: EntryState::Registered(Box::new(Handle::new(
                 join,
-                cancel: CancellationToken::new(),
-                done: Some(done),
-                completion: RemovalCompletion::new(),
-            }),
+                CancellationToken::new(),
+                Some(done),
+                completion.clone(),
+                HandleCleanup::new(
+                    id,
+                    registry.actors.attempt_reaper(),
+                    completion,
+                    test_reservation().bundle(retained_task),
+                ),
+            ))),
         },
     );
     drop(state);
-    registry.scheduler.schedule(scheduled).await;
+    registry.actors.schedule(scheduled);
 
     assert!(matches!(
         receive_reply(done_rx, "panic outcome").await,
@@ -1528,6 +2096,199 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
     assert_eq!(task_removed, 1);
 
     stop_registry(&registry, &token).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn raw_handle_drop_after_reaper_close_keeps_retained_result_charged() {
+    use super::scheduler::ActorRuntime;
+    use crate::core::deferred_drop::TestReservationSource;
+
+    #[derive(Debug)]
+    struct SourceDropProbe(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl std::fmt::Display for SourceDropProbe {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("retained actor result")
+        }
+    }
+
+    impl std::error::Error for SourceDropProbe {}
+
+    impl Drop for SourceDropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let actors = ActorRuntime::new();
+    actors.spawn();
+    assert!(
+        actors.join().await,
+        "an empty reaper coordinator must close cleanly"
+    );
+
+    let id = TaskId::next();
+    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+    let mut joins = Vec::new();
+    for suffix in ["first", "duplicate"] {
+        let result_source: crate::SharedError = Arc::new(SourceDropProbe(Arc::clone(&dropped)));
+        let (scheduled, join, _activity) = scheduled_actor_for_test(
+            &actors,
+            id,
+            Arc::from(format!("closed-reaper-{suffix}")),
+            completion_tx.clone(),
+            async move {
+                ActorExitReason::Fatal {
+                    reason: Arc::from("fatal"),
+                    exit_code: None,
+                    source: Some(result_source),
+                }
+            },
+        );
+        actors.schedule(scheduled);
+        joins.push(join);
+    }
+    for _ in 0..joins.len() {
+        assert_eq!(
+            receive_completion(&mut completion_rx, "closed-reaper completion").await,
+            id
+        );
+    }
+
+    let ownership = TestReservationSource::new(2);
+    let reservations = ownership
+        .try_reserve_many(2)
+        .expect("the isolated source has two ownership slots");
+    let mut completions = Vec::new();
+    let handles: Vec<_> = joins
+        .into_iter()
+        .zip(reservations)
+        .enumerate()
+        .map(|(index, (join, reservation))| {
+            let completion = RemovalCompletion::new();
+            completions.push(completion.clone());
+            let retained_task = crate::TaskFn::arc(
+                format!("closed-reaper-retained-task-{index}"),
+                |_ctx| async { Ok(()) },
+            );
+            Handle::new(
+                join,
+                CancellationToken::new(),
+                None,
+                completion.clone(),
+                HandleCleanup::new(
+                    id,
+                    actors.attempt_reaper(),
+                    completion,
+                    reservation.bundle(retained_task),
+                ),
+            )
+        })
+        .collect();
+
+    std::thread::spawn(move || drop(handles))
+        .join()
+        .expect("raw handle teardown must remain panic-safe without a Tokio runtime");
+
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "both forgotten physical results must remain retained"
+    );
+    assert!(
+        ownership.try_reserve().is_err(),
+        "every retained physical owner must keep its lifetime slot charged"
+    );
+    for completion in completions {
+        assert!(completion.is_complete());
+        assert!(!completion.is_physical_complete());
+    }
+    assert_eq!(actors.reaping_attempts(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canceled_terminal_report_keeps_reaper_result_charged_before_state_lock() {
+    use super::scheduler::AttemptReservation;
+    use crate::core::deferred_drop::TestReservationSource;
+    use std::sync::atomic::AtomicBool;
+
+    let registry = registry();
+    let id = TaskId::next();
+    let label: Arc<str> = Arc::from("canceled-terminal-report");
+    let completion = RemovalCompletion::new();
+    let blocked = tokio::spawn(std::future::pending::<()>());
+    registry.actors.attempt_reaper().abort_and_reap(
+        blocked,
+        AttemptReservation::new(
+            id,
+            Arc::clone(&label),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            completion.clone(),
+        ),
+    );
+
+    {
+        let mut state = registry.state.write().await;
+        state.by_label.insert(Arc::clone(&label), id);
+        state.tasks.insert(
+            id,
+            Entry {
+                label,
+                activity: Arc::new(AtomicBool::new(true)),
+                state: EntryState::Removing {
+                    completion: completion.clone(),
+                },
+            },
+        );
+    }
+    registry.pending_joins.inc(id);
+
+    let ownership = TestReservationSource::new(1);
+    let retained_task = crate::TaskFn::arc("canceled-terminal-retained", |_ctx| async { Ok(()) });
+    let cleanup = ownership
+        .try_reserve()
+        .expect("the isolated source has one ownership slot")
+        .bundle(retained_task);
+
+    let state_guard = registry.state.write().await;
+    let report_registry = Arc::clone(&registry);
+    let report_completion = completion.clone();
+    let report = tokio::spawn(async move {
+        Registry::finish_removal(
+            &report_registry.state,
+            &report_registry.empty_notify,
+            &report_registry.pending_joins,
+            &report_registry.bus,
+            &report_registry.actors.attempt_reaper(),
+            RemovalReport {
+                id,
+                outcome: None,
+                join: JoinCompletion::ForceAborted,
+                completion: report_completion,
+                cleanup,
+            },
+        )
+        .await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !report.is_finished(),
+        "the regression requires terminal reporting to wait for the state lock"
+    );
+    report.abort();
+    let _ = report.await;
+
+    assert!(
+        ownership.try_reserve().is_err(),
+        "cancellation must not release a bundle while its physical owner is retained"
+    );
+    assert!(completion.is_complete());
+    assert!(!completion.is_physical_complete());
+    assert!(registry.pending_joins.is_empty());
+    assert_eq!(registry.actors.reaping_attempts(), 1);
+    drop(state_guard);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1712,6 +2473,7 @@ async fn shutdown_drains_buffered_command_and_never_silently_drops() {
         None,
         Duration::from_millis(50),
         TaskDefaults::default(),
+        None,
         rx,
     );
 
@@ -1725,7 +2487,7 @@ async fn shutdown_drains_buffered_command_and_never_silently_drops() {
     tx.try_send(RegistryCommand::Add {
         id,
         label: Arc::from("buffered"),
-        spec: TaskSpec::restartable(task),
+        owned: Box::new(owned_task(TaskSpec::restartable(task))),
         outcome: Some(done_tx),
         completion: None,
         reply: reply_tx,
@@ -1770,4 +2532,85 @@ async fn shutdown_drains_buffered_command_and_never_silently_drops() {
         .is_err(),
         "after shutdown the command channel is closed; sends must return Err"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_flood_cannot_starve_management_ingress() {
+    use super::listener::COMPLETION_BURST_LIMIT;
+    use crate::TaskFn;
+
+    let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
+    let marker_id = TaskId::next();
+    let marker_label: Arc<str> = Arc::from("completion-fairness-marker");
+    let (marker_actor, marker_join, marker_activity) = scheduled_actor_for_test(
+        &registry.actors,
+        marker_id,
+        Arc::clone(&marker_label),
+        registry.listener.completion_tx.clone(),
+        std::future::pending::<ActorExitReason>(),
+    );
+    let marker_task = TaskFn::arc("completion-fairness-marker", |_ctx| async { Ok(()) });
+    {
+        let mut state = registry.state.write().await;
+        state.by_label.insert(Arc::clone(&marker_label), marker_id);
+        let completion = RemovalCompletion::new();
+        state.tasks.insert(
+            marker_id,
+            Entry {
+                label: Arc::clone(&marker_label),
+                activity: marker_activity,
+                state: EntryState::Registered(Box::new(Handle::new(
+                    marker_join,
+                    CancellationToken::new(),
+                    None,
+                    completion.clone(),
+                    HandleCleanup::new(
+                        marker_id,
+                        registry.actors.attempt_reaper(),
+                        completion,
+                        test_reservation().bundle(marker_task),
+                    ),
+                ))),
+            },
+        );
+    }
+
+    // No await occurs while filling either channel, so the current-thread
+    // listener first observes both as ready. The marker sits far enough behind
+    // the bounded burst to distinguish command progress from a full drain.
+    for _ in 0..COMPLETION_BURST_LIMIT * 64 {
+        registry
+            .listener
+            .completion_tx
+            .send(TaskId::next())
+            .expect("completion channel must stay open");
+    }
+    registry
+        .listener
+        .completion_tx
+        .send(marker_id)
+        .expect("completion channel must stay open");
+
+    let decision = tokio::time::timeout(
+        Duration::from_secs(1),
+        receive_reply(send_remove(&tx, TaskId::next()), "fair remove reply"),
+    )
+    .await
+    .expect("management command must make progress during a completion flood");
+    assert!(matches!(decision, Ok(false)));
+
+    let state = registry.state.read().await;
+    assert!(
+        matches!(
+            state.tasks.get(&marker_id).map(|entry| &entry.state),
+            Some(EntryState::Registered(_))
+        ),
+        "management ingress must run before the completion flood is fully drained"
+    );
+    drop(state);
+
+    // Resolve the defensive marker handle so its eventual early-completion
+    // reporter can finish and shutdown can drain cleanly.
+    drop(marker_actor);
+    stop_registry(&registry, &token).await;
 }

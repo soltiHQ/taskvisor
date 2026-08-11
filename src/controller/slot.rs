@@ -11,22 +11,27 @@ use std::{collections::VecDeque, sync::Arc};
 
 use tokio::time::Instant;
 
-use crate::{TaskSpec, identity::TaskId};
+use crate::{TaskSpec, core::deferred_drop::OwnedTask, identity::TaskId};
 
 /// Controller work whose user-provided task name was resolved before queue ownership.
 pub(super) struct PendingSubmission {
     pub(super) id: TaskId,
     pub(super) task_name: Arc<str>,
-    pub(super) task_spec: TaskSpec,
+    pub(super) owned: OwnedTask<TaskSpec>,
 }
 
 impl PendingSubmission {
-    pub(super) fn new(id: TaskId, task_name: Arc<str>, task_spec: TaskSpec) -> Self {
+    pub(super) fn new(id: TaskId, task_name: Arc<str>, owned: OwnedTask<TaskSpec>) -> Self {
         Self {
             id,
             task_name,
-            task_spec,
+            owned,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn task_spec(&self) -> &TaskSpec {
+        &self.owned.value
     }
 }
 
@@ -36,7 +41,7 @@ pub(super) struct SlotState {
 
     /// Pending submissions for this slot.
     ///
-    /// The front item is next after the current admission fails or after terminal cleanup of an accepted owner.
+    /// The front item is next after the current admission fails or after logical and physical cleanup of an accepted owner.
     pub(super) queue: VecDeque<PendingSubmission>,
 }
 
@@ -61,10 +66,10 @@ pub(super) enum SlotPhase {
         requested_at: Instant,
     },
 
-    /// The registry accepted the task, and terminal cleanup has not yet been applied by the controller.
+    /// The registry accepted the task, and logical cleanup plus physical release have not yet been applied by the controller.
     Running { owner: TaskId, started_at: Instant },
 
-    /// A replacement-driven runtime removal request has started, and terminal registry cleanup has not yet been applied.
+    /// A replacement-driven runtime removal request has started, and logical cleanup plus physical release have not yet been applied.
     Terminating {
         owner: TaskId,
         requested_at: Instant,
@@ -215,7 +220,7 @@ impl SlotState {
         matches_current
     }
 
-    /// Releases the matching owner after terminal registry cleanup.
+    /// Releases the matching owner after logical registry cleanup and physical actor release.
     pub(super) fn complete_owner(&mut self, owner: TaskId) -> bool {
         let matches_current = matches!(
             self.phase,
@@ -317,7 +322,13 @@ mod tests {
         let mut slot = SlotState::new();
         let pending = |name: &str| {
             let task_spec = make_spec(name);
-            PendingSubmission::new(TaskId::next(), Arc::from(name), task_spec)
+            let retained = task_spec.task().clone();
+            let reservation = crate::core::deferred_drop::try_reserve().expect("test reservation");
+            PendingSubmission::new(
+                TaskId::next(),
+                Arc::from(name),
+                OwnedTask::new(task_spec, retained, reservation),
+            )
         };
 
         slot.queue.push_back(pending("a"));
@@ -325,9 +336,9 @@ mod tests {
         slot.queue.push_back(pending("c"));
 
         assert_eq!(slot.queue.len(), 3);
-        assert_eq!(slot.queue.pop_front().unwrap().task_spec.name(), "a");
-        assert_eq!(slot.queue.pop_front().unwrap().task_spec.name(), "b");
-        assert_eq!(slot.queue.pop_front().unwrap().task_spec.name(), "c");
+        assert_eq!(slot.queue.pop_front().unwrap().task_spec().name(), "a");
+        assert_eq!(slot.queue.pop_front().unwrap().task_spec().name(), "b");
+        assert_eq!(slot.queue.pop_front().unwrap().task_spec().name(), "c");
         assert!(slot.queue.is_empty());
     }
 

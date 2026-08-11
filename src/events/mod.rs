@@ -62,8 +62,9 @@
 //!   ShutdownRequested ──► AllStoppedWithinGrace | GraceExceeded
 //! ```
 //!
-//! [`TaskRemoved`](EventKind::TaskRemoved) confirms registry cleanup.
-//! It is sent after the managed task runner has been joined or cleaned up.
+//! [`TaskRemoved`](EventKind::TaskRemoved) confirms registry-membership removal and terminal reporting; it can race with the internal logical-completion latch.
+//! Except for [`TaskOutcomeKind::ForceAborted`](crate::TaskOutcomeKind::ForceAborted), the managed runner has been physically joined first.
+//! A force-aborted synchronous poll can remain active under reaper ownership after this event.
 //!
 //! ## Read the Stream Safely
 //!
@@ -88,4 +89,4 @@ mod event;
 pub use event::{BackoffSource, Event, EventKind, RejectionKind};
 
 mod bus;
-pub(crate) use bus::Bus;
+pub(crate) use bus::{Bus, BusMessage, BusReceiver, TryRecvError};

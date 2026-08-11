@@ -67,6 +67,37 @@ fn failed_serve_outside_tokio_does_not_poison_start() {
     });
 }
 
+#[test]
+fn dropping_last_public_owners_after_tokio_runtime_destruction_does_not_panic() {
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let handle = runtime.block_on(async {
+        let handle = supervisor.serve();
+        let task = TaskFn::arc("runtime-destroyed-before-owners", |_ctx| async {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        handle
+            .add(TaskSpec::once(task))
+            .await
+            .expect("the task must be registered before runtime destruction");
+        handle
+    });
+
+    drop(runtime);
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(handle);
+        drop(supervisor);
+    }));
+    assert!(
+        dropped.is_ok(),
+        "last-owner fallback must not require an ambient Tokio runtime"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_one_public_owner_keeps_other_owners_alive() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);

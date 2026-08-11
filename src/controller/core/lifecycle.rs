@@ -2,12 +2,16 @@
 
 use std::{future::Future, sync::Arc};
 
-use tokio::task::JoinSet;
+use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::{controller::error::ControllerError, events::Event};
+use crate::events::Event;
 
-use super::{Controller, ControllerCommand, ControllerTask};
+use super::{Controller, ControllerCommand, ControllerTask, ControllerWorkers};
+
+/// Maximum number of continuously ready internal results handled before command ingress gets an
+/// explicit non-blocking turn.
+pub(super) const INTERNAL_RESULT_BURST_LIMIT: usize = 64;
 
 impl Controller {
     /// Starts the single owned controller loop.
@@ -28,24 +32,22 @@ impl Controller {
         match crate::core::panic_guard::guarded(self.run_inner(token)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                self.bus.publish(Event::runtime_failure(
-                    "controller",
-                    format!("controller_loop_exited: {error}"),
-                ));
+                self.bus.publish_lazy(|| {
+                    Event::runtime_failure("controller", format!("controller_loop_exited: {error}"))
+                });
             }
             Err(panic) => {
-                self.bus.publish(Event::runtime_failure(
-                    "controller",
-                    format!("controller_loop_panicked: {panic}"),
-                ));
+                self.bus.publish_lazy(|| {
+                    Event::runtime_failure(
+                        "controller",
+                        format!("controller_loop_panicked: {panic}"),
+                    )
+                });
             }
         }
 
         self.mark_shutting_down();
-        self.finalize_remaining_watchers();
-        self.slots.clear();
-        self.queued_slots.clear();
-        self.capacity_pending.clear();
+        self.finalize_slot_state_on_shutdown().await;
     }
 
     /// Waits for the owned controller loop exactly once.
@@ -74,77 +76,131 @@ impl Controller {
     /// Slot and queue transitions are applied in this loop.
     ///
     /// On shutdown, it closes the command receiver, drains buffered commands, and resolves pending submissions and identity-operation replies.
-    pub(super) async fn run_inner(&self, token: CancellationToken) -> Result<(), ControllerError> {
+    pub(super) async fn run_inner(&self, token: CancellationToken) -> Result<(), &'static str> {
         let mut rx = self
             .rx
             .write()
             .await
             .take()
-            .ok_or(ControllerError::AlreadyStarted)?;
+            .ok_or("controller command receiver already taken")?;
 
-        let mut admissions = JoinSet::new();
-        let mut completions = JoinSet::new();
-        let mut removals = JoinSet::new();
-        let mut identity_operations = JoinSet::new();
-        let identity_operation_limit = self.config.queue_capacity().get();
+        let mut workers = ControllerWorkers::new(
+            self.supervisor.clone(),
+            self.config.admission_capacity().get(),
+        );
         let loop_result = crate::core::panic_guard::guarded(async {
+            let mut internal_result_burst = 0usize;
             loop {
-                tokio::select! {
-                biased;
+                if token.is_cancelled() {
+                    self.mark_shutting_down();
+                    break;
+                }
 
+                if internal_result_burst >= INTERNAL_RESULT_BURST_LIMIT {
+                    match rx.try_recv() {
+                        Ok(command) => {
+                            self.handle_controller_command(command, &mut workers).await;
+                            internal_result_burst = 0;
+                            continue;
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                            internal_result_burst = 0;
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                tokio::select! {
                 _ = token.cancelled() => {
                     self.mark_shutting_down();
                     break;
                 },
 
-                result = admissions.join_next(), if !admissions.is_empty() => {
+                result = workers.metadata.next(), if !workers.metadata.is_empty() => {
+                    internal_result_burst = internal_result_burst.saturating_add(1);
+                    match result {
+                        Some(Ok(result)) => {
+                            let _ = self
+                                .guarded(
+                                    "handle_metadata_result",
+                                    self.handle_metadata_result(result, &mut workers),
+                                )
+                                .await;
+                        }
+                        Some(Err(error)) => {
+                            self.bus.publish_lazy(|| {
+                                Event::runtime_failure(
+                                    "controller",
+                                    format!("metadata_waiter_failed: {error}"),
+                                )
+                            });
+                        }
+                        None => {}
+                    }
+                }
+
+                result = workers.capacity.next(), if !workers.capacity.is_empty() => {
+                    internal_result_burst = internal_result_burst.saturating_add(1);
+                    if let Some(result) = result {
+                        let _ = self
+                            .guarded(
+                                "handle_registry_capacity_result",
+                                self.handle_registry_capacity_result(
+                                    result.id,
+                                    result.decision,
+                                    &mut workers,
+                                ),
+                            )
+                            .await;
+                    }
+                }
+
+                result = workers.admissions.next(), if !workers.admissions.is_empty() => {
+                    internal_result_burst = internal_result_burst.saturating_add(1);
                     match result {
                         Some(Ok(result)) => {
                             let _ = self
                                 .guarded(
                                     "handle_admission_result",
-                                    self.handle_admission_result(
-                                        result,
-                                        &mut admissions,
-                                        &mut completions,
-                                        &mut removals,
-                                    ),
+                                    self.handle_admission_result(result, &mut workers),
                                 )
                                 .await;
                         }
                         Some(Err(error)) => {
-                            self.bus.publish(
+                            self.bus.publish_lazy(|| {
                                 Event::runtime_failure(
                                     "controller",
                                     format!("admission_waiter_failed: {error}"),
-                                ),
-                            );
+                                )
+                            });
                         }
                         None => {}
                     }
                 }
-                result = completions.join_next(), if !completions.is_empty() => {
+                result = workers.completions.next(), if !workers.completions.is_empty() => {
+                    internal_result_burst = internal_result_burst.saturating_add(1);
                     match result {
                         Some(Ok(result)) => {
                             let _ = self
                                 .guarded(
                                     "handle_completion_result",
-                                    self.handle_completion_result(result, &mut admissions),
+                                    self.handle_completion_result(result, &mut workers),
                                 )
                                 .await;
                         }
                         Some(Err(error)) => {
-                            self.bus.publish(
+                            self.bus.publish_lazy(|| {
                                 Event::runtime_failure(
                                     "controller",
                                     format!("completion_waiter_failed: {error}"),
-                                ),
-                            );
+                                )
+                            });
                         }
                         None => {}
                     }
                 }
-                result = removals.join_next(), if !removals.is_empty() => {
+                result = workers.removals.next(), if !workers.removals.is_empty() => {
+                    internal_result_burst = internal_result_burst.saturating_add(1);
                     match result {
                         Some(Ok(result)) => {
                             let _ = self
@@ -155,81 +211,75 @@ impl Controller {
                                 .await;
                         }
                         Some(Err(error)) => {
-                            self.bus.publish(
+                            self.bus.publish_lazy(|| {
                                 Event::runtime_failure(
                                     "controller",
                                     format!("removal_waiter_failed: {error}"),
-                                ),
-                            );
+                                )
+                            });
                         }
                         None => {}
                     }
                 }
-                result = identity_operations.join_next(), if !identity_operations.is_empty() => {
+                result = workers.identity_operations.next(), if !workers.identity_operations.is_empty() => {
+                    internal_result_burst = internal_result_burst.saturating_add(1);
                     match result {
                         Some(Ok(())) => {}
                         Some(Err(error)) => {
-                            self.bus.publish(
+                            self.bus.publish_lazy(|| {
                                 Event::runtime_failure(
                                     "controller",
                                     format!("identity_operation_failed: {error}"),
-                                ),
-                            );
+                                )
+                            });
                         }
                         None => {}
                     }
                 }
-                Some(command) = rx.recv(), if identity_operations.len() < identity_operation_limit => {
-                    match command {
-                        ControllerCommand::Submit(sub) => {
-                            let _ = self
-                                .guarded(
-                                    "handle_submission",
-                                    self.handle_submission(sub, &mut admissions, &mut removals),
-                                )
-                                .await;
-                        }
-                        ControllerCommand::ManageIdentity {
-                            id,
-                            operation,
-                            reply,
-                        } => {
-                            let _ = self
-                                .guarded(
-                                    "handle_identity_operation",
-                                    self.handle_identity_operation(
-                                        id,
-                                        operation,
-                                        reply,
-                                        &mut admissions,
-                                        &mut identity_operations,
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
+                Some(command) = rx.recv() => {
+                    internal_result_burst = 0;
+                    self.handle_controller_command(command, &mut workers).await;
                 }
                 }
             }
         })
         .await;
+        drop(workers);
         self.finalize_pending_on_shutdown(&mut rx).await;
-        admissions.abort_all();
-        completions.abort_all();
-        removals.abort_all();
-        identity_operations.abort_all();
-        Self::drain_workers(&mut admissions).await;
-        Self::drain_workers(&mut completions).await;
-        Self::drain_workers(&mut removals).await;
-        Self::drain_workers(&mut identity_operations).await;
         self.finalize_slot_state_on_shutdown().await;
         if let Err(panic) = loop_result {
-            self.bus.publish(Event::runtime_failure(
-                "controller",
-                format!("controller_loop_panicked: {panic}"),
-            ));
+            self.bus.publish_lazy(|| {
+                Event::runtime_failure("controller", format!("controller_loop_panicked: {panic}"))
+            });
         }
         Ok(())
+    }
+
+    /// Applies one ordered command after it has left the public channel.
+    async fn handle_controller_command(
+        &self,
+        command: ControllerCommand,
+        workers: &mut ControllerWorkers,
+    ) {
+        match command {
+            ControllerCommand::Submit(sub) => {
+                let _ = self
+                    .guarded("handle_submission", self.handle_submission(*sub, workers))
+                    .await;
+            }
+            ControllerCommand::ManageIdentity {
+                id,
+                operation,
+                reply,
+            } => {
+                let _ = self
+                    .guarded(
+                        "handle_identity_operation",
+                        self.handle_identity_operation(id, operation, reply, workers),
+                    )
+                    .await;
+            }
+        }
     }
 
     /// Runs one controller work unit behind a panic boundary.
@@ -243,19 +293,11 @@ impl Controller {
         match crate::core::panic_guard::guarded(fut).await {
             Ok(output) => Some(output),
             Err(msg) => {
-                self.bus.publish(Event::runtime_failure(
-                    "controller",
-                    format!("{who}_panicked: {msg}"),
-                ));
+                self.bus.publish_lazy(|| {
+                    Event::runtime_failure("controller", format!("{who}_panicked: {msg}"))
+                });
                 None
             }
         }
-    }
-
-    /// Destroys one user-owned value behind its own panic boundary.
-    ///
-    /// Callers must release controller locks and resolve any waiter before calling this.
-    pub(super) async fn drop_guarded<T>(&self, who: &'static str, value: T) {
-        let _ = self.guarded(who, async move { drop(value) }).await;
     }
 }

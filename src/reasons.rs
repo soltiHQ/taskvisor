@@ -33,3 +33,14 @@ pub(crate) const DROP_IF_RUNNING: &str = "slot is busy; DropIfRunning rejected t
 /// Diagnostic text used when a controller slot queue is full.
 #[cfg(feature = "controller")]
 pub(crate) const QUEUE_FULL: &str = "slot queue is full";
+
+/// Rejection reason: the registry membership budget is exhausted.
+pub(crate) const REGISTERED_TASK_LIMIT: &str = "registered task limit reached";
+
+/// Rejection reason: no additional controller slot may be created.
+#[cfg(feature = "controller")]
+pub(crate) const CONTROLLER_SLOT_LIMIT: &str = "controller slot limit reached";
+
+/// Rejection reason: the aggregate controller pending budget is exhausted.
+#[cfg(feature = "controller")]
+pub(crate) const CONTROLLER_PENDING_LIMIT: &str = "controller pending limit reached";

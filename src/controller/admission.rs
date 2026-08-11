@@ -10,7 +10,7 @@
 //! ## Busy Slots
 //!
 //! A slot is busy while it is admitting, running, or terminating.
-//! Here, `Running` means that registration was confirmed and the controller has not yet applied terminal cleanup.
+//! Here, `Running` means that registration was confirmed and the controller has not yet observed both logical cleanup and physical actor release.
 //! It does not prove that the task body is executing now.
 //! The task may be waiting for a concurrency permit, sleeping between attempts, or finishing cleanup.
 //!
@@ -52,7 +52,7 @@ pub enum AdmissionPolicy {
     /// Requests replacement of the current owner and places this submission next.
     ///
     /// For a registered owner, the controller asks the runtime to remove it.
-    /// The replacement starts only after terminal registry cleanup is confirmed.
+    /// The replacement starts only after logical registry cleanup and physical actor release are confirmed.
     /// If the owner's registration is still pending, the controller waits for the direct registry decision.
     /// A rejection needs no removal.
     /// After an acceptance, the owner is removed before the replacement starts.
