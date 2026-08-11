@@ -40,6 +40,7 @@ flowchart TB
     Supervisor["Supervisor / SupervisorHandle"]
     Core["SupervisorCore"]
     Registry["Registry: authoritative task membership"]
+    Scheduler["Bounded actor scheduler"]
     Actor["TaskActor: one registered task"]
     Runner["run_once: one attempt"]
     Task["Task + TaskSpec + policies"]
@@ -51,8 +52,9 @@ flowchart TB
     Supervisor --> Core
     Builder -->|constructs| Core
     Core -->|bounded command channel| Registry
-    Registry -->|spawns and joins| Actor
-    Actor --> Runner
+    Registry -->|bounded handoff| Scheduler
+    Scheduler -->|polls actor futures| Actor
+    Actor -->|spawns active attempt| Runner
     Runner --> Task
     Core --> Shutdown
     Registry -->|direct one-shot| Waiter
@@ -121,8 +123,8 @@ sequenceDiagram
     Handle->>Core: add watched task
     Core->>Queue: Add command + reply + outcome sender
     Queue->>Registry: listener receives command
-    Registry->>Registry: resolve defaults and index ID + name
-    Registry->>TaskActor: spawn behind start gate
+    Registry->>Registry: prepare actor outside lock; index ID + name
+    Registry->>TaskActor: bounded scheduler handoff behind start gate
     Registry-->>Core: direct Add decision
     Registry->>TaskActor: open start gate
     Core-->>Caller: TaskId + TaskWaiter
@@ -144,7 +146,7 @@ For a static `run(tasks)` batch, the registry indexes every accepted entry, atte
 
 `run_once` owns one attempt: task invocation, panic capture, the attempt timeout, and the attempt terminal event. 
 
-`TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts.
+`TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts. Registered actor futures are data inside one central scheduler task. After a permit is acquired, the active attempt runs in its own Tokio task; an actor waiting for a permit or backoff does not consume another Tokio task.
 
 The retry loop and actor exits are shown separately below. Repeated phase names refer to the same actor phases.
 
@@ -204,7 +206,7 @@ Important boundaries:
 - A concurrency permit is held only while `run_once` is active.
 - Task panics caught by `run_once` become retryable `TaskError::Fail` values.
 - The actor returns an internal `ActorExitReason`; the registry maps it to `TaskOutcome` after joining the actor and removing its ID and name indexes.
-- Force-abort and an outer Tokio join failure are cleanup results, not normal actor exits.
+- Force-abort and an outer scheduler failure are cleanup results, not normal actor exits.
 
 ## Events and reliable outcomes are separate paths
 

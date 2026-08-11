@@ -42,7 +42,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Semaphore;
+use tokio::{sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -104,6 +104,9 @@ pub(crate) enum ActorExitReason {
     /// Depending on where cancellation happened, there may be no attempt-level terminal event.
     Canceled,
 
+    /// The internal attempt runner panicked outside the user-future panic boundary.
+    Panicked,
+
     /// Actor stopped because the task returned a fatal error.
     ///
     /// Fatal errors are not retried.
@@ -115,6 +118,37 @@ pub(crate) enum ActorExitReason {
         /// Original error source from the fatal [`TaskError`], if any.
         source: Option<SharedError>,
     },
+}
+
+/// Aborts one spawned attempt when its owning actor future is force-dropped by the scheduler.
+struct AttemptJoin<T> {
+    handle: Option<JoinHandle<T>>,
+}
+
+impl<T> AttemptJoin<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        let result = self
+            .handle
+            .as_mut()
+            .expect("attempt join handle is present until join")
+            .await;
+        self.handle.take();
+        result
+    }
+}
+
+impl<T> Drop for AttemptJoin<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Runtime parameters used by one task actor.
@@ -132,8 +166,8 @@ pub(crate) struct TaskActorParams {
 
 /// Internal supervisor for one registered task.
 ///
-/// The registry spawns one actor per accepted task.
-/// The actor runs attempts sequentially and returns one [`ActorExitReason`] when the retry loop ends.
+/// The registry schedules one actor future per accepted task.
+/// One central scheduler polls those futures; the actor runs attempts sequentially and returns one [`ActorExitReason`] when the retry loop ends.
 pub(crate) struct TaskActor {
     /// Runtime identity stamped on lifecycle events for this task run.
     id: TaskId,
@@ -216,15 +250,27 @@ impl TaskActor {
                     .with_attempt(attempt),
             );
             let attempt_start = Instant::now();
-            let res = run_once(
-                self.task.as_ref(),
-                &runtime_token,
-                self.params.timeout,
-                attempt,
-                id,
-                &self.bus,
-            )
+            let task = Arc::clone(&self.task);
+            let attempt_token = runtime_token.clone();
+            let timeout = self.params.timeout;
+            let bus = self.bus.clone();
+            let res = AttemptJoin::new(tokio::spawn(async move {
+                run_once(task.as_ref(), &attempt_token, timeout, attempt, id, &bus).await
+            }))
+            .join()
             .await;
+
+            let res = match res {
+                Ok(result) => result,
+                Err(error) if error.is_panic() => {
+                    drop(permit);
+                    return ActorExitReason::Panicked;
+                }
+                Err(_cancelled) => {
+                    drop(permit);
+                    return ActorExitReason::Canceled;
+                }
+            };
 
             drop(permit);
             match res {

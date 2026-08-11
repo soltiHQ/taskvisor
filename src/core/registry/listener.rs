@@ -56,7 +56,7 @@ impl Registry {
         reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }
 
-    /// Starts the registry listener task.
+    /// Starts the registry listener and central actor scheduler tasks.
     ///
     /// The listener consumes receivers stored during construction.
     /// It listens to:
@@ -67,6 +67,7 @@ impl Registry {
     /// On runtime cancellation, it closes the command receiver and processes commands already buffered without waiting for uncommitted reservations.
     /// It then claims entries still in `Registered` with zero additional grace and waits for both existing and newly created join owners to finish.
     pub fn spawn_listener(self: Arc<Self>) {
+        self.scheduler.spawn(self.runtime_token.clone());
         let mut cmd_rx = self
             .listener
             .cmd_rx
@@ -206,7 +207,7 @@ impl Registry {
             return true;
         };
 
-        match handle.await {
+        let listener_clean = match handle.await {
             Ok(()) => true,
             Err(error) => {
                 self.bus.publish(Event::runtime_failure(
@@ -215,7 +216,15 @@ impl Registry {
                 ));
                 false
             }
+        };
+        let scheduler_clean = self.scheduler.join().await;
+        if !scheduler_clean {
+            self.bus.publish(Event::runtime_failure(
+                "registry",
+                "actor scheduler join failed",
+            ));
         }
+        listener_clean && scheduler_clean
     }
 
     /// Aborts the listener so shutdown join-failure handling can be tested.

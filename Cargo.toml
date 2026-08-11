@@ -37,9 +37,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 tokio      = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7.19"
 thiserror  = "2.0.20"
-fastrand   = "2.5.0"
-dashmap    = { version = "6.1.0", optional = true }
-tracing    = { version = "0.1.44", optional = true, default-features = false, features = ["std"] }
+fastrand     = "2.5.0"
+futures-util = { version = "0.3.33", default-features = false, features = ["std", "async-await"] }
+dashmap      = { version = "6.1.0", optional = true }
+tracing      = { version = "0.1.44", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 criterion          = { version = "0.8.2", features = ["async_tokio"] }
