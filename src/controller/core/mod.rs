@@ -5,6 +5,7 @@
 //! It owns:
 //!
 //! - watched submission senders until they are handed to the runtime or rejected,
+//! - task payloads waiting for transient registry command capacity,
 //! - the bounded ordered channel for submissions and identity operations,
 //! - the per-slot state map,
 //! - a reverse index from every queued [`TaskId`] to its slot.
@@ -61,12 +62,21 @@ use crate::{
     identity::TaskId,
 };
 
-use super::{config::ControllerConfig, slot::SlotState};
+use super::{
+    config::ControllerConfig,
+    slot::{PendingSubmission, SlotState},
+};
+
+/// Controller-owned admission payload waiting for a reserved registry queue slot.
+struct CapacityPending {
+    slot_name: Arc<str>,
+    pending: PendingSubmission,
+}
 
 mod protocol;
 use protocol::{
-    AdmissionResult, CompletionResult, ControllerCommand, IdentityOperation, IdentityReply,
-    RemovalResult, Submission,
+    AdmissionDecision, AdmissionResult, CompletionResult, ControllerCommand, IdentityOperation,
+    IdentityReply, RemovalResult, Submission,
 };
 
 mod handle;
@@ -123,6 +133,8 @@ pub(crate) struct Controller {
     ///
     /// Admitting and running IDs are registry-owned and therefore intentionally absent.
     queued_slots: DashMap<TaskId, Arc<str>>,
+    /// Payloads whose slots are admitting but whose registry Add has not committed yet.
+    capacity_pending: DashMap<TaskId, CapacityPending>,
     /// Watched submissions not yet handed to the runtime registry.
     watchers: DashMap<TaskId, OutcomeTx>,
     /// Ordered command sender cloned into `ControllerHandle`.
@@ -150,6 +162,7 @@ impl Controller {
             shutdown_token,
             slots: DashMap::new(),
             queued_slots: DashMap::new(),
+            capacity_pending: DashMap::new(),
             watchers: DashMap::new(),
             tx,
             rx: RwLock::new(Some(rx)),

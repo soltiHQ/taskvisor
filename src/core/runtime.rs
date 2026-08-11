@@ -41,6 +41,8 @@
 mod event_relay;
 mod lifecycle;
 mod management;
+#[cfg(feature = "controller")]
+pub(crate) use management::ControllerAddPermit;
 mod shutdown_workflow;
 
 #[cfg(test)]

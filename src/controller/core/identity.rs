@@ -10,7 +10,7 @@ use crate::{
     identity::TaskId,
 };
 
-use super::{Controller, IdentityOperation, IdentityReply};
+use super::{AdmissionResult, Controller, IdentityOperation, IdentityReply};
 
 impl Controller {
     /// Starts one accepted identity operation after earlier controller commands have been handled.
@@ -24,6 +24,7 @@ impl Controller {
         id: TaskId,
         operation: IdentityOperation,
         reply: oneshot::Sender<Result<bool, RuntimeError>>,
+        admissions: &mut JoinSet<AdmissionResult>,
         identity_operations: &mut JoinSet<()>,
     ) {
         let reply = IdentityReply::new(reply);
@@ -32,7 +33,7 @@ impl Controller {
             return;
         }
         if self
-            .remove_queued_submission(id, operation.request_reason())
+            .remove_queued_submission(id, operation.request_reason(), admissions)
             .await
         {
             reply.send(Ok(true));
@@ -73,12 +74,18 @@ impl Controller {
         &self,
         id: TaskId,
         request_reason: Option<&'static str>,
+        admissions: &mut JoinSet<AdmissionResult>,
     ) -> bool {
-        let Some(slot_name) = self
-            .queued_slots
+        let slot_name = self
+            .capacity_pending
             .get(&id)
-            .map(|entry| Arc::clone(entry.value()))
-        else {
+            .map(|entry| Arc::clone(&entry.slot_name))
+            .or_else(|| {
+                self.queued_slots
+                    .get(&id)
+                    .map(|entry| Arc::clone(entry.value()))
+            });
+        let Some(slot_name) = slot_name else {
             return false;
         };
         let Some(slot_arc) = self.slots.get(&*slot_name).map(|entry| entry.clone()) else {
@@ -89,6 +96,40 @@ impl Controller {
         let mut slot = slot_arc.lock().await;
         if self.is_shutting_down() {
             return false;
+        }
+        if let Some((_, waiting)) = self.capacity_pending.remove(&id) {
+            let task_name = Arc::clone(&waiting.pending.task_name);
+            let mut request = Event::new(EventKind::TaskRemoveRequested)
+                .with_task(task_name)
+                .with_id(id);
+            if let Some(reason) = request_reason {
+                request = request.with_reason(reason);
+            }
+            self.bus.publish(request);
+            self.bus.publish(
+                Event::new(EventKind::ControllerRejected)
+                    .with_task(Arc::clone(&slot_name))
+                    .with_id(id)
+                    .with_rejection_kind(RejectionKind::RemovedFromQueue)
+                    .with_reason(crate::reasons::REMOVED_FROM_QUEUE),
+            );
+            self.finalize_rejected(
+                id,
+                RejectionKind::RemovedFromQueue,
+                crate::reasons::REMOVED_FROM_QUEUE,
+            );
+            let cleared = slot.reject_admission(id);
+            debug_assert!(cleared);
+            let deferred_drops = if let Some(supervisor) = self.supervisor.upgrade() {
+                self.start_next_from_queue(&supervisor, &mut slot, &slot_name, admissions)
+            } else {
+                Vec::new()
+            };
+            self.gc_if_idle(&slot_name, slot);
+            self.drop_guarded("drop_removed_capacity_pending", waiting.pending)
+                .await;
+            self.drop_pending_submissions(deferred_drops).await;
+            return true;
         }
         let Some(position) = slot.queue.iter().position(|pending| pending.id == id) else {
             self.queued_slots.remove(&id);

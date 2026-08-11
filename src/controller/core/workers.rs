@@ -11,7 +11,7 @@ use crate::{
     identity::TaskId,
 };
 
-use super::{AdmissionResult, CompletionResult, Controller, RemovalResult};
+use super::{AdmissionDecision, AdmissionResult, CompletionResult, Controller, RemovalResult};
 
 impl Controller {
     /// Tracks a committed Add command until its direct registry reply arrives.
@@ -31,7 +31,24 @@ impl Controller {
             AdmissionResult {
                 id,
                 slot_name,
-                decision,
+                decision: AdmissionDecision::Registry(decision),
+            }
+        });
+    }
+
+    /// Waits for one owned registry queue slot without moving the task payload out of controller state.
+    pub(super) fn track_registry_capacity(
+        admissions: &mut JoinSet<AdmissionResult>,
+        supervisor: Arc<SupervisorCore>,
+        id: TaskId,
+        slot_name: Arc<str>,
+    ) {
+        admissions.spawn(async move {
+            let decision = supervisor.reserve_controller_add().await;
+            AdmissionResult {
+                id,
+                slot_name,
+                decision: AdmissionDecision::Capacity(decision),
             }
         });
     }

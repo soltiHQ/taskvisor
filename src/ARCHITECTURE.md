@@ -99,6 +99,8 @@ flowchart TB
 
 The controller is compiled by the default `controller` feature, but it is a runtime opt-in: it exists only when a builder receives a `ControllerConfig`. Direct `add*` methods bypass slot admission; `submit*` methods use it.
 
+Controller admission does not turn transient registry queue saturation into a rejection. The slot remains `Admitting`, the controller retains the task payload and watcher, and a worker waits only for an owned registry queue permit. The controller loop remains available for later submissions, replacement, identity removal, and shutdown.
+
 `PreparedSubmission` is only a command-side hand-off. It allocates the controller submission's `TaskId` and holds its `ControllerSpec`, but it does not publish or enqueue anything. Consuming it sends the same ordered controller command as the ordinary `submit*` shortcuts. This lets an integrating application install `application ID -> TaskId` correlation before events for that `TaskId` can begin.
 
 ## Direct task lifecycle

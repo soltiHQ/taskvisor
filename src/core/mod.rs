@@ -83,6 +83,8 @@ mod shutdown;
 mod registry;
 #[cfg(feature = "controller")]
 pub(crate) use registry::{AddReplyRx, OutcomeTx, RemovalCompletion};
+#[cfg(feature = "controller")]
+pub(crate) use runtime::ControllerAddPermit;
 
 /// Controller add payload returned intact when registry command admission does not commit.
 ///
