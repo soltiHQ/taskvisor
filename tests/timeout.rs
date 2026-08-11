@@ -23,7 +23,7 @@ async fn run_to_exhaustion(spec: TaskSpec) -> Arc<EventCollector> {
     collector
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn configured_timeout_emits_one_terminal_attempt_event_then_retries() {
     let task = TaskFn::arc("slow", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -55,7 +55,7 @@ async fn configured_timeout_emits_one_terminal_attempt_event_then_retries() {
     assert!(reason.contains("timed out"));
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
@@ -93,7 +93,7 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
     assert_eq!(finished.reason, None);
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
     let task = TaskFn::arc("zero-to", |_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_millis(30)).await;

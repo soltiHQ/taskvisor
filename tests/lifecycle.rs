@@ -252,7 +252,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn always_interval_some_emits_success_source_backoff_between_runs() {
     let (handle, collector) =
         served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(2)));
@@ -298,7 +298,7 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn success_driven_restart_does_not_consume_failure_retry_budget() {
     let (handle, collector) =
         served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(2)));
