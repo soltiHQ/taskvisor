@@ -41,10 +41,9 @@
 //! - its Add command is committed and the watcher is handed to the runtime registry,
 //! - the submission is rejected and resolved as `TaskOutcome::Rejected`.
 //!
-//! Admission evaluates user-provided task metadata on a fixed worker set. The
-//! controller retains the watcher and a cancellation record while that work is
-//! pending, so later commands and shutdown do not wait for `Task::name`.
-//! A metadata panic resolves the waiter as an admission failure.
+//! A submission carries its immutable task name in `TaskSpec`, so the
+//! serialized controller loop can resolve the effective slot without an
+//! asynchronous metadata stage.
 //!
 //! ## Internal Architecture
 //!
@@ -55,7 +54,7 @@
 //! Shutdown and introspection are separate read/drain concerns.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, Weak},
 };
 
@@ -79,31 +78,10 @@ struct CapacityPending {
     pending: PendingSubmission,
 }
 
-/// Submission waiting for an isolated `Task::name` callback.
-struct MetadataPending {
-    sequence: u64,
-    event_task: Option<Arc<str>>,
-    cancel: CancellationToken,
-}
-
-/// Values released when an identity operation cancels metadata preparation.
-struct MetadataCancellation {
-    pending: MetadataPending,
-    done: Option<OutcomeTx>,
-    discarded: Option<metadata::MetadataResult>,
-    unblocked: Vec<metadata::MetadataResult>,
-}
-
 /// Controller-owned indexes changed by one serialized transition loop.
 #[derive(Default)]
 struct ControllerState {
     slots: HashMap<Arc<str>, Arc<Mutex<SlotState>>>,
-    metadata_pending: HashMap<TaskId, MetadataPending>,
-    /// Live metadata identities in submission order. Retired sequences are
-    /// removed instead of accumulating one tombstone per canceled submission.
-    metadata_order: BTreeMap<u64, TaskId>,
-    metadata_ready: BTreeMap<u64, metadata::MetadataResult>,
-    next_metadata_sequence: u64,
     queued_slots: HashMap<TaskId, Arc<str>>,
     capacity_pending: HashMap<TaskId, CapacityPending>,
     watchers: HashMap<TaskId, OutcomeTx>,
@@ -111,7 +89,7 @@ struct ControllerState {
 
 impl ControllerState {
     fn pending_len(&self) -> usize {
-        self.metadata_pending.len() + self.queued_slots.len() + self.capacity_pending.len()
+        self.queued_slots.len() + self.capacity_pending.len()
     }
 }
 
@@ -123,8 +101,6 @@ use protocol::{
 
 mod handle;
 pub(crate) use handle::ControllerHandle;
-
-mod metadata;
 
 mod task;
 use task::ControllerTask;

@@ -110,8 +110,9 @@
 //!     .build();
 //! let handle = supervisor.serve();
 //!
-//! let task = TaskFn::arc("refresh-customer-42", |_ctx| async { Ok(()) });
-//! let request = ControllerSpec::queue(TaskSpec::once(task)).with_slot("customer-42");
+//! let task = TaskFn::arc(|_ctx| async { Ok(()) });
+//! let request = ControllerSpec::queue(TaskSpec::once("refresh-customer-42", task))
+//!     .with_slot("customer-42");
 //! let (_id, waiter) = handle.submit_and_watch(request).await?;
 //!
 //! assert!(waiter.wait().await?.is_success());

@@ -25,13 +25,12 @@ fn served(grace_secs: u64, max_concurrent: usize) -> SupervisorHandle {
 }
 
 fn tracked_coop(
-    name: &str,
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     starts: Arc<AtomicUsize>,
     changed: Arc<Notify>,
 ) -> TaskRef {
-    TaskFn::arc(name, move |ctx: TaskContext| {
+    TaskFn::arc(move |ctx: TaskContext| {
         let active = Arc::clone(&active);
         let peak = Arc::clone(&peak);
         let starts = Arc::clone(&starts);
@@ -50,13 +49,12 @@ fn tracked_coop(
 }
 
 fn synchronously_blocked_task(
-    name: &str,
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     release: Arc<AtomicBool>,
     started: Arc<Notify>,
 ) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: TaskContext| {
+    TaskFn::arc(move |_ctx: TaskContext| {
         let active = Arc::clone(&active);
         let peak = Arc::clone(&peak);
         let release = Arc::clone(&release);
@@ -124,7 +122,6 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
     let first_started = Arc::new(Notify::new());
 
     let first = synchronously_blocked_task(
-        "blocked-poll",
         Arc::clone(&active),
         Arc::clone(&peak),
         Arc::clone(&release),
@@ -132,7 +129,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
     );
 
     let first_id = handle
-        .add(TaskSpec::restartable(first))
+        .add(TaskSpec::restartable("blocked-poll", first))
         .await
         .expect("register blocked poll");
     tokio::time::timeout(Duration::from_secs(2), first_started.notified())
@@ -149,14 +146,13 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
     let second_starts = Arc::new(AtomicUsize::new(0));
     let changed = Arc::new(Notify::new());
     let second = tracked_coop(
-        "replacement",
         Arc::clone(&active),
         Arc::clone(&peak),
         Arc::clone(&second_starts),
         Arc::clone(&changed),
     );
     handle
-        .add(TaskSpec::restartable(second))
+        .add(TaskSpec::restartable("replacement", second))
         .await
         .expect("register replacement");
 
@@ -188,15 +184,10 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
-    let first = synchronously_blocked_task(
-        "physically-reserved",
-        active,
-        peak,
-        Arc::clone(&release),
-        Arc::clone(&started),
-    );
+    let first =
+        synchronously_blocked_task(active, peak, Arc::clone(&release), Arc::clone(&started));
     let first_id = handle
-        .add(TaskSpec::restartable(first))
+        .add(TaskSpec::restartable("physically-reserved", first))
         .await
         .expect("register blocked task");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -217,11 +208,13 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
 
     let replacement_runs = Arc::new(AtomicUsize::new(0));
     let rejected_runs = Arc::clone(&replacement_runs);
-    let rejected = TaskFn::arc("physically-reserved", move |_ctx| {
+    let rejected = TaskFn::arc(move |_ctx| {
         rejected_runs.fetch_add(1, Ordering::SeqCst);
         async { Ok(()) }
     });
-    let duplicate = handle.add(TaskSpec::once(rejected)).await;
+    let duplicate = handle
+        .add(TaskSpec::once("physically-reserved", rejected))
+        .await;
     assert!(
         matches!(
             duplicate,
@@ -236,11 +229,14 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
     let replacement_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let runs = Arc::clone(&replacement_runs);
-            let replacement = TaskFn::arc("physically-reserved", move |_ctx| {
+            let replacement = TaskFn::arc(move |_ctx| {
                 runs.fetch_add(1, Ordering::SeqCst);
                 async { Ok(()) }
             });
-            match handle.add(TaskSpec::once(replacement)).await {
+            match handle
+                .add(TaskSpec::once("physically-reserved", replacement))
+                .await
+            {
                 Ok(id) => break id,
                 Err(RuntimeError::TaskAlreadyExists { .. }) => tokio::task::yield_now().await,
                 Err(error) => panic!("unexpected replacement admission failure: {error:?}"),
@@ -267,15 +263,10 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
-    let first = synchronously_blocked_task(
-        "budget-blocked-poll",
-        active,
-        peak,
-        Arc::clone(&release),
-        Arc::clone(&started),
-    );
+    let first =
+        synchronously_blocked_task(active, peak, Arc::clone(&release), Arc::clone(&started));
     let first_id = handle
-        .add(TaskSpec::restartable(first))
+        .add(TaskSpec::restartable("budget-blocked-poll", first))
         .await
         .expect("register blocked poll");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -284,7 +275,7 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
     assert!(handle.cancel(first_id).await.expect("cancel blocked poll"));
 
     let rejected = handle
-        .add(TaskSpec::once(make_ok_once("budget-after-reap")))
+        .add(TaskSpec::once("budget-after-reap", make_ok_once()))
         .await;
     assert!(
         matches!(
@@ -302,7 +293,7 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
     let admitted = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match handle
-                .add(TaskSpec::once(make_ok_once("budget-after-reap")))
+                .add(TaskSpec::once("budget-after-reap", make_ok_once()))
                 .await
             {
                 Ok(id) => break id,
@@ -334,7 +325,7 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
     let drop_started = Arc::new(Notify::new());
     let source_release = Arc::clone(&release);
     let source_started = Arc::clone(&drop_started);
-    let failing = TaskFn::arc("blocking-retry-drop", move |_ctx: TaskContext| {
+    let failing = TaskFn::arc(move |_ctx: TaskContext| {
         let source = BlockingRetrySource {
             release: Arc::clone(&source_release),
             drop_started: Arc::clone(&source_started),
@@ -342,7 +333,7 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
         async move { Err(TaskError::fail_from(source)) }
     });
     let first_id = handle
-        .add(TaskSpec::restartable(failing))
+        .add(TaskSpec::restartable("blocking-retry-drop", failing))
         .await
         .expect("register retrying task");
     tokio::time::timeout(Duration::from_secs(2), drop_started.notified())
@@ -360,15 +351,12 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
     let peak = Arc::new(AtomicUsize::new(0));
     let starts = Arc::new(AtomicUsize::new(0));
     let changed = Arc::new(Notify::new());
-    let replacement = tracked_coop(
-        "after-blocking-retry-drop",
-        active,
-        peak,
-        Arc::clone(&starts),
-        Arc::clone(&changed),
-    );
+    let replacement = tracked_coop(active, peak, Arc::clone(&starts), Arc::clone(&changed));
     handle
-        .add(TaskSpec::restartable(replacement))
+        .add(TaskSpec::restartable(
+            "after-blocking-retry-drop",
+            replacement,
+        ))
         .await
         .expect("register replacement");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -392,7 +380,7 @@ async fn add_storm_unique_names_all_register_then_drain_to_empty() {
         for i in 0..N {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add(TaskSpec::restartable(make_coop(&format!("w-{i}"))))
+                h.add(TaskSpec::restartable(format!("w-{i}"), make_coop()))
                     .await
                     .expect("add")
             }));
@@ -439,7 +427,7 @@ async fn add_storm_duplicate_name_exactly_one_registers() {
         for _ in 0..N {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add(TaskSpec::restartable(make_coop("dup"))).await
+                h.add(TaskSpec::restartable("dup", make_coop())).await
             }));
         }
         let mut accepted = 0;
@@ -487,7 +475,7 @@ async fn interleaved_add_and_remove_drains_to_empty() {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
                 let id = h
-                    .add(TaskSpec::restartable(make_coop(&format!("t-{i}"))))
+                    .add(TaskSpec::restartable(format!("t-{i}"), make_coop()))
                     .await
                     .expect("add");
                 let _ = h.remove(id).await;
@@ -519,7 +507,7 @@ async fn concurrent_remove_same_id_has_exactly_one_claim() {
     let release = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
     let task_release = Arc::clone(&release);
-    let task: TaskRef = TaskFn::arc("remove-race", move |_ctx: TaskContext| {
+    let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         let release = Arc::clone(&task_release);
         async move {
@@ -529,7 +517,7 @@ async fn concurrent_remove_same_id_has_exactly_one_claim() {
         }
     });
     let id = handle
-        .add(TaskSpec::restartable(task))
+        .add(TaskSpec::restartable("remove-race", task))
         .await
         .expect("register remove-race");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -577,7 +565,7 @@ async fn cancel_storm_by_id_returns_true_and_drains() {
         for i in 0..N {
             ids.push(
                 handle
-                    .add(TaskSpec::restartable(make_coop(&format!("c-{i}"))))
+                    .add(TaskSpec::restartable(format!("c-{i}"), make_coop()))
                     .await
                     .expect("register"),
             );
@@ -612,7 +600,7 @@ async fn concurrent_cancel_same_id_returns_exactly_one_true() {
     const K: usize = 16;
     with_timeout(20, async {
         let id = handle
-            .add(TaskSpec::restartable(make_coop("one")))
+            .add(TaskSpec::restartable("one", make_coop()))
             .await
             .expect("register");
 
@@ -652,7 +640,7 @@ async fn rapid_short_lived_once_tasks_alive_tracker_converges_empty() {
         for i in 0..M {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add(TaskSpec::once(make_ok_once(&format!("o-{i}"))))
+                h.add(TaskSpec::once(format!("o-{i}"), make_ok_once()))
                     .await
                     .expect("add")
             }));
@@ -681,14 +669,17 @@ async fn add_storm_with_concurrency_limit_bound_respected_no_deadlock() {
     const N: usize = 100;
     with_timeout(30, async {
         for i in 0..N {
+            let name = format!("lim-{i}");
             let task = tracked_coop(
-                &format!("lim-{i}"),
                 Arc::clone(&active),
                 Arc::clone(&peak),
                 Arc::clone(&starts),
                 Arc::clone(&changed),
             );
-            handle.add(TaskSpec::restartable(task)).await.expect("add");
+            handle
+                .add(TaskSpec::restartable(name, task))
+                .await
+                .expect("add");
         }
         assert!(
             poll_until(Duration::from_secs(10), || async {
@@ -721,7 +712,7 @@ async fn add_then_immediate_shutdown_storm_returns_within_grace() {
         for i in 0..N {
             let h = handle.clone();
             adds.push(tokio::spawn(async move {
-                h.add(TaskSpec::restartable(make_coop(&format!("s-{i}"))))
+                h.add(TaskSpec::restartable(format!("s-{i}"), make_coop()))
                     .await
             }));
         }
@@ -763,7 +754,7 @@ async fn controller_many_distinct_slots_all_settle() {
         for s in 0..S {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                let spec = TaskSpec::restartable(make_coop(&format!("svc-{s}")));
+                let spec = TaskSpec::restartable(format!("svc-{s}"), make_coop());
                 h.submit(ControllerSpec::queue(spec).with_slot(format!("slot-{s}")))
                     .await
             }));
@@ -805,7 +796,7 @@ async fn controller_replace_storm_single_slot_one_alive() {
         for i in 0..K {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                let spec = TaskSpec::restartable(make_coop(&format!("run-{i}")));
+                let spec = TaskSpec::restartable(format!("run-{i}"), make_coop());
                 h.submit(ControllerSpec::replace(spec).with_slot("s")).await
             }));
         }
@@ -819,7 +810,7 @@ async fn controller_replace_storm_single_slot_one_alive() {
         // can admit and complete this barrier task.
         let (_, barrier) = handle
             .submit_and_watch(
-                ControllerSpec::queue(TaskSpec::once(make_ok_once("replace-storm-barrier")))
+                ControllerSpec::queue(TaskSpec::once("replace-storm-barrier", make_ok_once()))
                     .with_slot("replace-storm-barrier"),
             )
             .await
@@ -878,15 +869,15 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
         let mut joins = Vec::new();
         for i in 0..K {
             let h = handle.clone();
+            let name = format!("d-{i}");
             let task = tracked_coop(
-                &format!("d-{i}"),
                 Arc::clone(&active),
                 Arc::clone(&peak),
                 Arc::clone(&starts),
                 Arc::clone(&changed),
             );
             joins.push(tokio::spawn(async move {
-                let spec = TaskSpec::restartable(task);
+                let spec = TaskSpec::restartable(name, task);
                 h.submit(ControllerSpec::drop_if_running(spec).with_slot("s"))
                     .await
             }));

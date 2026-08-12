@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = supervisor.serve();
 
     let attempts = Arc::new(AtomicU32::new(0));
-    let job: TaskRef = TaskFn::arc("prime-sum", {
+    let job: TaskRef = TaskFn::arc({
         let attempts = Arc::clone(&attempts);
         move |ctx| {
             let attempts = Arc::clone(&attempts);
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(job)
+    let spec = TaskSpec::restartable("prime-sum", job)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(200)));
 
     // Await the job's final result: the supervisor retried it for us.

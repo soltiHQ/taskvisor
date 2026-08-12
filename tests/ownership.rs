@@ -76,12 +76,12 @@ fn dropping_last_public_owners_after_tokio_runtime_destruction_does_not_panic() 
         .expect("test runtime");
     let handle = runtime.block_on(async {
         let handle = supervisor.serve();
-        let task = TaskFn::arc("runtime-destroyed-before-owners", |_ctx| async {
+        let task = TaskFn::arc(|_ctx| async {
             std::future::pending::<()>().await;
             Ok(())
         });
         handle
-            .add(TaskSpec::once(task))
+            .add(TaskSpec::once("runtime-destroyed-before-owners", task))
             .await
             .expect("the task must be registered before runtime destruction");
         handle
@@ -107,9 +107,9 @@ async fn dropping_one_public_owner_keeps_other_owners_alive() {
     drop(supervisor);
     drop(first);
 
-    let task = TaskFn::arc("owner-still-live", |_ctx: TaskContext| async { Ok(()) });
+    let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (_, waiter) = second
-        .add_and_watch(TaskSpec::once(task))
+        .add_and_watch(TaskSpec::once("owner-still-live", task))
         .await
         .expect("remaining handle must keep runtime open");
     assert!(matches!(
@@ -124,9 +124,9 @@ async fn temporary_supervisor_transfers_ownership_to_serve_handle() {
     let handle = Supervisor::builder(SupervisorConfig::default())
         .build()
         .serve();
-    let task = TaskFn::arc("temporary-owner", |_ctx: TaskContext| async { Ok(()) });
+    let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once(task))
+        .add_and_watch(TaskSpec::once("temporary-owner", task))
         .await
         .expect("serve handle must retain the public lease");
 
@@ -143,7 +143,7 @@ async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
     let canceled = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
     let task_canceled = Arc::clone(&canceled);
-    let task = TaskFn::arc("last-owner-cancel", move |ctx: TaskContext| {
+    let task = TaskFn::arc(move |ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         let canceled = Arc::clone(&task_canceled);
         async move {
@@ -157,7 +157,7 @@ async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve();
     handle
-        .add(TaskSpec::once(task))
+        .add(TaskSpec::once("last-owner-cancel", task))
         .await
         .expect("task must be admitted");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -176,7 +176,7 @@ async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
 async fn watched_task_resolves_after_last_owner_drop() {
     let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
-    let task = TaskFn::arc("abandoned-watcher", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         async move {
             started.notify_one();
@@ -187,7 +187,7 @@ async fn watched_task_resolves_after_last_owner_drop() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve();
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once(task))
+        .add_and_watch(TaskSpec::once("abandoned-watcher", task))
         .await
         .expect("task must be admitted");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -208,12 +208,12 @@ async fn explicit_shutdown_keeps_its_result_while_other_owners_drop() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve();
     let other = handle.clone();
-    let task = TaskFn::arc("shutdown-owner", |ctx: TaskContext| async move {
+    let task = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
     handle
-        .add(TaskSpec::once(task))
+        .add(TaskSpec::once("shutdown-owner", task))
         .await
         .expect("task must be admitted");
 
@@ -231,12 +231,14 @@ async fn last_owner_drop_rejects_queued_controller_work() {
         .with_controller(ControllerConfig::default())
         .build();
     let handle = supervisor.serve();
-    let owner = TaskFn::arc("drop-slot-owner", |ctx: TaskContext| async move {
+    let owner = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
     handle
-        .submit(ControllerSpec::queue(TaskSpec::once(owner)).with_slot("drop-slot"))
+        .submit(
+            ControllerSpec::queue(TaskSpec::once("drop-slot-owner", owner)).with_slot("drop-slot"),
+        )
         .await
         .expect("slot owner must be submitted");
     assert!(
@@ -251,9 +253,12 @@ async fn last_owner_drop_rejects_queued_controller_work() {
         "first submission must own the slot"
     );
 
-    let queued = TaskFn::arc("drop-slot-queued", |_ctx: TaskContext| async { Ok(()) });
+    let queued = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (_, waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(queued)).with_slot("drop-slot"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("drop-slot-queued", queued))
+                .with_slot("drop-slot"),
+        )
         .await
         .expect("queued submission must enter controller intake");
     assert!(

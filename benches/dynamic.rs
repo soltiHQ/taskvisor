@@ -56,16 +56,28 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn worker_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn bench_add(c: &mut Criterion) {

@@ -27,8 +27,9 @@ use crate::{TaskId, TaskWaiter};
 ///     .build();
 /// let handle = supervisor.serve();
 ///
-/// let task = TaskFn::arc("sync-tenant-42", |_ctx| async { Ok(()) });
-/// let request = ControllerSpec::replace(TaskSpec::once(task)).with_slot("tenant-42");
+/// let task = TaskFn::arc(|_ctx| async { Ok(()) });
+/// let request = ControllerSpec::replace(TaskSpec::once("sync-tenant-42", task))
+///     .with_slot("tenant-42");
 /// let prepared = handle.prepare_submission(request)?;
 /// let id = prepared.id();
 ///

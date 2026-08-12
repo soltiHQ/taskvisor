@@ -23,9 +23,9 @@
 //! Any setting that the spec does not set comes from [`TaskDefaults`](crate::TaskDefaults) when the supervisor accepts the task.
 //!
 //! ```text
-//! TaskFn::arc(name, closure) ─┐
-//!                             ├──► TaskRef ──► TaskSpec ──► Supervisor
-//! impl Task                  ─┘
+//! TaskFn::arc(closure) ─┐
+//!                       ├──► TaskRef ──► TaskSpec::once(name, task) ──► Supervisor
+//! impl Task            ─┘
 //! ```
 //!
 //! ## Example
@@ -33,13 +33,13 @@
 //! ```rust
 //! use taskvisor::{TaskError, TaskFn, TaskRef, TaskSpec};
 //!
-//! let task: TaskRef = TaskFn::arc("worker", |ctx| async move {
+//! let task: TaskRef = TaskFn::arc(|ctx| async move {
 //!     ctx.cancelled().await;
 //!     Err(TaskError::Canceled)
 //! });
 //!
 //! // Restart after retryable failures. Stop after success or cancellation.
-//! let spec = TaskSpec::restartable(task);
+//! let spec = TaskSpec::restartable("worker", task);
 //! ```
 //!
 //! The supervisor may call the task closure more than once.

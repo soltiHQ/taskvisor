@@ -27,7 +27,7 @@ use taskvisor::prelude::*;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One-shot: runs once and exits
-    let one_shot: TaskRef = TaskFn::arc("one-shot", |_ctx| async move {
+    let one_shot: TaskRef = TaskFn::arc(|_ctx| async move {
         println!("[one-shot] doing work...");
         tokio::time::sleep(Duration::from_millis(200)).await;
         println!("[one-shot] done.");
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resilient: fails first 2 attempts, succeeds on 3rd
     let attempt = Arc::new(AtomicU32::new(0));
-    let resilient: TaskRef = TaskFn::arc("resilient", move |_ctx| {
+    let resilient: TaskRef = TaskFn::arc(move |_ctx| {
         let attempt = Arc::clone(&attempt);
         async move {
             let n = attempt.fetch_add(1, Ordering::Relaxed) + 1;
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Recurring: repeats every 500ms until Ctrl+C
     let cycle = Arc::new(AtomicU32::new(0));
-    let recurring: TaskRef = TaskFn::arc("recurring", move |_ctx| {
+    let recurring: TaskRef = TaskFn::arc(move |_ctx| {
         let cycle = Arc::clone(&cycle);
         async move {
             let n = cycle.fetch_add(1, Ordering::Relaxed) + 1;
@@ -65,9 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let specs = vec![
-        TaskSpec::once(one_shot),
-        TaskSpec::periodic(recurring, Duration::from_millis(500)),
-        TaskSpec::restartable(resilient)
+        TaskSpec::once("one-shot", one_shot),
+        TaskSpec::periodic("recurring", recurring, Duration::from_millis(500)),
+        TaskSpec::restartable("resilient", resilient)
             .with_backoff(
                 BackoffPolicy::exponential(Duration::from_millis(200))
                     .with_max(Duration::from_secs(5)),

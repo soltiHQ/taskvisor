@@ -21,7 +21,6 @@ use crate::{
         AddBatchItem, AddReplyRx, CancelDecision, CancelReplyRx, OutcomeTx, RegistryCommand,
         RemovalCompletion, RemoveReplyRx,
     },
-    core::task_metadata::{self, TaskNameSnapshot},
     error::RuntimeError,
     events::{Event, EventKind},
     identity::TaskId,
@@ -119,43 +118,6 @@ impl SupervisorCore {
             });
         });
         owned
-    }
-
-    /// Resolves user-provided task metadata without polling it on a Tokio
-    /// worker. Cancellation stops only this caller's wait; the fixed metadata
-    /// worker retains charged ownership until the callback really returns.
-    pub(super) async fn snapshot_owned_task_name(
-        &self,
-        owned: OwnedTask<TaskSpec>,
-    ) -> Result<(Arc<str>, OwnedTask<TaskSpec>), RuntimeError> {
-        let receiver = match task_metadata::snapshot_task_name(owned, |spec| {
-            Arc::<str>::from(spec.task().name())
-        }) {
-            Ok(receiver) => receiver,
-            Err(owned) => {
-                drop(owned);
-                return Err(RuntimeError::ResourceLimitReached {
-                    resource: "task_metadata",
-                    limit: deferred_drop::OWNERSHIP_CAPACITY,
-                });
-            }
-        };
-        let snapshot = tokio::select! {
-            biased;
-            _ = self.shutdown.started.cancelled() => return Err(RuntimeError::ShuttingDown),
-            _ = self.cmd_tx.closed() => return Err(RuntimeError::ShuttingDown),
-            snapshot = receiver => snapshot.map_err(|_| RuntimeError::ResourceLimitReached {
-                resource: "task_metadata",
-                limit: deferred_drop::OWNERSHIP_CAPACITY,
-            })?,
-        };
-        match snapshot {
-            TaskNameSnapshot::Ready { owned, task_name } => Ok((task_name, owned)),
-            TaskNameSnapshot::Panicked { owned, message } => {
-                drop(owned);
-                panic!("Task::name panicked: {message}")
-            }
-        }
     }
 
     /// Marks the runtime as shutting down.
@@ -373,9 +335,9 @@ impl SupervisorCore {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
-        // A fail-fast add must observe command backpressure before running user
-        // metadata. The permit is not committed until the shutdown gate is
-        // checked after metadata completes.
+        // A fail-fast add observes command backpressure before taking task
+        // ownership. The permit is not committed until the shutdown gate is
+        // checked again below.
         let initial_permit = self.cmd_tx.try_reserve().map_err(|error| {
             let error = match error {
                 mpsc::error::TrySendError::Full(()) => RuntimeError::CommandQueueFull,
@@ -394,10 +356,7 @@ impl SupervisorCore {
             )
         })?;
         let owned = self.own_task(spec, reservation);
-        let (label, owned) = match self.snapshot_owned_task_name(owned).await {
-            Ok(named) => named,
-            Err(error) => return Err((error, done)),
-        };
+        let label = owned.value.shared_name();
         let (permit, _admission) = match self.try_reserve_command_admission() {
             Ok(admission) => admission,
             Err(error) => return Err((error, done)),
@@ -444,10 +403,7 @@ impl SupervisorCore {
             .await
             .map_err(|error| (error, done.take()))?;
         let owned = self.own_task(spec, reservation);
-        let (label, owned) = self
-            .snapshot_owned_task_name(owned)
-            .await
-            .map_err(|error| (error, done.take()))?;
+        let label = owned.value.shared_name();
         let permit = match tokio::select! {
             biased;
             _ = self.shutdown.started.cancelled() => Err(()),

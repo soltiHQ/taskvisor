@@ -14,6 +14,10 @@ pub type TaskRef = Arc<dyn Task>;
 /// Async work managed by a [`Supervisor`](crate::Supervisor).
 /// > Use [`TaskFn`](crate::TaskFn) unless you need a custom task type.
 ///
+/// Task identity belongs to [`TaskSpec`](crate::TaskSpec), not to the executable
+/// task object. The same [`TaskRef`] may therefore be reused under independently
+/// owned specification names.
+///
 /// ## Attempt Contract
 ///
 /// The supervisor calls [`spawn`](Task::spawn) once for every attempt.
@@ -53,14 +57,6 @@ pub type TaskRef = Arc<dyn Task>;
 /// - For the closure-based implementation and a shared-state example, see [`TaskFn`](crate::TaskFn).
 /// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
 pub trait Task: Send + Sync + 'static {
-    /// Returns the stable name used for registration and observability.
-    ///
-    /// Names must be unique among registered tasks and actors retained by the
-    /// physical reaper. After a logical force-abort, the name remains reserved
-    /// until the old actor has physically stopped and its reaper record is
-    /// released; this prevents two attempts with one name from overlapping.
-    fn name(&self) -> &str;
-
     /// Creates a new future for one attempt.
     ///
     /// Each call must return a fresh future.

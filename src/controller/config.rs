@@ -16,7 +16,7 @@
 //! | `identity_operation_capacity` | registry identity workers | Cap concurrently executing registry-backed remove/cancel operations; excess fallbacks return a resource-limit error.  |
 //! | `max_slot_queue`            | each busy slot               | Reject a new `Queue` when pending depth is at or above the limit.      |
 //! | `max_controller_slots`      | all controller slots         | Optionally reject creation of another distinct slot.                  |
-//! | `max_total_pending`         | all controller-owned pending | Optionally cap metadata, queued, and registry-capacity-waiting submissions. |
+//! | `max_total_pending`         | all controller-owned pending | Optionally cap queued and registry-capacity-waiting submissions. |
 
 use std::num::NonZeroUsize;
 
@@ -159,7 +159,7 @@ impl ControllerConfig {
 
     /// Returns the aggregate pending-submission limit.
     ///
-    /// Metadata-waiting, queued, and registry-capacity-waiting submissions count.
+    /// Queued and registry-capacity-waiting submissions count.
     /// Registry-owned running tasks do not.
     /// The default equals `queue_capacity`. Set `None` explicitly to disable the limit.
     #[must_use]

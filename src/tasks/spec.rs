@@ -1,7 +1,6 @@
 //! Per-task execution settings and default resolution.
 
-use std::num::NonZeroU32;
-use std::time::Duration;
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
 use crate::{
     core::{ConfigError, TaskDefaults},
@@ -16,7 +15,12 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|d| !d.is_zero())
 }
 
-/// A task and the rules used to run it.
+/// A named task and the rules used to run it.
+///
+/// The immutable name is used for registration and observability. It must be
+/// unique among registered tasks and actors retained by the physical reaper.
+/// After a logical force-abort, the name remains reserved until the old actor
+/// has physically stopped and its reaper record is released.
 ///
 /// A spec can set a value or inherit it from [`TaskDefaults`].
 /// The supervisor resolves all inherited values when it accepts the task.
@@ -52,9 +56,9 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// use std::time::Duration;
 /// use taskvisor::{TaskFn, TaskRef, TaskSpec};
 ///
-/// let task: TaskRef = TaskFn::arc("worker", |_ctx| async { Ok(()) });
+/// let task: TaskRef = TaskFn::arc(|_ctx| async { Ok(()) });
 ///
-/// let spec = TaskSpec::restartable(task)
+/// let spec = TaskSpec::restartable("worker", task)
 ///     .with_timeout(Duration::from_secs(30))
 ///     .with_max_retries(NonZeroU32::new(5).unwrap());
 /// ```
@@ -70,6 +74,8 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 #[derive(Clone)]
 #[must_use]
 pub struct TaskSpec {
+    /// Immutable registration and observability identity.
+    name: Arc<str>,
     /// Restart policy selected explicitly or inherited from [`TaskDefaults`].
     restart: TaskSetting<RestartPolicy>,
     /// Backoff policy selected explicitly or inherited from [`TaskDefaults`].
@@ -138,12 +144,12 @@ pub(crate) struct ResolvedTaskSpec {
 impl std::fmt::Debug for TaskSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskSpec")
+            .field("name", &self.name)
             .field("restart", &self.restart)
             .field("backoff", &self.backoff)
             .field("timeout", &self.timeout)
-            // `Debug` must stay observational. Calling user-provided metadata
-            // here could panic or perform arbitrary work while an unrelated
-            // diagnostic is being formatted.
+            // `Debug` must stay observational and must not inspect the
+            // user-provided task object.
             .field("task", &"<dyn Task>")
             .field("max_retries", &self.max_retries)
             .finish()
@@ -163,12 +169,13 @@ impl std::fmt::Debug for ResolvedTaskSpec {
 }
 
 impl TaskSpec {
-    /// Creates a spec that inherits every execution setting.
+    /// Creates a named spec that inherits every execution setting.
     ///
     /// The supervisor resolves restart, backoff, timeout, and retry limit from its [`TaskDefaults`] when it accepts the task.
     /// > A later `with_*` call sets that one field explicitly.
-    pub fn from_defaults(task: TaskRef) -> Self {
+    pub fn from_defaults(name: impl Into<Arc<str>>, task: TaskRef) -> Self {
         Self {
+            name: name.into(),
             restart: TaskSetting::Inherit,
             backoff: TaskSetting::Inherit,
             timeout: TaskSetting::Inherit,
@@ -177,7 +184,7 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a spec with explicit main settings.
+    /// Creates a named spec with explicit main settings.
     ///
     /// Prefer the named constructors for common cases: [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
     ///
@@ -187,12 +194,14 @@ impl TaskSpec {
     /// The retry limit is set to unlimited.
     /// > _change it with [`with_max_retries`](Self::with_max_retries)_.
     pub fn new(
+        name: impl Into<Arc<str>>,
         task: TaskRef,
         restart: RestartPolicy,
         backoff: BackoffPolicy,
         timeout: impl Into<Option<Duration>>,
     ) -> Self {
         Self {
+            name: name.into(),
             restart: TaskSetting::Explicit(restart),
             backoff: TaskSetting::Explicit(backoff),
             timeout: TaskSetting::Explicit(normalize_timeout(timeout.into())),
@@ -201,12 +210,13 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a one-shot task that never restarts.
+    /// Creates a named one-shot task that never restarts.
     ///
     /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
     /// > Override them with the matching `with_*` methods.
-    pub fn once(task: TaskRef) -> Self {
+    pub fn once(name: impl Into<Arc<str>>, task: TaskRef) -> Self {
         Self {
+            name: name.into(),
             restart: TaskSetting::Explicit(RestartPolicy::Never),
             backoff: TaskSetting::Inherit,
             timeout: TaskSetting::Inherit,
@@ -215,12 +225,13 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a task that restarts after retryable failures.
+    /// Creates a named task that restarts after retryable failures.
     ///
     /// Success, fatal failure, and cancellation stop the task.
     /// > Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
-    pub fn restartable(task: TaskRef) -> Self {
+    pub fn restartable(name: impl Into<Arc<str>>, task: TaskRef) -> Self {
         Self {
+            name: name.into(),
             restart: TaskSetting::Explicit(RestartPolicy::OnFailure),
             backoff: TaskSetting::Inherit,
             timeout: TaskSetting::Inherit,
@@ -246,18 +257,19 @@ impl TaskSpec {
     /// use std::time::Duration;
     /// use taskvisor::{TaskFn, TaskRef, TaskSpec};
     ///
-    /// let tick: TaskRef = TaskFn::arc("tick", |_ctx| async move {
+    /// let tick: TaskRef = TaskFn::arc(|_ctx| async move {
     ///     println!("tick");
     ///     Ok(())
     /// });
     ///
     /// // Starts the next successful cycle 30 seconds after this one ends.
-    /// let spec = TaskSpec::periodic(tick, Duration::from_secs(30));
+    /// let spec = TaskSpec::periodic("tick", tick, Duration::from_secs(30));
     /// ```
     #[doc(alias = "interval")]
     #[doc(alias = "fixed delay")]
-    pub fn periodic(task: TaskRef, every: Duration) -> Self {
+    pub fn periodic(name: impl Into<Arc<str>>, task: TaskRef, every: Duration) -> Self {
         Self {
+            name: name.into(),
             restart: TaskSetting::Explicit(RestartPolicy::Always {
                 interval: Some(every).filter(|d| !d.is_zero()),
             }),
@@ -277,7 +289,12 @@ impl TaskSpec {
     /// Returns the task name.
     #[must_use]
     pub fn name(&self) -> &str {
-        self.task.name()
+        &self.name
+    }
+
+    /// Clones the backing name without allocating or copying the string.
+    pub(crate) fn shared_name(&self) -> Arc<str> {
+        Arc::clone(&self.name)
     }
 
     /// Returns the explicit restart policy, or `None` if it is inherited.
@@ -367,12 +384,21 @@ impl TaskSpec {
 
     /// Applies inherited defaults at registry admission.
     pub(crate) fn resolve(self, defaults: &TaskDefaults) -> ResolvedTaskSpec {
+        let Self {
+            name,
+            restart,
+            backoff,
+            timeout,
+            max_retries,
+            task,
+        } = self;
+        drop(name);
         ResolvedTaskSpec {
-            restart: self.restart.resolve(defaults.restart()),
-            backoff: self.backoff.resolve(defaults.backoff()),
-            timeout: self.timeout.resolve(defaults.timeout()),
-            max_retries: self.max_retries.resolve(defaults.max_retries()),
-            task: self.task,
+            restart: restart.resolve(defaults.restart()),
+            backoff: backoff.resolve(defaults.backoff()),
+            timeout: timeout.resolve(defaults.timeout()),
+            max_retries: max_retries.resolve(defaults.max_retries()),
+            task,
         }
     }
 }
@@ -381,12 +407,6 @@ impl ResolvedTaskSpec {
     /// Returns the task handle.
     pub(crate) fn task(&self) -> &TaskRef {
         &self.task
-    }
-
-    /// Returns the task name.
-    #[cfg(test)]
-    pub(crate) fn name(&self) -> &str {
-        self.task.name()
     }
 
     /// Returns the resolved restart policy.
@@ -417,8 +437,8 @@ mod tests {
 
     use crate::{BoxTaskFuture, JitterPolicy, Task, TaskContext, TaskFn};
 
-    fn task(name: &str) -> TaskRef {
-        TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) })
+    fn task() -> TaskRef {
+        TaskFn::arc(|_ctx: TaskContext| async { Ok(()) })
     }
 
     fn assert_inherits_non_restart_settings(spec: &TaskSpec) {
@@ -437,18 +457,18 @@ mod tests {
 
     #[test]
     fn named_constructors_set_restart_and_inherit_other_settings() {
-        let inherited = TaskSpec::from_defaults(task("inherited"));
+        let inherited = TaskSpec::from_defaults("inherited", task());
         assert!(inherited.restart_override().is_none());
         assert_inherits_non_restart_settings(&inherited);
 
-        let once = TaskSpec::once(task("once"));
+        let once = TaskSpec::once("once", task());
         assert!(matches!(
             once.restart_override(),
             Some(RestartPolicy::Never)
         ));
         assert_inherits_non_restart_settings(&once);
 
-        let restartable = TaskSpec::restartable(task("restartable"));
+        let restartable = TaskSpec::restartable("restartable", task());
         assert!(matches!(
             restartable.restart_override(),
             Some(RestartPolicy::OnFailure)
@@ -456,7 +476,7 @@ mod tests {
         assert_inherits_non_restart_settings(&restartable);
 
         let every = Duration::from_secs(30);
-        let spec = TaskSpec::periodic(task("tick"), every);
+        let spec = TaskSpec::periodic("tick", task(), every);
         assert!(
             matches!(spec.restart_override(), Some(RestartPolicy::Always { interval: Some(d) }) if d == every),
             "periodic must set RestartPolicy::Always with the given interval, got {:?}",
@@ -464,7 +484,7 @@ mod tests {
         );
         assert_inherits_non_restart_settings(&spec);
 
-        let immediate = TaskSpec::periodic(task("immediate"), Duration::ZERO);
+        let immediate = TaskSpec::periodic("immediate", task(), Duration::ZERO);
         assert!(
             matches!(
                 immediate.restart_override(),
@@ -479,7 +499,7 @@ mod tests {
     fn new_marks_every_setting_as_explicit() {
         let backoff = BackoffPolicy::constant(Duration::from_secs(2));
         let timeout = Duration::from_secs(7);
-        let spec = TaskSpec::new(task("explicit"), RestartPolicy::Never, backoff, timeout);
+        let spec = TaskSpec::new("explicit", task(), RestartPolicy::Never, backoff, timeout);
 
         assert!(matches!(
             spec.restart_override(),
@@ -502,7 +522,7 @@ mod tests {
         let defaults = TaskDefaults::default()
             .with_timeout(Duration::from_secs(9))
             .with_max_retries(retries);
-        let spec = TaskSpec::restartable(task("disabled"))
+        let spec = TaskSpec::restartable("disabled", task())
             .with_timeout(None)
             .with_max_retries(None);
 
@@ -522,12 +542,13 @@ mod tests {
             .with_backoff(BackoffPolicy::constant(Duration::from_secs(3)))
             .with_timeout(Duration::from_secs(12))
             .with_max_retries(retries);
-        let spec = TaskSpec::restartable(task("worker"));
+        let task = task();
+        let expected_task = Arc::clone(&task);
+        let spec = TaskSpec::restartable("worker", task);
 
         let resolved = spec.resolve(&defaults);
 
-        assert_eq!(resolved.name(), "worker");
-        assert_eq!(resolved.task().name(), "worker");
+        assert!(Arc::ptr_eq(resolved.task(), &expected_task));
         assert!(matches!(resolved.restart(), RestartPolicy::OnFailure));
         assert_eq!(resolved.backoff().first(), Duration::from_secs(3));
         assert_eq!(resolved.backoff().jitter(), JitterPolicy::None);
@@ -543,7 +564,8 @@ mod tests {
             .with_timeout(Duration::from_secs(9))
             .with_max_retries(NonZeroU32::new(3).unwrap());
         let spec = TaskSpec::new(
-            task("explicit"),
+            "explicit",
+            task(),
             RestartPolicy::Never,
             BackoffPolicy::constant(Duration::from_secs(1)),
             None,
@@ -560,18 +582,19 @@ mod tests {
     #[test]
     fn with_timeout_accepts_duration_or_option_and_normalizes_zero() {
         assert_explicit_timeout(
-            TaskSpec::once(task("zero-duration")).with_timeout(Duration::ZERO),
+            TaskSpec::once("zero-duration", task()).with_timeout(Duration::ZERO),
             None,
             "with_timeout(ZERO) must normalize to None",
         );
         assert_explicit_timeout(
-            TaskSpec::once(task("zero-option")).with_timeout(Some(Duration::ZERO)),
+            TaskSpec::once("zero-option", task()).with_timeout(Some(Duration::ZERO)),
             None,
             "with_timeout(Some(ZERO)) must normalize to None",
         );
         assert_explicit_timeout(
             TaskSpec::new(
-                task("z"),
+                "z",
+                task(),
                 RestartPolicy::Never,
                 BackoffPolicy::default(),
                 Some(Duration::ZERO),
@@ -582,17 +605,17 @@ mod tests {
 
         let duration = Duration::from_secs(1);
         assert_explicit_timeout(
-            TaskSpec::once(task("positive-duration")).with_timeout(duration),
+            TaskSpec::once("positive-duration", task()).with_timeout(duration),
             Some(duration),
             "a positive Duration must be preserved",
         );
         assert_explicit_timeout(
-            TaskSpec::once(task("positive-option")).with_timeout(Some(duration)),
+            TaskSpec::once("positive-option", task()).with_timeout(Some(duration)),
             Some(duration),
             "a positive Some(Duration) must be preserved",
         );
         assert_explicit_timeout(
-            TaskSpec::once(task("none-inference")).with_timeout(None),
+            TaskSpec::once("none-inference", task()).with_timeout(None),
             None,
             "None must infer Option<Duration> and explicitly disable the timeout",
         );
@@ -600,7 +623,7 @@ mod tests {
 
     #[test]
     fn raw_retry_limit_is_validated_like_task_defaults() {
-        let spec = TaskSpec::once(task("limited"))
+        let spec = TaskSpec::once("limited", task())
             .try_with_max_retries(3)
             .expect("a positive retry limit must be accepted");
         assert!(matches!(
@@ -609,7 +632,7 @@ mod tests {
         ));
 
         assert_eq!(
-            TaskSpec::once(task("zero"))
+            TaskSpec::once("zero", task())
                 .try_with_max_retries(0)
                 .unwrap_err(),
             ConfigError::Zero {
@@ -619,21 +642,28 @@ mod tests {
     }
 
     #[test]
-    fn debug_never_calls_user_task_metadata() {
-        struct PanickingName;
+    fn shared_name_clones_the_same_arc_without_copying_the_string() {
+        let name: Arc<str> = Arc::from("shared");
+        let spec = TaskSpec::once(Arc::clone(&name), task());
+        let shared = spec.shared_name();
 
-        impl Task for PanickingName {
-            fn name(&self) -> &str {
-                panic!("Debug must not call Task::name")
-            }
+        assert!(Arc::ptr_eq(&name, &shared));
+        assert_eq!(spec.name(), "shared");
+    }
 
+    #[test]
+    fn debug_uses_owned_name_without_spawning_the_task() {
+        struct NoSpawn;
+
+        impl Task for NoSpawn {
             fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
                 unreachable!("formatting a spec must not spawn its task")
             }
         }
 
-        let spec = TaskSpec::once(Arc::new(PanickingName));
+        let spec = TaskSpec::once("debug-name", Arc::new(NoSpawn));
         let rendered = format!("{spec:?}");
+        assert!(rendered.contains("debug-name"));
         assert!(rendered.contains("<dyn Task>"));
 
         let resolved = spec.resolve(&TaskDefaults::default());

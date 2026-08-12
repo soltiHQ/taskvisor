@@ -8,8 +8,6 @@ use std::{
 };
 
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     RuntimeError,
@@ -18,10 +16,7 @@ use crate::{
     identity::TaskId,
 };
 
-use super::{
-    AdmissionResult, CompletionResult, Controller, RemovalResult,
-    metadata::{MetadataResult, TaskNameSnapshot},
-};
+use super::{AdmissionResult, CompletionResult, Controller, RemovalResult};
 
 type CapacityFuture =
     Pin<Box<dyn Future<Output = Result<ControllerAddPermit, RuntimeError>> + Send + 'static>>;
@@ -31,7 +26,6 @@ pub(super) type WorkerSet<T> = FuturesUnordered<BoxFuture<'static, Result<T, Str
 
 /// All asynchronous controller-side work that does not need an independent Tokio task.
 pub(super) struct ControllerWorkers {
-    pub(super) metadata: WorkerSet<MetadataResult>,
     pub(super) capacity: CapacityAdmissionPump,
     pub(super) admissions: WorkerSet<AdmissionResult>,
     pub(super) completions: WorkerSet<CompletionResult>,
@@ -42,32 +36,12 @@ pub(super) struct ControllerWorkers {
 impl ControllerWorkers {
     pub(super) fn new(supervisor: Weak<SupervisorCore>, admission_capacity: usize) -> Self {
         Self {
-            metadata: WorkerSet::new(),
             capacity: CapacityAdmissionPump::new(supervisor, admission_capacity),
             admissions: WorkerSet::new(),
             completions: WorkerSet::new(),
             removals: WorkerSet::new(),
             identity_operations: WorkerSet::new(),
         }
-    }
-
-    /// Tracks one isolated metadata callback without blocking later controller
-    /// commands. Cancellation drops the receiver immediately; the fixed
-    /// metadata worker retains the charged task until user code returns.
-    pub(super) fn track_metadata(
-        metadata: &WorkerSet<MetadataResult>,
-        id: TaskId,
-        cancel: CancellationToken,
-        receiver: oneshot::Receiver<TaskNameSnapshot>,
-    ) {
-        Self::push(metadata, async move {
-            let snapshot = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => None,
-                snapshot = receiver => snapshot.ok(),
-            };
-            MetadataResult { id, snapshot }
-        });
     }
 
     pub(super) fn push<T>(set: &WorkerSet<T>, future: impl Future<Output = T> + Send + 'static)

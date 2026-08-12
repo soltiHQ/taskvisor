@@ -150,10 +150,12 @@ impl Registry {
         let mut first_conflict = None;
         let current = {
             let st = self.state.read().await;
-            for item in &items {
+            let reaper_conflicts =
+                reaper.reserves_labels(items.iter().map(|item| item.label.as_ref()));
+            for (item, reaper_conflict) in items.iter().zip(reaper_conflicts) {
                 let conflicts_with_registry =
-                    st.by_label.contains_key(&item.label) || reaper.reserves_label(&item.label);
-                let repeats_in_batch = !seen.insert(Arc::clone(&item.label));
+                    st.by_label.contains_key(&item.label) || reaper_conflict;
+                let repeats_in_batch = !seen.insert(item.label.as_ref());
                 if conflicts_with_registry || repeats_in_batch {
                     first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
                     conflicting_ids.insert(item.id);
@@ -222,10 +224,11 @@ impl Registry {
         let mut conflicting_ids = HashSet::new();
         let mut first_conflict = None;
 
-        for item in &prepared {
-            let conflicts_with_registry =
-                st.by_label.contains_key(&item.label) || reaper.reserves_label(&item.label);
-            let repeats_in_batch = !seen.insert(Arc::clone(&item.label));
+        let reaper_conflicts =
+            reaper.reserves_labels(prepared.iter().map(|item| item.label.as_ref()));
+        for (item, reaper_conflict) in prepared.iter().zip(reaper_conflicts) {
+            let conflicts_with_registry = st.by_label.contains_key(&item.label) || reaper_conflict;
+            let repeats_in_batch = !seen.insert(item.label.as_ref());
             if conflicts_with_registry || repeats_in_batch {
                 first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
                 conflicting_ids.insert(item.id);
@@ -316,12 +319,8 @@ impl Registry {
             });
         }
         let _ = reply.send(Ok(()));
-        self.actors.schedule_batch(
-            accepted
-                .into_iter()
-                .map(|(_, _, scheduled)| scheduled)
-                .collect(),
-        );
+        self.actors
+            .schedule_batch(accepted.into_iter().map(|(_, _, scheduled)| scheduled));
         start_tx.send_replace(true);
     }
 

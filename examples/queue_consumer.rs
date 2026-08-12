@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rx = Arc::new(Mutex::new(rx));
     let attempts = Arc::new(AtomicU32::new(0));
 
-    let consumer: TaskRef = TaskFn::arc("queue-consumer", {
+    let consumer: TaskRef = TaskFn::arc({
         let rx = Arc::clone(&rx);
         let attempts = Arc::clone(&attempts);
         move |ctx| {
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Retry policy: base delays of 100ms, 200ms, 400ms, ... capped at 5s, with jitter.
-    let spec = TaskSpec::restartable(consumer).with_backoff(
+    let spec = TaskSpec::restartable("queue-consumer", consumer).with_backoff(
         BackoffPolicy::exponential(Duration::from_millis(100))
             .with_max(Duration::from_secs(5))
             .with_jitter(JitterPolicy::Equal),

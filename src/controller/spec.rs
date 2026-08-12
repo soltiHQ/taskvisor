@@ -37,11 +37,12 @@ use crate::TaskSpec;
 /// ```rust
 /// use taskvisor::{ControllerSpec, TaskFn, TaskRef, TaskSpec};
 ///
-/// let task: TaskRef = TaskFn::arc("deploy-main-42", |_ctx| async {
+/// let task: TaskRef = TaskFn::arc(|_ctx| async {
 ///     Ok(())
 /// });
 ///
-/// let spec = ControllerSpec::queue(TaskSpec::once(task)).with_slot("deploy-main");
+/// let spec = ControllerSpec::queue(TaskSpec::once("deploy-main-42", task))
+///     .with_slot("deploy-main");
 ///
 /// assert_eq!(spec.slot_name(), "deploy-main");
 /// ```
@@ -76,8 +77,8 @@ impl std::fmt::Debug for ControllerSpec {
         f.debug_struct("ControllerSpec")
             .field("admission", &self.admission)
             .field("task_spec", &self.task_spec)
-            // Falling back to `Task::name` is part of admission, not Debug.
-            // Keep diagnostics free of user callbacks.
+            // Keep the absence of an explicit override visible instead of
+            // duplicating the immutable task name in two Debug fields.
             .field("slot", &self.slot.as_deref().unwrap_or("<task-name>"))
             .finish()
     }
@@ -167,6 +168,11 @@ impl ControllerSpec {
         self.slot.as_deref()
     }
 
+    /// Clones the explicit slot key without allocating or copying the string.
+    pub(crate) fn shared_slot_override(&self) -> Option<Arc<str>> {
+        self.slot.as_ref().map(Arc::clone)
+    }
+
     /// Creates a submission with FIFO queue admission.
     ///
     /// If the slot is idle, the controller tries to start registry admission.
@@ -201,14 +207,13 @@ impl ControllerSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::TaskContext;
-    use crate::{BackoffPolicy, BoxTaskFuture, RestartPolicy, Task, TaskFn, TaskRef};
+    use crate::{TaskFn, TaskRef};
 
     fn make_spec(name: &str) -> TaskSpec {
-        let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-        TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+        let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+        TaskSpec::once(name, task)
     }
 
     #[test]
@@ -239,27 +244,20 @@ mod tests {
 
     #[test]
     fn slot_name_uses_explicit_slot() {
-        let cs = ControllerSpec::queue(make_spec("runner-web-7")).with_slot("web");
+        let slot: Arc<str> = Arc::from("web");
+        let cs = ControllerSpec::queue(make_spec("runner-web-7")).with_slot(Arc::clone(&slot));
         assert_eq!(cs.slot_name(), "web");
         assert_eq!(cs.slot_override(), Some("web"));
         assert_eq!(cs.task_spec().name(), "runner-web-7");
+        assert!(Arc::ptr_eq(
+            &slot,
+            &cs.shared_slot_override().expect("explicit slot must exist")
+        ));
     }
 
     #[test]
-    fn debug_does_not_resolve_implicit_slot_through_user_metadata() {
-        struct PanickingName;
-
-        impl Task for PanickingName {
-            fn name(&self) -> &str {
-                panic!("Debug must not call Task::name")
-            }
-
-            fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
-                unreachable!("formatting a controller spec must not spawn its task")
-            }
-        }
-
-        let spec = ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingName)));
+    fn debug_keeps_an_implicit_slot_symbolic() {
+        let spec = ControllerSpec::queue(make_spec("debug-name"));
         let rendered = format!("{spec:?}");
         assert!(rendered.contains("<task-name>"));
     }

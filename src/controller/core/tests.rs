@@ -3,7 +3,7 @@
 use super::*;
 use crate::Supervisor;
 use crate::TaskContext;
-use crate::{BackoffPolicy, BoxTaskFuture, RestartPolicy, Task, TaskFn, TaskRef, TaskSpec};
+use crate::{BoxTaskFuture, Task, TaskFn, TaskRef, TaskSpec};
 use futures_util::StreamExt;
 use std::num::NonZeroUsize;
 use std::sync::{
@@ -12,72 +12,19 @@ use std::sync::{
 };
 use std::time::Duration;
 
-struct PanickingNameTask;
+struct SpawnBombTask;
 
-impl Task for PanickingNameTask {
-    fn name(&self) -> &str {
-        panic!("injected task name panic")
-    }
-
-    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-#[derive(Default)]
-struct BlockingNameState {
-    entered: bool,
-    released: bool,
-}
-
-struct BlockingNameTask {
-    gate: Arc<(StdMutex<BlockingNameState>, Condvar)>,
-}
-
-impl Task for BlockingNameTask {
-    fn name(&self) -> &str {
-        let (state, changed) = &*self.gate;
-        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        state.entered = true;
-        changed.notify_all();
-        while !state.released {
-            state = changed
-                .wait(state)
-                .unwrap_or_else(|error| error.into_inner());
-        }
-        "blocking-task-name"
-    }
-
-    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
-        Box::pin(std::future::pending())
-    }
-}
-
-struct NameBombTask {
-    calls: Arc<AtomicUsize>,
-}
-
-impl Task for NameBombTask {
-    fn name(&self) -> &str {
-        self.calls.fetch_add(1, Ordering::AcqRel);
-        panic!("injected unexpected task name read")
-    }
-
+impl Task for SpawnBombTask {
     fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
         panic!("a policy-rejected task must not spawn")
     }
 }
 
 struct PanickingDropTask {
-    name: &'static str,
     drops: Arc<AtomicUsize>,
 }
 
 impl Task for PanickingDropTask {
-    fn name(&self) -> &str {
-        self.name
-    }
-
     fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
         Box::pin(std::future::pending())
     }
@@ -102,10 +49,6 @@ struct BlockingDropTask {
 }
 
 impl Task for BlockingDropTask {
-    fn name(&self) -> &str {
-        "blocking-controller-drop"
-    }
-
     fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
         Box::pin(std::future::pending())
     }
@@ -134,10 +77,6 @@ struct ShutdownDropProbeTask {
 }
 
 impl Task for ShutdownDropProbeTask {
-    fn name(&self) -> &str {
-        "slot-shutdown-drop-panic"
-    }
-
     fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
         Box::pin(std::future::pending())
     }
@@ -149,8 +88,6 @@ impl Drop for ShutdownDropProbeTask {
             let state = controller.state();
             state.watchers.is_empty()
                 && state.slots.is_empty()
-                && state.metadata_pending.is_empty()
-                && state.metadata_ready.is_empty()
                 && state.queued_slots.is_empty()
                 && state.capacity_pending.is_empty()
         });
@@ -161,32 +98,13 @@ impl Drop for ShutdownDropProbeTask {
     }
 }
 
-struct SingleReadNameTask {
-    calls: Arc<AtomicUsize>,
-}
-
-impl Task for SingleReadNameTask {
-    fn name(&self) -> &str {
-        assert_eq!(
-            self.calls.fetch_add(1, Ordering::AcqRel),
-            0,
-            "controller admission must snapshot Task::name exactly once"
-        );
-        "single-read-name"
-    }
-
-    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
-        Box::pin(std::future::pending())
-    }
-}
-
 fn make_spec(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    TaskSpec::once(name, task)
 }
 
 fn pending(id: TaskId, task_spec: TaskSpec) -> crate::controller::slot::PendingSubmission {
-    let task_name = Arc::from(task_spec.name());
+    let task_name = task_spec.shared_name();
     crate::controller::slot::PendingSubmission::new(id, task_name, owned_task_spec(task_spec))
 }
 
@@ -323,163 +241,12 @@ fn controller_workers(ctrl: &Controller) -> ControllerWorkers {
     )
 }
 
-/// Drives the isolated metadata stage when a unit test invokes admission
-/// without the real controller lifecycle loop.
 async fn handle_submission_fully(
     ctrl: &Controller,
     submission: Submission,
     workers: &mut ControllerWorkers,
 ) {
     ctrl.handle_submission(submission, workers).await;
-    apply_one_metadata(ctrl, workers).await;
-}
-
-async fn apply_one_metadata(ctrl: &Controller, workers: &mut ControllerWorkers) {
-    if workers.metadata.is_empty() {
-        return;
-    }
-    let result = tokio::time::timeout(Duration::from_secs(2), workers.metadata.next())
-        .await
-        .expect("isolated task metadata must complete")
-        .expect("the metadata worker set must contain one result")
-        .expect("metadata result tracking must not panic");
-    ctrl.handle_metadata_result(result, workers).await;
-}
-
-#[test]
-fn repeated_metadata_dispatch_rollbacks_remove_live_order_entries() {
-    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
-
-    for sequence in 0..128_u64 {
-        let id = TaskId::next();
-        {
-            let mut state = ctrl.state();
-            state.metadata_order.insert(sequence, id);
-            state.metadata_pending.insert(
-                id,
-                MetadataPending {
-                    sequence,
-                    event_task: None,
-                    cancel: CancellationToken::new(),
-                },
-            );
-        }
-
-        let (pending, done, discarded) = ctrl
-            .rollback_metadata_reservation(id)
-            .expect("the simulated pre-dispatch reservation must roll back");
-        assert_eq!(pending.sequence, sequence);
-        assert!(done.is_none());
-        assert!(discarded.is_none());
-
-        let state = ctrl.state();
-        assert!(state.metadata_order.is_empty());
-        assert!(state.metadata_pending.is_empty());
-    }
-}
-
-#[tokio::test]
-async fn metadata_order_state_stays_bounded_behind_a_blocked_head() {
-    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
-    let mut workers = controller_workers(&ctrl);
-    let head_id = TaskId::next();
-    {
-        let mut state = ctrl.state();
-        state.metadata_order.insert(0, head_id);
-        state.metadata_pending.insert(
-            head_id,
-            MetadataPending {
-                sequence: 0,
-                event_task: None,
-                cancel: CancellationToken::new(),
-            },
-        );
-        state.next_metadata_sequence = 1;
-    }
-
-    for sequence in 1..=256_u64 {
-        let id = TaskId::next();
-        {
-            let mut state = ctrl.state();
-            state.metadata_order.insert(sequence, id);
-            state.metadata_pending.insert(
-                id,
-                MetadataPending {
-                    sequence,
-                    event_task: None,
-                    cancel: CancellationToken::new(),
-                },
-            );
-            state.next_metadata_sequence = sequence + 1;
-        }
-
-        if sequence % 2 == 0 {
-            let (pending, done, discarded) = ctrl
-                .rollback_metadata_reservation(id)
-                .expect("the later reservation must roll back");
-            pending.cancel.cancel();
-            drop(done);
-            drop(discarded);
-        } else {
-            let canceled = ctrl
-                .cancel_metadata_pending(id)
-                .expect("the later reservation must cancel");
-            canceled.pending.cancel.cancel();
-            assert!(canceled.unblocked.is_empty());
-            drop(canceled.done);
-            drop(canceled.discarded);
-        }
-
-        let state = ctrl.state();
-        assert_eq!(state.metadata_pending.len(), 1);
-        assert_eq!(state.metadata_order.len(), state.metadata_pending.len());
-        assert!(state.metadata_ready.is_empty());
-    }
-
-    let survivor_id = TaskId::next();
-    let survivor_sequence = 257;
-    {
-        let mut state = ctrl.state();
-        state.metadata_order.insert(survivor_sequence, survivor_id);
-        state.metadata_pending.insert(
-            survivor_id,
-            MetadataPending {
-                sequence: survivor_sequence,
-                event_task: None,
-                cancel: CancellationToken::new(),
-            },
-        );
-        state.next_metadata_sequence = survivor_sequence + 1;
-    }
-    ctrl.handle_metadata_result(
-        metadata::MetadataResult {
-            id: survivor_id,
-            snapshot: None,
-        },
-        &mut workers,
-    )
-    .await;
-    {
-        let state = ctrl.state();
-        assert_eq!(state.metadata_pending.len(), 2);
-        assert_eq!(state.metadata_order.len(), state.metadata_pending.len());
-        assert_eq!(state.metadata_ready.len(), 1);
-    }
-
-    let canceled_head = ctrl
-        .cancel_metadata_pending(head_id)
-        .expect("the blocked ordering head must cancel");
-    canceled_head.pending.cancel.cancel();
-    assert_eq!(canceled_head.unblocked.len(), 1);
-    drop(canceled_head.done);
-    drop(canceled_head.discarded);
-    ctrl.apply_metadata_results(canceled_head.unblocked, &mut workers)
-        .await;
-
-    let state = ctrl.state();
-    assert!(state.metadata_pending.is_empty());
-    assert!(state.metadata_order.is_empty());
-    assert!(state.metadata_ready.is_empty());
 }
 
 #[test]
@@ -644,18 +411,37 @@ fn aggregate_pending_budget_bounds_push_but_allows_head_replacement() {
 fn aggregate_slot_budget_allows_existing_identity_and_reclaims_idle_slot() {
     let config = ControllerConfig::default().with_max_controller_slots(NonZeroUsize::new(1));
     let ctrl = make_controller(config, Bus::new(64));
+    let first_name: Arc<str> = Arc::from("first");
+    let second_name: Arc<str> = Arc::from("second");
 
     let first = ctrl
-        .try_get_or_create_slot("first")
+        .try_get_or_create_slot(&first_name)
         .expect("the first slot must fit");
     let same = ctrl
-        .try_get_or_create_slot("first")
+        .try_get_or_create_slot(&first_name)
         .expect("an existing slot does not consume capacity");
     assert!(Arc::ptr_eq(&first, &same));
-    assert!(matches!(ctrl.try_get_or_create_slot("second"), Err(1)));
+    assert!(matches!(ctrl.try_get_or_create_slot(&second_name), Err(1)));
 
-    ctrl.gc_if_idle(&Arc::from("first"), first.blocking_lock());
-    assert!(ctrl.try_get_or_create_slot("second").is_ok());
+    ctrl.gc_if_idle(&first_name, first.blocking_lock());
+    assert!(ctrl.try_get_or_create_slot(&second_name).is_ok());
+}
+
+#[test]
+fn try_get_or_create_slot_keeps_the_callers_arc_as_the_map_key() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let slot_name: Arc<str> = Arc::from("canonical-slot");
+
+    ctrl.try_get_or_create_slot(&slot_name)
+        .expect("the slot must fit");
+
+    let state = ctrl.state();
+    let stored_name = state
+        .slots
+        .keys()
+        .find(|name| name.as_ref() == slot_name.as_ref())
+        .expect("the slot map must contain the inserted name");
+    assert!(Arc::ptr_eq(&slot_name, stored_name));
 }
 
 #[test]
@@ -1072,27 +858,76 @@ async fn repeated_replace_while_admitting_is_latest_wins_with_one_removal_after_
 #[tokio::test]
 async fn shutdown_finalizes_buffered_submission_as_rejected() {
     let bus = Bus::new(64);
+    let mut events = bus.subscribe();
     let ctrl = make_controller(ControllerConfig::default(), bus);
+    let implicit_name: Arc<str> = Arc::from("buffered");
+    let explicit_task_name: Arc<str> = Arc::from("buffered-explicit-task");
+    let explicit_slot: Arc<str> = Arc::from("buffered-explicit-slot");
 
-    let task: TaskRef = TaskFn::arc("buffered", |_ctx: TaskContext| async { Ok(()) });
-    let (_id, waiter) = ctrl
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    let (implicit_id, implicit_waiter) = ctrl
         .handle()
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("s"))
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(
+            Arc::clone(&implicit_name),
+            task,
+        )))
         .await
         .expect("submission accepted into channel");
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    let (explicit_id, explicit_waiter) = ctrl
+        .handle()
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once(Arc::clone(&explicit_task_name), task))
+                .with_slot(Arc::clone(&explicit_slot)),
+        )
+        .await
+        .expect("explicit-slot submission accepted into channel");
 
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
 
-    let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
-        .await
-        .expect("waiter must resolve, not hang")
-        .expect("waiter must resolve to an outcome, not a dropped sender");
-    assert!(
-        matches!(outcome, TaskOutcome::Rejected { .. }),
-        "a buffered submission on shutdown must resolve Rejected, got {outcome:?}"
-    );
+    for waiter in [implicit_waiter, explicit_waiter] {
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter must resolve, not hang")
+            .expect("waiter must resolve to an outcome, not a dropped sender");
+        assert!(
+            matches!(outcome, TaskOutcome::Rejected { .. }),
+            "a buffered submission on shutdown must resolve Rejected, got {outcome:?}"
+        );
+    }
+
+    let rejected = drain_events(&mut events);
+    let implicit_event = rejected
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected && event.id == Some(implicit_id))
+        .expect("implicit-slot shutdown rejection must be published");
+    assert!(Arc::ptr_eq(
+        implicit_event
+            .task
+            .as_ref()
+            .expect("implicit task name must become the event slot"),
+        &implicit_name
+    ));
+    let explicit_event = rejected
+        .iter()
+        .find(|event| event.kind == EventKind::ControllerRejected && event.id == Some(explicit_id))
+        .expect("explicit-slot shutdown rejection must be published");
+    assert!(Arc::ptr_eq(
+        explicit_event
+            .task
+            .as_ref()
+            .expect("explicit slot must be present on the event"),
+        &explicit_slot
+    ));
+    assert!(!Arc::ptr_eq(
+        explicit_event
+            .task
+            .as_ref()
+            .expect("explicit slot must be present on the event"),
+        &explicit_task_name
+    ));
 }
 
 #[tokio::test]
@@ -1100,10 +935,12 @@ async fn try_submit_and_watch_is_fail_fast_and_preserves_watched_outcome() {
     let config = ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(1).unwrap());
     let ctrl = make_controller(config, Bus::new(64));
 
-    let task: TaskRef = TaskFn::arc("try-watched", |_ctx: TaskContext| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (_id, waiter) = ctrl
         .handle()
-        .try_submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("s"))
+        .try_submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("try-watched", task)).with_slot("s"),
+        )
         .expect("the watched submission must occupy the only command slot");
     assert!(matches!(
         ctrl.handle().try_submit_and_watch(
@@ -1301,11 +1138,14 @@ async fn slot_shutdown_finishes_all_watchers_before_panicking_task_drop() {
                 first,
                 Arc::from("slot-shutdown-drop-panic"),
                 with_controller_panic_reporter(
-                    isolated_owned_task_spec(TaskSpec::once(Arc::new(ShutdownDropProbeTask {
-                        controller: Arc::downgrade(&ctrl),
-                        state_clean_at_drop: Arc::clone(&state_clean_at_drop),
-                        drops: Arc::clone(&drops),
-                    }))),
+                    isolated_owned_task_spec(TaskSpec::once(
+                        "slot-shutdown-drop-panic",
+                        Arc::new(ShutdownDropProbeTask {
+                            controller: Arc::downgrade(&ctrl),
+                            state_clean_at_drop: Arc::clone(&state_clean_at_drop),
+                            drops: Arc::clone(&drops),
+                        }),
+                    )),
                     &ctrl.bus,
                 ),
             ));
@@ -1377,9 +1217,12 @@ async fn slot_shutdown_is_not_blocked_by_a_blocking_task_destructor() {
             crate::controller::slot::PendingSubmission::new(
                 id,
                 Arc::from("blocking-controller-drop"),
-                owned_task_spec(TaskSpec::once(Arc::new(BlockingDropTask {
-                    gate: Arc::clone(&gate),
-                }))),
+                owned_task_spec(TaskSpec::once(
+                    "blocking-controller-drop",
+                    Arc::new(BlockingDropTask {
+                        gate: Arc::clone(&gate),
+                    }),
+                )),
             ),
         );
     }
@@ -1515,10 +1358,12 @@ async fn queued_identity_reply_survives_panicking_task_drop() {
             id,
             Arc::from("identity-drop-panic-task"),
             with_controller_panic_reporter(
-                isolated_owned_task_spec(TaskSpec::once(Arc::new(PanickingDropTask {
-                    name: "identity-drop-panic-task",
-                    drops: Arc::clone(&drops),
-                }))),
+                isolated_owned_task_spec(TaskSpec::once(
+                    "identity-drop-panic-task",
+                    Arc::new(PanickingDropTask {
+                        drops: Arc::clone(&drops),
+                    }),
+                )),
                 &ctrl.bus,
             ),
         ),
@@ -1639,10 +1484,10 @@ async fn submit_after_shutdown_finalize_is_rejected_not_leaked() {
     let mut rx = ctrl.rx.write().await.take().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
 
-    let task: TaskRef = TaskFn::arc("late", |_ctx: TaskContext| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let result = ctrl
         .handle()
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("s"))
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once("late", task)).with_slot("s"))
         .await;
 
     assert!(
@@ -1723,12 +1568,11 @@ async fn guarded_converts_panic_to_diagnostic_and_survives() {
 }
 
 #[tokio::test]
-async fn explicit_slot_shutdown_rejects_without_reading_task_name() {
+async fn explicit_slot_shutdown_rejects_immediately() {
     let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let bus = Bus::new(64);
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
     let mut events = bus.subscribe();
-    let calls = Arc::new(AtomicUsize::new(0));
     let id = TaskId::next();
     let (done, outcome) = oneshot::channel();
     let mut workers = controller_workers(&ctrl);
@@ -1738,9 +1582,10 @@ async fn explicit_slot_shutdown_rejects_without_reading_task_name() {
         Submission {
             id,
             owned: owned_controller_spec(
-                ControllerSpec::queue(TaskSpec::once(Arc::new(NameBombTask {
-                    calls: Arc::clone(&calls),
-                })))
+                ControllerSpec::queue(TaskSpec::once(
+                    "explicit-shutdown-task",
+                    Arc::new(SpawnBombTask),
+                ))
                 .with_slot("explicit-shutdown"),
             ),
             done: Some(done),
@@ -1749,7 +1594,6 @@ async fn explicit_slot_shutdown_rejects_without_reading_task_name() {
     )
     .await;
 
-    assert_eq!(calls.load(Ordering::Acquire), 0);
     let outcome = receive_oneshot(outcome, "shutdown watcher").await;
     assert!(matches!(
         outcome,
@@ -1774,12 +1618,11 @@ async fn explicit_slot_shutdown_rejects_without_reading_task_name() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn explicit_slot_shutdown_while_waiting_for_lock_skips_task_name() {
+async fn explicit_slot_shutdown_while_waiting_for_lock_rechecks_shutdown() {
     let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let bus = Bus::new(64);
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
     let mut events = bus.subscribe();
-    let calls = Arc::new(AtomicUsize::new(0));
     let id = TaskId::next();
     let (done, outcome) = oneshot::channel();
     let slot = ctrl.get_or_create_slot("locked-at-shutdown");
@@ -1792,9 +1635,10 @@ async fn explicit_slot_shutdown_while_waiting_for_lock_skips_task_name() {
             Submission {
                 id,
                 owned: owned_controller_spec(
-                    ControllerSpec::queue(TaskSpec::once(Arc::new(NameBombTask {
-                        calls: Arc::clone(&calls),
-                    })))
+                    ControllerSpec::queue(TaskSpec::once(
+                        "locked-at-shutdown-task",
+                        Arc::new(SpawnBombTask),
+                    ))
                     .with_slot("locked-at-shutdown"),
                 ),
                 done: Some(done),
@@ -1816,7 +1660,6 @@ async fn explicit_slot_shutdown_while_waiting_for_lock_skips_task_name() {
         .await
         .expect("submission must resume after the explicit-slot lock is released");
 
-    assert_eq!(calls.load(Ordering::Acquire), 0);
     let outcome = receive_oneshot(outcome, "lock-wait shutdown watcher").await;
     assert!(matches!(
         outcome,
@@ -1849,7 +1692,7 @@ async fn explicit_slot_shutdown_while_waiting_for_lock_skips_task_name() {
 }
 
 #[tokio::test]
-async fn explicit_slot_drop_if_running_rejects_without_reading_task_name() {
+async fn explicit_slot_drop_if_running_rejects_before_pending_ownership() {
     let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let bus = Bus::new(64);
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
@@ -1859,7 +1702,6 @@ async fn explicit_slot_drop_if_running_rejects_without_reading_task_name() {
         Arc::from("busy-slot"),
         Arc::new(Mutex::new(running_slot(owner))),
     );
-    let calls = Arc::new(AtomicUsize::new(0));
     let id = TaskId::next();
     let (done, outcome) = oneshot::channel();
     let mut workers = controller_workers(&ctrl);
@@ -1868,9 +1710,10 @@ async fn explicit_slot_drop_if_running_rejects_without_reading_task_name() {
         Submission {
             id,
             owned: owned_controller_spec(
-                ControllerSpec::drop_if_running(TaskSpec::once(Arc::new(NameBombTask {
-                    calls: Arc::clone(&calls),
-                })))
+                ControllerSpec::drop_if_running(TaskSpec::once(
+                    "busy-slot-task",
+                    Arc::new(SpawnBombTask),
+                ))
                 .with_slot("busy-slot"),
             ),
             done: Some(done),
@@ -1879,7 +1722,6 @@ async fn explicit_slot_drop_if_running_rejects_without_reading_task_name() {
     )
     .await;
 
-    assert_eq!(calls.load(Ordering::Acquire), 0);
     let outcome = receive_oneshot(outcome, "busy-rejection watcher").await;
     assert!(matches!(
         outcome,
@@ -1908,7 +1750,7 @@ async fn explicit_slot_drop_if_running_rejects_without_reading_task_name() {
 }
 
 #[tokio::test]
-async fn explicit_slot_queue_full_rejects_without_reading_task_name() {
+async fn explicit_slot_queue_full_rejects_before_pending_ownership() {
     let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let bus = Bus::new(64);
     let config = ControllerConfig::new(NonZeroUsize::new(16).unwrap(), 1);
@@ -1923,7 +1765,6 @@ async fn explicit_slot_queue_full_rejects_without_reading_task_name() {
     ctrl.state()
         .slots
         .insert(Arc::from("full-slot"), Arc::new(Mutex::new(state)));
-    let calls = Arc::new(AtomicUsize::new(0));
     let id = TaskId::next();
     let (done, outcome) = oneshot::channel();
     let mut workers = controller_workers(&ctrl);
@@ -1932,10 +1773,8 @@ async fn explicit_slot_queue_full_rejects_without_reading_task_name() {
         Submission {
             id,
             owned: owned_controller_spec(
-                ControllerSpec::queue(TaskSpec::once(Arc::new(NameBombTask {
-                    calls: Arc::clone(&calls),
-                })))
-                .with_slot("full-slot"),
+                ControllerSpec::queue(TaskSpec::once("full-slot-task", Arc::new(SpawnBombTask)))
+                    .with_slot("full-slot"),
             ),
             done: Some(done),
         },
@@ -1943,7 +1782,6 @@ async fn explicit_slot_queue_full_rejects_without_reading_task_name() {
     )
     .await;
 
-    assert_eq!(calls.load(Ordering::Acquire), 0);
     let outcome = receive_oneshot(outcome, "queue-full watcher").await;
     assert!(matches!(
         outcome,
@@ -1972,408 +1810,12 @@ async fn explicit_slot_queue_full_rejects_without_reading_task_name() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn task_name_panic_publishes_rejection_matching_waiter() {
-    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-    let bus = Bus::new(64);
-    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
-    let mut events = bus.subscribe();
-    let mut workers = controller_workers(&ctrl);
-
-    for explicit_slot in [None, Some("explicit-name-panic")] {
-        let id = TaskId::next();
-        let (done, outcome) = oneshot::channel();
-        let spec = ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingNameTask)));
-        let spec = if let Some(slot) = explicit_slot {
-            spec.with_slot(slot)
-        } else {
-            spec
-        };
-
-        handle_submission_fully(
-            &ctrl,
-            Submission {
-                id,
-                owned: owned_controller_spec(spec),
-                done: Some(done),
-            },
-            &mut workers,
-        )
-        .await;
-
-        let outcome = receive_oneshot(outcome, "task-name panic watcher").await;
-        assert!(matches!(
-            outcome,
-            TaskOutcome::Rejected {
-                kind: crate::RejectionKind::AdmissionFailed,
-                ref reason,
-                ..
-            } if reason.as_ref() == crate::reasons::CONTROLLER_ADMISSION_INTERRUPTED
-        ));
-        let drained = drain_events(&mut events);
-        let rejections: Vec<_> = drained
-            .iter()
-            .filter(|event| event.kind == EventKind::ControllerRejected)
-            .collect();
-        assert_eq!(rejections.len(), 1);
-        assert_rejection_parity(rejections[0], id, &outcome);
-        assert_eq!(rejections[0].task.as_deref(), explicit_slot);
-        assert_eq!(
-            drained
-                .iter()
-                .filter(|event| event.kind == EventKind::RuntimeFailure)
-                .count(),
-            1
-        );
-    }
-
-    assert!(workers.admissions.is_empty());
-    assert!(workers.removals.is_empty());
-    assert!(ctrl.state().watchers.is_empty());
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn task_name_panic_rejects_watcher_and_controller_continues() {
-    let supervisor = Supervisor::builder(crate::SupervisorConfig::default())
-        .with_controller(ControllerConfig::default())
-        .build();
-    let handle = supervisor.serve();
-
-    let hostile_specs = [
-        ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingNameTask))),
-        ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingNameTask)))
-            .with_slot("explicit-slot"),
-    ];
-    for spec in hostile_specs {
-        let (_id, waiter) = handle
-            .submit_and_watch(spec)
-            .await
-            .expect("controller intake must accept the hostile submission");
-        let outcome = tokio::time::timeout(Duration::from_secs(2), waiter.wait())
-            .await
-            .expect("a task-name panic must not leave the waiter pending")
-            .expect("panic-safe admission must produce a typed outcome");
-        assert!(matches!(
-            outcome,
-            TaskOutcome::Rejected {
-                kind: crate::RejectionKind::AdmissionFailed,
-                reason,
-                ..
-            } if reason.as_ref() == crate::reasons::CONTROLLER_ADMISSION_INTERRUPTED
-        ));
-    }
-
-    let good: TaskRef = TaskFn::arc("after-name-panic", |_ctx: TaskContext| async { Ok(()) });
-    let (_id, waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(good)))
-        .await
-        .expect("the controller loop must continue after the caught panic");
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), waiter.wait()).await,
-        Ok(Ok(TaskOutcome::Completed))
-    ));
-
-    handle
-        .shutdown()
-        .await
-        .expect("panic-safe controller admission must shut down cleanly");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn blocking_task_name_cannot_extend_controller_shutdown() {
-    let _metadata_guard = crate::core::task_metadata::blocking_test_guard().await;
-    let supervisor = Supervisor::builder(crate::SupervisorConfig::default())
-        .with_controller(ControllerConfig::default())
-        .build();
-    let handle = supervisor.serve();
-    let unrelated = handle
-        .add(TaskSpec::once(TaskFn::arc(
-            "metadata-unrelated",
-            |ctx: TaskContext| async move {
-                ctx.cancelled().await;
-                Ok(())
-            },
-        )))
-        .await
-        .expect("the unrelated direct task must register");
-    let gate = Arc::new((StdMutex::new(BlockingNameState::default()), Condvar::new()));
-    let (blocked_id, waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(Arc::new(
-            BlockingNameTask {
-                gate: Arc::clone(&gate),
-            },
-        ))))
-        .await
-        .expect("controller intake must accept metadata before it blocks");
-    let (_later_id, later_waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(TaskFn::arc(
-            "after-blocked-metadata",
-            |_ctx: TaskContext| async { Ok(()) },
-        ))))
-        .await
-        .expect("a later submission must enter the bounded metadata stage");
-
-    let entered = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if gate
-                .0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .entered
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    let unrelated_cancel = if entered.is_ok() {
-        Some(tokio::time::timeout(Duration::from_secs(2), handle.cancel(unrelated)).await)
-    } else {
-        None
-    };
-    let blocked_remove = if entered.is_ok() {
-        Some(tokio::time::timeout(Duration::from_secs(2), handle.remove(blocked_id)).await)
-    } else {
-        None
-    };
-    let later_outcome = tokio::time::timeout(Duration::from_secs(2), later_waiter.wait()).await;
-    let shutdown = tokio::time::timeout(Duration::from_secs(2), handle.shutdown()).await;
-
-    // Always release the fixed metadata worker before asserting, so a failed
-    // regression cannot contaminate the rest of the process-wide test suite.
-    {
-        let (state, changed) = &*gate;
-        state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .released = true;
-        changed.notify_all();
-    }
-
-    assert!(entered.is_ok(), "the metadata worker must enter Task::name");
-    assert!(
-        matches!(unrelated_cancel, Some(Ok(Ok(true)))),
-        "an unrelated identity command must pass a blocked metadata callback: {unrelated_cancel:?}"
-    );
-    assert!(
-        matches!(blocked_remove, Some(Ok(Ok(true)))),
-        "identity removal must cancel the metadata-stage submission: {blocked_remove:?}"
-    );
-    assert!(
-        matches!(later_outcome, Ok(Ok(TaskOutcome::Completed))),
-        "canceling the metadata ordering head must unblock the next submission: {later_outcome:?}"
-    );
-    assert!(
-        matches!(shutdown, Ok(Ok(()))),
-        "controller shutdown must not wait for a blocking Task::name: {shutdown:?}"
-    );
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), waiter.wait()).await,
-        Ok(Ok(TaskOutcome::Rejected {
-            kind: crate::RejectionKind::RemovedFromQueue,
-            ..
-        }))
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn metadata_results_preserve_submission_fifo_order() {
-    let _metadata_guard = crate::core::task_metadata::blocking_test_guard().await;
-    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
-    let gate = Arc::new((StdMutex::new(BlockingNameState::default()), Condvar::new()));
-    let first_id = TaskId::next();
-    let second_id = TaskId::next();
-    let mut workers = controller_workers(&ctrl);
-
-    ctrl.handle_submission(
-        Submission {
-            id: first_id,
-            owned: owned_controller_spec(
-                ControllerSpec::queue(TaskSpec::once(Arc::new(BlockingNameTask {
-                    gate: Arc::clone(&gate),
-                })))
-                .with_slot("metadata-fifo"),
-            ),
-            done: None,
-        },
-        &mut workers,
-    )
-    .await;
-    ctrl.handle_submission(
-        Submission {
-            id: second_id,
-            owned: owned_controller_spec(
-                ControllerSpec::queue(waiting_spec("metadata-fifo-second"))
-                    .with_slot("metadata-fifo"),
-            ),
-            done: None,
-        },
-        &mut workers,
-    )
-    .await;
-
-    let second = tokio::time::timeout(Duration::from_secs(2), workers.metadata.next())
-        .await
-        .expect("the later metadata callback must finish while the first is gated")
-        .expect("the metadata set contains the later result")
-        .expect("metadata tracking must not panic");
-
-    // Release before any assertion, so a failed ordering regression cannot
-    // leave a process-wide metadata worker blocked.
-    {
-        let (state, changed) = &*gate;
-        state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .released = true;
-        changed.notify_all();
-    }
-
-    assert_eq!(second.id, second_id);
-    ctrl.handle_metadata_result(second, &mut workers).await;
-    assert!(
-        ctrl.slot("metadata-fifo").is_none(),
-        "a later ready submission must wait for the earlier metadata sequence"
-    );
-
-    let first = tokio::time::timeout(Duration::from_secs(2), workers.metadata.next())
-        .await
-        .expect("the released first metadata callback must finish")
-        .expect("the metadata set contains the first result")
-        .expect("metadata tracking must not panic");
-    assert_eq!(first.id, first_id);
-    ctrl.handle_metadata_result(first, &mut workers).await;
-
-    let slot = ctrl
-        .slot("metadata-fifo")
-        .expect("the ordered prefix must create its explicit slot");
-    let slot = slot.lock().await;
-    assert_eq!(slot.owner_id(), Some(first_id));
-    assert_eq!(
-        slot.queue.front().map(|pending| pending.id),
-        Some(second_id)
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn metadata_pending_budget_rejects_before_dispatching_user_name() {
-    let config = ControllerConfig::default().with_max_total_pending(NonZeroUsize::new(1));
-    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
-    let ctrl = Controller::new(config, supervisor.core(), Bus::new(64));
-    let mut workers = controller_workers(&ctrl);
-
-    let first_id = TaskId::next();
-    ctrl.handle_submission(
-        Submission {
-            id: first_id,
-            owned: owned_controller_spec(
-                ControllerSpec::queue(make_spec("metadata-budget-head"))
-                    .with_slot("metadata-budget-head"),
-            ),
-            done: None,
-        },
-        &mut workers,
-    )
-    .await;
-    let first_result = tokio::time::timeout(Duration::from_secs(2), workers.metadata.next())
-        .await
-        .expect("the first metadata callback must finish")
-        .expect("the metadata set contains the first result")
-        .expect("metadata tracking must not panic");
-    assert_eq!(first_result.id, first_id);
-
-    let rejected_gate = Arc::new((StdMutex::new(BlockingNameState::default()), Condvar::new()));
-    let rejected_id = TaskId::next();
-    let (rejected_tx, rejected_rx) = oneshot::channel();
-    ctrl.handle_submission(
-        Submission {
-            id: rejected_id,
-            owned: owned_controller_spec(
-                ControllerSpec::queue(TaskSpec::once(Arc::new(BlockingNameTask {
-                    gate: Arc::clone(&rejected_gate),
-                })))
-                .with_slot("metadata-budget-rejected"),
-            ),
-            done: Some(rejected_tx),
-        },
-        &mut workers,
-    )
-    .await;
-    assert!(matches!(
-        rejected_rx.await,
-        Ok(TaskOutcome::Rejected {
-            kind: crate::RejectionKind::ResourceLimit,
-            ..
-        })
-    ));
-
-    let first = ctrl
-        .cancel_metadata_pending(first_id)
-        .expect("the first metadata reservation remains counted until application");
-    first.pending.cancel.cancel();
-    assert!(first.unblocked.is_empty());
-    drop(first.discarded);
-    drop(first.done);
-    drop(first_result);
-
-    // A later sentinel is enqueued behind any incorrectly dispatched rejected
-    // job. Receiving it therefore proves every earlier executor job was first
-    // received by a worker, making the negative name-call assertion
-    // deterministic without a timing sleep.
-    let sentinel_id = TaskId::next();
-    ctrl.handle_submission(
-        Submission {
-            id: sentinel_id,
-            owned: owned_controller_spec(
-                ControllerSpec::queue(make_spec("metadata-budget-sentinel"))
-                    .with_slot("metadata-budget-sentinel"),
-            ),
-            done: None,
-        },
-        &mut workers,
-    )
-    .await;
-    let sentinel_result = tokio::time::timeout(Duration::from_secs(2), workers.metadata.next())
-        .await
-        .expect("the sentinel metadata callback must finish")
-        .expect("the metadata set contains the sentinel result")
-        .expect("metadata tracking must not panic");
-    assert_eq!(sentinel_result.id, sentinel_id);
-
-    let rejected_name_entered = {
-        let (state, changed) = &*rejected_gate;
-        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        let entered = state.entered;
-        state.released = true;
-        changed.notify_all();
-        entered
-    };
-
-    let sentinel = ctrl
-        .cancel_metadata_pending(sentinel_id)
-        .expect("the sentinel remains in metadata state until application");
-    sentinel.pending.cancel.cancel();
-    assert!(sentinel.unblocked.is_empty());
-    drop(sentinel.discarded);
-    drop(sentinel.done);
-    drop(sentinel_result);
-
-    assert!(
-        !rejected_name_entered,
-        "a submission rejected by max_total_pending must never dispatch Task::name"
-    );
-}
-
 #[tokio::test]
-async fn controller_registry_commit_reuses_snapshotted_task_name() {
+async fn controller_registry_commit_uses_stored_task_name() {
     let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), Bus::new(64));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let task: TaskRef = Arc::new(SingleReadNameTask {
-        calls: Arc::clone(&calls),
-    });
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    let task_name: Arc<str> = Arc::from("stored-task-name");
     let id = TaskId::next();
     let (done, outcome) = oneshot::channel();
     let mut workers = controller_workers(&ctrl);
@@ -2382,20 +1824,31 @@ async fn controller_registry_commit_reuses_snapshotted_task_name() {
         &ctrl,
         Submission {
             id,
-            owned: owned_controller_spec(ControllerSpec::queue(TaskSpec::once(task))),
+            owned: owned_controller_spec(ControllerSpec::queue(TaskSpec::once(
+                Arc::clone(&task_name),
+                task,
+            ))),
             done: Some(done),
         },
         &mut workers,
     )
     .await;
 
-    assert_eq!(calls.load(Ordering::Acquire), 1);
     assert_eq!(workers.admissions.len(), 1);
     assert!(workers.removals.is_empty());
     assert!(ctrl.state().watchers.is_empty());
+    {
+        let state = ctrl.state();
+        let stored_name = state
+            .slots
+            .keys()
+            .find(|name| name.as_ref() == task_name.as_ref())
+            .expect("the implicit slot must retain the task name");
+        assert!(Arc::ptr_eq(&task_name, stored_name));
+    }
     let slot = ctrl
-        .slot("single-read-name")
-        .expect("the snapshotted name must become the fallback slot");
+        .slot("stored-task-name")
+        .expect("the stored task name must become the fallback slot");
     assert!(matches!(
         slot.lock().await.phase(),
         SlotPhase::Admitting { owner, .. } if owner == id
@@ -2404,6 +1857,52 @@ async fn controller_registry_commit_reuses_snapshotted_task_name() {
     drop(outcome);
     abort_and_drain(&mut workers.admissions).await;
     abort_and_drain(&mut workers.removals).await;
+}
+
+#[tokio::test]
+async fn stored_names_apply_cross_slot_submissions_inline_in_fifo_order() {
+    let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+    let bus = Bus::new(64);
+    let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus.clone());
+    let mut events = bus.subscribe();
+    let mut workers = controller_workers(&ctrl);
+    let first = TaskId::next();
+    let second = TaskId::next();
+
+    for (id, name) in [(first, "inline-first"), (second, "inline-second")] {
+        ctrl.handle_submission(
+            Submission {
+                id,
+                owned: owned_controller_spec(ControllerSpec::queue(make_spec(name))),
+                done: None,
+            },
+            &mut workers,
+        )
+        .await;
+    }
+
+    for (id, name) in [(first, "inline-first"), (second, "inline-second")] {
+        let slot = ctrl
+            .slot(name)
+            .expect("the stored task name must create its implicit slot inline");
+        assert!(matches!(
+            slot.lock().await.phase(),
+            SlotPhase::Admitting { owner, .. } if owner == id
+        ));
+    }
+    assert_eq!(
+        workers.admissions.len(),
+        2,
+        "one pending registry reply must not prevent the next slot from starting admission"
+    );
+    let submitted: Vec<_> = drain_events(&mut events)
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ControllerSubmitted)
+        .filter_map(|event| event.id)
+        .collect();
+    assert_eq!(submitted, vec![first, second]);
+
+    abort_and_drain(&mut workers.admissions).await;
 }
 
 #[tokio::test]
@@ -2440,10 +1939,12 @@ async fn registry_precommit_shutdown_drop_panic_preserves_watcher_and_controller
             id,
             owned: with_controller_panic_reporter(
                 isolated_owned_controller_spec(
-                    ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingDropTask {
-                        name: "drop-panic-uncommitted",
-                        drops: Arc::clone(&drops),
-                    })))
+                    ControllerSpec::queue(TaskSpec::once(
+                        "drop-panic-uncommitted",
+                        Arc::new(PanickingDropTask {
+                            drops: Arc::clone(&drops),
+                        }),
+                    ))
                     .with_slot("drop-panic-slot"),
                 ),
                 &ctrl.bus,
@@ -2517,12 +2018,13 @@ async fn transient_registry_full_waits_then_admits_without_rejection() {
     let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus);
     let token = CancellationToken::new();
     let runner = start_controller_loop(&ctrl, &token).await;
-    let task: TaskRef = TaskFn::arc("transient-full-target", |_ctx: TaskContext| async {
-        Ok(())
-    });
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (id, outcome) = ctrl
         .handle()
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(task)).with_slot("transient-slot"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("transient-full-target", task))
+                .with_slot("transient-slot"),
+        )
         .await
         .expect("the controller command queue must accept the target");
 
@@ -2668,12 +2170,12 @@ async fn replace_remains_ordered_while_owner_waits_for_registry_capacity() {
         .await
     );
 
-    let replacement: TaskRef =
-        TaskFn::arc("capacity-replacement", |_ctx: TaskContext| async { Ok(()) });
+    let replacement: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (replacement_id, replacement_outcome) = ctrl
         .handle()
         .submit_and_watch(
-            ControllerSpec::replace(TaskSpec::once(replacement)).with_slot("capacity-replace-slot"),
+            ControllerSpec::replace(TaskSpec::once("capacity-replacement", replacement))
+                .with_slot("capacity-replace-slot"),
         )
         .await
         .expect("the replacement must enter controller intake");
@@ -2746,10 +2248,12 @@ async fn queued_precommit_failures_finish_before_panicking_task_drop() {
             first,
             Arc::from("queued-drop-panic"),
             with_controller_panic_reporter(
-                isolated_owned_task_spec(TaskSpec::once(Arc::new(PanickingDropTask {
-                    name: "queued-drop-panic",
-                    drops: Arc::clone(&drops),
-                }))),
+                isolated_owned_task_spec(TaskSpec::once(
+                    "queued-drop-panic",
+                    Arc::new(PanickingDropTask {
+                        drops: Arc::clone(&drops),
+                    }),
+                )),
                 &ctrl.bus,
             ),
         ));
@@ -2808,10 +2312,12 @@ async fn buffered_shutdown_drain_continues_after_task_drop_panic() {
             id: first,
             owned: with_controller_panic_reporter(
                 isolated_owned_controller_spec(
-                    ControllerSpec::queue(TaskSpec::once(Arc::new(PanickingDropTask {
-                        name: "buffered-drop-panic",
-                        drops: Arc::clone(&drops),
-                    })))
+                    ControllerSpec::queue(TaskSpec::once(
+                        "buffered-drop-panic",
+                        Arc::new(PanickingDropTask {
+                            drops: Arc::clone(&drops),
+                        }),
+                    ))
                     .with_slot("buffered-first"),
                 ),
                 &ctrl.bus,
@@ -2894,9 +2400,12 @@ async fn minimum_queue_capacity_is_supported() {
         .build();
     let handle = sup.serve();
 
-    let task: TaskRef = TaskFn::arc("minimum-capacity", |_ctx: TaskContext| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     handle
-        .submit(ControllerSpec::queue(TaskSpec::once(task)))
+        .submit(ControllerSpec::queue(TaskSpec::once(
+            "minimum-capacity",
+            task,
+        )))
         .await
         .expect("submission must work with the minimum non-zero capacity");
 
@@ -2904,11 +2413,11 @@ async fn minimum_queue_capacity_is_supported() {
 }
 
 fn waiting_spec(name: &'static str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
-    TaskSpec::restartable(task)
+    TaskSpec::restartable(name, task)
 }
 
 async fn start_controller_loop(
@@ -2980,12 +2489,12 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
         )
         .await
         .expect("the watched command must be buffered behind the blocked handler");
-    let (_panicking_id, panicking_waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(Arc::new(
-            PanickingNameTask,
-        ))))
+    let (_second_id, second_waiter) = handle
+        .submit_and_watch(ControllerSpec::queue(make_spec(
+            "second-buffered-during-shutdown",
+        )))
         .await
-        .expect("the hostile watched command must remain buffered for shutdown drain");
+        .expect("the second watched command must remain buffered for shutdown drain");
     let identity_handle = handle.clone();
     let identity = tokio::spawn(async move { identity_handle.cancel(TaskId::next()).await });
     assert!(
@@ -3048,11 +2557,10 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
         }
             if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
     ));
-    let panicking_outcome =
-        tokio::time::timeout(Duration::from_millis(50), panicking_waiter.wait())
-            .await
-            .expect("the hostile buffered watcher must already be settled")
-            .expect("the hostile buffered watcher must resolve as an outcome");
+    let panicking_outcome = tokio::time::timeout(Duration::from_millis(50), second_waiter.wait())
+        .await
+        .expect("the hostile buffered watcher must already be settled")
+        .expect("the hostile buffered watcher must resolve as an outcome");
     assert!(matches!(
         panicking_outcome,
         TaskOutcome::Rejected {
@@ -3267,7 +2775,7 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
     let (release, released) = oneshot::channel();
     let released = Arc::new(StdMutex::new(Some(released)));
     let task_release = Arc::clone(&released);
-    let task: TaskRef = TaskFn::arc("bounded-identity-owner", move |ctx: TaskContext| {
+    let task: TaskRef = TaskFn::arc(move |ctx: TaskContext| {
         let started = Arc::clone(&started);
         let observed = Arc::clone(&observed);
         let released = task_release
@@ -3284,7 +2792,7 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
         }
     });
     let owner_id = runtime_handle
-        .add(TaskSpec::once(task))
+        .add(TaskSpec::once("bounded-identity-owner", task))
         .await
         .expect("the direct task must register");
     assert!(
@@ -3331,7 +2839,7 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
 
     let buffered_ran = Arc::new(AtomicBool::new(false));
     let ran = Arc::clone(&buffered_ran);
-    let buffered: TaskRef = TaskFn::arc("buffered-after-identity", move |_ctx| {
+    let buffered: TaskRef = TaskFn::arc(move |_ctx| {
         let ran = Arc::clone(&ran);
         async move {
             ran.store(true, Ordering::SeqCst);
@@ -3339,7 +2847,10 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
         }
     });
     handle
-        .submit(ControllerSpec::queue(TaskSpec::once(buffered)).with_slot("buffered"))
+        .submit(
+            ControllerSpec::queue(TaskSpec::once("buffered-after-identity", buffered))
+                .with_slot("buffered"),
+        )
         .await
         .expect("a later submission must cross the independent command budget");
     assert!(
@@ -3411,7 +2922,7 @@ async fn completed_owner_progresses_under_continuously_ready_intake() {
 
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let owner: TaskRef = TaskFn::arc("starvation-owner", {
+    let owner: TaskRef = TaskFn::arc({
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
         move |_ctx| {
@@ -3425,19 +2936,22 @@ async fn completed_owner_progresses_under_continuously_ready_intake() {
         }
     });
     let (owner_id, owner_waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(owner)).with_slot("hot-slot"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("starvation-owner", owner)).with_slot("hot-slot"),
+        )
         .await
         .expect("the initial owner submission must enter the controller");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("the initial owner must start");
 
-    let flood_task: TaskRef = TaskFn::arc("starvation-flood", |ctx| async move {
+    let flood_task: TaskRef = TaskFn::arc(|ctx| async move {
         ctx.cancelled().await;
         Ok(())
     });
     let flood_spec =
-        ControllerSpec::drop_if_running(TaskSpec::once(flood_task)).with_slot("hot-slot");
+        ControllerSpec::drop_if_running(TaskSpec::once("starvation-flood", flood_task))
+            .with_slot("hot-slot");
     let stop = Arc::new(AtomicBool::new(false));
     let saw_full = Arc::new(AtomicBool::new(false));
     let producer_failed = Arc::new(AtomicBool::new(false));
@@ -3629,7 +3143,6 @@ async fn replace_stays_responsive_under_registry_backpressure() {
         .await
         .expect("Replace must not wait for registry capacity");
     drop(first);
-    apply_one_metadata(&ctrl, &mut workers).await;
     assert_eq!(
         workers.removals.len(),
         1,
@@ -3649,7 +3162,6 @@ async fn replace_stays_responsive_under_registry_backpressure() {
         .await
         .expect("a newer Replace must stay responsive while removal is backpressured");
     drop(second);
-    apply_one_metadata(&ctrl, &mut workers).await;
 
     let slot = ctrl.slot("s").expect("the slot must remain tracked");
     let slot = slot.lock().await;
@@ -3717,7 +3229,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
 
     let victim_ran = Arc::new(AtomicBool::new(false));
     let ran = Arc::clone(&victim_ran);
-    let victim: TaskRef = TaskFn::arc("cancel-victim", move |_ctx: TaskContext| {
+    let victim: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let ran = Arc::clone(&ran);
         async move {
             ran.store(true, Ordering::SeqCst);
@@ -3725,7 +3237,9 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         }
     });
     let (victim_id, waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(victim)).with_slot("s"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("cancel-victim", victim)).with_slot("s"),
+        )
         .await
         .expect("the queued submission must enter the controller channel");
     assert!(
@@ -3755,7 +3269,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
     assert!(!ctrl.state().queued_slots.contains_key(&victim_id));
 
     let try_ran = Arc::clone(&victim_ran);
-    let try_victim: TaskRef = TaskFn::arc("try-remove-victim", move |_ctx: TaskContext| {
+    let try_victim: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let ran = Arc::clone(&try_ran);
         async move {
             ran.store(true, Ordering::SeqCst);
@@ -3763,7 +3277,9 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         }
     });
     let (try_id, try_waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(try_victim)).with_slot("s"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("try-remove-victim", try_victim)).with_slot("s"),
+        )
         .await
         .expect("the second queued submission must enter the controller channel");
     assert!(
@@ -3784,7 +3300,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         } if reason.as_ref() == crate::reasons::REMOVED_FROM_QUEUE));
 
     let try_cancel_ran = Arc::clone(&victim_ran);
-    let try_cancel_victim: TaskRef = TaskFn::arc("try-cancel-victim", move |_ctx: TaskContext| {
+    let try_cancel_victim: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let ran = Arc::clone(&try_cancel_ran);
         async move {
             ran.store(true, Ordering::SeqCst);
@@ -3792,7 +3308,10 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
         }
     });
     let (try_cancel_id, try_cancel_waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(try_cancel_victim)).with_slot("s"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("try-cancel-victim", try_cancel_victim))
+                .with_slot("s"),
+        )
         .await
         .expect("the try-cancel victim must enter the controller channel");
     assert!(
@@ -3848,7 +3367,7 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
     let released = Arc::new(StdMutex::new(Some(released)));
     let first_log = Arc::clone(&log);
     let first_release = Arc::clone(&released);
-    let first: TaskRef = TaskFn::arc("same-runtime-name", move |_ctx: TaskContext| {
+    let first: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let released = first_release
             .lock()
             .expect("release lock poisoned")
@@ -3862,7 +3381,7 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
         }
     });
     let second_log = Arc::clone(&log);
-    let second: TaskRef = TaskFn::arc("same-runtime-name", move |_ctx: TaskContext| {
+    let second: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let log = Arc::clone(&second_log);
         async move {
             log.lock().expect("log lock poisoned").push("second");
@@ -3872,7 +3391,9 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
 
     let (first_id, first_outcome) = ctrl
         .handle()
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(first)).with_slot("s"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("same-runtime-name", first)).with_slot("s"),
+        )
         .await
         .expect("the first submission must enter controller intake");
     assert!(
@@ -3889,7 +3410,9 @@ async fn reliable_completion_reuses_task_name_without_task_removed() {
 
     let (second_id, second_outcome) = ctrl
         .handle()
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(second)).with_slot("s"))
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("same-runtime-name", second)).with_slot("s"),
+        )
         .await
         .expect("the second submission must enter controller intake");
     assert!(

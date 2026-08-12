@@ -51,16 +51,45 @@ struct CaughtFailure {
     cleanup_panicked: bool,
 }
 
-struct CatchPanic {
-    future: Option<BoxTaskFuture>,
-    cleanup_poisoned: Arc<AtomicBool>,
+struct DropDiagnostic<'a> {
+    bus: &'a Bus,
+    task_name: &'a Arc<str>,
+    id: TaskId,
+    attempt: u32,
 }
 
-impl CatchPanic {
-    fn new(future: BoxTaskFuture, cleanup_poisoned: Arc<AtomicBool>) -> Self {
+impl DropDiagnostic<'_> {
+    fn publish(&self, failure: &CaughtFailure) {
+        self.bus.publish_lazy(|| {
+            Event::runtime_failure(
+                "task_runner",
+                format!(
+                    "future_drop_panicked task={}: {}",
+                    self.task_name, failure.error
+                ),
+            )
+            .with_id(self.id)
+            .with_attempt(self.attempt)
+        });
+    }
+}
+
+struct CatchPanic<'a> {
+    future: Option<BoxTaskFuture>,
+    cleanup_poisoned: Arc<AtomicBool>,
+    drop_diagnostic: DropDiagnostic<'a>,
+}
+
+impl<'a> CatchPanic<'a> {
+    fn new(
+        future: BoxTaskFuture,
+        cleanup_poisoned: Arc<AtomicBool>,
+        drop_diagnostic: DropDiagnostic<'a>,
+    ) -> Self {
         Self {
             future: Some(future),
             cleanup_poisoned,
+            drop_diagnostic,
         }
     }
 
@@ -68,8 +97,9 @@ impl CatchPanic {
     ///
     /// `Future::drop` is synchronous and can block. Keeping it here means the
     /// attempt still owns its concurrency permit and activity bit until that
-    /// destructor really returns. A destructor panic becomes an attempt failure;
-    /// a second panic from destroying its payload is intentionally retained.
+    /// destructor really returns. The caller classifies a destructor panic as
+    /// an attempt failure or an abort-time runtime diagnostic; a second panic
+    /// from destroying its payload is intentionally retained.
     fn drop_future(future: BoxTaskFuture, cleanup_poisoned: &AtomicBool) -> Option<CaughtFailure> {
         match std::panic::catch_unwind(AssertUnwindSafe(|| drop(future))) {
             Ok(()) => None,
@@ -100,7 +130,7 @@ impl CatchPanic {
     }
 }
 
-impl Future for CatchPanic {
+impl Future for CatchPanic<'_> {
     type Output = Result<(), CaughtFailure>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -151,13 +181,15 @@ impl Future for CatchPanic {
     }
 }
 
-impl Drop for CatchPanic {
+impl Drop for CatchPanic<'_> {
     fn drop(&mut self) {
         if let Some(future) = self.future.take() {
-            // Timeout, cancellation, and force-abort all reach this path. The
-            // enclosing attempt continues to own its permit/activity while the
-            // synchronous destructor executes.
-            let _drop_error = Self::drop_future(future, self.cleanup_poisoned.as_ref());
+            // Cancellation and force-abort reach this path. The enclosing
+            // attempt continues to own its permit/activity while the synchronous
+            // destructor executes and while its best-effort diagnostic is queued.
+            if let Some(failure) = Self::drop_future(future, self.cleanup_poisoned.as_ref()) {
+                self.drop_diagnostic.publish(&failure);
+            }
         }
     }
 }
@@ -280,7 +312,16 @@ pub(crate) async fn run_once<T: Task + ?Sized>(
     let ctx = TaskContext::from_token(child.clone());
 
     let fut = match std::panic::catch_unwind(AssertUnwindSafe(move || task.spawn(ctx))) {
-        Ok(fut) => CatchPanic::new(fut, Arc::clone(&cleanup_poisoned)),
+        Ok(fut) => CatchPanic::new(
+            fut,
+            Arc::clone(&cleanup_poisoned),
+            DropDiagnostic {
+                bus,
+                task_name,
+                id,
+                attempt,
+            },
+        ),
         Err(payload) => {
             let mut failure = AttemptFailure::new(panic_to_error(payload.as_ref()));
             failure.cleanup_panicked = dispose_panic_payload(payload, cleanup_poisoned.as_ref());
@@ -407,10 +448,6 @@ mod tests {
     struct SlowTask;
 
     impl Task for SlowTask {
-        fn name(&self) -> &str {
-            "slow-task"
-        }
-
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -422,13 +459,77 @@ mod tests {
     struct FailTask;
 
     impl Task for FailTask {
-        fn name(&self) -> &str {
-            "fail-task"
-        }
-
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Err(TaskError::fail("boom")) })
         }
+    }
+
+    struct PendingDropFuture {
+        polled: Arc<tokio::sync::Notify>,
+        panic_on_drop: bool,
+    }
+
+    impl Future for PendingDropFuture {
+        type Output = Result<(), TaskError>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polled.notify_one();
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingDropFuture {
+        fn drop(&mut self) {
+            if self.panic_on_drop {
+                panic!("future cleanup panic");
+            }
+        }
+    }
+
+    async fn abort_pending_attempt(panic_on_drop: bool) -> (Vec<Arc<Event>>, TaskId) {
+        let bus = Bus::new(16);
+        let mut events = bus.subscribe();
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let task_polled = Arc::clone(&polled);
+        let id = TaskId::next();
+        let task_name: Arc<str> = Arc::from(if panic_on_drop {
+            "pending-drop-panic"
+        } else {
+            "pending-normal-drop"
+        });
+        let runner = tokio::spawn(async move {
+            let task = crate::TaskFn::new(move |_ctx| PendingDropFuture {
+                polled: Arc::clone(&task_polled),
+                panic_on_drop,
+            });
+            let parent = CancellationToken::new();
+            run_once(
+                &task,
+                &task_name,
+                AttemptRun {
+                    parent: &parent,
+                    timeout: None,
+                    attempt: 7,
+                    id,
+                    bus: &bus,
+                    cleanup_poisoned: Arc::new(AtomicBool::new(false)),
+                },
+            )
+            .await
+        });
+
+        polled.notified().await;
+        runner.abort();
+        let join_error = runner
+            .await
+            .expect_err("an explicitly aborted pending runner cannot complete naturally");
+        assert!(
+            join_error.is_cancelled(),
+            "the future destructor panic must stay inside the runner boundary: {join_error}"
+        );
+
+        let drained = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        (drained, id)
     }
 
     #[tokio::test(start_paused = true)]
@@ -440,7 +541,7 @@ mod tests {
 
         let result = run_once(
             &SlowTask,
-            &Arc::from(SlowTask.name()),
+            &Arc::from("slow-task"),
             AttemptRun {
                 parent: &parent,
                 timeout,
@@ -480,9 +581,6 @@ mod tests {
     async fn success_returns_ok_and_publishes_measured_stopped_event() {
         struct SleepOk;
         impl Task for SleepOk {
-            fn name(&self) -> &str {
-                "sleep-ok"
-            }
             fn spawn(&self, _ctx: TaskContext) -> BoxFut {
                 Box::pin(async {
                     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -497,7 +595,7 @@ mod tests {
 
         run_once(
             &SleepOk,
-            &Arc::from(SleepOk.name()),
+            &Arc::from("sleep-ok"),
             AttemptRun {
                 parent: &parent,
                 timeout: None,
@@ -533,7 +631,7 @@ mod tests {
         let parent = CancellationToken::new();
         let result = run_once(
             &FailTask,
-            &Arc::from(FailTask.name()),
+            &Arc::from("fail-task"),
             AttemptRun {
                 parent: &parent,
                 timeout: None,
@@ -555,5 +653,31 @@ mod tests {
             ),
             "expected TaskError::Fail, got: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn aborted_future_drop_panic_publishes_only_runtime_diagnostic() {
+        let (normal_events, _) = abort_pending_attempt(false).await;
+        assert!(
+            normal_events.is_empty(),
+            "ordinary abort must not report a failure: {normal_events:?}"
+        );
+
+        let (panic_events, id) = abort_pending_attempt(true).await;
+        assert_eq!(
+            panic_events.len(),
+            1,
+            "abort-time cleanup panic must emit one diagnostic, not an attempt result: {panic_events:?}"
+        );
+        let diagnostic = &panic_events[0];
+        assert_eq!(diagnostic.kind, EventKind::RuntimeFailure);
+        assert_eq!(diagnostic.task.as_deref(), Some("task_runner"));
+        assert_eq!(diagnostic.id, Some(id));
+        assert_eq!(diagnostic.attempt, Some(7));
+        assert!(diagnostic.reason.as_deref().is_some_and(|reason| {
+            reason.contains("future_drop_panicked")
+                && reason.contains("pending-drop-panic")
+                && reason.contains("future cleanup panic")
+        }));
     }
 }

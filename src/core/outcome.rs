@@ -345,12 +345,12 @@ impl TaskOutcome {
 /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
 /// # let handle = sup.serve();
-/// let job: TaskRef = TaskFn::arc("job", |_ctx| async {
+/// let job: TaskRef = TaskFn::arc(|_ctx| async {
 ///     Ok(())
 /// });
 ///
 /// let (id, waiter) = handle
-///     .add_and_watch(TaskSpec::once(job))
+///     .add_and_watch(TaskSpec::once("job", job))
 ///     .await?;
 ///
 /// match waiter.wait().await? {

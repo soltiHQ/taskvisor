@@ -23,17 +23,17 @@ use tokio::sync::Notify;
 
 /// A job that runs for `duration`, observing cancellation.
 fn job(name: &'static str, duration: Duration) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
+    let task: TaskRef = TaskFn::arc(move |ctx| async move {
         ctx.run_until_cancelled(tokio::time::sleep(duration))
             .await?;
         Ok(())
     });
-    TaskSpec::once(task)
+    TaskSpec::once(name, task)
 }
 
 /// A job that reports when its body starts, then waits for an explicit release.
 fn gated_job(name: &'static str, started: Arc<Notify>, release: Arc<Notify>) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx| {
+    let task: TaskRef = TaskFn::arc(move |ctx| {
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
         async move {
@@ -42,7 +42,7 @@ fn gated_job(name: &'static str, started: Arc<Notify>, release: Arc<Notify>) -> 
             Ok(())
         }
     });
-    TaskSpec::once(task)
+    TaskSpec::once(name, task)
 }
 
 #[tokio::main(flavor = "current_thread")]

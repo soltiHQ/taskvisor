@@ -28,7 +28,7 @@ impl SupervisorCore {
     ///
     /// Used when the subscriber listener is shutting down.
     /// Retained events are delivered before one coalesced lag diagnostic.
-    pub(super) async fn drain_pending(rx: &mut BusReceiver, set: &SubscriberSet) {
+    pub(super) fn drain_pending(rx: &mut BusReceiver, set: &SubscriberSet) {
         // Publishers may still be active while shutdown runs. Consuming at most
         // one retained ring's worth of real events keeps this phase bounded.
         let mut dropped = 0_u64;
@@ -75,7 +75,7 @@ impl SupervisorCore {
                     biased;
 
                     _ = rt.cancelled() => {
-                        Self::drain_pending(&mut rx, &set).await;
+                        Self::drain_pending(&mut rx, &set);
                         break;
                     }
 

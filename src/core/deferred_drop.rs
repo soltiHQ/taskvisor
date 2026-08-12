@@ -62,13 +62,26 @@ impl DropReservation {
         DropBundle::new(self, Box::new(move || drop(retained)))
     }
 
-    fn submit(mut self, jobs: Vec<DropJob>, panic_reporter: Option<PanicReporter>, poisoned: bool) {
+    fn submit(
+        mut self,
+        retained: DropJob,
+        undelivered_outcome: Option<DropJob>,
+        auxiliary: Option<DropJob>,
+        panic_reporter: Option<PanicReporter>,
+        poisoned: bool,
+    ) {
         let permit = self
             .permit
             .take()
             .expect("one ownership reservation submits at most one bundle");
-        self.executor
-            .submit(DropBatch::new(permit, jobs, panic_reporter, poisoned));
+        self.executor.submit(DropBatch::new(
+            permit,
+            retained,
+            undelivered_outcome,
+            auxiliary,
+            panic_reporter,
+            poisoned,
+        ));
     }
 }
 
@@ -207,13 +220,13 @@ impl DropBundle {
         else {
             return;
         };
-        let mut jobs = Vec::with_capacity(3);
-        jobs.push(inner.retained);
-        jobs.extend(inner.undelivered_outcome);
-        jobs.extend(inner.auxiliary);
-        inner
-            .reservation
-            .submit(jobs, inner.panic_reporter, inner.poisoned);
+        inner.reservation.submit(
+            inner.retained,
+            inner.undelivered_outcome,
+            inner.auxiliary,
+            inner.panic_reporter,
+            inner.poisoned,
+        );
     }
 }
 
@@ -259,9 +272,9 @@ impl<T> OwnedTask<T> {
 
 /// A worker message keeps its permit outside every user closure.
 ///
-/// If any user destructor panics, the permit is retained forever and the
-/// global ownership capacity shrinks. This makes
-/// repeated hostile failures fail closed instead of creating repeated leaks.
+/// If any user destructor panics, its charged unit is retired forever and the
+/// global ownership capacity shrinks. Repeated hostile failures therefore
+/// exhaust the bounded budget instead of creating repeated uncharged leaks.
 const CAPACITY_WAITING: u8 = 0;
 const CAPACITY_GRANTED: u8 = 1;
 const CAPACITY_CLOSED: u8 = 2;
@@ -290,6 +303,7 @@ struct CapacityWaiter {
 
 struct CapacityState {
     available: usize,
+    effective_capacity: usize,
     closed: bool,
     waiters: VecDeque<CapacityWaiter>,
 }
@@ -360,6 +374,7 @@ impl CapacityBroker {
             capacity,
             state: Mutex::new(CapacityState {
                 available: capacity,
+                effective_capacity: capacity,
                 closed: false,
                 waiters: VecDeque::new(),
             }),
@@ -378,7 +393,11 @@ impl CapacityBroker {
             return Err(DropCapacityError);
         }
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.closed || !state.waiters.is_empty() || state.available < units {
+        if state.closed
+            || units > state.effective_capacity
+            || !state.waiters.is_empty()
+            || state.available < units
+        {
             return Err(DropCapacityError);
         }
         state.available -= units;
@@ -390,7 +409,7 @@ impl CapacityBroker {
             return Err(DropCapacityError);
         }
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.closed {
+        if state.closed || units > state.effective_capacity {
             return Err(DropCapacityError);
         }
         if state.waiters.is_empty() && state.available >= units {
@@ -436,6 +455,57 @@ impl CapacityBroker {
         };
         drop(state);
         Self::notify(ready);
+    }
+
+    /// Permanently removes charged units after hostile cleanup retained user
+    /// state. Waiters whose atomic request can no longer fit are rejected;
+    /// feasible waiters continue against the remaining capacity.
+    fn retire(&self, units: usize) {
+        if units == 0 {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return;
+        }
+        let Some(effective_capacity) = state.effective_capacity.checked_sub(units) else {
+            state.closed = true;
+            let closed = Self::close_waiters_locked(&mut state);
+            drop(state);
+            Self::notify(closed);
+            return;
+        };
+        if state.available > effective_capacity {
+            state.closed = true;
+            let closed = Self::close_waiters_locked(&mut state);
+            drop(state);
+            Self::notify(closed);
+            return;
+        }
+        state.effective_capacity = effective_capacity;
+
+        let mut rejected = Vec::new();
+        state.waiters.retain(|waiter| {
+            if waiter.units <= effective_capacity {
+                true
+            } else {
+                waiter
+                    .signal
+                    .status
+                    .store(CAPACITY_CLOSED, AtomicOrdering::Release);
+                rejected.push(Arc::clone(&waiter.signal));
+                false
+            }
+        });
+
+        if effective_capacity == 0 {
+            state.closed = true;
+            rejected.extend(Self::close_waiters_locked(&mut state));
+        } else {
+            rejected.extend(self.dispatch_locked(&mut state));
+        }
+        drop(state);
+        Self::notify(rejected);
     }
 
     fn cancel(&self, units: usize, signal: &Arc<CapacitySignal>) {
@@ -499,7 +569,7 @@ impl CapacityBroker {
             state.closed = true;
             return false;
         };
-        if available > self.capacity {
+        if available > state.effective_capacity {
             state.closed = true;
             return false;
         }
@@ -525,13 +595,14 @@ impl CapacityBroker {
         if state.closed {
             return Vec::new();
         }
+        let effective_capacity = state.effective_capacity;
         let mut ready = Vec::new();
         loop {
             let mut selected = None;
             for (index, waiter) in state.waiters.iter().enumerate() {
                 if waiter.units <= state.available {
                     let exceeds_bypass_budget = state.waiters.iter().take(index).any(|older| {
-                        older.bypassed_units.saturating_add(waiter.units) > self.capacity
+                        older.bypassed_units.saturating_add(waiter.units) > effective_capacity
                     });
                     if exceeds_bypass_budget {
                         break;
@@ -539,7 +610,7 @@ impl CapacityBroker {
                     selected = Some(index);
                     break;
                 }
-                if waiter.bypassed_units >= self.capacity {
+                if waiter.bypassed_units >= effective_capacity {
                     break;
                 }
             }
@@ -578,6 +649,14 @@ impl CapacityBroker {
             .unwrap_or_else(|error| error.into_inner())
             .available
     }
+
+    #[cfg(test)]
+    fn effective_capacity(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .effective_capacity
+    }
 }
 
 struct OwnershipPermit {
@@ -598,9 +677,14 @@ impl OwnershipPermit {
         Some(Self::new(Arc::clone(&self.broker), 1))
     }
 
-    fn close_and_forget(self) {
+    fn retire(mut self) {
+        let units = std::mem::take(&mut self.units);
+        self.broker.retire(units);
+    }
+
+    fn close_without_release(mut self) {
+        self.units = 0;
         self.broker.close();
-        std::mem::forget(self);
     }
 }
 
@@ -613,7 +697,9 @@ impl Drop for OwnershipPermit {
 
 struct DropBatch {
     permit: Option<OwnershipPermit>,
-    jobs: Vec<DropJob>,
+    retained: Option<DropJob>,
+    undelivered_outcome: Option<DropJob>,
+    auxiliary: Option<DropJob>,
     panic_reporter: Option<PanicReporter>,
     poisoned: bool,
 }
@@ -621,22 +707,32 @@ struct DropBatch {
 impl DropBatch {
     fn new(
         permit: OwnershipPermit,
-        jobs: Vec<DropJob>,
+        retained: DropJob,
+        undelivered_outcome: Option<DropJob>,
+        auxiliary: Option<DropJob>,
         panic_reporter: Option<PanicReporter>,
         poisoned: bool,
     ) -> Self {
         Self {
             permit: Some(permit),
-            jobs,
+            retained: Some(retained),
+            undelivered_outcome,
+            auxiliary,
             panic_reporter,
             poisoned,
         }
     }
 
     fn run(mut self) {
-        let jobs = std::mem::take(&mut self.jobs);
         let mut clean = true;
-        for job in jobs {
+        for job in [
+            self.retained.take(),
+            self.undelivered_outcome.take(),
+            self.auxiliary.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             if let Err(payload) = catch_unwind(AssertUnwindSafe(job)) {
                 clean = false;
                 // A hostile panic payload may itself panic in Drop. It remains
@@ -655,12 +751,9 @@ impl DropBatch {
             // bundle returned normally.
             drop(self.permit.take());
         } else if let Some(permit) = self.permit.take() {
-            // The permit itself is the fixed-size accounting record for this
-            // hostile bundle. Retaining it permanently prevents repeated
-            // uncharged ownership from entering the executor. Closing the
-            // semaphore wakes every admission waiter with a typed capacity
-            // error instead of leaving it parked behind a poisoned slot.
-            permit.close_and_forget();
+            // Retire exactly this charged slot so impossible waiters fail
+            // promptly while the broker's remaining capacity stays usable.
+            permit.retire();
         }
     }
 }
@@ -676,13 +769,20 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 impl Drop for DropBatch {
     fn drop(&mut self) {
         // A disconnected worker set cannot execute this already charged batch.
-        // Retain both the bounded payload and its permit; future acquisition is
-        // closed by `DropExecutor::submit`.
+        // Close admission without returning its charged unit, then retain every
+        // user-bearing payload outside the unavailable worker set.
         if let Some(permit) = self.permit.take() {
-            permit.close_and_forget();
+            permit.close_without_release();
         }
-        if !self.jobs.is_empty() {
-            std::mem::forget(std::mem::take(&mut self.jobs));
+        for job in [
+            self.retained.take(),
+            self.undelivered_outcome.take(),
+            self.auxiliary.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            std::mem::forget(job);
         }
     }
 }
@@ -911,6 +1011,16 @@ mod tests {
         .await;
     }
 
+    async fn wait_for_effective_capacity(executor: &DropExecutor, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while executor.capacity.effective_capacity() != expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker must commit its ownership-capacity update");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn batch_reservation_is_atomic_and_rejects_process_limit_overflow() {
         let executor = DropExecutor::start(1, 2);
@@ -1114,13 +1224,17 @@ mod tests {
             }
         }
 
-        let executor = DropExecutor::start(1, 1);
+        let executor = DropExecutor::start(1, 2);
         let attempted = Arc::new(AtomicBool::new(false));
         let reported = Arc::new(AtomicBool::new(false));
         let mut bundle = executor
             .try_reserve()
-            .expect("the only slot")
+            .expect("the poisoned slot")
             .bundle(PanickingDrop(Arc::clone(&attempted)));
+        let held = executor.try_reserve().expect("the remaining slot");
+        let mut waiter = Box::pin(executor.reserve());
+        assert_pending_once(waiter.as_mut()).await;
+
         let attempted_for_report = Arc::clone(&attempted);
         let reported_by_worker = Arc::clone(&reported);
         bundle.set_panic_reporter(move |message| {
@@ -1139,37 +1253,156 @@ mod tests {
         })
         .await
         .expect("the worker must report the hostile destructor");
+        wait_for_effective_capacity(&executor, 1).await;
 
-        for _ in 0..128 {
-            assert!(
-                executor.try_reserve().is_err(),
-                "the one charged failure must fail-close all later ownership"
-            );
-        }
-        let waiter = tokio::time::timeout(Duration::from_secs(1), executor.reserve())
-            .await
-            .expect("closing poisoned ownership admission must wake async waiters");
+        assert_pending_once(waiter.as_mut()).await;
         assert!(
-            waiter.is_err(),
-            "a poisoned destructor executor must reject async admission"
+            executor.try_reserve().is_err(),
+            "the poisoned slot and the live reservation consume all capacity"
         );
+
+        drop(held);
+        let recovered = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("releasing a healthy slot must wake the waiter")
+            .expect("one destructor panic must not close ownership admission");
         assert_eq!(executor.capacity.available(), 0);
+
+        drop(recovered);
+        assert_eq!(
+            executor.capacity.available(),
+            1,
+            "only the panicking bundle's charged slot stays consumed"
+        );
+        let remaining = executor
+            .try_reserve()
+            .expect("the broker's healthy capacity remains usable");
+        assert!(
+            executor.try_reserve().is_err(),
+            "the poisoned slot must never be reused"
+        );
+        drop(remaining);
+        assert_eq!(executor.capacity.available(), 1);
+        assert_eq!(executor.capacity.effective_capacity(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn actor_cleanup_poison_closes_later_ownership_admission() {
-        let executor = DropExecutor::start(1, 1);
-        let mut bundle = executor.try_reserve().expect("the only slot").bundle(());
+    async fn actor_cleanup_poison_consumes_only_its_charged_slot() {
+        struct ObservedDrop(Arc<AtomicBool>);
+
+        impl Drop for ObservedDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let executor = DropExecutor::start(1, 2);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut bundle = executor
+            .try_reserve()
+            .expect("the poisoned slot")
+            .bundle(ObservedDrop(Arc::clone(&dropped)));
+        let held = executor.try_reserve().expect("the remaining slot");
+        let mut waiter = Box::pin(executor.reserve());
+        assert_pending_once(waiter.as_mut()).await;
+
         bundle.poison();
         bundle.submit();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker must process the poisoned bundle");
+        wait_for_effective_capacity(&executor, 1).await;
 
-        let next = tokio::time::timeout(Duration::from_secs(1), executor.reserve())
+        assert_pending_once(waiter.as_mut()).await;
+        drop(held);
+        let recovered = tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
-            .expect("poisoned terminal cleanup must wake ownership admission");
-        assert!(
-            next.is_err(),
-            "a retained nested panic payload must fail-close later admission"
-        );
+            .expect("releasing a healthy slot must wake the waiter")
+            .expect("one poisoned bundle must not close ownership admission");
         assert_eq!(executor.capacity.available(), 0);
+
+        drop(recovered);
+        assert_eq!(
+            executor.capacity.available(),
+            1,
+            "only the poisoned bundle's charged slot stays consumed"
+        );
+        let remaining = executor
+            .try_reserve()
+            .expect("the broker's healthy capacity remains usable");
+        assert!(executor.try_reserve().is_err());
+        drop(remaining);
+        assert_eq!(executor.capacity.available(), 1);
+        assert_eq!(executor.capacity.effective_capacity(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retiring_the_last_slot_wakes_waiters_with_a_typed_error() {
+        struct ObservedDrop(Arc<AtomicBool>);
+
+        impl Drop for ObservedDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let executor = DropExecutor::start(1, 1);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut bundle = executor
+            .try_reserve()
+            .expect("the slot to retire")
+            .bundle(ObservedDrop(Arc::clone(&dropped)));
+        let mut waiter = Box::pin(executor.reserve());
+        assert_pending_once(waiter.as_mut()).await;
+
+        bundle.poison();
+        bundle.submit();
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("retiring the last reachable slot must wake its waiter");
+        assert!(result.is_err());
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(executor.capacity.available(), 0);
+        assert_eq!(executor.capacity.effective_capacity(), 0);
+        assert!(executor.try_reserve().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retirement_rejects_impossible_batch_but_preserves_healthy_progress() {
+        let executor = DropExecutor::start(1, 3);
+        let mut poisoned = executor
+            .try_reserve()
+            .expect("the slot to retire")
+            .bundle(());
+        let held_a = executor.try_reserve().expect("the first healthy slot");
+        let held_b = executor.try_reserve().expect("the second healthy slot");
+
+        let mut impossible = Box::pin(executor.reserve_many(3));
+        assert_pending_once(impossible.as_mut()).await;
+        let mut single = Box::pin(executor.reserve());
+        assert_pending_once(single.as_mut()).await;
+
+        poisoned.poison();
+        poisoned.submit();
+        let impossible = tokio::time::timeout(Duration::from_secs(1), impossible)
+            .await
+            .expect("retirement must wake an atomic request above effective capacity");
+        assert!(impossible.is_err());
+        assert_eq!(executor.capacity.effective_capacity(), 2);
+        assert_pending_once(single.as_mut()).await;
+
+        drop(held_a);
+        let single = tokio::time::timeout(Duration::from_secs(1), single)
+            .await
+            .expect("a healthy released slot must still advance a feasible waiter")
+            .expect("retirement must not close the healthy remainder");
+        drop(single);
+        drop(held_b);
+        assert_eq!(executor.capacity.available(), 2);
+        assert_eq!(executor.capacity.effective_capacity(), 2);
     }
 }

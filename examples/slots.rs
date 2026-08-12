@@ -36,7 +36,7 @@ fn job_with_start(
     duration: Duration,
     started: Option<Arc<Notify>>,
 ) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx| {
+    let task: TaskRef = TaskFn::arc(move |ctx| {
         let started = started.clone();
         async move {
             if let Some(started) = &started {
@@ -57,7 +57,7 @@ fn job_with_start(
             }
         }
     });
-    TaskSpec::once(task)
+    TaskSpec::once(name, task)
 }
 
 #[tokio::main(flavor = "current_thread")]

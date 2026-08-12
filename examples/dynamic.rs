@@ -21,7 +21,7 @@ use std::time::Duration;
 use taskvisor::prelude::*;
 
 fn make_worker(name: &'static str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |ctx| async move {
+    let task: TaskRef = TaskFn::arc(move |ctx| async move {
         let mut tick = 0u32;
         loop {
             match ctx
@@ -39,7 +39,7 @@ fn make_worker(name: &'static str) -> TaskSpec {
             }
         }
     });
-    TaskSpec::restartable(task)
+    TaskSpec::restartable(name, task)
 }
 
 #[tokio::main(flavor = "current_thread")]

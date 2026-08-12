@@ -108,10 +108,10 @@ impl Controller {
     #[inline]
     pub(super) fn try_get_or_create_slot(
         &self,
-        slot_name: &str,
+        slot_name: &Arc<str>,
     ) -> Result<Arc<Mutex<SlotState>>, usize> {
         let mut state = self.state();
-        if let Some(slot) = state.slots.get(slot_name) {
+        if let Some(slot) = state.slots.get(slot_name.as_ref()) {
             return Ok(slot.clone());
         }
         if let Some(limit) = self.config.max_controller_slots() {
@@ -122,7 +122,7 @@ impl Controller {
         }
         Ok(state
             .slots
-            .entry(Arc::from(slot_name))
+            .entry(Arc::clone(slot_name))
             .or_insert_with(|| Arc::new(Mutex::new(SlotState::new())))
             .clone())
     }

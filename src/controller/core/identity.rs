@@ -84,44 +84,6 @@ impl Controller {
         request_reason: Option<&'static str>,
         workers: &mut ControllerWorkers,
     ) -> bool {
-        if let Some(super::MetadataCancellation {
-            pending,
-            done,
-            discarded,
-            unblocked,
-        }) = self.cancel_metadata_pending(id)
-        {
-            pending.cancel.cancel();
-            self.bus.publish_lazy(|| {
-                let mut request = Event::new(EventKind::TaskRemoveRequested).with_id(id);
-                if let Some(task) = &pending.event_task {
-                    request = request.with_task(Arc::clone(task));
-                }
-                if let Some(reason) = request_reason {
-                    request = request.with_reason(reason);
-                }
-                request
-            });
-            self.bus.publish_lazy(|| {
-                let mut event = Event::new(EventKind::ControllerRejected)
-                    .with_id(id)
-                    .with_rejection_kind(RejectionKind::RemovedFromQueue)
-                    .with_reason(crate::reasons::REMOVED_FROM_QUEUE);
-                if let Some(task) = pending.event_task {
-                    event = event.with_task(task);
-                }
-                event
-            });
-            let terminal = Self::send_rejected(
-                done,
-                RejectionKind::RemovedFromQueue,
-                crate::reasons::REMOVED_FROM_QUEUE,
-            );
-            drop(terminal);
-            drop(discarded);
-            self.apply_metadata_results(unblocked, workers).await;
-            return true;
-        }
         let route = {
             let state = self.state();
             state

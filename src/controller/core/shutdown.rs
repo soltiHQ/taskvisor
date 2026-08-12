@@ -4,7 +4,7 @@
 //!
 //! Pending controller work can include:
 //!
-//! - metadata workers, `watchers`, and slot queues: submissions seen but not handed to the runtime;
+//! - `watchers` and slot queues: submissions seen but not handed to the runtime;
 //! - `rx`: commands accepted by the channel but not processed;
 //! - admission, completion, and removal workers;
 //! - identity-operation workers waiting for the registry or terminal cleanup.
@@ -42,15 +42,16 @@ impl Controller {
             match command {
                 ControllerCommand::Submit(sub) => {
                     let super::Submission { id, owned, done } = *sub;
+                    let event_task = owned
+                        .value
+                        .shared_slot_override()
+                        .unwrap_or_else(|| owned.value.task_spec().shared_name());
                     self.bus.publish_lazy(|| {
-                        let mut event = Event::new(EventKind::ControllerRejected)
+                        Event::new(EventKind::ControllerRejected)
                             .with_id(id)
                             .with_rejection_kind(RejectionKind::ControllerShuttingDown)
-                            .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN);
-                        if let Some(slot_name) = owned.value.slot_override() {
-                            event = event.with_task(slot_name.to_owned());
-                        }
-                        event
+                            .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN)
+                            .with_task(event_task)
                     });
 
                     let terminal = done.and_then(|done| {
@@ -76,36 +77,6 @@ impl Controller {
     /// Rejects queued slot work, resolves every remaining watcher, and clears slot indexes.
     pub(super) async fn finalize_slot_state_on_shutdown(&self) {
         let mut pending_to_drop = Vec::new();
-        let (metadata_waiting, metadata_ready): (Vec<_>, Vec<_>) = {
-            let mut state = self.state();
-            state.metadata_order.clear();
-            (
-                state.metadata_pending.drain().collect(),
-                std::mem::take(&mut state.metadata_ready)
-                    .into_values()
-                    .collect(),
-            )
-        };
-        for (id, pending) in metadata_waiting {
-            pending.cancel.cancel();
-            self.bus.publish_lazy(|| {
-                let mut event = Event::new(EventKind::ControllerRejected)
-                    .with_id(id)
-                    .with_rejection_kind(RejectionKind::ControllerShuttingDown)
-                    .with_reason(crate::reasons::CONTROLLER_SHUTTING_DOWN);
-                if let Some(task) = pending.event_task {
-                    event = event.with_task(task);
-                }
-                event
-            });
-            let terminal = self.finalize_rejected(
-                id,
-                RejectionKind::ControllerShuttingDown,
-                crate::reasons::CONTROLLER_SHUTTING_DOWN,
-            );
-            drop(terminal);
-        }
-        drop(metadata_ready);
         let capacity_waiting: Vec<_> = {
             let mut state = self.state();
             state.capacity_pending.drain().collect()
@@ -157,9 +128,6 @@ impl Controller {
         {
             let mut state = self.state();
             state.slots.clear();
-            state.metadata_pending.clear();
-            state.metadata_order.clear();
-            state.metadata_ready.clear();
             state.queued_slots.clear();
             state.capacity_pending.clear();
         }

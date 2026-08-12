@@ -453,6 +453,18 @@ impl AttemptReaper {
             .contains_key(label)
     }
 
+    /// Snapshots reaper conflicts for one admission batch under one lock.
+    pub(crate) fn reserves_labels<'a>(
+        &self,
+        labels: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<bool> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        labels
+            .into_iter()
+            .map(|label| state.by_label.contains_key(label))
+            .collect()
+    }
+
     pub(crate) fn is_alive(&self, label: &str) -> bool {
         self.state
             .lock()
@@ -806,7 +818,7 @@ impl ActorRuntime {
         actor.spawn();
     }
 
-    pub(super) fn schedule_batch(&self, actors: Vec<ScheduledActor>) {
+    pub(super) fn schedule_batch(&self, actors: impl IntoIterator<Item = ScheduledActor>) {
         for actor in actors {
             actor.spawn();
         }

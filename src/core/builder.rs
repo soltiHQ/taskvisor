@@ -257,7 +257,7 @@ impl SupervisorBuilder {
     ///
     /// Subscriber ownership is reserved as one atomic batch before Taskvisor
     /// calls [`Subscribe::name`] or [`Subscribe::queue_capacity`]. A rejected
-    /// batch therefore invokes neither metadata callback and consumes no
+    /// batch therefore invokes neither subscriber metadata callback and consumes no
     /// ownership slots.
     ///
     /// This method is safe to call outside Tokio and does not spawn Tokio tasks.
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn try_build_reserves_the_complete_subscriber_batch_before_metadata() {
+    fn try_build_reserves_the_complete_subscriber_batch_before_subscriber_metadata() {
         let source = deferred_drop::TestReservationSource::new(1);
         let name_calls = Arc::new(AtomicUsize::new(0));
         let capacity_calls = Arc::new(AtomicUsize::new(0));

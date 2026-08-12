@@ -178,18 +178,18 @@ pub async fn with_timeout<F: Future>(secs: u64, fut: F) -> F::Output {
         .expect("operation timed out — possible deadlock/hang regression")
 }
 
-pub fn make_coop(name: &str) -> TaskRef {
-    TaskFn::arc(name, |ctx: TaskContext| async move {
+pub fn make_coop() -> TaskRef {
+    TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     })
 }
 
 /// A task that starts observably and then ignores cancellation forever.
-pub fn make_stubborn(name: &str) -> (TaskRef, Arc<tokio::sync::Notify>) {
+pub fn make_stubborn() -> (TaskRef, Arc<tokio::sync::Notify>) {
     let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
-    let task = TaskFn::arc(name, move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         async move {
             started.notify_one();
@@ -206,24 +206,24 @@ pub async fn wait_for_start(name: &str, started: &tokio::sync::Notify) {
         .unwrap_or_else(|_| panic!("{name} did not start"));
 }
 
-pub fn make_ok_once(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: TaskContext| async move { Ok(()) })
+pub fn make_ok_once() -> TaskRef {
+    TaskFn::arc(|_ctx: TaskContext| async move { Ok(()) })
 }
 
-pub fn make_fail(name: &str, exit_code: Option<i32>) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: TaskContext| async move {
+pub fn make_fail(exit_code: Option<i32>) -> TaskRef {
+    TaskFn::arc(move |_ctx: TaskContext| async move {
         Err(TaskError::fail("boom").with_exit_code(exit_code))
     })
 }
 
-pub fn make_fatal(name: &str, exit_code: Option<i32>) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: TaskContext| async move {
+pub fn make_fatal(exit_code: Option<i32>) -> TaskRef {
+    TaskFn::arc(move |_ctx: TaskContext| async move {
         Err(TaskError::fatal("unrecoverable").with_exit_code(exit_code))
     })
 }
 
-pub fn make_panic(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: TaskContext| async move {
+pub fn make_panic() -> TaskRef {
+    TaskFn::arc(|_ctx: TaskContext| async move {
         panic!("kaboom");
     })
 }

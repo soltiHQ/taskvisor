@@ -82,12 +82,18 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn work_task(name: &str, iterations: u64) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |_ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| async move {
         let mut x = 0u64;
         for i in 0..iterations {
             x = x.wrapping_add(i);
@@ -95,7 +101,13 @@ fn work_task(name: &str, iterations: u64) -> TaskSpec {
         std::hint::black_box(x);
         Ok(())
     });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn bench_batch(c: &mut Criterion) {

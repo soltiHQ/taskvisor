@@ -131,12 +131,12 @@ impl Supervisor {
     /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     /// let handle = supervisor.serve();
     ///
-    /// let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
+    /// let worker: TaskRef = TaskFn::arc(|ctx| async move {
     ///     ctx.cancelled().await;
     ///     Err(TaskError::Canceled)
     /// });
     ///
-    /// let id = handle.add(TaskSpec::once(worker)).await?;
+    /// let id = handle.add(TaskSpec::once("worker", worker)).await?;
     /// handle.cancel(id).await?;
     /// handle.shutdown().await?;
     /// # Ok(()) }
@@ -165,7 +165,7 @@ impl Supervisor {
     /// If a name is repeated or already registered, no task from the batch starts.
     ///
     /// `run` can be called only once for a supervisor.
-    /// A pre-start ownership-limit or task-metadata failure leaves the single-shot lifecycle unused, so a corrected batch may retry.
+    /// A pre-start ownership-limit failure leaves the single-shot lifecycle unused, so a corrected batch may retry.
     /// Once the lifecycle reaches registry admission, a rejected batch does not stop tasks added earlier through [`serve`](Self::serve), but that `run` call is consumed and cannot be retried.
     ///
     /// `Ok(())` means the bounded supervisor lifecycle and cleanup workflow completed successfully.
@@ -180,12 +180,12 @@ impl Supervisor {
     ///
     /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    /// let task: TaskRef = TaskFn::arc("worker", |_ctx| async move {
+    /// let task: TaskRef = TaskFn::arc(|_ctx| async move {
     ///     println!("one unit of work");
     ///     Ok(())
     /// });
     ///
-    /// supervisor.run(vec![TaskSpec::once(task)]).await?;
+    /// supervisor.run(vec![TaskSpec::once("worker", task)]).await?;
     /// # Ok(()) }
     /// ```
     ///
@@ -208,7 +208,7 @@ impl Supervisor {
     /// Runs an initial task batch until natural completion, shared shutdown, or an application-owned shutdown future completes.
     ///
     /// The shutdown future is polled while the initial batch waits for bounded
-    /// ownership, isolated task metadata, and registry admission. When it
+    /// ownership and registry admission. When it
     /// completes first, taskvisor starts the same graceful shutdown used by
     /// [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
     ///
@@ -225,7 +225,7 @@ impl Supervisor {
     ///
     /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    /// let task: TaskRef = TaskFn::arc("worker", |ctx| async move {
+    /// let task: TaskRef = TaskFn::arc(|ctx| async move {
     ///     ctx.cancelled().await;
     ///     Err(TaskError::Canceled)
     /// });
@@ -235,7 +235,7 @@ impl Supervisor {
     ///     let _ = stop.send(());
     /// });
     /// supervisor
-    ///     .run_until(vec![TaskSpec::once(task)], async move {
+    ///     .run_until(vec![TaskSpec::once("worker", task)], async move {
     ///         let _ = stopped.await;
     ///     })
     ///     .await?;

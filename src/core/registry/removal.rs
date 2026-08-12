@@ -68,23 +68,27 @@ impl Drop for OutcomeDropGuard<'_> {
     }
 }
 
-/// Owns every user-bearing part of a terminal report before its first await.
+/// Owns every part of a terminal report until registry membership is removed.
 ///
 /// If the reporting future is canceled while waiting for the registry lock,
-/// this guard still transfers the classified outcome and charged cleanup
-/// bundle to their terminal owners. The physical reaper therefore cannot be
-/// left holding an uncharged actor result.
-struct PendingTerminalReport<'a> {
+/// this guard transfers the whole commit to one detached continuation. Logical
+/// completion and the pending-join barrier therefore remain tied to membership
+/// removal instead of being released by cancellation.
+struct PendingTerminalReport {
+    state: Arc<RwLock<Inner>>,
+    empty_notify: Arc<Notify>,
+    pending_joins: Arc<PendingJoins>,
+    bus: Bus,
     id: TaskId,
     outcome: Option<TaskOutcome>,
     done: Option<OutcomeTx>,
     cleanup: Option<DropBundle>,
     reaper: AttemptReaper,
     completion: RemovalCompletion,
-    pending_joins: &'a PendingJoins,
+    detach_on_drop: bool,
 }
 
-impl PendingTerminalReport<'_> {
+impl PendingTerminalReport {
     fn take(&mut self) -> (TaskOutcome, Option<OutcomeTx>, DropBundle) {
         (
             self.outcome
@@ -96,12 +100,86 @@ impl PendingTerminalReport<'_> {
                 .expect("one charged terminal bundle is retained"),
         )
     }
-}
 
-impl Drop for PendingTerminalReport<'_> {
-    fn drop(&mut self) {
-        let Some(mut cleanup) = self.cleanup.take() else {
+    /// Removes one authoritative membership entry, then commits all terminal
+    /// reporting and completion side effects without another cancellation
+    /// point.
+    async fn commit(&mut self) {
+        let removed = {
+            let mut st = self.state.write().await;
+            let is_removing = st
+                .tasks
+                .get(&self.id)
+                .is_some_and(|entry| matches!(&entry.state, EntryState::Removing { .. }));
+            if !is_removing {
+                None
+            } else {
+                let entry = st
+                    .tasks
+                    .remove(&self.id)
+                    .expect("the removing entry was checked above");
+                let EntryState::Removing {
+                    completion: state_completion,
+                } = entry.state
+                else {
+                    unreachable!("the removing entry was checked above")
+                };
+                if st.by_label.get(entry.label.as_ref()) == Some(&self.id) {
+                    st.by_label.remove(entry.label.as_ref());
+                }
+                let is_empty = st.tasks.is_empty();
+                Some((entry.label, state_completion, is_empty))
+            }
+        };
+
+        let Some((label, state_completion, is_empty)) = removed else {
+            self.finish_without_membership();
             return;
+        };
+
+        let (terminal_outcome, outcome, cleanup) = self.take();
+        let mut finalizer = TerminalFinalizer {
+            id: self.id,
+            empty_notify: &self.empty_notify,
+            pending_joins: &self.pending_joins,
+            state_completion: Some(state_completion),
+            report_completion: self.completion.clone(),
+            is_empty,
+            terminal: Some((self.reaper.clone(), cleanup)),
+        };
+        let cleanup = &mut finalizer
+            .terminal
+            .as_mut()
+            .expect("terminal ownership is installed")
+            .1;
+
+        Registry::report_outcome(
+            &self.bus,
+            self.id,
+            &label,
+            terminal_outcome,
+            outcome,
+            cleanup,
+        );
+        // Wake completion waiters only after id and label membership is removed,
+        // reporting has been attempted, and the registry state lock is released.
+        drop(finalizer);
+    }
+
+    /// Completes a stale duplicate report only after the state lock verified
+    /// that no membership remains for it.
+    fn finish_without_membership(&mut self) {
+        if self.retain_terminal() {
+            self.pending_joins.dec(self.id);
+            self.completion.complete_logical();
+        }
+    }
+
+    /// Transfers classified terminal ownership to the reaper without changing
+    /// registry barriers or logical completion.
+    fn retain_terminal(&mut self) -> bool {
+        let Some(mut cleanup) = self.cleanup.take() else {
+            return false;
         };
         if let Some(outcome) = self.outcome.take() {
             match self.done.take() {
@@ -115,8 +193,52 @@ impl Drop for PendingTerminalReport<'_> {
         }
         self.reaper
             .attach_terminal(self.id, cleanup, None, self.completion.clone());
-        self.pending_joins.dec(self.id);
-        self.completion.complete_logical();
+        true
+    }
+
+    /// Moves an interrupted commit into a guard whose cancellation fallback
+    /// retains physical ownership without falsely completing logical removal.
+    fn take_continuation(&mut self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            empty_notify: Arc::clone(&self.empty_notify),
+            pending_joins: Arc::clone(&self.pending_joins),
+            bus: self.bus.clone(),
+            id: self.id,
+            outcome: self.outcome.take(),
+            done: self.done.take(),
+            cleanup: self.cleanup.take(),
+            reaper: self.reaper.clone(),
+            completion: self.completion.clone(),
+            detach_on_drop: false,
+        }
+    }
+
+    /// Preserves the charged terminal ownership if the detached continuation
+    /// itself is canceled by runtime teardown. Membership and logical latches
+    /// deliberately remain incomplete because the state commit did not occur.
+    fn retain_without_logical_completion(&mut self) {
+        let _ = self.retain_terminal();
+    }
+}
+
+impl Drop for PendingTerminalReport {
+    fn drop(&mut self) {
+        if self.cleanup.is_none() {
+            return;
+        }
+
+        if self.detach_on_drop
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let mut continuation = self.take_continuation();
+            drop(runtime.spawn(async move {
+                continuation.commit().await;
+            }));
+            return;
+        }
+
+        self.retain_without_logical_completion();
     }
 }
 
@@ -462,8 +584,7 @@ impl Registry {
             unreachable!("a removing entry was checked above")
         };
         let label = Arc::clone(&entry.label);
-        pending_joins.inc(id);
-        pending_joins.label(id, Arc::clone(&label));
+        pending_joins.inc_with_label(id, Arc::clone(&label));
         Some((label, *handle, completion))
     }
 
@@ -541,9 +662,9 @@ impl Registry {
     ///
     /// State removal, outcome delivery, terminal events, and pending-join cleanup finish before an empty-registry waiter can continue.
     pub(super) async fn finish_removal(
-        state: &RwLock<Inner>,
-        empty_notify: &Notify,
-        pending_joins: &PendingJoins,
+        state: &Arc<RwLock<Inner>>,
+        empty_notify: &Arc<Notify>,
+        pending_joins: &Arc<PendingJoins>,
         bus: &Bus,
         reaper: &AttemptReaper,
         report: RemovalReport,
@@ -560,65 +681,19 @@ impl Registry {
             JoinCompletion::ForceAborted => TaskOutcome::ForceAborted,
         };
         let mut pending_report = PendingTerminalReport {
+            state: Arc::clone(state),
+            empty_notify: Arc::clone(empty_notify),
+            pending_joins: Arc::clone(pending_joins),
+            bus: bus.clone(),
             id,
             outcome: Some(terminal_outcome),
             done: outcome,
             cleanup: Some(cleanup),
             reaper: reaper.clone(),
-            completion: removal_completion.clone(),
-            pending_joins,
+            completion: removal_completion,
+            detach_on_drop: true,
         };
-        let removed = {
-            let mut st = state.write().await;
-            let is_removing = st
-                .tasks
-                .get(&id)
-                .is_some_and(|entry| matches!(&entry.state, EntryState::Removing { .. }));
-            if !is_removing {
-                None
-            } else {
-                let entry = st
-                    .tasks
-                    .remove(&id)
-                    .expect("the removing entry was checked above");
-                let EntryState::Removing {
-                    completion: state_completion,
-                } = entry.state
-                else {
-                    unreachable!("the removing entry was checked above")
-                };
-                if st.by_label.get(entry.label.as_ref()) == Some(&id) {
-                    st.by_label.remove(entry.label.as_ref());
-                }
-                let is_empty = st.tasks.is_empty();
-                Some((entry.label, state_completion, is_empty))
-            }
-        };
-        let Some((label, state_completion, is_empty)) = removed else {
-            return;
-        };
-
-        let (terminal_outcome, outcome, cleanup) = pending_report.take();
-
-        let mut finalizer = TerminalFinalizer {
-            id,
-            empty_notify,
-            pending_joins,
-            state_completion: Some(state_completion),
-            report_completion: removal_completion,
-            is_empty,
-            terminal: Some((reaper.clone(), cleanup)),
-        };
-        let cleanup = &mut finalizer
-            .terminal
-            .as_mut()
-            .expect("terminal ownership is installed")
-            .1;
-
-        Self::report_outcome(bus, id, &label, terminal_outcome, outcome, cleanup);
-        // Wake completion waiters only after id and label membership is removed,
-        // reporting has been attempted, and the registry state lock is released.
-        drop(finalizer);
+        pending_report.commit().await;
     }
 
     /// Publishes one typed terminal event, delivers the watched outcome, then publishes registry removal.

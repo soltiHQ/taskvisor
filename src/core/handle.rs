@@ -68,7 +68,7 @@ use super::outcome::TaskWaiter;
 ///     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 ///     let handle = supervisor.serve();
 ///
-///     let task = TaskFn::arc("worker", |ctx| async move {
+///     let task = TaskFn::arc(|ctx| async move {
 ///         loop {
 ///             ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(1)))
 ///                 .await?;
@@ -76,7 +76,7 @@ use super::outcome::TaskWaiter;
 ///         }
 ///     });
 ///
-///     let id = handle.add(TaskSpec::restartable(task)).await?;
+///     let id = handle.add(TaskSpec::restartable("worker", task)).await?;
 ///     let _claimed = handle.cancel(id).await?;
 ///     handle.shutdown().await?;
 ///     Ok(())
@@ -171,12 +171,12 @@ impl SupervisorHandle {
     /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
     /// # let handle = sup.serve();
-    /// let job: TaskRef = TaskFn::arc("job", |_ctx| async {
+    /// let job: TaskRef = TaskFn::arc(|_ctx| async {
     ///     Ok(())
     /// });
     ///
     /// let (_id, waiter) = handle
-    ///     .add_and_watch(TaskSpec::once(job))
+    ///     .add_and_watch(TaskSpec::once("job", job))
     ///     .await?;
     ///
     /// let outcome = waiter.wait().await?;

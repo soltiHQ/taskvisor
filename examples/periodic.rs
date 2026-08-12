@@ -17,7 +17,7 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let heartbeat: TaskRef = TaskFn::arc("heartbeat", |_ctx| async move {
+    let heartbeat: TaskRef = TaskFn::arc(|_ctx| async move {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     });
 
-    let spec = TaskSpec::periodic(heartbeat, Duration::from_secs(2));
+    let spec = TaskSpec::periodic("heartbeat", heartbeat, Duration::from_secs(2));
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     supervisor.run_with_os_signals(vec![spec]).await?;

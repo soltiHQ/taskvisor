@@ -10,8 +10,8 @@ use std::time::Duration;
 use common::{fast_backoff, with_timeout};
 use taskvisor::prelude::*;
 
-fn pending(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: TaskContext| async move {
+fn pending() -> TaskRef {
+    TaskFn::arc(|_ctx: TaskContext| async move {
         std::future::pending::<()>().await;
         Ok(())
     })
@@ -29,7 +29,7 @@ async fn dynamic_add_applies_inherited_timeout() {
     let handle = supervisor.serve();
 
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once(pending("dynamic-default-timeout")))
+        .add_and_watch(TaskSpec::once("dynamic-default-timeout", pending()))
         .await
         .expect("dynamic task must be admitted");
     let outcome = with_timeout(2, waiter.wait())
@@ -44,7 +44,7 @@ async fn dynamic_add_applies_inherited_timeout() {
 async fn fully_inherited_spec_uses_default_restart_policy() {
     let runs = Arc::new(AtomicU32::new(0));
     let task_runs = Arc::clone(&runs);
-    let task = TaskFn::arc("fully-inherited", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let runs = Arc::clone(&task_runs);
         async move {
             runs.fetch_add(1, Ordering::SeqCst);
@@ -59,7 +59,7 @@ async fn fully_inherited_spec_uses_default_restart_policy() {
         .build();
     let handle = supervisor.serve();
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::from_defaults(task))
+        .add_and_watch(TaskSpec::from_defaults("fully-inherited", task))
         .await
         .expect("fully inherited task must be admitted");
 
@@ -71,8 +71,6 @@ async fn fully_inherited_spec_uses_default_restart_policy() {
     handle.shutdown().await.expect("shutdown must join");
 }
 
-// Task metadata runs on a native isolation worker. Paused Tokio time may
-// auto-advance the outer timeout before that OS thread is scheduled.
 #[tokio::test(flavor = "current_thread")]
 async fn static_batch_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
@@ -81,7 +79,7 @@ async fn static_batch_applies_inherited_timeout() {
 
     with_timeout(
         2,
-        supervisor.run(vec![TaskSpec::once(pending("static-default-timeout"))]),
+        supervisor.run(vec![TaskSpec::once("static-default-timeout", pending())]),
     )
     .await
     .expect("timed-out static task must reach natural completion");
@@ -95,7 +93,7 @@ async fn explicit_none_disables_inherited_timeout() {
     let handle = supervisor.serve();
     let (release, released) = tokio::sync::oneshot::channel::<()>();
     let released = Arc::new(std::sync::Mutex::new(Some(released)));
-    let task = TaskFn::arc("explicit-no-timeout", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let released = released
             .lock()
             .expect("release lock poisoned")
@@ -108,7 +106,7 @@ async fn explicit_none_disables_inherited_timeout() {
     });
 
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once(task).with_timeout(None))
+        .add_and_watch(TaskSpec::once("explicit-no-timeout", task).with_timeout(None))
         .await
         .expect("task must be admitted");
     let mut outcome = Box::pin(waiter.wait());
@@ -135,7 +133,7 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
 
     let limited_runs = Arc::new(AtomicU32::new(0));
     let runs = Arc::clone(&limited_runs);
-    let limited = TaskFn::arc("inherited-retry-limit", move |_ctx: TaskContext| {
+    let limited = TaskFn::arc(move |_ctx: TaskContext| {
         let runs = Arc::clone(&runs);
         async move {
             runs.fetch_add(1, Ordering::SeqCst);
@@ -147,7 +145,7 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
         .build();
     let handle = supervisor.serve();
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(limited))
+        .add_and_watch(TaskSpec::restartable("inherited-retry-limit", limited))
         .await
         .expect("limited task must be admitted");
     assert!(matches!(
@@ -159,7 +157,7 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
 
     let unlimited_runs = Arc::new(AtomicU32::new(0));
     let runs = Arc::clone(&unlimited_runs);
-    let succeeds_on_third = TaskFn::arc("explicit-unlimited", move |_ctx: TaskContext| {
+    let succeeds_on_third = TaskFn::arc(move |_ctx: TaskContext| {
         let runs = Arc::clone(&runs);
         async move {
             if runs.fetch_add(1, Ordering::SeqCst) < 2 {
@@ -174,7 +172,9 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
         .build();
     let handle = supervisor.serve();
     let (_, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(succeeds_on_third).with_max_retries(None))
+        .add_and_watch(
+            TaskSpec::restartable("explicit-unlimited", succeeds_on_third).with_max_retries(None),
+        )
         .await
         .expect("unlimited task must be admitted");
     assert!(matches!(
@@ -186,8 +186,6 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
 }
 
 #[cfg(feature = "controller")]
-// Controller submission acknowledges command intake before its native
-// metadata worker completes, so a paused-clock watchdog can race that worker.
 #[tokio::test(flavor = "current_thread")]
 async fn controller_admission_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
@@ -197,9 +195,10 @@ async fn controller_admission_applies_inherited_timeout() {
     let handle = supervisor.serve();
 
     let (_, waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(pending(
+        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(
             "controller-default-timeout",
-        ))))
+            pending(),
+        )))
         .await
         .expect("controller task must be admitted");
     assert!(matches!(

@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A flaky task: fails twice, then succeeds.
     let attempts = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx| {
+    let flaky: TaskRef = TaskFn::arc(move |_ctx| {
         let attempts = Arc::clone(&attempts);
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(flaky)
+    let spec = TaskSpec::restartable("flaky-job", flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(100)));
 
     let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(PromSubscriber {

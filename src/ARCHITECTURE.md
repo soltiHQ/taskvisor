@@ -263,11 +263,10 @@ The controller is a serialized admission layer before the registry. One loop own
 ```mermaid
 %%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
-    Commands["Ordered submit and identity commands"]
+    Commands["Ordered submissions with immutable task names<br/>and identity commands"]
     AddDecision["Direct registry Add decision"]
     Completion["Terminal RemovalCompletion"]
     Shutdown["Runtime shutdown token"]
-    Metadata["Process-wide Task::name workers"]
     Loop["Single controller loop"]
     Slots["Per-slot state + queue"]
     Registry["SupervisorCore / Registry"]
@@ -275,8 +274,6 @@ flowchart LR
     Events["Best-effort controller events"]
 
     Commands --> Loop
-    Loop -->|bounded metadata job| Metadata
-    Metadata -->|sequence-ordered result| Loop
     AddDecision --> Loop
     Completion --> Loop
     Shutdown --> Loop
@@ -318,7 +315,7 @@ Policy behavior around those phases:
 - A successful removal request does not free the slot. The controller waits for both logical terminal reporting and physical actor/reaper release; only then can it free the slot.
 - A task name and a controller slot are different keys. The registry still enforces global task-name uniqueness.
 
-`Task::name` is synchronous user code. Static-run batches, direct adds, and controller submissions transfer already charged task ownership to the same two fixed process-wide metadata workers. A blocked callback therefore consumes bounded ownership and one metadata worker without blocking a Tokio worker or public shutdown. The controller loop continues processing identity operations while metadata is pending. Ready controller results are buffered by submission sequence and applied only as a contiguous ordered prefix, so a later fast callback cannot overtake an earlier slow callback. Canceling an earlier metadata-stage ID retires its sequence and unblocks the next ready submission. Metadata-stage records count against `max_total_pending`; their owned tasks also remain bounded by the process-wide ownership budget.
+`TaskSpec` owns the immutable task name as an `Arc<str>`. Static-run batches and direct adds clone that value before registry hand-off; admission does not execute user code to discover task identity. The controller reads the same value from each ordered submission and resolves the effective slot immediately: an explicit slot wins, otherwise the task name is used. There is no asynchronous task-metadata stage or metadata-result ordering barrier; command order and per-slot FIFO are applied directly by the serialized controller loop.
 
 ## Shared shutdown
 
@@ -352,7 +349,7 @@ flowchart LR
 
 Subscriber shutdown has its own timeout and happens after the task grace phase. Every common cleanup phase is attempted even if an earlier phase reports an internal failure. If explicitly requested OS signal setup fails, shutdown still closes admission and runs the common cleanup tail, but it does not run the normal task-drain branch. On Unix, Tokio's process-global handlers are not restored when listeners are dropped; this side effect exists only after the application calls `run_with_os_signals`. Dropping the last runtime owner is only a synchronous fallback: it closes admission and cancels tokens, but cannot await or report graceful cleanup.
 
-User `Drop` implementations are not part of the cooperative grace contract: synchronous Rust destructors cannot be interrupted safely. Taskvisor shares 1024 process-wide ownership slots across accepted tasks and configured subscribers. A task reservation follows controller queues, registry membership, logical force-abort, and the physical attempt reaper. A subscriber reservation is acquired atomically for the complete configured set before metadata callbacks and follows pending configuration, its dedicated callback worker, and detached physical completion. Terminal cleanup transfers retained final references and auxiliary terminal values to at most two process-wide destructor threads. Because every running or queued destructor bundle already owns a slot, their combined retained memory is strictly bounded by that admission budget.
+User `Drop` implementations are not part of the cooperative grace contract: synchronous Rust destructors cannot be interrupted safely. Taskvisor shares 1024 process-wide ownership slots across accepted tasks and configured subscribers. A task reservation follows controller queues, registry membership, logical force-abort, and the physical attempt reaper. A subscriber reservation is acquired atomically for the complete configured set before calling subscriber names or queue capacities, and follows pending configuration, its dedicated callback worker, and detached physical completion. Terminal cleanup transfers retained final references and auxiliary terminal values to at most two process-wide destructor threads. Because every running or queued destructor bundle already owns a slot, their combined retained memory is strictly bounded by that admission budget.
 
 Ordinary async task admission waits for an ownership slot; fail-fast task admission and `SupervisorBuilder::try_build` return resource-limit errors. Subscriber builds reserve their complete batch without waiting, before calling subscriber names or queue capacities. Cancellation before task hand-off leaves destruction in the caller's execution context because the library has not accepted ownership yet. Once a watched outcome is delivered successfully, that outcome belongs to the caller and dropping its waiter destroys it in the caller's context.
 
@@ -365,7 +362,7 @@ A destructor panic is caught after its panic payload is retained under the same 
 | Public task contract or task configuration                  | [`tasks/`](tasks), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                                                            | [`tests/defaults.rs`](../tests/defaults.rs), rustdoc examples                                                                         |
 | Attempt timeout, panic, or terminal event                   | [`core/runner.rs`](core/runner.rs)                                                                                                                                                             | unit tests in that module, [`tests/timeout.rs`](../tests/timeout.rs), [`tests/failure.rs`](../tests/failure.rs)                       |
 | Restart, retry, backoff, or cancellation between attempts   | [`core/actor.rs`](core/actor.rs), [`policies/`](policies)                                                                                                                                      | actor unit tests, [`tests/failure.rs`](../tests/failure.rs), [`tests/lifecycle.rs`](../tests/lifecycle.rs)                            |
-| Task identity, duplicate names, add/remove/cancel semantics | [`core/registry/`](core/registry), [`core/runtime/management.rs`](core/runtime/management.rs)                                                                                                  | [`tests/identity.rs`](../tests/identity.rs), [`tests/watch.rs`](../tests/watch.rs), [`tests/concurrency.rs`](../tests/concurrency.rs) |
+| Task identity, duplicate names, add/remove/cancel semantics | [`tasks/spec.rs`](tasks/spec.rs), [`core/registry/`](core/registry), [`core/runtime/management.rs`](core/runtime/management.rs)                                                                | [`tests/identity.rs`](../tests/identity.rs), [`tests/watch.rs`](../tests/watch.rs), [`tests/concurrency.rs`](../tests/concurrency.rs) |
 | Final watched outcomes or destructor isolation              | [`core/outcome.rs`](core/outcome.rs), [`core/deferred_drop.rs`](core/deferred_drop.rs), [`core/registry/removal.rs`](core/registry/removal.rs)                                                   | [`tests/watch.rs`](../tests/watch.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                                     |
 | Event fields or delivery                                    | [`events/`](events), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs), [`subscribers/`](subscribers)                                                                               | [`tests/lifecycle.rs`](../tests/lifecycle.rs), subscriber unit tests                                                                  |
 | Per-slot queue/replace/reject behavior                      | [`controller/slot.rs`](controller/slot.rs), [`controller/core/admission.rs`](controller/core/admission.rs), [`controller/core/queue.rs`](controller/core/queue.rs)                             | [`tests/controller.rs`](../tests/controller.rs), controller unit tests                                                                |

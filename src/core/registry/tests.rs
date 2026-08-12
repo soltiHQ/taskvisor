@@ -11,22 +11,9 @@ use crate::{
 use std::{future::Future, pin::Pin, task::Poll};
 use tokio::sync::oneshot;
 
-struct RegistryNameProbe {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    allow_lifecycle_reads: Arc<std::sync::atomic::AtomicBool>,
-}
+struct RegistryNameProbe;
 
 impl crate::Task for RegistryNameProbe {
-    fn name(&self) -> &str {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        assert!(
-            self.allow_lifecycle_reads
-                .load(std::sync::atomic::Ordering::Acquire),
-            "registry admission must consume the cached command label"
-        );
-        "cached-command-label"
-    }
-
     fn spawn(&self, _ctx: crate::TaskContext) -> crate::BoxTaskFuture {
         Box::pin(std::future::pending())
     }
@@ -101,10 +88,9 @@ fn registry_with_limit(limit: usize) -> Arc<Registry> {
 }
 
 fn waiting_task_spec(name: &str) -> TaskSpec {
-    let task: crate::TaskRef = crate::TaskFn::arc(name, |_ctx: crate::TaskContext| async move {
-        std::future::pending().await
-    });
-    TaskSpec::once(task)
+    let task: crate::TaskRef =
+        crate::TaskFn::arc(|_ctx: crate::TaskContext| async move { std::future::pending().await });
+    TaskSpec::once(name, task)
 }
 
 fn owned_task(spec: TaskSpec) -> OwnedTask<TaskSpec> {
@@ -112,13 +98,13 @@ fn owned_task(spec: TaskSpec) -> OwnedTask<TaskSpec> {
     OwnedTask::new(spec, retained, test_reservation())
 }
 
-fn cleanup_bundle(name: &'static str) -> DropBundle {
-    let retained = crate::TaskFn::arc(name, |_ctx| async { Ok(()) });
+fn cleanup_bundle(_name: &'static str) -> DropBundle {
+    let retained = crate::TaskFn::arc(|_ctx| async { Ok(()) });
     test_reservation().bundle(retained)
 }
 
-fn isolated_cleanup_bundle(name: &'static str) -> DropBundle {
-    let retained = crate::TaskFn::arc(name, |_ctx| async { Ok(()) });
+fn isolated_cleanup_bundle(_name: &'static str) -> DropBundle {
+    let retained = crate::TaskFn::arc(|_ctx| async { Ok(()) });
     isolated_test_reservation().bundle(retained)
 }
 
@@ -524,9 +510,8 @@ async fn panicking_outcome_destructor_cannot_strand_terminal_cleanup() {
                     source: Some(source),
                 })),
                 completion: report_completion.clone(),
-                cleanup: crate::core::deferred_drop::isolated_test_reservation().bundle(
-                    crate::TaskFn::arc("panic-outcome-cleanup", |_ctx| async { Ok(()) }),
-                ),
+                cleanup: crate::core::deferred_drop::isolated_test_reservation()
+                    .bundle(crate::TaskFn::arc(|_ctx| async { Ok(()) })),
             },
         ),
     )
@@ -557,10 +542,6 @@ async fn duplicate_admission_drops_prepared_task_after_state_unlock() {
     }
 
     impl crate::Task for DropProbeTask {
-        fn name(&self) -> &str {
-            "duplicate-lock-scope"
-        }
-
         fn spawn(&self, _ctx: crate::TaskContext) -> crate::BoxTaskFuture {
             Box::pin(std::future::pending())
         }
@@ -603,8 +584,8 @@ async fn duplicate_admission_drops_prepared_task_after_state_unlock() {
     registry
         .spawn_and_register(
             TaskId::next(),
-            label,
-            owned_task(TaskSpec::once(task)),
+            Arc::clone(&label),
+            owned_task(TaskSpec::once(label, task)),
             None,
             None,
             reply,
@@ -653,6 +634,7 @@ fn started_registry(
 }
 
 struct ControlledCancellationTask {
+    label: &'static str,
     task: crate::TaskRef,
     started: Arc<Notify>,
     cancellation_seen: Arc<Notify>,
@@ -666,7 +648,7 @@ fn controlled_cancellation_task(label: &'static str) -> ControlledCancellationTa
     let started_by_task = Arc::clone(&started);
     let seen_by_task = Arc::clone(&cancellation_seen);
     let release_by_task = Arc::clone(&release);
-    let task = crate::TaskFn::arc(label, move |ctx: crate::TaskContext| {
+    let task = crate::TaskFn::arc(move |ctx: crate::TaskContext| {
         let started = Arc::clone(&started_by_task);
         let cancellation_seen = Arc::clone(&seen_by_task);
         let release = Arc::clone(&release_by_task);
@@ -680,6 +662,7 @@ fn controlled_cancellation_task(label: &'static str) -> ControlledCancellationTa
     });
 
     ControlledCancellationTask {
+        label,
         task,
         started,
         cancellation_seen,
@@ -710,7 +693,7 @@ fn send_add(
 fn batch_item(id: TaskId, spec: TaskSpec) -> AddBatchItem {
     AddBatchItem {
         id,
-        label: Arc::from(spec.task().name()),
+        label: Arc::from(spec.name()),
         owned: owned_task(spec),
     }
 }
@@ -761,22 +744,17 @@ async fn stop_registry(registry: &Registry, token: &CancellationToken) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn add_command_consumes_cached_label_without_reading_task_name() {
+async fn add_command_consumes_cached_label() {
     let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
     let mut events = bus.subscribe();
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let allow_lifecycle_reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let id = TaskId::next();
     let (reply, reply_rx) = oneshot::channel();
-    let task: crate::TaskRef = Arc::new(RegistryNameProbe {
-        calls: Arc::clone(&calls),
-        allow_lifecycle_reads: Arc::clone(&allow_lifecycle_reads),
-    });
+    let task: crate::TaskRef = Arc::new(RegistryNameProbe);
 
     tx.try_send(RegistryCommand::Add {
         id,
         label: Arc::from("cached-command-label"),
-        owned: Box::new(owned_task(TaskSpec::once(task))),
+        owned: Box::new(owned_task(TaskSpec::once("cached-command-label", task))),
         outcome: None,
         completion: None,
         reply,
@@ -787,7 +765,6 @@ async fn add_command_consumes_cached_label_without_reading_task_name() {
         receive_reply(reply_rx, "cached-label Add").await,
         Ok(())
     ));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 0);
     assert_eq!(
         registry.id_for_label("cached-command-label").await,
         Some(id)
@@ -804,9 +781,7 @@ async fn add_command_consumes_cached_label_without_reading_task_name() {
     .await
     .expect("cached-label TaskAdded event");
     assert_eq!(added.task.as_deref(), Some("cached-command-label"));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 0);
 
-    allow_lifecycle_reads.store(true, std::sync::atomic::Ordering::Release);
     stop_registry(&registry, &token).await;
 }
 
@@ -818,12 +793,12 @@ async fn add_reply_commits_state_without_event_confirmation() {
     let (registry, bus, token, tx) = started_registry(1, Duration::from_secs(1));
     let mut stale_events = bus.subscribe();
     let id = TaskId::next();
-    let task: TaskRef = TaskFn::arc("reply-add", |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
 
-    let reply = send_add(&tx, id, TaskSpec::restartable(task), None);
+    let reply = send_add(&tx, id, TaskSpec::restartable("reply-add", task), None);
     assert!(
         receive_reply(reply, "add reply").await.is_ok(),
         "registry must accept a unique task"
@@ -881,13 +856,13 @@ async fn single_add_publishes_added_before_starting() {
         registrations.spawn(async move {
             let id = TaskId::next();
             let name = format!("ordered-add-{index}");
-            let task: TaskRef = TaskFn::arc(name.clone(), |_ctx| async { Ok(()) });
+            let task: TaskRef = TaskFn::arc(|_ctx| async { Ok(()) });
             let (reply, reply_rx) = oneshot::channel();
             registry
                 .spawn_and_register(
                     id,
-                    Arc::from(name),
-                    owned_task(TaskSpec::once(task)),
+                    Arc::from(name.clone()),
+                    owned_task(TaskSpec::once(name, task)),
                     None,
                     None,
                     reply,
@@ -949,12 +924,12 @@ async fn batch_reply_commits_every_task_as_one_registry_decision() {
     let mut items = Vec::new();
     for label in ["batch-a", "batch-b", "batch-c"] {
         let id = TaskId::next();
-        let task: TaskRef = TaskFn::arc(label, |ctx: TaskContext| async move {
+        let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
             ctx.cancelled().await;
             Ok(())
         });
         expected.push((id, Arc::from(label)));
-        items.push(batch_item(id, TaskSpec::restartable(task)));
+        items.push(batch_item(id, TaskSpec::restartable(label, task)));
     }
     expected.sort_by_key(|(id, _)| *id);
 
@@ -981,11 +956,11 @@ async fn dropped_batch_reply_still_starts_after_all_added_events() {
     for label in ["dropped-batch-a", "dropped-batch-b"] {
         let id = TaskId::next();
         let body_tx = body_tx.clone();
-        let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+        let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
             let _ = body_tx.send(id);
             async { Ok(()) }
         });
-        items.push(batch_item(id, TaskSpec::once(task)));
+        items.push(batch_item(id, TaskSpec::once(label, task)));
     }
     drop(body_tx);
 
@@ -1032,13 +1007,13 @@ async fn duplicate_inside_batch_rejects_every_item_without_starting_bodies() {
     let mut ids = Vec::new();
     for label in ["unique", "duplicate", "duplicate"] {
         let runs = Arc::clone(&runs);
-        let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+        let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
             runs.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         });
         let id = TaskId::next();
         ids.push(id);
-        items.push(batch_item(id, TaskSpec::once(task)));
+        items.push(batch_item(id, TaskSpec::once(label, task)));
     }
 
     let result = receive_reply(send_batch(&tx, items), "duplicate batch reply").await;
@@ -1089,7 +1064,7 @@ async fn batch_conflict_with_registered_or_removing_label_starts_no_new_body() {
             send_add(
                 &tx,
                 existing_id,
-                TaskSpec::restartable(controlled.task),
+                TaskSpec::restartable(controlled.label, controlled.task),
                 None,
             ),
             "existing add reply",
@@ -1104,11 +1079,11 @@ async fn batch_conflict_with_registered_or_removing_label_starts_no_new_body() {
     let candidate_runs = Arc::new(AtomicUsize::new(0));
     let make_candidate = |label: &'static str| {
         let runs = Arc::clone(&candidate_runs);
-        let task: TaskRef = TaskFn::arc(label, move |_ctx: TaskContext| {
+        let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
             runs.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         });
-        batch_item(TaskId::next(), TaskSpec::once(task))
+        batch_item(TaskId::next(), TaskSpec::once(label, task))
     };
 
     let registered_result = receive_reply(
@@ -1181,13 +1156,18 @@ async fn duplicate_add_reply_rejects_without_starting_body() {
 
     let (registry, _bus, token, tx) = started_registry(64, Duration::from_secs(1));
     let first_id = TaskId::next();
-    let first: TaskRef = TaskFn::arc("duplicate", |ctx: TaskContext| async move {
+    let first: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
     assert!(
         receive_reply(
-            send_add(&tx, first_id, TaskSpec::restartable(first), None),
+            send_add(
+                &tx,
+                first_id,
+                TaskSpec::restartable("duplicate", first),
+                None,
+            ),
             "first add reply",
         )
         .await
@@ -1196,14 +1176,19 @@ async fn duplicate_add_reply_rejects_without_starting_body() {
 
     let runs = Arc::new(AtomicUsize::new(0));
     let duplicate_runs = Arc::clone(&runs);
-    let duplicate: TaskRef = TaskFn::arc("duplicate", move |_ctx: TaskContext| {
+    let duplicate: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         duplicate_runs.fetch_add(1, Ordering::SeqCst);
         async { Ok(()) }
     });
     let second_id = TaskId::next();
     let (outcome, outcome_rx) = oneshot::channel();
     let duplicate_reply = receive_reply(
-        send_add(&tx, second_id, TaskSpec::once(duplicate), Some(outcome)),
+        send_add(
+            &tx,
+            second_id,
+            TaskSpec::once("duplicate", duplicate),
+            Some(outcome),
+        ),
         "duplicate add reply",
     )
     .await;
@@ -1234,7 +1219,12 @@ async fn remove_reply_claims_once_before_terminal_completion() {
     let id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(controlled.task), None),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::restartable(controlled.label, controlled.task),
+                None,
+            ),
             "setup add reply",
         )
         .await
@@ -1321,7 +1311,12 @@ async fn concurrent_cancel_commands_share_one_terminal_completion() {
     let id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(controlled.task), None),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::restartable(controlled.label, controlled.task),
+                None,
+            ),
             "shared cancel add reply",
         )
         .await
@@ -1399,7 +1394,12 @@ async fn removing_task_keeps_label_reserved_until_terminal_join() {
     let first_id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, first_id, TaskSpec::restartable(controlled.task), None,),
+            send_add(
+                &tx,
+                first_id,
+                TaskSpec::restartable(controlled.label, controlled.task),
+                None,
+            ),
             "reserved-name add reply",
         )
         .await
@@ -1418,13 +1418,18 @@ async fn removing_task_keeps_label_reserved_until_terminal_join() {
 
     let duplicate_runs = Arc::new(AtomicUsize::new(0));
     let runs_by_task = Arc::clone(&duplicate_runs);
-    let duplicate: TaskRef = TaskFn::arc("reserved-name", move |_ctx: TaskContext| {
+    let duplicate: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         runs_by_task.fetch_add(1, Ordering::SeqCst);
         async { Ok(()) }
     });
     let duplicate_id = TaskId::next();
     let duplicate_reply = receive_reply(
-        send_add(&tx, duplicate_id, TaskSpec::once(duplicate), None),
+        send_add(
+            &tx,
+            duplicate_id,
+            TaskSpec::once("reserved-name", duplicate),
+            None,
+        ),
         "removing duplicate add reply",
     )
     .await;
@@ -1457,7 +1462,7 @@ async fn removing_task_keeps_label_reserved_until_terminal_join() {
     assert_eq!(registry.id_for_label("reserved-name").await, None);
     assert!(!registry.pending_joins.contains(first_id));
 
-    let replacement: TaskRef = TaskFn::arc("reserved-name", |ctx: TaskContext| async move {
+    let replacement: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
@@ -1467,7 +1472,7 @@ async fn removing_task_keeps_label_reserved_until_terminal_join() {
             send_add(
                 &tx,
                 replacement_id,
-                TaskSpec::restartable(replacement),
+                TaskSpec::restartable("reserved-name", replacement),
                 None,
             ),
             "replacement add reply",
@@ -1525,20 +1530,30 @@ async fn dropped_add_reply_does_not_stop_command_processing() {
     let (registry, bus, token, tx) = started_registry(64, Duration::from_secs(1));
     let mut events = bus.subscribe();
     let first_id = TaskId::next();
-    let first: TaskRef = TaskFn::arc("dropped-add-a", |ctx: TaskContext| async move {
+    let first: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
-    drop(send_add(&tx, first_id, TaskSpec::restartable(first), None));
+    drop(send_add(
+        &tx,
+        first_id,
+        TaskSpec::restartable("dropped-add-a", first),
+        None,
+    ));
 
     let second_id = TaskId::next();
-    let second: TaskRef = TaskFn::arc("dropped-add-b", |ctx: TaskContext| async move {
+    let second: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
     assert!(
         receive_reply(
-            send_add(&tx, second_id, TaskSpec::restartable(second), None),
+            send_add(
+                &tx,
+                second_id,
+                TaskSpec::restartable("dropped-add-b", second),
+                None,
+            ),
             "second add reply",
         )
         .await
@@ -1566,7 +1581,12 @@ async fn dropped_remove_reply_does_not_skip_join_cleanup() {
     let id = TaskId::next();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(controlled.task), None),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::restartable(controlled.label, controlled.task),
+                None,
+            ),
             "setup add reply",
         )
         .await
@@ -1797,7 +1817,7 @@ async fn scheduler_join_is_bounded_while_reaper_keeps_attempt_ownership() {
     let reaped_label: Arc<str> = Arc::from("bounded-reaper");
     let reaped_activity = Arc::new(AtomicBool::new(true));
     let physical_release = RemovalCompletion::new();
-    let retained_task = TaskFn::arc("bounded-reaper", |_ctx| async { Ok(()) });
+    let retained_task = TaskFn::arc(|_ctx| async { Ok(()) });
     scheduler.attempt_reaper().abort_and_reap(
         blocked,
         AttemptReservation::new(
@@ -1936,13 +1956,18 @@ async fn natural_completion_cleans_registry_when_event_observer_lags() {
 
     let (registry, bus, token, tx) = started_registry(1, Duration::from_secs(1));
     let mut stale_events = bus.subscribe();
-    let task: TaskRef = TaskFn::arc("completion-no-bus", |_ctx: TaskContext| async { Ok(()) });
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let id = TaskId::next();
     let (outcome, outcome_rx) = oneshot::channel();
 
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::once(task), Some(outcome)),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::once("completion-no-bus", task),
+                Some(outcome),
+            ),
             "fast add reply",
         )
         .await
@@ -1982,13 +2007,18 @@ async fn forged_terminal_event_does_not_remove_running_actor() {
         "the registry listener must not subscribe to the event bus"
     );
     let id = TaskId::next();
-    let task: TaskRef = TaskFn::arc("ignore-terminal-event", |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(task), None),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::restartable("ignore-terminal-event", task),
+                None,
+            ),
             "running add reply",
         )
         .await
@@ -2003,13 +2033,18 @@ async fn forged_terminal_event_does_not_remove_running_actor() {
     );
 
     let barrier_id = TaskId::next();
-    let barrier: TaskRef = TaskFn::arc("event-barrier", |ctx: TaskContext| async move {
+    let barrier: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     });
     assert!(
         receive_reply(
-            send_add(&tx, barrier_id, TaskSpec::restartable(barrier), None,),
+            send_add(
+                &tx,
+                barrier_id,
+                TaskSpec::restartable("event-barrier", barrier),
+                None,
+            ),
             "barrier add reply",
         )
         .await
@@ -2031,8 +2066,7 @@ async fn outer_actor_panic_is_reaped_by_completion_channel() {
     let label: Arc<str> = Arc::from("outer-panic");
     let (done, done_rx) = oneshot::channel();
     let completion = RemovalCompletion::new();
-    let retained_task: crate::TaskRef =
-        crate::TaskFn::arc("outer-panic-retained", |_ctx| async { Ok(()) });
+    let retained_task: crate::TaskRef = crate::TaskFn::arc(|_ctx| async { Ok(()) });
 
     let (scheduled, join, activity) = scheduled_actor_for_test(
         &registry.actors,
@@ -2164,14 +2198,10 @@ async fn raw_handle_drop_after_reaper_close_keeps_retained_result_charged() {
     let handles: Vec<_> = joins
         .into_iter()
         .zip(reservations)
-        .enumerate()
-        .map(|(index, (join, reservation))| {
+        .map(|(join, reservation)| {
             let completion = RemovalCompletion::new();
             completions.push(completion.clone());
-            let retained_task = crate::TaskFn::arc(
-                format!("closed-reaper-retained-task-{index}"),
-                |_ctx| async { Ok(()) },
-            );
+            let retained_task = crate::TaskFn::arc(|_ctx| async { Ok(()) });
             Handle::new(
                 join,
                 CancellationToken::new(),
@@ -2208,7 +2238,7 @@ async fn raw_handle_drop_after_reaper_close_keeps_retained_result_charged() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn canceled_terminal_report_keeps_reaper_result_charged_before_state_lock() {
+async fn canceled_terminal_report_continues_membership_commit_after_state_lock() {
     use super::scheduler::AttemptReservation;
     use crate::core::deferred_drop::TestReservationSource;
     use std::sync::atomic::AtomicBool;
@@ -2246,7 +2276,7 @@ async fn canceled_terminal_report_keeps_reaper_result_charged_before_state_lock(
     registry.pending_joins.inc(id);
 
     let ownership = TestReservationSource::new(1);
-    let retained_task = crate::TaskFn::arc("canceled-terminal-retained", |_ctx| async { Ok(()) });
+    let retained_task = crate::TaskFn::arc(|_ctx| async { Ok(()) });
     let cleanup = ownership
         .try_reserve()
         .expect("the isolated source has one ownership slot")
@@ -2284,11 +2314,35 @@ async fn canceled_terminal_report_keeps_reaper_result_charged_before_state_lock(
         ownership.try_reserve().is_err(),
         "cancellation must not release a bundle while its physical owner is retained"
     );
-    assert!(completion.is_complete());
+    assert!(
+        !completion.is_complete(),
+        "logical completion must wait for membership removal"
+    );
     assert!(!completion.is_physical_complete());
-    assert!(registry.pending_joins.is_empty());
+    assert!(
+        registry.pending_joins.contains(id),
+        "the pending-join barrier must remain charged before membership removal"
+    );
+    assert!(
+        state_guard.tasks.contains_key(&id),
+        "cancellation must leave membership to its detached commit owner"
+    );
+    assert_eq!(
+        state_guard.by_label.get("canceled-terminal-report"),
+        Some(&id)
+    );
     assert_eq!(registry.actors.reaping_attempts(), 1);
     drop(state_guard);
+
+    tokio::time::timeout(Duration::from_secs(1), completion.wait())
+        .await
+        .expect("the detached terminal commit must remove membership");
+    assert!(!registry.contains(id).await);
+    assert_eq!(
+        registry.id_for_label("canceled-terminal-report").await,
+        None
+    );
+    assert!(registry.pending_joins.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2300,7 +2354,12 @@ async fn remove_path_owns_cleanup_when_completion_signal_arrives() {
     let (done, done_rx) = oneshot::channel();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::restartable(controlled.task), Some(done),),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::restartable(controlled.label, controlled.task),
+                Some(done),
+            ),
             "race add reply",
         )
         .await
@@ -2363,7 +2422,7 @@ async fn completion_claim_before_remove_emits_one_terminal_event() {
     let mut events = bus.subscribe();
     let release = Arc::new(Notify::new());
     let task_release = Arc::clone(&release);
-    let task: TaskRef = TaskFn::arc("completion-first", move |_ctx: TaskContext| {
+    let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let release = Arc::clone(&task_release);
         async move {
             release.notified().await;
@@ -2374,7 +2433,12 @@ async fn completion_claim_before_remove_emits_one_terminal_event() {
     let (done, mut done_rx) = oneshot::channel();
     assert!(
         receive_reply(
-            send_add(&tx, id, TaskSpec::once(task), Some(done)),
+            send_add(
+                &tx,
+                id,
+                TaskSpec::once("completion-first", task),
+                Some(done),
+            ),
             "completion-first add reply",
         )
         .await
@@ -2477,7 +2541,7 @@ async fn shutdown_drains_buffered_command_and_never_silently_drops() {
         rx,
     );
 
-    let task: TaskRef = TaskFn::arc("buffered", |ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Err(TaskError::Canceled)
     });
@@ -2487,7 +2551,7 @@ async fn shutdown_drains_buffered_command_and_never_silently_drops() {
     tx.try_send(RegistryCommand::Add {
         id,
         label: Arc::from("buffered"),
-        owned: Box::new(owned_task(TaskSpec::restartable(task))),
+        owned: Box::new(owned_task(TaskSpec::restartable("buffered", task))),
         outcome: Some(done_tx),
         completion: None,
         reply: reply_tx,
@@ -2549,7 +2613,7 @@ async fn completion_flood_cannot_starve_management_ingress() {
         registry.listener.completion_tx.clone(),
         std::future::pending::<ActorExitReason>(),
     );
-    let marker_task = TaskFn::arc("completion-fairness-marker", |_ctx| async { Ok(()) });
+    let marker_task = TaskFn::arc(|_ctx| async { Ok(()) });
     {
         let mut state = registry.state.write().await;
         state.by_label.insert(Arc::clone(&marker_label), marker_id);

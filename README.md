@@ -39,7 +39,7 @@ Once the task is defined, its supervision policy becomes one declaration:
 
 ```rust,ignore
 supervisor
-    .run_with_os_signals(vec![TaskSpec::restartable(worker)])
+    .run_with_os_signals(vec![TaskSpec::restartable("worker", worker)])
     .await?;
 ```
 
@@ -70,7 +70,7 @@ use taskvisor::prelude::*;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let attempts = Arc::new(AtomicU32::new(0));
-    let flaky = TaskFn::arc("flaky", move |_ctx| {
+    let flaky = TaskFn::arc(move |_ctx| {
         let attempts = Arc::clone(&attempts);
         async move {
             let attempt = attempts.fetch_add(1, Ordering::Relaxed) + 1;
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(flaky)
+    let spec = TaskSpec::restartable("flaky", flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(50)));
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
@@ -116,7 +116,10 @@ sync tenant-17/rev-1 arrives  ──► run independently
 ```
 
 ```rust,ignore
-let request = ControllerSpec::replace(TaskSpec::once(sync_tenant_42_rev_2))
+let request = ControllerSpec::replace(TaskSpec::once(
+    "sync-tenant-42-rev-2",
+    sync_tenant_42_rev_2,
+))
     .with_slot("tenant-42");
 
 let (_id, waiter) = handle.submit_and_watch(request).await?;
@@ -160,7 +163,7 @@ These type groups form the main API:
 | Type                                   | Purpose                                                    |
 |----------------------------------------|------------------------------------------------------------|
 | `TaskFn` or `Task`                     | The async work. A new future is created for every attempt. |
-| `TaskSpec`                             | Restart policy, backoff, timeout, and retry limit.         |
+| `TaskSpec`                             | Immutable task name, restart policy, backoff, timeout, and retry limit. |
 | `Supervisor` and `SupervisorHandle`    | Own task lifecycle, shutdown, and dynamic management.      |
 | `TaskWaiter` and `TaskOutcome`         | Deliver the reliable final result of watched work.         |
 | `ControllerSpec` and `AdmissionPolicy` | Resolve queue, replace, or reject conflicts per slot.      |
@@ -192,11 +195,11 @@ There are two runtime modes:
 
 The named constructors cover the common cases:
 
-| Constructor                       | After `Ok(())`               | After a retryable failure |
-|-----------------------------------|------------------------------|---------------------------|
-| `TaskSpec::once(task)`            | Stop                         | Stop                      |
-| `TaskSpec::restartable(task)`     | Stop                         | Retry with backoff        |
-| `TaskSpec::periodic(task, every)` | Wait `every`, then run again | Retry with backoff        |
+| Constructor                             | After `Ok(())`               | After a retryable failure |
+|-----------------------------------------|------------------------------|---------------------------|
+| `TaskSpec::once(name, task)`            | Stop                         | Stop                      |
+| `TaskSpec::restartable(name, task)`     | Stop                         | Retry with backoff        |
+| `TaskSpec::periodic(name, task, every)` | Wait `every`, then run again | Retry with backoff        |
 
 Fatal errors and cancellation always stop the task. A periodic interval begins after a successful attempt finishes; it is not a wall-clock or cron schedule.
 
@@ -216,8 +219,8 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 use taskvisor::{BackoffPolicy, JitterPolicy, TaskRef, TaskSpec};
 
-fn supervised(task: TaskRef) -> TaskSpec {
-    TaskSpec::restartable(task)
+fn supervised(name: &str, task: TaskRef) -> TaskSpec {
+    TaskSpec::restartable(name, task)
         .with_backoff(
             BackoffPolicy::exponential(Duration::from_millis(200))
                 .with_max(Duration::from_secs(30))
@@ -270,7 +273,9 @@ Dynamic management uses `TaskId`:
 let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 let handle = supervisor.serve();
 
-let id = handle.add(TaskSpec::restartable(worker)).await?;
+let id = handle
+    .add(TaskSpec::restartable("worker", worker))
+    .await?;
 let registered = handle.list().await;
 let stopped = handle.cancel(id).await?;
 
@@ -299,7 +304,7 @@ async fn wait_for_task(
     job: TaskRef,
 ) -> Result<(), RuntimeError> {
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once(job))
+        .add_and_watch(TaskSpec::once("job", job))
         .await?;
 
     match waiter.wait().await? {
@@ -341,7 +346,7 @@ async fn submit_to_slot(
     handle: &SupervisorHandle,
     job: TaskRef,
 ) -> Result<TaskOutcome, Box<dyn std::error::Error>> {
-    let request = ControllerSpec::queue(TaskSpec::once(job))
+    let request = ControllerSpec::queue(TaskSpec::once("customer-42-job", job))
         .with_slot("customer-42");
     let (_id, waiter) = handle.submit_and_watch(request).await?;
     Ok(waiter.wait().await?)
@@ -409,7 +414,7 @@ Taskvisor defines an in-process lifecycle. Keep these boundaries explicit:
 - Cancellation depends on the task reaching an await point that observes `TaskContext`. Force-abort cannot stop synchronous code that blocks a runtime thread.
 - Subscriber callbacks may continue on their dedicated threads after the drain deadline. Taskvisor stops waiting and drops queued events, but it cannot interrupt synchronous user code already running.
 - User destructors run synchronously and cannot be interrupted. Taskvisor shares 1024 process-wide ownership slots across accepted tasks and configured subscribers, moves final library-owned destruction to two dedicated threads, and keeps public shutdown bounded. If a destructor panics, ownership admission fails closed with a resource-limit error; a blocking destructor occupies one isolation thread until it returns.
-- Static-run, direct-add, and controller task-name callbacks share two fixed process-wide metadata threads. A blocking `Task::name` retains its charged ownership slot but cannot block Tokio workers, controller identity operations, or shutdown. Controller results re-enter admission in submission order.
+- `TaskSpec` owns the immutable task name. Admission reads that data directly; `Task` implementations provide only executable attempts through `spawn`.
 - A successfully delivered watched outcome belongs to its caller. Dropping `TaskWaiter` after delivery destroys that outcome in the caller's execution context.
 - Periodic tasks use an interval after completion. They do not provide calendar scheduling or missed-run recovery.
 - The controller coordinates tasks inside one supervisor.

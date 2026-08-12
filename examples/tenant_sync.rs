@@ -38,7 +38,7 @@ impl SyncGate {
 
 fn tenant_sync(tenant: &'static str, revision: u64, gate: Arc<SyncGate>) -> TaskSpec {
     let name = format!("sync/{tenant}/rev-{revision}");
-    let task: TaskRef = TaskFn::arc(name, move |ctx| {
+    let task: TaskRef = TaskFn::arc(move |ctx| {
         let gate = Arc::clone(&gate);
         async move {
             println!("  {tenant} revision {revision}: started");
@@ -62,7 +62,7 @@ fn tenant_sync(tenant: &'static str, revision: u64, gate: Arc<SyncGate>) -> Task
             }
         }
     });
-    TaskSpec::once(task)
+    TaskSpec::once(name, task)
 }
 
 #[tokio::main(flavor = "current_thread")]

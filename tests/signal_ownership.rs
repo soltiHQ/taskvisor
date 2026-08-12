@@ -36,13 +36,13 @@ fn child_runs_supervisor_then_sends_sigterm() {
         .build()
         .expect("the child Tokio runtime must build");
     runtime.block_on(async {
-        let task: TaskRef = TaskFn::arc("natural", |_ctx| async {
+        let task: TaskRef = TaskFn::arc(|_ctx| async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok(())
         });
         let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
         supervisor
-            .run(vec![TaskSpec::once(task)])
+            .run(vec![TaskSpec::once("natural", task)])
             .await
             .expect("plain run must finish naturally");
     });

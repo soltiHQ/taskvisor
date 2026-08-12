@@ -27,12 +27,32 @@ struct RingState {
     closed: bool,
 }
 
+impl RingState {
+    /// Retains `event` and transfers any displaced event to the caller.
+    ///
+    /// Returning the displaced value is important: callers can release its
+    /// payload only after they have dropped the ring mutex guard.
+    fn push_retaining_newest(&mut self, event: Event, capacity: usize) -> (Option<Event>, bool) {
+        let was_empty = self.events.is_empty();
+        let displaced = if self.events.len() == capacity {
+            self.dropped = self.dropped.saturating_add(1);
+            self.events.pop_front()
+        } else {
+            None
+        };
+        self.events.push_back(event);
+        (displaced, was_empty)
+    }
+}
+
 struct Shared {
     capacity: usize,
     state: Mutex<RingState>,
     available: Notify,
     enabled: AtomicBool,
     receiver_taken: AtomicBool,
+    #[cfg(test)]
+    receiver_notifications: std::sync::atomic::AtomicU64,
     /// Unit tests observe internal events without changing the production
     /// single-consumer architecture.
     #[cfg(test)]
@@ -161,6 +181,8 @@ impl Bus {
                 enabled: AtomicBool::new(false),
                 receiver_taken: AtomicBool::new(false),
                 #[cfg(test)]
+                receiver_notifications: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
                 observers,
             }),
         }
@@ -184,29 +206,40 @@ impl Bus {
     }
 
     fn publish_enabled(&self, event: Event) {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // `enabled` is only a fast-path hint. A publisher may have observed it
-        // before shutdown closed the ring, so admission is decided again under
-        // the same mutex that linearizes close-and-take.
-        if state.closed {
-            drop(state);
-            return;
-        }
         #[cfg(test)]
         let observed = Arc::new(event.clone());
-        if state.events.len() == self.shared.capacity {
-            state.events.pop_front();
-            state.dropped = state.dropped.saturating_add(1);
-        }
-        state.events.push_back(event);
-        drop(state);
+        let (displaced, became_nonempty) = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // `enabled` is only a fast-path hint. A publisher may have observed
+            // it before shutdown closed the ring, so admission is decided
+            // again under the same mutex that linearizes close-and-take.
+            if state.closed {
+                drop(state);
+                return;
+            }
+            state.push_retaining_newest(event, self.shared.capacity)
+        };
+
+        // Event payloads can own the final strong reference to arbitrary-sized
+        // diagnostic strings. Release displaced ownership without serializing
+        // other publishers or the relay behind its destructor/deallocation.
+        drop(displaced);
         #[cfg(test)]
         let _ = self.shared.observers.send(observed);
-        self.shared.available.notify_one();
+        // There is exactly one production receiver (`take_receiver` enforces
+        // that invariant). It either observes this non-empty ring directly or
+        // consumes the permit/wakeup registered before its empty check.
+        if became_nonempty {
+            #[cfg(test)]
+            self.shared
+                .receiver_notifications
+                .fetch_add(1, Ordering::Relaxed);
+            self.shared.available.notify_one();
+        }
     }
 
     /// Enables event retention when at least one downstream consumer exists.
@@ -249,12 +282,19 @@ impl Bus {
     pub(crate) fn receiver_count(&self) -> usize {
         self.shared.observers.receiver_count()
     }
+
+    #[cfg(test)]
+    fn receiver_notification_count(&self) -> u64 {
+        self.shared.receiver_notifications.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::EventKind;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
     use tokio::sync::broadcast::error::{
         RecvError as ObserverRecvError, TryRecvError as ObserverTryRecvError,
     };
@@ -305,6 +345,101 @@ mod tests {
                     if event.attempt == Some(retained)
             ));
         }
+    }
+
+    #[test]
+    fn displaced_event_ownership_leaves_the_ring_lock_before_drop() {
+        let reason: Arc<str> = Arc::from("displaced-event");
+        let reason_probe = Arc::downgrade(&reason);
+        let state = Mutex::new(RingState {
+            events: VecDeque::from([
+                Event::new(EventKind::RuntimeFailure).with_reason(Arc::clone(&reason))
+            ]),
+            dropped: 0,
+            closed: false,
+        });
+        drop(reason);
+
+        let displaced = {
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            let (displaced, became_nonempty) =
+                state.push_retaining_newest(Event::new(EventKind::ShutdownRequested), 1);
+            assert!(!became_nonempty);
+            assert_eq!(state.dropped, 1);
+            assert!(reason_probe.upgrade().is_some());
+            displaced
+        };
+
+        let ring = state
+            .try_lock()
+            .expect("the displaced event must outlive the ring mutex guard");
+        drop(ring);
+        drop(displaced);
+        assert!(reason_probe.upgrade().is_none());
+    }
+
+    #[test]
+    fn receiver_notification_is_emitted_only_on_empty_to_nonempty_edge() {
+        let bus = Bus::new(4);
+        let mut rx = bus.take_receiver();
+
+        bus.publish(Event::new(EventKind::AttemptStarting).with_attempt(1));
+        assert_eq!(bus.receiver_notification_count(), 1);
+        bus.publish(Event::new(EventKind::AttemptStarting).with_attempt(2));
+        assert_eq!(bus.receiver_notification_count(), 1);
+
+        assert!(matches!(rx.try_recv(), Ok(BusMessage::Event(_))));
+        bus.publish(Event::new(EventKind::AttemptStarting).with_attempt(3));
+        assert_eq!(bus.receiver_notification_count(), 1);
+        assert!(matches!(rx.try_recv(), Ok(BusMessage::Event(_))));
+        assert!(matches!(rx.try_recv(), Ok(BusMessage::Event(_))));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        bus.publish(Event::new(EventKind::AttemptStarting).with_attempt(4));
+        assert_eq!(bus.receiver_notification_count(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_edge_race_does_not_lose_receiver_wakeup() {
+        const ROUNDS: u32 = 2_048;
+
+        let bus = Bus::new(1);
+        let mut rx = bus.take_receiver();
+        let rendezvous = Arc::new(Barrier::new(2));
+        let publisher_bus = bus.clone();
+        let publisher_rendezvous = Arc::clone(&rendezvous);
+        let publisher = tokio::spawn(async move {
+            for attempt in 1..=ROUNDS {
+                publisher_rendezvous.wait().await;
+                if attempt % 3 == 1 {
+                    tokio::task::yield_now().await;
+                }
+                publisher_bus.publish(Event::new(EventKind::AttemptStarting).with_attempt(attempt));
+            }
+        });
+
+        let receive_all = async {
+            for attempt in 1..=ROUNDS {
+                rendezvous.wait().await;
+                if attempt % 3 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(matches!(
+                    rx.recv().await,
+                    BusMessage::Event(event) if event.attempt == Some(attempt)
+                ));
+            }
+        };
+
+        if tokio::time::timeout(Duration::from_secs(10), receive_all)
+            .await
+            .is_err()
+        {
+            publisher.abort();
+            panic!("receiver lost an empty-to-nonempty wakeup");
+        }
+        publisher.await.expect("publisher task must complete");
+        assert_eq!(bus.receiver_notification_count(), u64::from(ROUNDS));
     }
 
     #[tokio::test]

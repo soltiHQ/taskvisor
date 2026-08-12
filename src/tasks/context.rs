@@ -105,7 +105,7 @@ impl TaskContext {
     /// use std::time::Duration;
     /// use taskvisor::{TaskFn, TaskRef};
     ///
-    /// let poller: TaskRef = TaskFn::arc("poller", |ctx| async move {
+    /// let poller: TaskRef = TaskFn::arc(|ctx| async move {
     ///     loop {
     ///         ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
     ///             .await?;

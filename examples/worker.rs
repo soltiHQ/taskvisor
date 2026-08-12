@@ -19,7 +19,7 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let worker: TaskRef = TaskFn::arc("ticker", |ctx| async move {
+    let worker: TaskRef = TaskFn::arc(|ctx| async move {
         let mut tick = 0u64;
         loop {
             match ctx
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(worker);
+    let spec = TaskSpec::restartable("ticker", worker);
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     supervisor.run_with_os_signals(vec![spec]).await?;

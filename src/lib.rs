@@ -90,12 +90,12 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 //!
-//!     let hello: TaskRef = TaskFn::arc("hello", |_ctx| async move {
+//!     let hello: TaskRef = TaskFn::arc(|_ctx| async move {
 //!         println!("hello from taskvisor");
 //!         Ok(())
 //!     });
 //!
-//!     supervisor.run(vec![TaskSpec::once(hello)]).await?;
+//!     supervisor.run(vec![TaskSpec::once("hello", hello)]).await?;
 //!     Ok(())
 //! }
 //! ```

@@ -7,11 +7,7 @@ use std::{
 
 use super::{SupervisorCore, shutdown_workflow::ShutdownTrigger};
 use crate::{
-    core::{
-        deferred_drop,
-        registry::AddBatchItem,
-        task_metadata::{self, TaskNameSnapshot},
-    },
+    core::{deferred_drop, registry::AddBatchItem},
     error::RuntimeError,
     identity::TaskId,
     tasks::TaskSpec,
@@ -164,65 +160,18 @@ impl SupervisorCore {
                 limit: error.limit(),
             })?;
 
-        // Charge every task before handing synchronous user metadata to the
-        // process-wide fixed worker set. A name panic still occurs before the
-        // single-shot lifecycle is consumed, so a corrected batch may retry.
-        let owned_tasks: Vec<_> = tasks
+        // Charge every task before constructing the atomic registry batch.
+        // Names are immutable specification data, so cloning them does not run
+        // user code or allocate another string.
+        let tasks: Vec<_> = tasks
             .into_iter()
             .zip(reservations)
-            .map(|(spec, reservation)| self.own_task(spec, reservation))
+            .map(|(spec, reservation)| {
+                let label = spec.shared_name();
+                let owned = self.own_task(spec, reservation);
+                (label, owned)
+            })
             .collect();
-        let mut metadata = Vec::with_capacity(owned_tasks.len());
-        for owned in owned_tasks {
-            let receiver = match task_metadata::snapshot_task_name(owned, |spec| {
-                Arc::<str>::from(spec.task().name())
-            }) {
-                Ok(receiver) => receiver,
-                Err(owned) => {
-                    drop(owned);
-                    return Err(RuntimeError::ResourceLimitReached {
-                        resource: "task_metadata",
-                        limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
-                    });
-                }
-            };
-            metadata.push(receiver);
-        }
-
-        let mut tasks = Vec::with_capacity(metadata.len());
-        for receiver in metadata {
-            let snapshot = tokio::select! {
-                biased;
-                _ = self.shutdown.started.cancelled() => {
-                    return self.wait_started_shutdown().await;
-                }
-                trigger = shutdown.as_mut() => {
-                    if self.running.compare_exchange(
-                        false,
-                        true,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ).is_err() {
-                        return Err(RuntimeError::AlreadyRunning);
-                    }
-                    self.start();
-                    return self.join_shutdown(trigger).await;
-                }
-                snapshot = receiver => snapshot.map_err(|_| RuntimeError::ResourceLimitReached {
-                    resource: "task_metadata",
-                    limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
-                })?,
-            };
-            match snapshot {
-                TaskNameSnapshot::Ready { owned, task_name } => {
-                    tasks.push((task_name, owned));
-                }
-                TaskNameSnapshot::Panicked { owned, message } => {
-                    drop(owned);
-                    panic!("Task::name panicked: {message}")
-                }
-            }
-        }
 
         if self
             .running

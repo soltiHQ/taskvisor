@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A "flaky" task that fails 3 times then succeeds.
     let counter = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx| {
+    let flaky: TaskRef = TaskFn::arc(move |_ctx| {
         let counter = Arc::clone(&counter);
         async move {
             let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // restartable() uses exponential backoff from 200ms to 30s with equal jitter.
-    let spec = TaskSpec::restartable(flaky);
+    let spec = TaskSpec::restartable("flaky-job", flaky);
 
     let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::clone(&metrics) as _];
     let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);

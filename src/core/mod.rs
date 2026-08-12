@@ -81,7 +81,6 @@ pub(crate) use owner::RuntimeOwner;
 
 pub(crate) mod deferred_drop;
 pub(crate) mod panic_guard;
-pub(crate) mod task_metadata;
 
 mod actor;
 mod runner;

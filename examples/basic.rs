@@ -16,13 +16,13 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let task: TaskRef = TaskFn::arc("hello", |_ctx| async move {
+    let task: TaskRef = TaskFn::arc(|_ctx| async move {
         println!("Hello from taskvisor!");
         Ok(())
     });
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    supervisor.run(vec![TaskSpec::once(task)]).await?;
+    supervisor.run(vec![TaskSpec::once("hello", task)]).await?;
 
     Ok(())
 }

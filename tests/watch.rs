@@ -16,7 +16,7 @@ fn served() -> SupervisorHandle {
 async fn outcome_reason_is_byte_identical_to_the_event_reason() {
     let (handle, collector) = served_with_collector(SupervisorConfig::default());
 
-    let spec = TaskSpec::restartable(make_fail("drifter", Some(9)))
+    let spec = TaskSpec::restartable("drifter", make_fail(Some(9)))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(2).unwrap());
     let (id, waiter) = handle
@@ -68,7 +68,7 @@ async fn watched_add_variants_return_the_same_completed_contract() {
     let handle = served();
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once(make_ok_once("ok")))
+        .add_and_watch(TaskSpec::once("ok", make_ok_once()))
         .await
         .expect("add_and_watch should succeed");
     assert_eq!(waiter.id(), id);
@@ -80,7 +80,7 @@ async fn watched_add_variants_return_the_same_completed_contract() {
     assert!(outcome.is_success());
 
     let (id, waiter) = handle
-        .try_add_and_watch(TaskSpec::once(make_ok_once("try-ok")))
+        .try_add_and_watch(TaskSpec::once("try-ok", make_ok_once()))
         .await
         .expect("the management queue has capacity");
     assert_eq!(waiter.id(), id);
@@ -97,7 +97,7 @@ async fn fatal_outcome_for_fatal_error() {
     let handle = served();
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_fatal("doomed", Some(137))))
+        .add_and_watch(TaskSpec::restartable("doomed", make_fatal(Some(137))))
         .await
         .expect("add_and_watch should succeed");
 
@@ -125,7 +125,7 @@ async fn failed_outcome_after_task_panic_with_never_policy() {
     let handle = served();
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(make_panic("kaboom")))
+        .add_and_watch(TaskSpec::once("kaboom", make_panic()))
         .await
         .expect("add_and_watch should succeed");
 
@@ -149,11 +149,9 @@ async fn failed_outcome_after_task_panic_with_never_policy() {
 async fn spurious_canceled_return_resolves_canceled_outcome() {
     let handle = served();
 
-    let liar: TaskRef = TaskFn::arc("liar-watch", |_ctx: TaskContext| async {
-        Err(TaskError::Canceled)
-    });
+    let liar: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Err(TaskError::Canceled) });
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(liar))
+        .add_and_watch(TaskSpec::restartable("liar-watch", liar))
         .await
         .expect("add_and_watch should succeed");
 
@@ -174,9 +172,9 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let (stubborn, started) = make_stubborn("stubborn-watch");
+    let (stubborn, started) = make_stubborn();
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(stubborn))
+        .add_and_watch(TaskSpec::once("stubborn-watch", stubborn))
         .await
         .expect("add_and_watch should succeed");
     wait_for_start("stubborn-watch", &started).await;
@@ -196,10 +194,11 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
 async fn waiter_stays_pending_across_periodic_reruns() {
     let handle = served();
 
-    let spec =
-        TaskSpec::restartable(make_ok_once("periodic-watch")).with_restart(RestartPolicy::Always {
+    let spec = TaskSpec::restartable("periodic-watch", make_ok_once()).with_restart(
+        RestartPolicy::Always {
             interval: Some(Duration::from_millis(20)),
-        });
+        },
+    );
     let (id, waiter) = handle
         .add_and_watch(spec)
         .await
@@ -220,7 +219,7 @@ async fn cancelled_outcome_when_task_is_cancelled() {
     let handle = served();
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("coop")))
+        .add_and_watch(TaskSpec::restartable("coop", make_coop()))
         .await
         .expect("add_and_watch should succeed");
 
@@ -241,9 +240,9 @@ async fn force_aborted_outcome_for_noncooperative_task() {
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let (stubborn, started) = make_stubborn("stubborn");
+    let (stubborn, started) = make_stubborn();
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once(stubborn))
+        .add_and_watch(TaskSpec::once("stubborn", stubborn))
         .await
         .expect("add_and_watch should succeed");
     wait_for_start("stubborn", &started).await;
@@ -266,12 +265,12 @@ async fn duplicate_name_returns_already_exists_not_a_waiter() {
     let handle = served();
 
     let first = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("dup")))
+        .add_and_watch(TaskSpec::restartable("dup", make_coop()))
         .await;
     assert!(first.is_ok(), "first add must succeed");
 
     let second = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("dup")))
+        .add_and_watch(TaskSpec::restartable("dup", make_coop()))
         .await;
     assert!(
         matches!(second, Err(RuntimeError::TaskAlreadyExists { .. })),
@@ -286,7 +285,7 @@ async fn shutdown_resolves_pending_waiters() {
     let handle = served();
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("worker")))
+        .add_and_watch(TaskSpec::restartable("worker", make_coop()))
         .await
         .expect("add_and_watch should succeed");
 
@@ -310,7 +309,7 @@ async fn dropping_waiter_does_not_affect_task() {
     let handle = served();
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(make_coop("ignored")))
+        .add_and_watch(TaskSpec::restartable("ignored", make_coop()))
         .await
         .expect("add_and_watch should succeed");
     drop(waiter);
@@ -336,7 +335,7 @@ async fn outcome_is_delivered_even_under_bus_lag() {
     let sup = Supervisor::new(cfg, vec![]);
     let handle = sup.serve();
 
-    let spec = TaskSpec::restartable(make_fail("noisy", None))
+    let spec = TaskSpec::restartable("noisy", make_fail(None))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(5).unwrap());
     let (_id, waiter) = handle
@@ -359,7 +358,7 @@ async fn outcome_is_delivered_even_under_bus_lag() {
 async fn task_error_source_survives_end_to_end_to_the_outcome() {
     let handle = served();
 
-    let task: TaskRef = TaskFn::arc("io-fail", |_ctx: TaskContext| async {
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async {
         Err(TaskError::fail_from(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "denied",
@@ -367,7 +366,7 @@ async fn task_error_source_survives_end_to_end_to_the_outcome() {
     });
 
     let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once(task))
+        .add_and_watch(TaskSpec::once("io-fail", task))
         .await
         .expect("add_and_watch should succeed");
 

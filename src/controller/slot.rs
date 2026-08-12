@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use crate::{TaskSpec, core::deferred_drop::OwnedTask, identity::TaskId};
 
-/// Controller work whose user-provided task name was resolved before queue ownership.
+/// Controller work carrying the immutable task name used for registry handoff.
 pub(super) struct PendingSubmission {
     pub(super) id: TaskId,
     pub(super) task_name: Arc<str>,
@@ -344,9 +344,9 @@ mod tests {
 
     fn make_spec(name: &str) -> TaskSpec {
         use crate::TaskContext;
-        use crate::{BackoffPolicy, RestartPolicy, TaskFn, TaskRef};
+        use crate::{TaskFn, TaskRef};
 
-        let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-        TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+        let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+        TaskSpec::once(name, task)
     }
 }

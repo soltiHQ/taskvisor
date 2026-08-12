@@ -168,7 +168,16 @@ pub(super) struct PendingJoins {
 }
 
 impl PendingJoins {
+    /// Marks one reporter in flight and installs its diagnostic label in the
+    /// same critical section.
+    pub(super) fn inc_with_label(&self, id: TaskId, label: Arc<str>) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *g.counts.entry(id).or_insert(0) += 1;
+        g.labels.insert(id, label);
+    }
+
     /// Marks one join reporter for `id` as in flight.
+    #[cfg(test)]
     pub(super) fn inc(&self, id: TaskId) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         *g.counts.entry(id).or_insert(0) += 1;
@@ -177,6 +186,7 @@ impl PendingJoins {
     /// Stores the label for an in-flight join.
     ///
     /// No-op if `id` is not currently tracked.
+    #[cfg(test)]
     pub(super) fn label(&self, id: TaskId, label: Arc<str>) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.counts.contains_key(&id) {

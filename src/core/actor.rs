@@ -507,11 +507,15 @@ mod tests {
         }
     }
 
-    fn actor(task: Arc<dyn Task>, restart: RestartPolicy, max_retries: u32) -> TaskActor {
-        let name: Arc<str> = Arc::from(task.name());
+    fn actor(
+        name: &'static str,
+        task: Arc<dyn Task>,
+        restart: RestartPolicy,
+        max_retries: u32,
+    ) -> TaskActor {
         TaskActor::new(
             Bus::new(16),
-            name,
+            Arc::from(name),
             Arc::clone(&task),
             params(restart, max_retries),
             TaskActorResources {
@@ -525,9 +529,6 @@ mod tests {
 
     struct OkTask;
     impl Task for OkTask {
-        fn name(&self) -> &str {
-            "ok"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Ok(()) })
         }
@@ -535,9 +536,6 @@ mod tests {
 
     struct FailTask;
     impl Task for FailTask {
-        fn name(&self) -> &str {
-            "fail"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Err(TaskError::fail("boom")) })
         }
@@ -545,9 +543,6 @@ mod tests {
 
     struct FatalTask;
     impl Task for FatalTask {
-        fn name(&self) -> &str {
-            "fatal"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Err(TaskError::fatal("fatal")) })
         }
@@ -602,10 +597,6 @@ mod tests {
     }
 
     impl Task for NestedPayloadTask {
-        fn name(&self) -> &str {
-            "nested-payload"
-        }
-
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             self.attempts.fetch_add(1, Ordering::AcqRel);
             Box::pin(NestedPayloadFuture)
@@ -613,10 +604,6 @@ mod tests {
     }
 
     impl Task for TimeoutCleanupPanicTask {
-        fn name(&self) -> &str {
-            "timeout-cleanup-panic"
-        }
-
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             self.attempts.fetch_add(1, Ordering::AcqRel);
             Box::pin(PanickingDropFuture)
@@ -634,9 +621,6 @@ mod tests {
         }
     }
     impl Task for CountedTask {
-        fn name(&self) -> &str {
-            "counted"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             let prev = self.remaining.fetch_sub(1, Ordering::SeqCst);
             if prev > 0 {
@@ -650,7 +634,7 @@ mod tests {
     #[tokio::test]
     async fn ok_task_returns_completed_under_non_restarting_policies() {
         for restart in [RestartPolicy::Never, RestartPolicy::OnFailure] {
-            let a = actor(Arc::new(OkTask), restart, 0);
+            let a = actor("ok", Arc::new(OkTask), restart, 0);
             let reason = a.run(CancellationToken::new()).await;
             assert!(
                 matches!(reason, ActorExitReason::Completed),
@@ -661,7 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_error_returns_fatal_with_reason() {
-        let a = actor(Arc::new(FatalTask), RestartPolicy::OnFailure, 0);
+        let a = actor("fatal", Arc::new(FatalTask), RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
         match reason {
             ActorExitReason::Fatal {
@@ -679,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_retries_exhausted_returns_exhausted_with_reason() {
-        let a = actor(Arc::new(FailTask), RestartPolicy::OnFailure, 3);
+        let a = actor("fail", Arc::new(FailTask), RestartPolicy::OnFailure, 3);
         let reason = a.run(CancellationToken::new()).await;
         match reason {
             ActorExitReason::Exhausted { reason, .. } => {
@@ -694,6 +678,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let a = actor(
+            "ok",
             Arc::new(OkTask),
             RestartPolicy::Always { interval: None },
             0,
@@ -709,7 +694,7 @@ mod tests {
         });
         let actor = TaskActor::new(
             Bus::new(16),
-            Arc::from(task.name()),
+            Arc::from("timeout-cleanup-panic"),
             Arc::clone(&task) as Arc<dyn Task>,
             TaskActorParams {
                 restart: RestartPolicy::OnFailure,
@@ -746,7 +731,7 @@ mod tests {
         });
         let actor = TaskActor::new(
             Bus::new(16),
-            Arc::from(task.name()),
+            Arc::from("nested-payload"),
             Arc::clone(&task) as Arc<dyn Task>,
             TaskActorParams {
                 restart: RestartPolicy::OnFailure,
@@ -775,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn on_failure_retries_then_succeeds() {
         let task = Arc::new(CountedTask::new(2));
-        let a = actor(task, RestartPolicy::OnFailure, 0);
+        let a = actor("counted", task, RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
         assert!(matches!(reason, ActorExitReason::Completed));
     }
@@ -786,9 +771,6 @@ mod tests {
 
         struct Counting(Arc<AtomicU32>);
         impl Task for Counting {
-            fn name(&self) -> &str {
-                "spin"
-            }
             fn spawn(&self, _ctx: TaskContext) -> BoxFut {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Box::pin(async { Ok(()) })
@@ -797,7 +779,7 @@ mod tests {
 
         let counter = Arc::new(AtomicU32::new(0));
         let task = Arc::new(Counting(Arc::clone(&counter)));
-        let a = actor(task, RestartPolicy::Always { interval: None }, 0);
+        let a = actor("spin", task, RestartPolicy::Always { interval: None }, 0);
 
         let token = CancellationToken::new();
         let child = token.clone();

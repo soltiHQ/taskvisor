@@ -16,16 +16,14 @@ use crate::{
     reasons,
 };
 
-use super::{
-    AdmissionResult, CompletionResult, Controller, ControllerWorkers, Submission,
-    metadata::{MetadataResult, TaskNameSnapshot, snapshot_task_name},
-};
+use super::{AdmissionResult, CompletionResult, Controller, ControllerWorkers, Submission};
 
 /// Keeps one watched admission owned across controller-side pre-commit work.
 ///
 /// Before parking, the sender is local. After parking, it lives in `Controller::watchers`.
 /// A normal queue/registry commit disarms the guard.
-/// Unwinding user metadata preparation therefore resolves the waiter as an admission failure instead of leaving it parked.
+/// Unwinding controller-side preparation therefore resolves the waiter as an
+/// admission failure instead of leaving it parked.
 struct AdmissionWatcher<'a> {
     controller: &'a Controller,
     id: TaskId,
@@ -39,10 +37,6 @@ type StartFailure = Box<crate::core::UncommittedWatchedAdd>;
 
 enum AdmissionWatcherState {
     Local(Option<OutcomeTx>),
-    /// The aggregate pending budget, metadata sequence, and optional watcher
-    /// are reserved, but the task has not yet committed to the metadata
-    /// executor. A dispatch failure rolls this state back to `Local`.
-    MetadataParked,
     Parked,
     Committed,
 }
@@ -64,11 +58,6 @@ impl<'a> AdmissionWatcher<'a> {
         }
     }
 
-    /// Sets the slot label used by a possible rejection event.
-    fn set_event_task(&mut self, task: Arc<str>) {
-        self.event_task = Some(task);
-    }
-
     fn take_pending(&mut self, id: TaskId, task_name: Arc<str>) -> PendingSubmission {
         let owned = self
             .owned
@@ -76,87 +65,6 @@ impl<'a> AdmissionWatcher<'a> {
             .expect("controller ownership is transferred once")
             .map(crate::ControllerSpec::into_task_spec);
         PendingSubmission::new(id, task_name, owned)
-    }
-
-    fn take_owned_for_metadata(&mut self) -> OwnedTask<crate::ControllerSpec> {
-        self.owned
-            .take()
-            .expect("controller ownership is transferred to metadata isolation once")
-    }
-
-    fn restore_owned_after_metadata(&mut self, owned: OwnedTask<crate::ControllerSpec>) {
-        debug_assert!(self.owned.is_none());
-        self.owned = Some(owned);
-    }
-
-    /// Atomically reserves the aggregate pending budget, metadata sequence,
-    /// watcher, and cancellation record before user metadata can be dispatched.
-    fn park_metadata(
-        &mut self,
-        event_task: Option<Arc<str>>,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<(), usize> {
-        let AdmissionWatcherState::Local(done) = &mut self.state else {
-            unreachable!("metadata preparation starts only from local admission ownership")
-        };
-        let mut state = self.controller.state();
-        if let Some(limit) = self.controller.config.max_total_pending()
-            && state.pending_len() >= limit.get()
-        {
-            return Err(limit.get());
-        }
-        let sequence = state.next_metadata_sequence;
-        let next_sequence = sequence
-            .checked_add(1)
-            .expect("controller metadata sequence exhausted");
-        debug_assert!(!state.metadata_pending.contains_key(&self.id));
-        debug_assert!(
-            done.is_none() || !state.watchers.contains_key(&self.id),
-            "one watched identity cannot reserve metadata twice"
-        );
-
-        state.next_metadata_sequence = next_sequence;
-        let previous = state.metadata_order.insert(sequence, self.id);
-        debug_assert!(previous.is_none(), "metadata sequences are unique");
-        state.metadata_pending.insert(
-            self.id,
-            super::MetadataPending {
-                sequence,
-                event_task,
-                cancel,
-            },
-        );
-        if let Some(done) = done.take() {
-            state.watchers.insert(self.id, done);
-        }
-        self.state = AdmissionWatcherState::MetadataParked;
-        Ok(())
-    }
-
-    /// Makes metadata-executor ownership authoritative after dispatch succeeds.
-    fn commit_metadata(&mut self) {
-        debug_assert!(matches!(self.state, AdmissionWatcherState::MetadataParked));
-        self.state = AdmissionWatcherState::Committed;
-    }
-
-    /// Rolls back a pre-dispatch metadata reservation without running user
-    /// destructors under the controller-state lock.
-    fn rollback_metadata(&mut self) {
-        if !matches!(self.state, AdmissionWatcherState::MetadataParked) {
-            return;
-        }
-        let Some((pending, done, discarded)) =
-            self.controller.rollback_metadata_reservation(self.id)
-        else {
-            // The record and watcher are one atomic reservation. If that
-            // invariant is ever broken, fail closed instead of sending a
-            // duplicate terminal result.
-            self.state = AdmissionWatcherState::Committed;
-            return;
-        };
-        self.state = AdmissionWatcherState::Local(done);
-        pending.cancel.cancel();
-        drop(discarded);
     }
 
     fn dispose_owned(&mut self, terminal: Option<TaskOutcome>) {
@@ -171,7 +79,7 @@ impl<'a> AdmissionWatcher<'a> {
         cleanup.submit();
     }
 
-    /// Moves a watched sender into the controller map after user metadata is prepared.
+    /// Moves a watched sender into the controller map before durable admission ownership.
     fn park(&mut self) {
         let state = std::mem::replace(&mut self.state, AdmissionWatcherState::Committed);
         match state {
@@ -183,9 +91,6 @@ impl<'a> AdmissionWatcher<'a> {
                 self.state = AdmissionWatcherState::Parked;
             }
             AdmissionWatcherState::Committed => {}
-            AdmissionWatcherState::MetadataParked => {
-                unreachable!("metadata ownership must commit or roll back before slot parking")
-            }
             AdmissionWatcherState::Parked => {
                 self.state = AdmissionWatcherState::Parked;
             }
@@ -195,10 +100,7 @@ impl<'a> AdmissionWatcher<'a> {
     /// Marks queue or registry ownership as authoritative.
     fn commit(&mut self) {
         debug_assert!(
-            !matches!(
-                self.state,
-                AdmissionWatcherState::Local(Some(_)) | AdmissionWatcherState::MetadataParked
-            ),
+            !matches!(self.state, AdmissionWatcherState::Local(Some(_))),
             "a watched admission must be parked before commit"
         );
         self.state = AdmissionWatcherState::Committed;
@@ -206,7 +108,6 @@ impl<'a> AdmissionWatcher<'a> {
 
     /// Resolves a normal controller rejection and disarms unwind fallback.
     fn reject(&mut self, kind: RejectionKind, reason: &str) -> Option<TaskOutcome> {
-        self.rollback_metadata();
         let state = std::mem::replace(&mut self.state, AdmissionWatcherState::Committed);
         let undelivered = match state {
             AdmissionWatcherState::Local(Some(tx)) => tx
@@ -217,9 +118,6 @@ impl<'a> AdmissionWatcher<'a> {
                 .err(),
             AdmissionWatcherState::Parked => {
                 self.controller.finalize_rejected(self.id, kind, reason)
-            }
-            AdmissionWatcherState::MetadataParked => {
-                unreachable!("metadata rejection rolls its reservation back first")
             }
             AdmissionWatcherState::Local(None) | AdmissionWatcherState::Committed => None,
         };
@@ -265,108 +163,6 @@ impl Drop for AdmissionWatcher<'_> {
 }
 
 impl Controller {
-    /// Removes a metadata reservation that never committed to the executor.
-    ///
-    /// The retired sequence is removed from the bounded live-order index.
-    /// Values are returned for cancellation and disposal only after the
-    /// controller-state lock has been released.
-    pub(super) fn rollback_metadata_reservation(
-        &self,
-        id: TaskId,
-    ) -> Option<(
-        super::MetadataPending,
-        Option<OutcomeTx>,
-        Option<MetadataResult>,
-    )> {
-        let mut state = self.state();
-        let pending = state.metadata_pending.remove(&id)?;
-        let done = state.watchers.remove(&id);
-        let discarded = state.metadata_ready.remove(&pending.sequence);
-        let ordered = state.metadata_order.remove(&pending.sequence);
-        debug_assert_eq!(ordered, Some(id));
-        Some((pending, done, discarded))
-    }
-
-    /// Removes the metadata-stage state whose ordered result is now eligible.
-    fn take_metadata_for_apply(
-        &self,
-        id: TaskId,
-    ) -> Option<(super::MetadataPending, Option<OutcomeTx>)> {
-        let mut state = self.state();
-        let pending = state.metadata_pending.remove(&id)?;
-        let done = state.watchers.remove(&id);
-        Some((pending, done))
-    }
-
-    /// Buffers one out-of-order result and returns the contiguous submission
-    /// prefix that may now apply slot policy.
-    fn order_metadata_result(
-        &self,
-        result: MetadataResult,
-    ) -> (Option<MetadataResult>, Vec<MetadataResult>) {
-        use std::collections::btree_map::Entry;
-
-        let mut state = self.state();
-        let Some(sequence) = state
-            .metadata_pending
-            .get(&result.id)
-            .map(|pending| pending.sequence)
-        else {
-            return (Some(result), Vec::new());
-        };
-        let duplicate = match state.metadata_ready.entry(sequence) {
-            Entry::Vacant(entry) => {
-                entry.insert(result);
-                None
-            }
-            Entry::Occupied(_) => Some(result),
-        };
-        let ready = Self::drain_ordered_metadata(&mut state);
-        (duplicate, ready)
-    }
-
-    /// Cancels one metadata-stage identity and releases later ready results if
-    /// this identity was the ordering head.
-    pub(super) fn cancel_metadata_pending(
-        &self,
-        id: TaskId,
-    ) -> Option<super::MetadataCancellation> {
-        let mut state = self.state();
-        let pending = state.metadata_pending.remove(&id)?;
-        let done = state.watchers.remove(&id);
-        let discarded = state.metadata_ready.remove(&pending.sequence);
-        let ordered = state.metadata_order.remove(&pending.sequence);
-        debug_assert_eq!(ordered, Some(id));
-        let unblocked = Self::drain_ordered_metadata(&mut state);
-        Some(super::MetadataCancellation {
-            pending,
-            done,
-            discarded,
-            unblocked,
-        })
-    }
-
-    fn drain_ordered_metadata(state: &mut super::ControllerState) -> Vec<MetadataResult> {
-        let mut ready = Vec::new();
-        loop {
-            let Some((sequence, expected_id)) = state
-                .metadata_order
-                .first_key_value()
-                .map(|(sequence, id)| (*sequence, *id))
-            else {
-                break;
-            };
-            let Some(result) = state.metadata_ready.remove(&sequence) else {
-                break;
-            };
-            let ordered = state.metadata_order.remove(&sequence);
-            debug_assert_eq!(ordered, Some(expected_id));
-            debug_assert_eq!(result.id, expected_id);
-            ready.push(result);
-        }
-        ready
-    }
-
     /// Atomically claims one controller-owned registry-capacity payload and watcher.
     pub(super) fn claim_capacity_pending(
         &self,
@@ -404,7 +200,7 @@ impl Controller {
         self.drop_pending_submission(waiting.pending, terminal);
     }
 
-    /// Returns an immediate busy-slot rejection that needs no task metadata.
+    /// Returns an immediate busy-slot rejection before pending ownership is created.
     fn busy_rejection(
         &self,
         slot: &SlotState,
@@ -428,9 +224,8 @@ impl Controller {
     /// Applies admission policy for one submission.
     ///
     /// Watched submissions are parked in `watchers` until they are either rejected by the controller or handed to the runtime registry.
-    /// User-provided task metadata is snapshotted on a fixed worker set. The
-    /// watcher is parked with a cancellation record while that callback is in
-    /// flight, so a panic, identity removal, or shutdown cannot strand it.
+    /// The immutable task name and effective slot are available before any
+    /// controller-owned pending state is created.
     ///
     /// Policy behavior:
     /// - idle slot: enter `Admitting`; commit the registry Add immediately or wait asynchronously for transient registry capacity,
@@ -441,22 +236,21 @@ impl Controller {
     /// A slot becomes `Running` only after the direct registry Add reply succeeds.
     pub(super) async fn handle_submission(&self, sub: Submission, workers: &mut ControllerWorkers) {
         let Submission { id, owned, done } = sub;
+        let task_name = owned.value.task_spec().shared_name();
         let admission = owned.value.admission();
-        let explicit_slot = owned.value.slot_override().map(Arc::<str>::from);
-        let mut watcher = AdmissionWatcher::new(
-            self,
-            id,
-            owned,
-            done,
-            explicit_slot.as_ref().map(Arc::clone),
-        );
-        if self.supervisor.upgrade().is_none() {
+        let explicit_slot = owned.value.shared_slot_override();
+        let slot_name = explicit_slot
+            .as_ref()
+            .map_or_else(|| Arc::clone(&task_name), Arc::clone);
+        let mut watcher =
+            AdmissionWatcher::new(self, id, owned, done, Some(Arc::clone(&slot_name)));
+        let Some(sup) = self.supervisor.upgrade() else {
             let _ = watcher.reject_with_event(
                 RejectionKind::AdmissionFailed,
                 reasons::CONTROLLER_ADMISSION_INTERRUPTED,
             );
             return;
-        }
+        };
 
         if self.is_shutting_down() {
             let _ = watcher.reject_with_event(
@@ -466,10 +260,10 @@ impl Controller {
             return;
         }
 
-        // An explicit slot is sufficient for policy-only rejection.
-        // Avoid calling user-provided `Task::name` when the task cannot be admitted anyway.
-        if let Some(slot_name) = &explicit_slot
-            && let Some(slot_arc) = self.slot(slot_name)
+        // Preserve the explicit-slot policy preflight: terminal busy decisions
+        // do not need a watcher entry or a pending submission.
+        if let Some(explicit_slot) = &explicit_slot
+            && let Some(slot_arc) = self.slot(explicit_slot)
         {
             let slot = slot_arc.lock().await;
             if self.is_shutting_down() {
@@ -488,142 +282,7 @@ impl Controller {
             }
         }
 
-        let cancel = tokio_util::sync::CancellationToken::new();
-        if let Err(limit) =
-            watcher.park_metadata(explicit_slot.as_ref().map(Arc::clone), cancel.clone())
-        {
-            cancel.cancel();
-            let reason = format!("{}: {limit}", reasons::CONTROLLER_PENDING_LIMIT);
-            let _ = watcher.reject_with_event(RejectionKind::ResourceLimit, &reason);
-            return;
-        }
-        let metadata = match snapshot_task_name(watcher.take_owned_for_metadata()) {
-            Ok(metadata) => metadata,
-            Err(owned) => {
-                watcher.restore_owned_after_metadata(*owned);
-                let reason = format!(
-                    "{}: {}",
-                    reasons::CONTROLLER_ADMISSION_INTERRUPTED,
-                    "task metadata workers are unavailable"
-                );
-                let _ = watcher.reject_with_event(RejectionKind::ResourceLimit, &reason);
-                return;
-            }
-        };
-        ControllerWorkers::track_metadata(&workers.metadata, id, cancel, metadata);
-        watcher.commit_metadata();
-    }
-
-    /// Resumes admission after the fixed metadata worker returns.
-    pub(super) async fn handle_metadata_result(
-        &self,
-        result: MetadataResult,
-        workers: &mut ControllerWorkers,
-    ) {
-        let (discarded, ready) = self.order_metadata_result(result);
-        drop(discarded);
-        self.apply_metadata_results(ready, workers).await;
-    }
-
-    /// Applies an already ordered contiguous metadata-result prefix.
-    pub(super) async fn apply_metadata_results(
-        &self,
-        ready: Vec<MetadataResult>,
-        workers: &mut ControllerWorkers,
-    ) {
-        for result in ready {
-            self.apply_metadata_result(result, workers).await;
-        }
-    }
-
-    async fn apply_metadata_result(&self, result: MetadataResult, workers: &mut ControllerWorkers) {
-        let Some((pending_metadata, done)) = self.take_metadata_for_apply(result.id) else {
-            drop(result.snapshot);
-            return;
-        };
-        match result.snapshot {
-            Some(TaskNameSnapshot::Ready { owned, task_name }) => {
-                self.handle_named_submission(result.id, owned, done, task_name, workers)
-                    .await;
-            }
-            Some(TaskNameSnapshot::Panicked { owned, message }) => {
-                let mut watcher = AdmissionWatcher::new(
-                    self,
-                    result.id,
-                    owned,
-                    done,
-                    pending_metadata.event_task,
-                );
-                self.bus.publish_lazy(|| {
-                    Event::runtime_failure(
-                        "controller",
-                        format!("task_name_snapshot_panicked: {message}"),
-                    )
-                });
-                let _ = watcher.reject_with_event(
-                    RejectionKind::AdmissionFailed,
-                    reasons::CONTROLLER_ADMISSION_INTERRUPTED,
-                );
-            }
-            None => {
-                self.bus.publish_lazy(|| {
-                    let mut event = Event::new(EventKind::ControllerRejected)
-                        .with_id(result.id)
-                        .with_rejection_kind(RejectionKind::AdmissionFailed)
-                        .with_reason(reasons::CONTROLLER_ADMISSION_INTERRUPTED);
-                    if let Some(task) = pending_metadata.event_task {
-                        event = event.with_task(task);
-                    }
-                    event
-                });
-                let terminal = Self::send_rejected(
-                    done,
-                    RejectionKind::AdmissionFailed,
-                    reasons::CONTROLLER_ADMISSION_INTERRUPTED,
-                );
-                drop(terminal);
-            }
-        }
-    }
-
-    /// Applies slot policy after task metadata has been isolated and cached.
-    async fn handle_named_submission(
-        &self,
-        id: TaskId,
-        owned: OwnedTask<crate::ControllerSpec>,
-        done: Option<OutcomeTx>,
-        task_name: Arc<str>,
-        workers: &mut ControllerWorkers,
-    ) {
-        let admission = owned.value.admission();
-        let explicit_slot = owned.value.slot_override().map(Arc::<str>::from);
-        let mut watcher = AdmissionWatcher::new(
-            self,
-            id,
-            owned,
-            done,
-            explicit_slot.as_ref().map(Arc::clone),
-        );
-        let Some(sup) = self.supervisor.upgrade() else {
-            let _ = watcher.reject_with_event(
-                RejectionKind::AdmissionFailed,
-                reasons::CONTROLLER_ADMISSION_INTERRUPTED,
-            );
-            return;
-        };
-        let slot_name = explicit_slot.unwrap_or_else(|| Arc::clone(&task_name));
-        watcher.set_event_task(Arc::clone(&slot_name));
         let pending = watcher.take_pending(id, task_name);
-
-        if self.is_shutting_down() {
-            let terminal = watcher.reject_with_event(
-                RejectionKind::ControllerShuttingDown,
-                reasons::CONTROLLER_SHUTTING_DOWN,
-            );
-            self.drop_pending_submission(pending, terminal);
-            return;
-        }
-
         watcher.park();
 
         let mut displaced_to_drop = None;

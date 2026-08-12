@@ -116,29 +116,6 @@ impl Controller {
                     break;
                 },
 
-                result = workers.metadata.next(), if !workers.metadata.is_empty() => {
-                    internal_result_burst = internal_result_burst.saturating_add(1);
-                    match result {
-                        Some(Ok(result)) => {
-                            let _ = self
-                                .guarded(
-                                    "handle_metadata_result",
-                                    self.handle_metadata_result(result, &mut workers),
-                                )
-                                .await;
-                        }
-                        Some(Err(error)) => {
-                            self.bus.publish_lazy(|| {
-                                Event::runtime_failure(
-                                    "controller",
-                                    format!("metadata_waiter_failed: {error}"),
-                                )
-                            });
-                        }
-                        None => {}
-                    }
-                }
-
                 result = workers.capacity.next(), if !workers.capacity.is_empty() => {
                     internal_result_burst = internal_result_burst.saturating_add(1);
                     if let Some(result) = result {
