@@ -1,66 +1,59 @@
-//! # Event data model
+//! Defines the event values delivered to subscribers.
 //!
-//! [`Event`] is a flat record.
-//! [`EventKind`] tells you what happened, and the optional fields give details.
-//! Delivery is best-effort; events are not durable storage and are not a reliable completion signal.
+//! Runtime components create an [`Event`] to describe a lifecycle action.
+//! Ordinary events enter the bounded bus and may reach subscriber callbacks.
+//! Internal overflow and relay-failure diagnostics can enter subscriber lanes
+//! directly. No event feeds back into task management or registry cleanup.
+//! Applications normally read events through [`Subscribe`](crate::Subscribe),
+//! not construct them.
 //!
-//! | Type              | Role                                       |
-//! |-------------------|--------------------------------------------|
-//! | [`EventKind`]     | Event classification                       |
-//! | [`Event`]         | Event payload and metadata                 |
-//! | [`BackoffSource`] | Why a `BackoffScheduled` event was emitted |
-//! | [`RejectionKind`] | Machine-readable submission rejection      |
-//! | [`TaskOutcomeKind`]| Machine-readable final task outcome        |
+//! ```text
+//! runtime action
+//!      │ Event::new + metadata builders
+//!      ▼
+//! Event
+//!      │ best-effort delivery
+//!      ▼
+//!      ├── ordinary event ──► event bus ──► subscribers
+//!      └── internal diagnostic ──► subscriber lanes
+//! ```
 //!
-//! ## Sequence numbers
+//! [`EventKind`] defines the event meaning. [`BackoffSource`],
+//! [`RejectionKind`], and [`TaskOutcomeKind`] provide typed categories where
+//! free-form text would be unsafe for machine decisions.
 //!
-//! [`Event::new`] gives each event a process-local increasing `seq`.
-//! Use it to sort observed events and detect gaps.
-//! It is not stored across process restarts.
-//! The sequence fails fast on `u64` exhaustion instead of wrapping.
+//! Every event contains `kind`, `at`, and `seq`. Other fields depend on the
+//! event kind. Read the variant documentation before using an optional field.
+//! Duration builders store whole milliseconds and clamp values above
+//! `u32::MAX` milliseconds.
 //!
-//! With concurrent publishers, it shows event construction order, not a guaranteed order of runtime effects or subscriber callbacks.
+//! `seq` is an increasing process-local construction sequence. Concurrent
+//! effects and callbacks may occur in another order. The sequence is not
+//! persisted and panics on exhaustion instead of wrapping.
 //!
-//! ## Fields
-//!
-//! [`Event`] is a flat record with optional fields. Which fields are set depends on [`EventKind`].
-//!
-//! Always present:
-//! - `seq`: process-local event sequence.
-//! - `at`: wall-clock timestamp.
-//! - `kind`: event type.
-//!
-//! Present when relevant:
-//! - `id`: the stable [`TaskId`] for one submission and run.
-//! - `attempt`: task attempt number, starting from 1.
-//! - `task`: usually a task name. Subscriber diagnostics use it for the subscriber name, and controller events use it for the slot name.
-//! - `outcome_kind`: machine-readable final outcome for `TaskFinished` and rejected work.
-//! - `rejection_kind`: machine-readable category for a rejected add or controller submission.
-//! - `dropped`: number of events represented by a coalesced overflow report.
-//!
-//! `timeout_ms`, `delay_ms`, and `duration_ms` use whole milliseconds.
-//! Values above `u32::MAX` milliseconds are stored as `u32::MAX`.
-//!
-//! Treat `reason` as readable diagnostic text, not schema.
-//! Use [`TaskOutcomeKind`] and [`RejectionKind`] for machine decisions.
-//! > Use [`EventKind::as_label`] for a stable event label.
-//!
-//! ## Example
+//! # Interpreting an event
 //!
 //! ```rust
-//! use std::time::Duration;
 //! use taskvisor::{Event, EventKind};
 //!
-//! let ev = Event::new(EventKind::AttemptFailed)
-//!     .with_task("demo-task")
-//!     .with_reason("boom")
-//!     .with_attempt(3)
-//!     .with_duration(Duration::from_millis(42));
-//!
-//! assert_eq!(ev.kind, EventKind::AttemptFailed);
-//! assert_eq!(ev.task.as_deref(), Some("demo-task"));
-//! assert_eq!(ev.reason.as_deref(), Some("boom"));
-//! assert_eq!(ev.duration_ms, Some(42));
+//! fn observe(event: &Event) {
+//!     match event.kind {
+//!         EventKind::TaskFinished => {
+//!             let outcome = event.outcome_kind
+//!                 .map(|kind| kind.as_label())
+//!                 .unwrap_or("unknown");
+//!             println!(
+//!                 "id={:?} task={:?} outcome={outcome}",
+//!                 event.id,
+//!                 event.task.as_deref(),
+//!             );
+//!         }
+//!         EventKind::SubscriberOverflow => {
+//!             eprintln!("lost {} events", event.dropped.unwrap_or(0));
+//!         }
+//!         _ => {}
+//!     }
+//! }
 //! ```
 
 use std::sync::Arc;
@@ -94,269 +87,151 @@ fn next_event_seq() -> u64 {
         .unwrap_or_else(|_| panic!("event sequence exhausted; ordering cannot wrap safely"))
 }
 
-/// Describes what happened in the runtime.
+/// Classifies one best-effort runtime event.
 ///
-/// Every event has `seq`, `at`, and `kind`.
-/// Variant docs list only the additional fields normally set by the runtime.
-/// Include a wildcard arm when matching because new event kinds may be added.
+/// Every [`Event`] has `seq`, `at`, and `kind`. Variant documentation lists the
+/// additional metadata set by Taskvisor. Match on this value before reading
+/// optional metadata. This enum is non-exhaustive; include a wildcard arm when
+/// matching it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventKind {
-    /// A subscriber panicked while processing an event.
+    /// A subscriber callback panicked.
     ///
-    /// Sets:
-    /// - `task`: subscriber name
-    /// - `reason`: panic info/message
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Carries the subscriber name in `task` and panic details in `reason`.
     SubscriberPanicked,
 
-    /// An internal runtime component failed.
+    /// An internal runtime component failed or did not join cleanly.
     ///
-    /// This includes a caught panic or a worker that did not join cleanly.
-    ///
-    /// Sets:
-    /// - `task`: runtime component name
-    /// - `reason`: diagnostic failure details
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Carries the component name in `task` and diagnostic details in `reason`.
     RuntimeFailure,
 
-    /// An event was lost because a subscriber path fell behind or closed.
+    /// An event path fell behind or closed before delivery.
     ///
-    /// Sets:
-    /// - `task`: subscriber name (or the internal consumer that lagged)
-    /// - `dropped`: number of events lost, when known
-    /// - `reason`: `"full"`, `"closed"`, or `"lagged(n)"`
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// `task` identifies the subscriber or internal relay. `dropped` carries a
+    /// loss count when known. `reason` contains diagnostic details.
     SubscriberOverflow,
 
-    /// Shutdown was requested.
+    /// Explicit shutdown entered the shared shutdown workflow.
     ///
-    /// This can come from an application-owned shutdown future, an explicitly configured OS signal, or a runtime shutdown request.
-    ///
-    /// Sets:
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// This includes a handle request, an application shutdown future, or a
+    /// configured operating-system signal. Natural shutdown does not emit it.
     ShutdownRequested,
 
-    /// Bounded registry cleanup completed without a new grace overrun.
+    /// Registry task cleanup finished within the shared grace window.
     ///
-    /// This does not prove physical exit of any actor retained by the
-    /// force-abort reaper.
-    ///
-    /// Sets:
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// A task force-aborted before this shutdown may still be physically active.
     AllStoppedWithinGrace,
 
-    /// Grace period exceeded; some tasks did not stop in time.
-    ///
-    /// Sets:
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Registry task cleanup did not finish within the shared grace window.
     GraceExceeded,
 
-    /// A task attempt is starting.
+    /// A registered task is about to run one attempt.
     ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: attempt number (1-based for this task run)
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Carries `id`, `task`, and the one-based `attempt` number.
     AttemptStarting,
 
-    /// A task attempt returned `Ok(())`.
+    /// One task attempt returned `Ok(())`.
     ///
-    /// This is an attempt result, not always the final task result. Under
-    /// [`RestartPolicy::Always`](crate::RestartPolicy::Always), another attempt follows.
-    ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: attempt number
-    /// - `duration_ms`: attempt duration
+    /// This is not always the final task result. Carries `id`, `task`,
+    /// `attempt`, and `duration_ms`.
     AttemptSucceeded,
 
-    /// Task attempt returned [`TaskError::Canceled`](crate::TaskError::Canceled).
+    /// One task attempt returned [`TaskError::Canceled`](crate::TaskError::Canceled).
     ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: attempt number
-    /// - `duration_ms`: attempt duration
+    /// Carries `id`, `task`, `attempt`, and `duration_ms`.
     AttemptCanceled,
 
-    /// A task attempt returned a failure.
+    /// One task attempt returned or produced a failure.
     ///
-    /// This includes retryable failures, fatal errors, task-returned timeouts,
-    /// and panics caught while running user code. A configured per-attempt
-    /// deadline instead emits [`AttemptTimedOut`](Self::AttemptTimedOut).
-    /// A later event shows whether Taskvisor retries or reaches a terminal state.
-    ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: attempt number
-    /// - `duration_ms`: attempt duration
-    /// - `reason`: error message
-    /// - `exit_code`: process-like exit code, when available
+    /// This includes retryable and fatal errors, task-returned timeouts, and
+    /// caught task panics. A configured deadline normally emits
+    /// [`AttemptTimedOut`](Self::AttemptTimedOut). Cleanup failure at that
+    /// deadline emits this variant instead. Carries `id`, `task`, `attempt`,
+    /// `duration_ms`, `reason`, and an optional `exit_code`.
     AttemptFailed,
 
-    /// Task exceeded its configured timeout for this attempt.
+    /// One task attempt exceeded its configured deadline.
     ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: attempt number
-    /// - `timeout_ms`: configured timeout
-    /// - `duration_ms`: elapsed attempt duration
+    /// Carries `id`, `task`, `attempt`, `timeout_ms`, and `duration_ms`.
     AttemptTimedOut,
 
-    /// The next attempt was scheduled after success or failure.
+    /// The task actor scheduled a delay before another attempt.
     ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `attempt`: previous attempt number
-    /// - `delay_ms`: delay before the next attempt (ms)
-    /// - `backoff_source`: `Success` or `Failure`
-    /// - `reason`: last failure message (only for failure-driven backoff)
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Carries `id`, `task`, the previous `attempt`, `delay_ms`, and
+    /// `backoff_source`. Failure backoff also carries the last error in `reason`.
     BackoffScheduled,
 
-    /// An add request was published before Taskvisor processed it.
+    /// A task add request was published before registry processing.
     ///
-    /// This does not confirm admission.
-    /// For an all-or-nothing batch, Taskvisor publishes one request event per item before it sends the whole batch command.
-    ///
-    /// Sets:
-    /// - `id`: task run identity (pre-allocated for this add request)
-    /// - `task`: logical task name
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// This does not confirm admission. An all-or-nothing batch publishes one
+    /// event per item before sending its single registry command. Carries the
+    /// reserved `id` and requested `task` name.
     TaskAddRequested,
 
-    /// A task was registered and its actor task was started.
+    /// Registry admission accepted the task.
     ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// The task body may not have started. Carries `id` and `task`.
     TaskAdded,
 
-    /// A task was not added because its name conflicted or its all-or-nothing batch was rejected.
+    /// Registry admission rejected a task add.
     ///
-    /// No task actor is constructed for a rejected dynamic add.
-    /// If an all-or-nothing batch is rejected, no task actor is constructed for any item.
-    ///
-    /// Sets:
-    /// - `id`: task run identity of the rejected add request
-    /// - `task`: task name
-    /// - `outcome_kind`: [`TaskOutcomeKind::Rejected`]
-    /// - `rejection_kind`: [`RejectionKind::AlreadyExists`] or [`RejectionKind::BatchRejected`]
-    /// - `reason`: diagnostic rejection details
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// No rejected task body starts. Batch rejection starts no item in the
+    /// batch. Carries `id`, `task`, diagnostic `reason`,
+    /// [`TaskOutcomeKind::Rejected`], and a registry [`RejectionKind`].
     TaskAddFailed,
 
-    /// A remove request was published before Taskvisor completed it.
+    /// A remove or cancel request entered runtime or controller processing.
     ///
-    /// This is not proof of removal.
-    /// Use the management method's result or a waiter when you need a reliable answer.
-    ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name, when known
-    /// - `reason`: optional removal reason
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// This is not proof that a target existed or reached terminal cleanup.
+    /// Carries `id`, an optional `reason`, and a task name when available.
     TaskRemoveRequested,
 
-    /// Task registry membership was removed and terminal reporting was committed.
+    /// Registry cleanup attempted the closing event for a removed task.
     ///
-    /// This event can race with the internal logical-completion latch.
-    /// For [`TaskOutcomeKind::ForceAborted`], it does not prove physical actor exit.
-    /// The reaper retains the task name and execution resources until that exit.
-    ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Registry membership is already absent. Final watched-outcome delivery,
+    /// when requested, was attempted first. A force-aborted task may still be
+    /// physically active. Carries `id` and `task`.
     TaskRemoved,
 
-    /// A registered task reached its final outcome and will not start another attempt.
+    /// Registry cleanup classified the final outcome of a registered task.
     ///
-    /// This is emitted once after the final outcome is committed and before
-    /// [`TaskRemoved`](Self::TaskRemoved). Except for force-abort, the task
-    /// runner is physically joined first. A force-aborted synchronous poll may
-    /// remain active under reaper ownership even after both events.
-    ///
-    /// Sets:
-    /// - `id`: task run identity
-    /// - `task`: task name
-    /// - `outcome_kind`: stable machine-readable final category
-    /// - `reason`: optional diagnostic detail; never parse it as schema
-    /// - `exit_code`: process-like exit code, when available
-    /// - `at`: wall-clock timestamp
-    /// - `seq`: process-local sequence
+    /// Membership is already absent. This event is attempted before watched
+    /// outcome delivery and [`TaskRemoved`](Self::TaskRemoved). Except for
+    /// force-abort, task execution is physically joined first. Carries `id`,
+    /// `task`, `outcome_kind`, and optional diagnostic `reason` and `exit_code`.
+    /// Use [`TaskWaiter`](crate::TaskWaiter) when the final outcome must not rely
+    /// on best-effort event delivery.
     TaskFinished,
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
-    /// The controller rejected a submission.
+    /// The controller rejected a submission before registry admission.
     ///
-    /// Sets:
-    /// - `task`: slot name, when known
-    /// - `id`: the rejected submission's [`TaskId`]
-    /// - `outcome_kind`: [`TaskOutcomeKind::Rejected`]
-    /// - `rejection_kind`: stable machine-readable rejection category
-    /// - `reason`: readable rejection details
+    /// Carries `id`, [`TaskOutcomeKind::Rejected`], `rejection_kind`, diagnostic
+    /// `reason`, and the slot name in `task` when known.
     ControllerRejected,
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
-    /// The controller accepted a submission.
+    /// The controller accepted a submission into slot ownership or its queue.
     ///
-    /// The task may still be queued or waiting for runtime registration.
-    /// This event does not mean that the task body has started.
-    ///
-    /// Sets:
-    /// - `task`: slot name
-    /// - `id`: the submission's [`TaskId`]
-    /// - `reason`: a readable admission summary, e.g. `admission=Queue status=admitting` or
-    ///   `started_from_queue depth=N` (exact text is diagnostic, not a stable contract)
+    /// Runtime registry admission and task execution may not have started.
+    /// Carries `id`, the slot name in `task`, and a diagnostic summary in
+    /// `reason`.
     ControllerSubmitted,
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
-    /// A controller slot changed state.
+    /// A controller slot changed admission state.
     ///
-    /// Sets:
-    /// - `task`: slot name
-    /// - `reason`: readable transition text; it is not a stable machine contract
+    /// Carries the slot name in `task` and diagnostic transition text in
+    /// `reason`.
     ControllerSlotTransition,
 }
 
 impl EventKind {
-    /// Returns a stable machine-readable label for logs and metrics.
-    ///
-    /// The label is the snake_case form of the variant name.
-    /// Use it as an event name in tracing or as a metrics label value.
-    ///
-    /// ```text
-    /// EventKind::AttemptStarting
-    ///           │ as_label()
-    ///           ▼
-    ///     "attempt_starting"
-    ///        ├── log field:    event="attempt_starting"
-    ///        └── metric label: event="attempt_starting"
-    /// ```
+    /// Returns the stable snake-case label for logs and metrics.
     ///
     /// ```rust
     /// use taskvisor::EventKind;
@@ -395,19 +270,19 @@ impl EventKind {
     }
 }
 
-/// Reason for scheduling the next run/backoff.
+/// Identifies why a [`BackoffScheduled`](EventKind::BackoffScheduled) delay exists.
 ///
-/// A closed set (success vs failure); intentionally **not** `#[non_exhaustive]`.
+/// This enum is exhaustive: a delay follows either success or failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackoffSource {
-    /// Delay after a successful attempt under `RestartPolicy::Always`.
+    /// A successful `RestartPolicy::Always` attempt scheduled its interval.
     Success,
-    /// Delay after a retryable failure.
+    /// A retryable failure scheduled its backoff policy.
     Failure,
 }
 
 impl BackoffSource {
-    /// Returns the stable machine-readable label used by logs and metrics.
+    /// Returns the stable label used by logs and metrics.
     ///
     /// ```rust
     /// use taskvisor::BackoffSource;
@@ -424,10 +299,11 @@ impl BackoffSource {
     }
 }
 
-/// Reason why a task or controller submission did not start.
+/// Classifies why submitted work was rejected before its task body ran.
 ///
-/// [`Event::reason`] and the `reason` field on [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) retain readable details.
-/// Use this enum for branching, metrics, and state transitions.
+/// Use this enum for branching and telemetry. [`Event::reason`] and
+/// [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) keep readable details.
+/// This enum is non-exhaustive; include a wildcard arm when matching it.
 ///
 /// ```rust
 /// use taskvisor::RejectionKind;
@@ -438,9 +314,13 @@ impl BackoffSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RejectionKind {
-    /// The registry already contains a task with the requested name.
+    /// The name is reserved or repeated in the same all-or-nothing batch.
+    ///
+    /// An active or removing task reserves its name. A force-aborted task keeps
+    /// the name reserved until Taskvisor has observed the actor's physical exit
+    /// and collected its terminal state.
     AlreadyExists,
-    /// One conflicting item caused an all-or-nothing batch to reject this non-conflicting item.
+    /// A conflict elsewhere caused this item in an all-or-nothing batch to fail.
     BatchRejected,
     /// `DropIfRunning` rejected a submission because the controller slot was busy.
     SlotBusy,
@@ -448,9 +328,9 @@ pub enum RejectionKind {
     QueueFull,
     /// A newer `Replace` submission displaced this queued submission.
     SupersededByReplace,
-    /// An explicit remove or cancel operation removed the queued submission.
+    /// An explicit remove or cancel operation rejected work before registry commit.
     RemovedFromQueue,
-    /// Runtime shutdown rejected work that had not reached registry admission.
+    /// Controller shutdown rejected work that had not reached registry admission.
     ControllerShuttingDown,
     /// The controller could not commit the submission to the runtime registry.
     AdmissionFailed,
@@ -459,7 +339,7 @@ pub enum RejectionKind {
 }
 
 impl RejectionKind {
-    /// Returns a stable machine-readable label for logs and metrics.
+    /// Returns the stable label used by logs and metrics.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
@@ -476,39 +356,38 @@ impl RejectionKind {
     }
 }
 
-/// One runtime event with optional metadata.
+/// One best-effort runtime event with optional typed metadata.
 ///
-/// - `at`: wall-clock timestamp (for logs)
-/// - `seq`: process-local construction sequence; see the module-level limits
-/// - other optional fields are set depending on the [`EventKind`]
+/// Subscriber callbacks receive this value by reference. Match [`kind`](Self::kind)
+/// first, then read the fields documented for that variant. Do not parse
+/// [`reason`](Self::reason) for program logic; use typed category fields and
+/// their stable labels.
 ///
-/// Fields are public for reading. Create an event with [`Event::new`] and add optional values with the `with_*` builders.
-/// > Use `..` when matching the struct because more fields may be added.
+/// [`Event::new`] sets `kind`, `at`, and `seq`. The `with_*` builders attach
+/// metadata but do not validate that a field belongs to the selected kind.
 ///
-/// # Also
-///
-/// - [`EventKind`] - event classification
-/// - [`Subscribe`](crate::Subscribe) - user-defined event handler trait
-/// - `LogWriter` (feature = `logging`) - built-in readable event printer
+/// This struct is non-exhaustive; use `..` when matching it.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Event {
-    /// Process-local sequence number allocated when the event was created.
+    /// Process-local construction sequence.
     ///
-    /// It increases without wrapping and is not stored across process restarts.
+    /// It increases without wrapping and is not persisted across restarts.
+    /// Gaps can appear because event delivery is best-effort. Concurrent effects
+    /// may occur in a different order.
     pub seq: u64,
     /// Wall-clock timestamp captured when the event was created.
     ///
-    /// Wall clocks can move. Use `seq` for observed ordering, not `at`.
+    /// Wall clocks can move. This value is not a monotonic ordering source.
     pub at: SystemTime,
 
-    /// Task timeout in milliseconds (compact).
+    /// Configured task deadline in whole milliseconds.
     pub timeout_ms: Option<u32>,
-    /// Backoff delay before next attempt in milliseconds (compact).
+    /// Delay before the next attempt in whole milliseconds.
     pub delay_ms: Option<u32>,
-    /// Elapsed duration of the attempt in milliseconds.
+    /// Attempt duration in whole milliseconds.
     pub duration_ms: Option<u32>,
-    /// Number of events lost in a coalesced overflow report.
+    /// Events represented by one coalesced overflow report.
     pub dropped: Option<u64>,
     /// Human-readable diagnostic detail.
     ///
@@ -516,22 +395,25 @@ pub struct Event {
     /// [`outcome_kind`](Self::outcome_kind) and
     /// [`rejection_kind`](Self::rejection_kind) for machine decisions.
     pub reason: Option<Arc<str>>,
-    /// Machine-readable final category for `TaskFinished` and rejected work.
+    /// Final category for `TaskFinished` and rejected work.
     ///
     /// Use [`TaskOutcomeKind`] for branching and [`TaskOutcomeKind::as_label`]
     /// for telemetry labels.
     pub outcome_kind: Option<TaskOutcomeKind>,
-    /// Machine-readable category for `TaskAddFailed` and `ControllerRejected`.
+    /// Rejection category for `TaskAddFailed` and `ControllerRejected`.
     ///
     /// Readable details remain available in [`reason`](Self::reason).
     pub rejection_kind: Option<RejectionKind>,
-    /// 1-based number of the attempt described by an attempt-level or backoff event.
+    /// One-based attempt number for attempt and backoff events.
     ///
     /// This is not the total number of attempts and is not set on `TaskFinished`.
     pub attempt: Option<u32>,
-    /// This is normally a task name. Subscriber diagnostics use it for a subscriber name, and controller events use it for a slot name.
+    /// Name associated with the event.
+    ///
+    /// Usually a task name. Diagnostics may store a subscriber, relay, or
+    /// runtime component name. Controller events store a slot name.
     pub task: Option<Arc<str>>,
-    /// Submission/run identity this event belongs to, if applicable.
+    /// Submission and run identity associated with the event.
     ///
     /// This is the canonical correlation key.
     /// Unlike [`task`](Self::task), it does not change during one submission.
@@ -539,17 +421,20 @@ pub struct Event {
     ///
     /// See [`TaskId`] for process and counter limits.
     pub id: Option<TaskId>,
-    /// Numeric exit code, from a process-like runtime.
-    /// `None` for events that have no process behind them.
+    /// Numeric exit code from a process-like task, when available.
     pub exit_code: Option<i32>,
     /// Event classification.
     pub kind: EventKind,
-    /// Source for backoff scheduling (success vs failure).
+    /// Cause of a scheduled delay.
     pub backoff_source: Option<BackoffSource>,
 }
 
 impl Event {
-    /// Creates an event with the current wall-clock time and the next sequence number.
+    /// Creates an event with the current wall-clock time and next sequence value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the process-local event sequence is exhausted.
     #[must_use]
     pub fn new(kind: EventKind) -> Self {
         Self {
@@ -599,7 +484,7 @@ impl Event {
         self
     }
 
-    /// Attaches a task name.
+    /// Attaches the task, diagnostic component, or controller slot name.
     #[inline]
     #[must_use]
     pub fn with_task(mut self, task: impl Into<Arc<str>>) -> Self {
@@ -607,7 +492,7 @@ impl Event {
         self
     }
 
-    /// Attaches the submission/run identity ([`TaskId`]).
+    /// Attaches the submission and run identity.
     #[inline]
     #[must_use]
     pub fn with_id(mut self, id: TaskId) -> Self {
@@ -615,7 +500,7 @@ impl Event {
         self
     }
 
-    /// Attaches a timeout duration (stored as milliseconds).
+    /// Attaches a deadline, stored as whole milliseconds.
     #[inline]
     #[must_use]
     pub fn with_timeout(mut self, d: Duration) -> Self {
@@ -624,7 +509,7 @@ impl Event {
         self
     }
 
-    /// Attaches a backoff delay (stored as milliseconds).
+    /// Attaches a retry or restart delay, stored as whole milliseconds.
     #[inline]
     #[must_use]
     pub fn with_delay(mut self, d: Duration) -> Self {
@@ -633,7 +518,7 @@ impl Event {
         self
     }
 
-    /// Attaches the attempt's elapsed duration (stored as milliseconds).
+    /// Attaches an attempt duration, stored as whole milliseconds.
     #[inline]
     #[must_use]
     pub fn with_duration(mut self, d: Duration) -> Self {
@@ -658,7 +543,7 @@ impl Event {
         self
     }
 
-    /// Attaches a numeric exit code (from a process-like runtime).
+    /// Attaches a numeric exit code from a process-like task.
     #[inline]
     #[must_use]
     pub fn with_exit_code(mut self, code: i32) -> Self {
@@ -666,7 +551,7 @@ impl Event {
         self
     }
 
-    /// Attaches the source that caused a backoff to be scheduled.
+    /// Attaches the cause of a scheduled delay.
     #[inline]
     #[must_use]
     pub fn with_backoff_source(mut self, source: BackoffSource) -> Self {
@@ -674,21 +559,21 @@ impl Event {
         self
     }
 
-    /// Marks that this backoff comes from a successful attempt.
+    /// Marks a delay scheduled after success.
     #[inline]
     #[must_use]
     pub fn with_backoff_success(self) -> Self {
         self.with_backoff_source(BackoffSource::Success)
     }
 
-    /// Marks that this backoff comes from a failed attempt.
+    /// Marks a delay scheduled after failure.
     #[inline]
     #[must_use]
     pub fn with_backoff_failure(self) -> Self {
         self.with_backoff_source(BackoffSource::Failure)
     }
 
-    /// Creates a subscriber overflow event.
+    /// Creates an overflow event for a subscriber or the internal relay.
     #[inline]
     #[must_use]
     pub fn subscriber_overflow(
@@ -700,7 +585,7 @@ impl Event {
             .with_reason(reason)
     }
 
-    /// Creates a subscriber panic event.
+    /// Creates an event for a panicked subscriber callback.
     #[inline]
     #[must_use]
     pub fn subscriber_panicked(subscriber: impl Into<Arc<str>>, info: impl Into<Arc<str>>) -> Self {
@@ -709,7 +594,7 @@ impl Event {
             .with_reason(info)
     }
 
-    /// Creates an internal runtime failure event.
+    /// Creates an event for an internal runtime failure.
     #[inline]
     #[must_use]
     pub fn runtime_failure(component: impl Into<Arc<str>>, reason: impl Into<Arc<str>>) -> Self {
@@ -718,7 +603,7 @@ impl Event {
             .with_reason(reason)
     }
 
-    /// Returns `true` for internal diagnostic events.
+    /// Returns whether this is an internal diagnostic event.
     #[inline]
     #[must_use]
     pub fn is_internal_diagnostic(&self) -> bool {

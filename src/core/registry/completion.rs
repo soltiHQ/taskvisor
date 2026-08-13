@@ -1,15 +1,18 @@
-//! # Registry completion signals
+//! Signals registry cleanup and physical actor release for one removal.
 //!
-//! Natural completion, an explicit remove or cancel, and shutdown can all start
-//! terminal removal. One path claims the actor and becomes its join owner.
-//! [`RemovalCompletion`] connects callers waiting for cleanup with that owner.
+//! Natural actor exit, remove, cancel, and shutdown all enter the same removal path.
+//! [`RemovalCompletion`] lets other components observe that path without owning the actor join.
+//! Public cancellation waits for logical completion.
+//! The controller also waits for physical completion before it reuses a slot.
 //!
 //! ```text
-//! Registered ──► Removing ──► logical terminal ──► remove registry membership
-//!                                  │                         │
-//!                                  ▼                         ▼
-//!                         public completion       physical actor/reaper release
+//! registered ──► removing ──► membership and reporting ──► logical
+//! force-aborted actor ──► physical exit and terminal match ──► physical
 //! ```
+//!
+//! Logical completion means membership was removed and terminal reporting was attempted.
+//! Physical completion means the actor or reaper no longer owns the attempt.
+//! These latches do not request cancellation.
 
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -19,18 +22,12 @@ use crate::core::outcome::TaskOutcome;
 /// Sender used to resolve a watched task with its final [`TaskOutcome`].
 pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
 
-/// Shared logical and physical terminal-cleanup signals.
-///
-/// Every clone observes the same two phases. Public cancellation and shutdown
-/// wait for logical completion, which is bounded by the configured grace.
-/// Controller slot reuse waits for physical completion so a logically aborted
-/// but still-running actor cannot overlap its replacement.
-///
-/// This is not the actor's cancellation token. Creating or waiting on this value
-/// does not request task cancellation.
+/// Shared two-phase completion for one registry removal.
 #[derive(Clone, Debug)]
 pub(crate) struct RemovalCompletion {
+    /// Wakes public cancellation waiters after terminal commit.
     logical: CancellationToken,
+    /// Wakes controller replacement after actor and reaper ownership is released.
     physical: CancellationToken,
 }
 
@@ -43,16 +40,12 @@ impl RemovalCompletion {
         }
     }
 
-    /// Waits until terminal registry cleanup has been committed.
-    ///
-    /// If cleanup is already complete, this returns immediately. Dropping this
-    /// wait does not affect other waiters or the cleanup owner.
+    /// Waits for logical completion without owning the removal operation.
     pub(crate) async fn wait(&self) {
         self.logical.cancelled().await;
     }
 
-    /// Waits until the physical actor owner and terminal reaper record have
-    /// both been released, and until logical terminal reporting is complete.
+    /// Waits for both logical and physical completion.
     #[cfg(feature = "controller")]
     pub(crate) async fn wait_physical(&self) {
         self.logical.cancelled().await;
@@ -65,6 +58,7 @@ impl RemovalCompletion {
     }
 
     #[cfg(test)]
+    /// Returns whether actor and reaper ownership has been released.
     pub(super) fn is_physical_complete(&self) -> bool {
         self.physical.is_cancelled()
     }

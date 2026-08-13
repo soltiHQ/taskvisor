@@ -1,54 +1,14 @@
-//! # Event subscriber trait
+//! Defines the application callback boundary for runtime events.
 //!
-//! [`Subscribe`] is the extension point for observing runtime events.
+//! [`Subscribe`] implementations enter a supervisor through
+//! [`SupervisorBuilder::with_subscribers`](crate::SupervisorBuilder::with_subscribers).
+//! Each implementation gets its own bounded queue and serial callback lane
+//! after runtime startup.
 //!
-//! Each registered subscriber gets:
-//! - a bounded queue,
-//! - a dedicated worker thread,
-//! - panic isolation from the runtime and other subscribers.
-//!
-//! Delivery is best-effort.
-//! If a subscriber queue is full, new events may be dropped for that subscriber.
-//! Events may also be lost earlier if the shared event bus lags.
-//!
-//! ## Flow
-//!
-//! ```text
-//! event ──► [bounded queue] ──► dedicated thread ──► on_event
-//!                └── full: count drop; report once after the queue catches up
-//! ```
-//!
-//! ## Rules
-//!
-//! - Ordinary queue drops are coalesced into one [`EventKind::SubscriberOverflow`](crate::EventKind::SubscriberOverflow) delivered directly to the affected subscriber after its queue catches up.
-//! - Taskvisor tries to report ordinary panics as [`EventKind::SubscriberPanicked`](crate::EventKind::SubscriberPanicked).
-//! - Successfully queued events are processed one at a time and in FIFO order for each subscriber.
-//! - Diagnostic events are not re-reported if they overflow or panic, to avoid feedback loops.
-//! - There is no processing order guarantee between different subscribers.
-//! - Queue overflow drops the event for this subscriber only.
-//! - A slow subscriber can fill only its own queue.
-//!
-//! ## Example
-//!
-//! ```rust
-//! use std::num::NonZeroUsize;
-//! use taskvisor::{Event, EventKind, Subscribe};
-//!
-//! struct Metrics;
-//!
-//! impl Subscribe for Metrics {
-//!     fn on_event(&self, ev: &Event) {
-//!         if matches!(ev.kind, EventKind::AttemptFailed) {
-//!             // update counters, push to a channel, etc.
-//!         }
-//!     }
-//!
-//!     fn name(&self) -> &str { "metrics" }
-//!     fn queue_capacity(&self) -> NonZeroUsize {
-//!         NonZeroUsize::new(2048).unwrap()
-//!     }
-//! }
-//! ```
+//! Ordinary runtime events pass through the shared bus and the subscriber
+//! queue. After a full lane catches up, Taskvisor delivers its coalesced
+//! overflow summary directly when the lane remains active. Subscribers are for
+//! observation, not runtime state or reliable task results.
 
 use std::num::NonZeroUsize;
 
@@ -56,49 +16,89 @@ use crate::events::Event;
 
 const DEFAULT_QUEUE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
-/// Synchronous handler for best-effort runtime events.
+/// Synchronous observer for best-effort [`Event`] values.
 ///
-/// `Subscribe` is synchronous by design.
-/// Each subscriber owns one dedicated worker thread that calls it serially.
-/// Subscriber callbacks do not consume Tokio async workers or Tokio blocking-pool capacity.
+/// Each subscriber has one serial lane on a supervisor-local callback
+/// executor. Events delivered to [`on_event`](Self::on_event) keep FIFO order
+/// for that subscriber. Shutdown or a failed callback lane can still discard
+/// queued events. Different subscribers may run concurrently. These callbacks
+/// do not use Tokio async workers or its blocking pool.
 ///
-/// Keep [`on_event`](Self::on_event) fast.
-/// For async I/O or work that may wait a long time, send the event data to your own channel and process it elsewhere.
+/// Keep callbacks short. Copy the needed fields into an application-owned
+/// channel when handling requires async I/O, blocking I/O, or a long wait. The
+/// borrowed event is valid only for the callback.
 ///
-/// During shutdown, Taskvisor gives all subscriber queues one shared drain timeout.
-/// At the deadline, queued events are dropped.
-/// A callback that is already running cannot be aborted and may continue on its dedicated thread after Taskvisor returns.
+/// Queue overflow affects only that subscriber. Taskvisor counts dropped
+/// ordinary events and delivers one direct
+/// [`SubscriberOverflow`](crate::EventKind::SubscriberOverflow) summary after
+/// the lane catches up. Dropping an internal diagnostic, or panicking while
+/// handling one, does not generate another diagnostic.
 ///
-/// Unwinding panics are caught and isolated.
-/// A build with `panic = "abort"` cannot isolate panics because the process exits immediately.
-/// Taskvisor tries to report a panic on an ordinary event as `SubscriberPanicked`.
-/// A panic while handling an internal diagnostic event is not reported again, to avoid a feedback loop.
+/// Taskvisor catches an unwinding panic from an ordinary event callback and
+/// tries to publish a [`SubscriberPanicked`](crate::EventKind::SubscriberPanicked)
+/// event. A `panic = "abort"` build exits instead.
+///
+/// During shutdown, all subscriber lanes share one drain timeout. Queued events
+/// are dropped at the deadline. A callback already running cannot be aborted
+/// and may continue on its executor thread after shutdown returns.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::num::NonZeroUsize;
+/// use std::sync::Arc;
+/// use taskvisor::{Event, EventKind, Subscribe, Supervisor, SupervisorConfig};
+///
+/// struct Metrics;
+///
+/// impl Subscribe for Metrics {
+///     fn on_event(&self, event: &Event) {
+///         if event.kind == EventKind::AttemptFailed {
+///             // Update an in-memory counter.
+///         }
+///     }
+///
+///     fn name(&self) -> &str {
+///         "metrics"
+///     }
+///
+///     fn queue_capacity(&self) -> NonZeroUsize {
+///         NonZeroUsize::new(2048).unwrap()
+///     }
+/// }
+///
+/// let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(Metrics)];
+/// let supervisor = Supervisor::builder(SupervisorConfig::default())
+///     .with_subscribers(subscribers)
+///     .build();
+/// // Start it with `Supervisor::run`, `run_until`, or `serve`.
+/// ```
 pub trait Subscribe: Send + Sync + 'static {
-    /// Processes one successfully queued event.
+    /// Processes one event delivered by this subscriber's serial lane.
     ///
-    /// Taskvisor calls this method on the subscriber's dedicated thread, never from the event publisher or a Tokio worker.
-    /// Calls are sequential and follow queue order for this subscriber.
+    /// Taskvisor calls this method on a callback-executor thread. Calls never
+    /// run in the event publisher or on a Tokio worker.
     fn on_event(&self, event: &Event);
 
-    /// Returns the name used in logs and diagnostic events.
+    /// Returns the name used by subscriber diagnostics.
     ///
-    /// Taskvisor reads and stores the name once during registration.
-    ///
-    /// The default returns the fully-qualified type path via [`type_name`](std::any::type_name).
+    /// Supervisor construction reads and stores this value once. Choose a
+    /// stable, recognizable name for logs and alerts. The default is the fully
+    /// qualified [`type_name`](std::any::type_name).
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 
-    /// Returns this subscriber's queue capacity.
+    /// Returns the maximum number of queued events for this subscriber.
     ///
-    /// The return type guarantees that the queue can hold at least one event.
-    /// Values above Tokio's structural bounded-channel maximum make
+    /// Supervisor construction reads this value once. Values above Tokio's
+    /// structural bounded-channel maximum make
     /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build)
     /// return [`BuildError::CapacityTooLarge`](crate::BuildError::CapacityTooLarge).
-    /// If the queue is full, Taskvisor drops the new ordinary event and increments this subscriber's overflow counter.
-    /// After the queue catches up, the same worker delivers one direct `SubscriberOverflow` summary with the number of dropped events.
+    /// A full queue drops the new event for this subscriber. Increase capacity
+    /// for short bursts. A larger queue does not make a slow callback faster.
     ///
-    /// > Default: `1024`.
+    /// The default capacity is `1024`.
     fn queue_capacity(&self) -> NonZeroUsize {
         DEFAULT_QUEUE_CAPACITY
     }

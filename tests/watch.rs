@@ -9,7 +9,9 @@ use common::*;
 use taskvisor::prelude::*;
 
 fn served() -> SupervisorHandle {
-    Supervisor::new(SupervisorConfig::default(), vec![]).serve()
+    Supervisor::new(SupervisorConfig::default(), vec![])
+        .serve()
+        .expect("runtime startup")
 }
 
 #[tokio::test]
@@ -170,7 +172,7 @@ async fn spurious_canceled_return_resolves_canceled_outcome() {
 async fn shutdown_drain_force_aborts_stubborn_watched_task() {
     let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(150));
     let sup = Supervisor::new(cfg, vec![]);
-    let handle = sup.serve();
+    let handle = sup.serve().expect("runtime startup");
 
     let (stubborn, started) = make_stubborn();
     let (_id, waiter) = handle
@@ -238,7 +240,7 @@ async fn cancelled_outcome_when_task_is_cancelled() {
 async fn force_aborted_outcome_for_noncooperative_task() {
     let cfg = SupervisorConfig::default().with_grace(Duration::from_millis(100));
     let sup = Supervisor::new(cfg, vec![]);
-    let handle = sup.serve();
+    let handle = sup.serve().expect("runtime startup");
 
     let (stubborn, started) = make_stubborn();
     let (id, waiter) = handle
@@ -333,7 +335,7 @@ async fn outcome_is_delivered_even_under_bus_lag() {
     let cfg =
         SupervisorConfig::default().with_bus_capacity(std::num::NonZeroUsize::new(2).unwrap());
     let sup = Supervisor::new(cfg, vec![]);
-    let handle = sup.serve();
+    let handle = sup.serve().expect("runtime startup");
 
     let spec = TaskSpec::restartable("noisy", make_fail(None))
         .with_backoff(fast_backoff())

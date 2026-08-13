@@ -409,7 +409,7 @@ async fn duplicate_static_batch_starts_no_task_body() {
         Err(RuntimeError::AlreadyRunning)
     ));
 
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     handle
         .add(TaskSpec::restartable("after-batch-error", make_coop()))
         .await

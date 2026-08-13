@@ -1,3 +1,11 @@
+//! Tests runtime coordination and ordering boundaries through internal entry points.
+//!
+//! These tests exercise [`SupervisorCore`] directly rather than through the
+//! public handle. They cover startup, event relay loss, bounded management
+//! admission, cleanup ownership, static-run commit rules, registry fences, and
+//! shared shutdown. Helpers create unstarted cores, saturated queues, and
+//! injected ownership states for those checks.
+//!
 use std::{
     future::Future,
     num::NonZeroUsize,
@@ -18,7 +26,7 @@ use crate::{
     BoxTaskFuture, Task, TaskContext, TaskFn, TaskRef,
     core::{
         SupervisorConfig, TaskDefaults,
-        deferred_drop::{OwnedTask, test_reservation},
+        deferred_drop::{DropDomain, DropStartError, OwnedTask, TestLazyDomain, test_reservation},
         registry::{AddBatchItem, Registry, RemoveReplyRx},
     },
     error::RuntimeError,
@@ -28,11 +36,15 @@ use crate::{
     tasks::TaskSpec,
 };
 
+/// Records subscriber callbacks and wakes tests waiting for a matching event.
 struct RecordingSub {
+    /// Events observed by the subscriber callback worker.
     seen: Arc<Mutex<Vec<Event>>>,
+    /// Notification sent after each recorded event.
     changed: tokio::sync::Notify,
 }
 impl RecordingSub {
+    /// Returns a subscriber and an external view of its event buffer.
     fn new() -> (Arc<Self>, Arc<Mutex<Vec<Event>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         (
@@ -44,6 +56,7 @@ impl RecordingSub {
         )
     }
 
+    /// Waits until the recorded stream contains an event matching `predicate`.
     async fn wait_for(&self, predicate: impl Fn(&Event) -> bool) {
         loop {
             let changed = self.changed.notified();
@@ -67,6 +80,7 @@ impl Subscribe for RecordingSub {
     }
 }
 
+/// Supplies a live subscriber lane when a test does not need event inspection.
 struct NoopSub;
 
 impl Subscribe for NoopSub {
@@ -81,19 +95,25 @@ impl Subscribe for NoopSub {
     }
 }
 
+/// Builds an unstarted test core without subscribers.
 fn core(cfg: SupervisorConfig) -> Arc<SupervisorCore> {
     core_with_subs(cfg, Vec::new())
 }
 
+/// Wraps a test task with an already-acquired cleanup reservation.
 fn owned_task(spec: TaskSpec) -> OwnedTask<TaskSpec> {
     let retained = Arc::clone(spec.task());
     OwnedTask::new(spec, retained, test_reservation())
 }
 
+/// Builds an unstarted core with the requested subscriber set.
 fn core_with_subs(
     cfg: SupervisorConfig,
     subs: Vec<Arc<dyn crate::subscribers::Subscribe>>,
 ) -> Arc<SupervisorCore> {
+    let ownership = crate::core::deferred_drop::TestReservationSource::new(
+        crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+    );
     let task_defaults = TaskDefaults::default();
     let bus = Bus::new(cfg.bus_capacity().get());
     let subs = Arc::new(SubscriberSet::new(subs, bus.clone()));
@@ -113,11 +133,65 @@ fn core_with_subs(
         bus,
         subs,
         registry,
+        ownership.domain(),
         token,
         cmd_tx,
     )
 }
 
+/// Builds an unstarted core with a caller-controlled cleanup ownership domain.
+fn core_with_domain(cfg: SupervisorConfig, drop_domain: DropDomain) -> Arc<SupervisorCore> {
+    let task_defaults = TaskDefaults::default();
+    let bus = Bus::new(cfg.bus_capacity().get());
+    let subs = Arc::new(
+        SubscriberSet::from_reserved(
+            Vec::new(),
+            Vec::new(),
+            bus.clone(),
+            cfg.subscriber_shutdown_timeout(),
+        )
+        .expect("an empty subscriber set has no fallible metadata or capacity"),
+    );
+    let token = CancellationToken::new();
+    let (cmd_tx, cmd_rx) = mpsc::channel(cfg.registry_queue_capacity().get());
+    let registry = Registry::new(
+        bus.clone(),
+        token.clone(),
+        None,
+        cfg.grace(),
+        task_defaults.clone(),
+        cfg.max_registered_tasks(),
+        cmd_rx,
+    );
+    SupervisorCore::new_internal(
+        CoreSettings::new(cfg, task_defaults),
+        bus,
+        subs,
+        registry,
+        drop_domain,
+        token,
+        cmd_tx,
+    )
+}
+
+/// Checks that cleanup-worker startup details survive runtime error conversion.
+fn assert_destructor_start_failure(error: RuntimeError, worker: usize) {
+    match error {
+        RuntimeError::ThreadStartFailed { component, source } => {
+            assert_eq!(component, "destructor_isolation");
+            assert_eq!(source.kind(), std::io::ErrorKind::Other);
+            let source = source
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<DropStartError>())
+                .expect("the runtime error must retain the typed drop-start source");
+            assert_eq!(source.worker(), worker);
+            assert_eq!(source.raw_os_error(), None);
+        }
+        other => panic!("expected destructor-isolation startup failure, got {other:?}"),
+    }
+}
+
+/// Polls once and requires the future to remain pending at an ordering boundary.
 async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
     std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
         Poll::Pending => Poll::Ready(()),
@@ -126,6 +200,7 @@ async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
     .await;
 }
 
+/// Builds an unstarted core whose only registry command slot is occupied.
 fn core_with_full_command_queue() -> (Arc<SupervisorCore>, RemoveReplyRx) {
     let cfg =
         SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
@@ -136,8 +211,9 @@ fn core_with_full_command_queue() -> (Arc<SupervisorCore>, RemoveReplyRx) {
     (core, filler_reply)
 }
 
+/// Starts the registry listener and confirms that it consumes the queue filler.
 async fn start_and_release_command_queue(core: &SupervisorCore, filler_reply: RemoveReplyRx) {
-    core.start();
+    core.start().expect("runtime startup");
     assert!(matches!(
         timeout(Duration::from_secs(2), filler_reply)
             .await
@@ -146,17 +222,25 @@ async fn start_and_release_command_queue(core: &SupervisorCore, filler_reply: Re
     ));
 }
 
+/// Enumerates management paths that share queue and shutdown contracts.
 #[derive(Clone, Copy, Debug)]
 enum ManagementOperation {
+    /// Identity removal without a completion wait.
     RemoveId,
+    /// Label removal without a completion wait.
     RemoveLabel,
+    /// Identity cancellation with an unbounded completion wait.
     CancelId,
+    /// Label cancellation with an unbounded completion wait.
     CancelLabel,
+    /// Identity cancellation with a zero completion deadline.
     CancelIdWithTimeout,
+    /// Label cancellation with a zero completion deadline.
     CancelLabelWithTimeout,
 }
 
 impl ManagementOperation {
+    /// Every management path covered by shared admission tests.
     const ALL: [Self; 6] = [
         Self::RemoveId,
         Self::RemoveLabel,
@@ -166,6 +250,7 @@ impl ManagementOperation {
         Self::CancelLabelWithTimeout,
     ];
 
+    /// Runs the capacity-waiting form of this operation.
     async fn execute(self, core: &SupervisorCore, id: TaskId) -> Result<bool, RuntimeError> {
         match self {
             Self::RemoveId => core.remove(id).await,
@@ -180,6 +265,7 @@ impl ManagementOperation {
         }
     }
 
+    /// Runs the fail-fast queue-admission form of this operation.
     async fn try_execute(self, core: &SupervisorCore, id: TaskId) -> Result<bool, RuntimeError> {
         match self {
             Self::RemoveId => core.try_remove(id).await,
@@ -194,17 +280,23 @@ impl ManagementOperation {
         }
     }
 
+    /// Reports whether this path publishes an identity removal request event.
     fn publishes_identity_request(self) -> bool {
         matches!(self, Self::RemoveId)
     }
 }
 
+/// Holds a task whose post-cancellation exit is controlled by the test.
 struct ControlledCancellationTask {
+    /// Managed task submitted to the runtime.
     task: TaskRef,
+    /// Notification sent after the task observes cancellation.
     cancellation_seen: Arc<tokio::sync::Notify>,
+    /// Notification that allows the task body to return.
     release: Arc<tokio::sync::Notify>,
 }
 
+/// Builds a task that pauses after observing cancellation.
 fn controlled_cancellation_task() -> ControlledCancellationTask {
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -228,6 +320,7 @@ fn controlled_cancellation_task() -> ControlledCancellationTask {
     }
 }
 
+/// Extracts the preserved I/O source from a signal-setup shutdown result.
 fn signal_setup_source(result: Result<(), RuntimeError>) -> std::io::Error {
     match result {
         Err(RuntimeError::SignalSetupFailed { source }) => source,
@@ -241,7 +334,7 @@ async fn subscriber_listener_reports_bus_lag_as_overflow() {
 
     let cfg = SupervisorConfig::default().with_bus_capacity(NonZeroUsize::new(2).unwrap());
     let core = core_with_subs(cfg, vec![recorder.clone()]);
-    core.start();
+    core.start().expect("runtime startup");
 
     for i in 0..500 {
         core.bus
@@ -276,7 +369,7 @@ async fn drain_pending_delivers_retained_tail_after_a_lag_gap() {
     let bus = Bus::new(2);
     let mut rx = bus.take_receiver();
     let set = Arc::new(SubscriberSet::new(vec![recorder], bus.clone()));
-    set.start();
+    set.start().expect("subscriber startup");
 
     for i in 0..5 {
         bus.publish(Event::new(EventKind::AttemptStarting).with_task(format!("t{i}")));
@@ -322,7 +415,7 @@ async fn shutdown_relay_drain_has_a_fixed_work_budget() {
     let bus = Bus::new(capacity);
     let mut rx = bus.take_receiver();
     let set = Arc::new(SubscriberSet::new(vec![recorder], bus.clone()));
-    set.start();
+    set.start().expect("subscriber startup");
 
     for index in 0..capacity {
         bus.publish(Event::new(EventKind::AttemptStarting).with_task(format!("drain-{index}")));
@@ -359,7 +452,7 @@ async fn continuous_event_publication_cannot_extend_relay_shutdown() {
     let cfg = SupervisorConfig::default()
         .with_bus_capacity(NonZeroUsize::new(8).expect("the test bus is bounded"));
     let core = core_with_subs(cfg, vec![Arc::new(NoopSub)]);
-    core.start();
+    core.start().expect("runtime startup");
 
     let bus = core.bus.clone();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -412,7 +505,7 @@ async fn concurrent_start_waiters_return_only_after_runtime_is_ready() {
         threads.push(std::thread::spawn(move || {
             let _runtime = runtime.enter();
             ready.send(()).expect("test receiver is alive");
-            core.start();
+            core.start().expect("runtime startup");
             done.send(()).expect("test receiver is alive");
         }));
     }
@@ -493,12 +586,128 @@ async fn run_is_single_shot() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn concurrent_nonempty_run_is_rejected_before_second_ownership_admission() {
+    let core = core(SupervisorConfig::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let started_by_task = Arc::clone(&started);
+    let first_task: TaskRef = TaskFn::arc(move |ctx: TaskContext| {
+        let started = Arc::clone(&started_by_task);
+        async move {
+            started.notify_one();
+            ctx.cancelled().await;
+            Err(crate::TaskError::Canceled)
+        }
+    });
+    let first_core = Arc::clone(&core);
+    let first = tokio::spawn(async move {
+        first_core
+            .run(vec![TaskSpec::once("first-static-owner", first_task)])
+            .await
+    });
+    timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the first static owner must start");
+
+    let second_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second_runs_by_task = Arc::clone(&second_runs);
+    let second_task: TaskRef = TaskFn::arc(move |_ctx| {
+        second_runs_by_task.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    assert!(matches!(
+        core.run(vec![TaskSpec::once("second-static-owner", second_task)])
+            .await,
+        Err(RuntimeError::AlreadyRunning)
+    ));
+    assert_eq!(second_runs.load(Ordering::SeqCst), 0);
+
+    core.shutdown()
+        .await
+        .expect("the first static lifecycle must shut down cleanly");
+    assert!(matches!(
+        timeout(Duration::from_secs(2), first).await,
+        Ok(Ok(Ok(())))
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_dynamic_add_reports_lazy_drop_start_failure_and_exact_retry_succeeds() {
+    let injected = TestLazyDomain::fail_first_start_at_worker(4, 1);
+    let domain = injected.domain();
+    let core = core_with_domain(SupervisorConfig::default(), domain.clone());
+    core.start().expect("dynamic runtime startup");
+
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runs_by_task = Arc::clone(&runs);
+    let task: TaskRef = TaskFn::arc(move |_ctx| {
+        runs_by_task.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+
+    let error = core
+        .add_task(TaskSpec::once("lazy-dynamic-start", Arc::clone(&task)))
+        .await
+        .expect_err("the injected first destructor-domain start must fail");
+    assert_destructor_start_failure(error, 1);
+    assert!(!domain.is_started());
+    assert_eq!(injected.spawn_calls(), 2);
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert!(core.id_for_label("lazy-dynamic-start").await.is_none());
+
+    core.add_task(TaskSpec::once("lazy-dynamic-start", task))
+        .await
+        .expect("the same domain must start and admit the exact retry");
+    timeout(Duration::from_secs(2), core.registry.wait_until_empty())
+        .await
+        .expect("the retried task must reach terminal registry cleanup");
+    assert!(domain.is_started());
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    core.shutdown()
+        .await
+        .expect("the retried dynamic runtime must shut down cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn nonempty_static_lazy_drop_start_failure_does_not_consume_single_shot() {
+    let injected = TestLazyDomain::fail_first_start_at_worker(4, 1);
+    let domain = injected.domain();
+    let core = core_with_domain(SupervisorConfig::default(), domain.clone());
+
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runs_by_task = Arc::clone(&runs);
+    let task: TaskRef = TaskFn::arc(move |_ctx| {
+        runs_by_task.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+
+    let error = core
+        .run(vec![TaskSpec::once("lazy-static-start", Arc::clone(&task))])
+        .await
+        .expect_err("the injected first destructor-domain start must fail");
+    assert_destructor_start_failure(error, 1);
+    assert!(!domain.is_started());
+    assert_eq!(injected.spawn_calls(), 2);
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+    timeout(
+        Duration::from_secs(2),
+        core.run(vec![TaskSpec::once("lazy-static-start", task)]),
+    )
+    .await
+    .expect("the exact static retry must not hang")
+    .expect("pre-lifecycle drop startup failure must preserve the single shot");
+    assert!(domain.is_started());
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn shutdown_cancels_a_saturated_dynamic_ownership_wait() {
     let source = crate::core::deferred_drop::TestReservationSource::new(1);
     let held = source.try_reserve().expect("the test source has one slot");
     let core = core(SupervisorConfig::default());
     core.set_ownership_source_for_test(source);
-    core.start();
+    core.start().expect("runtime startup");
 
     let task = TaskFn::arc(|_ctx| async { Ok(()) });
     let mut add = Box::pin(core.add_task(TaskSpec::once("saturated-dynamic-add", task)));
@@ -540,7 +749,7 @@ async fn saturated_static_batch_fails_fast_without_consuming_run_lifecycle() {
         rejected,
         Err(RuntimeError::ResourceLimitReached {
             resource: crate::core::deferred_drop::OWNERSHIP_RESOURCE,
-            limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+            limit: 1,
         })
     ));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
@@ -637,7 +846,7 @@ async fn static_batch_that_cannot_fit_beside_subscribers_fails_without_waiting()
 async fn shutdown_panic_still_runs_cleanup_before_caching_result() {
     let (recorder, seen) = RecordingSub::new();
     let core = core_with_subs(SupervisorConfig::default(), vec![recorder]);
-    core.start();
+    core.start().expect("runtime startup");
 
     let result = core.join_shutdown(ShutdownTrigger::PanicForTest).await;
     assert!(
@@ -677,7 +886,7 @@ async fn listener_join_failures_mark_shutdown_unclean() {
         } else {
             core(SupervisorConfig::default())
         };
-        core.start();
+        core.start().expect("runtime startup");
         match listener {
             "registry" => core.registry.abort_listener_for_test(),
             "subscriber" => core.abort_subscriber_listener_for_test(),
@@ -700,7 +909,7 @@ async fn add_is_rejected_once_shutting_down() {
     use crate::{TaskContext, TaskFn, TaskRef};
 
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
 
     let early: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
@@ -768,7 +977,7 @@ async fn shutdown_fence_processes_committed_add_before_drain() {
         Err(RuntimeError::ShuttingDown)
     ));
 
-    core.start();
+    core.start().expect("runtime startup");
     assert!(matches!(
         timeout(Duration::from_secs(2), add_reply)
             .await
@@ -819,7 +1028,7 @@ async fn shutdown_fence_processes_whole_committed_batch_before_drain() {
 
     let mut shutdown = Box::pin(core.shutdown());
     assert_pending_once(shutdown.as_mut()).await;
-    core.start();
+    core.start().expect("runtime startup");
 
     assert!(matches!(
         timeout(Duration::from_secs(2), batch_reply)
@@ -877,7 +1086,7 @@ async fn committed_duplicate_batch_keeps_its_error_during_shutdown() {
 
     let mut shutdown = Box::pin(core.shutdown());
     assert_pending_once(shutdown.as_mut()).await;
-    core.start();
+    core.start().expect("runtime startup");
 
     let batch_result = timeout(
         Duration::from_secs(2),
@@ -956,7 +1165,7 @@ async fn backpressured_batch_loses_whole_admission_race_to_shutdown() {
     assert_pending_once(batch.as_mut()).await;
     let mut shutdown = Box::pin(core.shutdown());
     assert_pending_once(shutdown.as_mut()).await;
-    core.start();
+    core.start().expect("runtime startup");
 
     timeout(Duration::from_secs(2), shutdown)
         .await
@@ -1019,7 +1228,7 @@ async fn unpolled_backpressured_add_does_not_block_shutdown_fence() {
     assert_pending_once(shutdown.as_mut()).await;
     assert!(core.is_shutting_down());
 
-    core.start();
+    core.start().expect("runtime startup");
     timeout(Duration::from_secs(2), shutdown)
         .await
         .expect("the control fence must not wait for the backpressured Add")
@@ -1115,7 +1324,7 @@ async fn try_management_operations_wait_for_registry_decision_after_admission() 
         let mut request = Box::pin(operation.try_execute(&core, TaskId::next()));
         assert_pending_once(request.as_mut()).await;
 
-        core.start();
+        core.start().expect("runtime startup");
         assert!(
             !timeout(Duration::from_secs(2), request)
                 .await
@@ -1131,7 +1340,7 @@ async fn try_management_operations_wait_for_registry_decision_after_admission() 
 #[tokio::test(flavor = "current_thread")]
 async fn try_cancel_by_label_with_timeout_bounds_terminal_completion() {
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
 
     let controlled = controlled_cancellation_task();
     let id = core
@@ -1189,7 +1398,7 @@ async fn remove_by_label_orders_after_an_already_queued_add() {
 
     let mut remove = Box::pin(core.remove_by_label(Arc::from("ordered-label")));
     assert_pending_once(remove.as_mut()).await;
-    core.start();
+    core.start().expect("runtime startup");
 
     assert!(matches!(
         timeout(Duration::from_secs(2), add_reply)
@@ -1239,7 +1448,7 @@ async fn cancel_by_label_orders_after_an_already_queued_add() {
 
     let mut cancel = Box::pin(core.cancel_by_label(Arc::from("ordered-cancel-label")));
     assert_pending_once(cancel.as_mut()).await;
-    core.start();
+    core.start().expect("runtime startup");
 
     assert!(matches!(
         timeout(Duration::from_secs(2), add_reply)
@@ -1274,7 +1483,7 @@ async fn backpressured_remove_returns_shutting_down_without_request_event() {
     assert_pending_once(remove.as_mut()).await;
 
     core.runtime_token.cancel();
-    core.start();
+    core.start().expect("runtime startup");
     assert!(matches!(
         timeout(Duration::from_secs(2), remove)
             .await
@@ -1313,7 +1522,7 @@ async fn backpressured_add_returns_shutting_down_when_queue_closes() {
     assert_pending_once(add.as_mut()).await;
 
     core.runtime_token.cancel();
-    core.start();
+    core.start().expect("runtime startup");
     assert!(matches!(
         timeout(Duration::from_secs(2), add)
             .await
@@ -1377,7 +1586,7 @@ async fn try_add_waits_for_registry_decision_after_admission() {
     assert_pending_once(add.as_mut()).await;
     assert!(core.id_for_label("try-add-confirmed").await.is_none());
 
-    core.start();
+    core.start().expect("runtime startup");
     let id = timeout(Duration::from_secs(2), add)
         .await
         .expect("try_add must resolve after the registry processes its command")
@@ -1396,7 +1605,7 @@ async fn try_add_watched_returns_waiter_after_registry_admission() {
     let mut add = Box::pin(core.try_add_task_watched(TaskSpec::once("try-add-watched", task)));
     assert_pending_once(add.as_mut()).await;
 
-    core.start();
+    core.start().expect("runtime startup");
     let (_id, outcome) = timeout(Duration::from_secs(2), add)
         .await
         .expect("try_add_and_watch must resolve after registry processing")
@@ -1477,7 +1686,7 @@ async fn dropping_add_after_enqueue_does_not_roll_command_back() {
     .expect("the add must cross its documented command-acceptance boundary");
     drop(add);
 
-    core.start();
+    core.start().expect("runtime startup");
     timeout(Duration::from_secs(2), started_rx)
         .await
         .expect("the queued task must start after its caller is dropped")
@@ -1635,7 +1844,7 @@ async fn closed_command_queue_returns_shutting_down_and_watcher() {
     use crate::{TaskContext, TaskFn, TaskOutcome, TaskRef};
 
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
     core.runtime_token.cancel();
     timeout(Duration::from_secs(2), core.registry.join_listener())
         .await
@@ -1735,7 +1944,7 @@ async fn controller_completion_waits_for_registry_membership_cleanup() {
     use crate::{TaskContext, TaskFn, TaskRef};
 
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
     let id = TaskId::next();
     let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (reply, completion) = core
@@ -1767,7 +1976,7 @@ async fn controller_completion_waits_for_registry_membership_cleanup() {
 #[tokio::test]
 async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
     let mut rx = core.bus.subscribe();
 
     let err = std::io::Error::other("signal registration failed");
@@ -1795,7 +2004,7 @@ async fn signal_setup_error_surfaces_as_runtime_error_not_shutdown() {
 #[tokio::test(start_paused = true)]
 async fn signal_setup_error_bounds_a_preexisting_removal_reporter() {
     let core = core(SupervisorConfig::default().with_grace(Duration::from_secs(60)));
-    core.start();
+    core.start().expect("runtime startup");
 
     let controlled = controlled_cancellation_task();
     let id = core
@@ -1860,7 +2069,7 @@ async fn signal_setup_error_keeps_custom_source_for_late_callers() {
     }
 
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
     let original = std::io::Error::new(std::io::ErrorKind::PermissionDenied, Marker);
 
     let first = signal_setup_source(
@@ -1882,7 +2091,7 @@ async fn signal_setup_error_keeps_custom_source_for_late_callers() {
 #[tokio::test]
 async fn signal_setup_error_keeps_raw_os_code_for_late_callers() {
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
     let original = std::io::Error::from_raw_os_error(2);
 
     let first = signal_setup_source(
@@ -1897,7 +2106,7 @@ async fn signal_setup_error_keeps_raw_os_code_for_late_callers() {
 #[tokio::test]
 async fn real_signal_publishes_shutdown_requested() {
     let core = core(SupervisorConfig::default());
-    core.start();
+    core.start().expect("runtime startup");
     let mut rx = core.bus.subscribe();
 
     let out = core.join_shutdown(ShutdownTrigger::Requested).await;
@@ -1918,7 +2127,7 @@ async fn cancel_uses_registry_completion_when_event_bus_lags() {
 
     let cfg = SupervisorConfig::default().with_bus_capacity(NonZeroUsize::new(1).unwrap());
     let core = core(cfg);
-    core.start();
+    core.start().expect("runtime startup");
 
     let controlled = controlled_cancellation_task();
     let id = core

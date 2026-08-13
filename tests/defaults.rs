@@ -26,7 +26,7 @@ async fn dynamic_add_applies_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
 
     let (_, waiter) = handle
         .add_and_watch(TaskSpec::once("dynamic-default-timeout", pending()))
@@ -57,7 +57,7 @@ async fn fully_inherited_spec_uses_default_restart_policy() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(defaults)
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let (_, waiter) = handle
         .add_and_watch(TaskSpec::from_defaults("fully-inherited", task))
         .await
@@ -90,7 +90,7 @@ async fn explicit_none_disables_inherited_timeout() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(timeout_defaults())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let (release, released) = tokio::sync::oneshot::channel::<()>();
     let released = Arc::new(std::sync::Mutex::new(Some(released)));
     let task = TaskFn::arc(move |_ctx: TaskContext| {
@@ -143,7 +143,7 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(defaults.clone())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let (_, waiter) = handle
         .add_and_watch(TaskSpec::restartable("inherited-retry-limit", limited))
         .await
@@ -170,7 +170,7 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_task_defaults(defaults)
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let (_, waiter) = handle
         .add_and_watch(
             TaskSpec::restartable("explicit-unlimited", succeeds_on_third).with_max_retries(None),
@@ -192,7 +192,7 @@ async fn controller_admission_applies_inherited_timeout() {
         .with_task_defaults(timeout_defaults())
         .with_controller(ControllerConfig::default())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
 
     let (_, waiter) = handle
         .submit_and_watch(ControllerSpec::queue(TaskSpec::once(

@@ -1,65 +1,108 @@
-//! The [`Task`] contract and shared task types.
+//! Defines the executable side of a supervised task.
+//!
+//! [`Task`] is a factory for attempt futures. Application code usually creates
+//! one with [`TaskFn`](crate::TaskFn), or implements the trait for a named type.
+//! [`TaskRef`] erases that concrete type for [`TaskSpec`](crate::TaskSpec).
+//! After admission, Taskvisor calls [`Task::spawn`] once for each attempt and
+//! polls the returned [`BoxTaskFuture`].
+//!
+//! ```text
+//! application task ──► TaskRef ──► TaskSpec ──► registry admission
+//!                                                    ▼
+//!                                                TaskActor
+//!                                                    ▼
+//!                                                run_once
+//!                                                    ▼
+//!                         Task::spawn(TaskContext) ──► BoxTaskFuture
+//! ```
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::error::TaskError;
 use crate::tasks::TaskContext;
 
-/// Boxed `Send` future returned by [`Task::spawn`].
+/// Type-erased future for one task attempt.
+///
+/// [`Task::spawn`] returns this future for the attempt runner to poll.
 pub type BoxTaskFuture = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
-/// Shared task handle (`Arc<dyn Task>`).
+/// Shared, type-erased [`Task`] handle used by [`TaskSpec`](crate::TaskSpec).
 pub type TaskRef = Arc<dyn Task>;
 
-/// Async work managed by a [`Supervisor`](crate::Supervisor).
-/// > Use [`TaskFn`](crate::TaskFn) unless you need a custom task type.
+/// A factory for supervised attempt futures.
 ///
 /// Task identity belongs to [`TaskSpec`](crate::TaskSpec), not to the executable
-/// task object. The same [`TaskRef`] may therefore be reused under independently
-/// owned specification names.
+/// object. The same [`TaskRef`] can be registered through different specs.
+/// Separate registrations may call [`spawn`](Task::spawn) concurrently on that
+/// shared object.
 ///
-/// ## Attempt Contract
+/// # Attempt contract
 ///
-/// The supervisor calls [`spawn`](Task::spawn) once for every attempt.
-/// > `spawn` **must return a new future on every call**.
-///
-/// The same task object is reused for every attempt.
-/// State stored in its fields can therefore survive retries.
-/// Each returned future is attempt-local; its local values do not carry over to the next attempt.
+/// The actor reuses the task object. Its attempt runner calls
+/// [`spawn`](Task::spawn) once per attempt. Each call must return a new future.
+/// Fields in the task object may keep state across retries; values owned by the
+/// returned future belong only to that attempt.
 ///
 /// ```text
-/// spawn(ctx) -> attempt 1 -> retry delay -> spawn(ctx) -> attempt 2
+/// Task object
+///      ├── spawn(ctx) ──► attempt 1
+///      └── later spawn(ctx) ──► attempt 2
 /// ```
 ///
-/// ## Cancellation
+/// # Implementing a named task
 ///
-/// Long-running tasks should listen to [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`].
-/// Return [`TaskError::Canceled`] when the task stops for that reason.
-/// > **This is a normal stop and is never retried.**
+/// ```rust
+/// use taskvisor::{BoxTaskFuture, Task, TaskContext, TaskError};
 ///
-/// Short tasks may ignore cancellation if they finish quickly.
-/// During shutdown, a task that does not stop before the grace period is aborted.
-/// Dropping its future does not rollback external side effects.
+/// struct Worker;
 ///
-/// | Result                  | Meaning           | Can restart?                                                      |
-/// |-------------------------|-------------------|-------------------------------------------------------------------|
-/// | `Ok(())`                | Attempt succeeded | Only with [`RestartPolicy::Always`](crate::RestartPolicy::Always) |
-/// | [`TaskError::Fail`]     | Retryable failure | If policy and retry limit allow it                                |
-/// | [`TaskError::Timeout`]  | Attempt timed out | If policy and retry limit allow it                                |
-/// | [`TaskError::Canceled`] | Cooperative stop  | No                                                                |
-/// | [`TaskError::Fatal`]    | Permanent failure | No                                                                |
+/// impl Task for Worker {
+///     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture {
+///         Box::pin(async move {
+///             ctx.cancelled().await;
+///             Err(TaskError::Canceled)
+///         })
+///     }
+/// }
+/// ```
 ///
-/// A panic in `spawn` or in the returned future is caught and treated as a retryable failure.
-/// > **Do not use panic for normal error handling.**
+/// # Cancellation
 ///
-/// ## See Also
+/// Long-running tasks must observe [`TaskContext`] and return
+/// [`TaskError::Canceled`] after a cooperative stop. Cancellation is never
+/// retried. A task that does not stop within the removal or shutdown grace
+/// window may be aborted. Timeout drops the future inside the attempt runner.
+/// Abort asks Tokio to drop it after the current poll returns. Neither action
+/// rolls back external side effects or interrupts synchronous code inside a poll.
 ///
-/// - For the closure-based implementation and a shared-state example, see [`TaskFn`](crate::TaskFn).
-/// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
+/// Taskvisor drops every attempt future synchronously on its Tokio worker. Keep
+/// destructors for future-owned values short and non-blocking. A blocking
+/// destructor delays attempt release and holds any concurrency permit until it
+/// returns.
+///
+/// # Attempt results
+///
+/// | Result                  | Actor decision                                      |
+/// |-------------------------|-----------------------------------------------------|
+/// | `Ok(())`                | Repeat only under `RestartPolicy::Always`           |
+/// | [`TaskError::Fail`]     | Retry when policy and retry limit allow it          |
+/// | [`TaskError::Timeout`]  | Retry when policy and retry limit allow it          |
+/// | [`TaskError::Canceled`] | Stop                                                 |
+/// | [`TaskError::Fatal`]    | Stop                                                 |
+///
+/// A primary panic while creating or polling the future is classified as
+/// [`TaskError::Fail`]. A cleanup panic while dropping user-owned attempt data
+/// stops normal retry handling. Do not use panic for expected failures.
+///
+/// # See also
+///
+/// - [`TaskFn`](crate::TaskFn) adapts an async closure.
+/// - [`TaskSpec`](crate::TaskSpec) adds identity and execution settings.
 pub trait Task: Send + Sync + 'static {
-    /// Creates a new future for one attempt.
+    /// Creates a fresh future for one attempt.
     ///
-    /// Each call must return a fresh future.
-    /// Use `ctx` to stop cooperatively.
+    /// This method runs synchronously before the attempt timeout starts. Return
+    /// the future quickly and perform task work inside it. Use `ctx` inside the
+    /// future for cooperative cancellation.
     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture;
 }

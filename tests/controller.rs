@@ -18,7 +18,7 @@ fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventColle
         .with_subscribers(collector_subscribers(&collector))
         .with_controller(cfg)
         .build();
-    (sup.serve(), collector)
+    (sup.serve().expect("runtime startup"), collector)
 }
 
 async fn submit_running(handle: &SupervisorHandle, spec: ControllerSpec) -> TaskId {
@@ -485,7 +485,7 @@ async fn submit_without_controller_is_consistent_across_construction_paths() {
 
     with_timeout(5, async {
         for (constructor, supervisor, spec) in cases {
-            let handle = supervisor.serve();
+            let handle = supervisor.serve().expect("runtime startup");
 
             assert!(
                 matches!(
@@ -606,7 +606,7 @@ async fn slot_waits_for_force_reaped_owner_before_starting_different_label() {
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
             .with_controller(ControllerConfig::default())
             .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let release = Arc::new(AtomicBool::new(false));
     let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let started = Arc::new(Notify::new());
@@ -682,7 +682,7 @@ async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
             .with_controller(ControllerConfig::default())
             .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let release = Arc::new(AtomicBool::new(false));
     let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let started = Arc::new(Notify::new());
@@ -1065,7 +1065,7 @@ async fn natural_run_joins_controller_before_return() {
             .await
             .expect("empty run must finish cleanly");
 
-        let handle = sup.serve();
+        let handle = sup.serve().expect("runtime startup");
         let result = handle.try_submit(ControllerSpec::queue(TaskSpec::once(
             "after-natural-shutdown",
             make_ok_once(),
@@ -1089,7 +1089,7 @@ async fn rejected_static_batch_keeps_controller_running() {
             Err(RuntimeError::TaskAlreadyExists { .. })
         ));
 
-        let handle = sup.serve();
+        let handle = sup.serve().expect("runtime startup");
         let (_id, waiter) = handle
             .submit_and_watch(ControllerSpec::queue(TaskSpec::once(
                 "after-rejected-static-batch",

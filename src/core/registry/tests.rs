@@ -1,3 +1,5 @@
+//! White-box checks for registry ordering and ownership boundaries.
+
 use super::*;
 use crate::{
     RuntimeError, TaskOutcome, TaskSpec,
@@ -6,9 +8,10 @@ use crate::{
         deferred_drop::{DropBundle, OwnedTask, isolated_test_reservation, test_reservation},
     },
     events::{Event, EventKind},
+    identity::TaskId,
     reasons,
 };
-use std::{future::Future, pin::Pin, task::Poll};
+use std::{future::Future, pin::Pin, sync::atomic::Ordering, task::Poll};
 use tokio::sync::oneshot;
 
 struct RegistryNameProbe;
@@ -1776,7 +1779,6 @@ async fn hostile_outer_panic_payload_destructor_cannot_block_scheduler() {
 
     let mut handle = Box::pin(handle);
     assert_pending_once(handle.as_mut()).await;
-    // Release even on regression so a failing test cannot strand a worker.
     release.store(true, Ordering::Release);
     let joined = tokio::time::timeout(Duration::from_secs(1), handle)
         .await
@@ -1830,10 +1832,7 @@ async fn scheduler_join_is_bounded_while_reaper_keeps_attempt_ownership() {
     );
     scheduler.attempt_reaper().attach_terminal(
         reaped_id,
-        deferred_drop::reserve()
-            .await
-            .expect("test ownership reservation")
-            .bundle(retained_task),
+        deferred_drop::isolated_test_reservation().bundle(retained_task),
         None,
         physical_release.clone(),
     );
@@ -1860,8 +1859,6 @@ async fn scheduler_join_is_bounded_while_reaper_keeps_attempt_ownership() {
     .expect("reaper must eventually join the released attempt");
     assert!(physical_release.is_physical_complete());
 
-    // The first bounded join retained the coordinator handle. A later join can
-    // observe and collect its clean completion without spawning another task.
     assert!(scheduler.join().await);
 }
 
@@ -2639,9 +2636,6 @@ async fn completion_flood_cannot_starve_management_ingress() {
         );
     }
 
-    // No await occurs while filling either channel, so the current-thread
-    // listener first observes both as ready. The marker sits far enough behind
-    // the bounded burst to distinguish command progress from a full drain.
     for _ in 0..COMPLETION_BURST_LIMIT * 64 {
         registry
             .listener
@@ -2673,8 +2667,6 @@ async fn completion_flood_cannot_starve_management_ingress() {
     );
     drop(state);
 
-    // Resolve the defensive marker handle so its eventual early-completion
-    // reporter can finish and shutdown can drain cleanly.
     drop(marker_actor);
     stop_registry(&registry, &token).await;
 }

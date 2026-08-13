@@ -1,18 +1,10 @@
-//! # Panic boundary for internal async operations
+//! Contains panics from internal asynchronous operations.
 //!
-//! [`guarded`] catches a panic while an internal future is polled.
-//!
-//! ## What This Guard Does
-//!
-//! It catches panics while polling the future and returns the panic text as `Err(message)`.
-//!
-//! ## What This Guard Does Not Do
-//!
-//! It does not repair partially changed state or restart a loop.
-//! User task bodies use a separate panic boundary in the attempt runner.
-//!
-//! Listener callers can report the panic and continue the loop.
-//! Shutdown callers report it and continue later cleanup phases.
+//! [`guarded`] catches panics while polling or destroying a future and returns
+//! readable panic text. Registry, controller, and shutdown loops use this
+//! boundary to report one failed work unit and continue their own recovery.
+//! It does not roll back state. User task attempts use the separate boundary in
+//! the attempt runner.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -25,6 +17,7 @@ struct Guarded<F: Future> {
 }
 
 impl<F: Future> Guarded<F> {
+    /// Pins a future inside its panic boundary.
     fn new(future: F) -> Self {
         Self {
             future: Some(Box::pin(future)),
@@ -44,6 +37,7 @@ impl<F: Future> Guarded<F> {
         }
     }
 
+    /// Destroys an output value without letting its panic escape.
     fn dispose_value<T>(value: T) {
         if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(value))) {
             dispose_panic_payload(payload);
@@ -94,17 +88,12 @@ impl<F: Future> Drop for Guarded<F> {
     }
 }
 
-/// Runs `fut` behind a panic boundary.
-///
-/// Returns:
-/// - `Ok(output)` when the future completes normally,
-/// - `Err(message)` when polling or destroying the future panics.
-///
-/// Boxing keeps pinning safe without custom unsafe projection.
+/// Returns a future that converts polling and cleanup panics into error text.
 pub(crate) fn guarded<F: Future>(fut: F) -> impl Future<Output = Result<F::Output, String>> {
     Guarded::new(fut)
 }
 
+/// Destroys a panic payload without allowing a nested panic to escape.
 fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
         // A second destructor attempt cannot be made safely. Retaining this one

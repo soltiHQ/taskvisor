@@ -1,26 +1,31 @@
-//! # Bridge to `tracing`
+//! Implements the `tracing` feature's structured event endpoint.
 //!
-//! [`TracingBridge`] converts every event it receives into one structured [`tracing`] event.
+//! [`TracingBridge`] and [`TracingBridgeWithReasons`] are [`Subscribe`]
+//! implementations at the end of the best-effort observability path.
 //!
-//! Each tracing event uses target `taskvisor` and contains:
-//! - a level based on the event severity (see [`TracingBridge`]),
-//! - structured fields: `event` (the stable label), `event_seq`, `event_unix_ms`, and these optional
-//!   payload fields when set: `task_name`, `taskvisor_id`, `subscriber`, `component`, `slot`, `attempt`,
-//!   `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, `exit_code`,
-//!   `backoff_source`.
-//!
-//! Unset optional fields are not recorded.
-//! Free-form [`Event::reason`] text is omitted by default.
-//! Use [`TracingBridge::with_reasons`] to include it.
-//!
-//! ## Example
-//! ```rust,no_run
-//! use std::sync::Arc;
-//! use taskvisor::{Subscribe, Supervisor, SupervisorConfig, TracingBridge};
-//!
-//! let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
-//! let sup = Supervisor::new(SupervisorConfig::default(), subs);
+//! ```text
+//! event relay ──► subscriber queue ──► TracingBridge ──► tracing dispatcher
 //! ```
+//!
+//! Each callback emits one `tracing` event with target `taskvisor`. The
+//! `event` field contains [`EventKind::as_label`], and `event_seq` preserves
+//! the Taskvisor sequence. `event_unix_ms` is set when the timestamp is at or
+//! after the Unix epoch. Set payload fields use these names:
+//!
+//! - identity and context: `taskvisor_id`, `task_name`, `subscriber`,
+//!   `component`, and `slot`;
+//! - lifecycle data: `attempt`, `backoff_source`, `outcome_kind`,
+//!   `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`,
+//!   and `exit_code`.
+//!
+//! Free-form [`Event::reason`] text is excluded by default. Applications can
+//! opt in through [`TracingBridge::with_reasons`].
+//!
+//! Longer task, subscriber, component, and slot names keep their first 4096
+//! characters and add a truncation marker.
+//!
+//! The bridge emits into the active `tracing` dispatcher. It does not install a
+//! tracing subscriber or choose application filters.
 
 use std::{borrow::Cow, time::UNIX_EPOCH};
 use tracing::Level;
@@ -41,41 +46,50 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
     Cow::Owned(value)
 }
 
-/// Sends runtime events to [`tracing`] as structured events.
+/// Sends runtime events to `tracing` without free-form reason text.
 ///
-/// Level mapping:
+/// Register this value with Taskvisor, then configure a `tracing` subscriber in
+/// the application. Filter on target `taskvisor` and the stable `event` field.
+/// Other typed labels are suitable for structured filtering and metrics.
+///
+/// Event kinds map to tracing levels as follows:
+///
 /// - `ERROR`: runtime failures, subscriber panics, and fatal or panicked final outcomes.
-/// - `WARN`:  failed or force-aborted final outcomes, grace exceeded, overflow, and admission failures.
-/// - `INFO`:  completed or canceled final outcomes and shutdown milestones.
-/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, and expected rejections.
+/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry;
+///   overflow; and `AdmissionFailed` or unclassified rejections.
+/// - `INFO`: completed or canceled outcomes and shutdown milestones.
+/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal,
+///   controller submissions, and all other typed rejections.
 /// - `TRACE`: attempt transitions, management requests, and controller slot transitions.
 ///
-/// Free-form reasons are omitted by default.
-/// Use [`Self::with_reasons`] to include them.
+/// # Examples
 ///
-/// ## Also
+/// ```rust,no_run
+/// use std::sync::Arc;
+/// use taskvisor::{Subscribe, Supervisor, SupervisorConfig, TracingBridge};
 ///
-/// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
-/// - See [`EventKind::as_label`] for the stable `event` field values.
+/// let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
+/// let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
+/// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 #[derive(Default)]
 pub struct TracingBridge;
 
 impl TracingBridge {
-    /// Creates a bridge that includes free-form [`Event::reason`] text.
+    /// Creates a tracing subscriber that includes [`Event::reason`].
     ///
-    /// Task code and runtime errors can provide the reason text.
-    /// The application decides whether that text is allowed at its log destination.
-    /// Free-form values are truncated after 4096 characters.
+    /// Task code and runtime errors can supply this free-form text. Longer
+    /// reasons keep their first 4096 characters and add a truncation marker.
     #[must_use]
     pub const fn with_reasons() -> TracingBridgeWithReasons {
         TracingBridgeWithReasons
     }
 }
 
-/// A [`TracingBridge`] that includes free-form [`Event::reason`] text.
+/// Sends runtime events to `tracing` and includes free-form reason text.
 ///
-/// Create it with [`TracingBridge::with_reasons`].
+/// Create this variant with [`TracingBridge::with_reasons`]. It otherwise uses
+/// the same fields and level mapping as [`TracingBridge`].
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 #[derive(Default)]
 pub struct TracingBridgeWithReasons;
@@ -87,7 +101,7 @@ fn rejection_level(kind: Option<RejectionKind>) -> Level {
     }
 }
 
-/// Maps an event to a tracing level.
+/// Returns the tracing level assigned to an event.
 fn level_for(e: &Event) -> Level {
     match e.kind {
         EventKind::SubscriberPanicked | EventKind::RuntimeFailure => Level::ERROR,

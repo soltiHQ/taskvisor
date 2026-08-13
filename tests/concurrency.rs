@@ -22,6 +22,7 @@ fn served(grace_secs: u64, max_concurrent: usize) -> SupervisorHandle {
     )
     .build()
     .serve()
+    .expect("runtime startup")
 }
 
 fn tracked_coop(
@@ -114,7 +115,8 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
             .with_max_concurrent(NonZeroUsize::new(1)),
     )
     .build()
-    .serve();
+    .serve()
+    .expect("runtime startup");
 
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
@@ -179,7 +181,8 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
             .with_max_concurrent(NonZeroUsize::new(2)),
     )
     .build()
-    .serve();
+    .serve()
+    .expect("runtime startup");
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
@@ -258,7 +261,8 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
             .with_max_registered_tasks(NonZeroUsize::new(1)),
     )
     .build()
-    .serve();
+    .serve()
+    .expect("runtime startup");
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
@@ -319,7 +323,8 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
             .with_max_concurrent(NonZeroUsize::new(1)),
     )
     .build()
-    .serve();
+    .serve()
+    .expect("runtime startup");
 
     let release = Arc::new(AtomicBool::new(false));
     let drop_started = Arc::new(Notify::new());
@@ -747,7 +752,8 @@ async fn controller_many_distinct_slots_all_settle() {
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
             .with_controller(ControllerConfig::default())
             .build()
-            .serve();
+            .serve()
+            .expect("runtime startup");
     const S: usize = 128;
     with_timeout(40, async {
         let mut joins = Vec::new();
@@ -789,7 +795,8 @@ async fn controller_replace_storm_single_slot_one_alive() {
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
             .with_controller(ControllerConfig::default())
             .build()
-            .serve();
+            .serve()
+            .expect("runtime startup");
     const K: usize = 50;
     with_timeout(40, async {
         let mut joins = Vec::new();
@@ -859,7 +866,8 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
             .with_subscribers(subs)
             .with_controller(ControllerConfig::default())
             .build()
-            .serve();
+            .serve()
+            .expect("runtime startup");
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let starts = Arc::new(AtomicUsize::new(0));

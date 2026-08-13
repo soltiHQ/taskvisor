@@ -27,7 +27,7 @@ use tokio::sync::Notify;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     // 1) A one-shot job that succeeds -> Completed.
     println!("=== Completed ===");

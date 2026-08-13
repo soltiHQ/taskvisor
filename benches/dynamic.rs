@@ -92,7 +92,7 @@ fn bench_add(c: &mut Criterion) {
                 let rt = rt_fn();
                 rt.block_on(async {
                     let sup = Supervisor::new(bench_config(), vec![]);
-                    let handle = sup.serve();
+                    let handle = sup.serve().expect("runtime startup");
 
                     let mut total = Duration::ZERO;
                     for i in 0..iters {
@@ -124,7 +124,7 @@ fn bench_add_cancel(c: &mut Criterion) {
                 let rt = rt_fn();
                 rt.block_on(async {
                     let sup = Supervisor::new(bench_config(), vec![]);
-                    let handle = sup.serve();
+                    let handle = sup.serve().expect("runtime startup");
 
                     let mut total = Duration::ZERO;
                     for i in 0..iters {
@@ -162,7 +162,7 @@ fn bench_list(c: &mut Criterion) {
                         let rt = rt_fn();
                         rt.block_on(async {
                             let sup = Supervisor::new(bench_config(), vec![]);
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
 
                             for i in 0..n {
                                 handle.add(worker_task(&format!("w-{i}"))).await.unwrap();
@@ -201,7 +201,7 @@ fn bench_churn(c: &mut Criterion) {
                         let rt = rt_fn();
                         total += rt.block_on(async {
                             let sup = Supervisor::new(bench_config(), vec![]);
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
 
                             let start = std::time::Instant::now();
                             for i in 0..n {

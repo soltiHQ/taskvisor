@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_controller(ControllerConfig::default())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     println!("Slot 'deploy' admits at most one task at a time.\n");
 

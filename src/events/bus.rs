@@ -1,9 +1,26 @@
-//! # Internal event ingress
+//! Buffers runtime events before subscriber fan-out.
 //!
-//! Runtime components publish [`Event`] values into one bounded, non-blocking
-//! newest-retaining ring. The single event relay owns the consumer and fans
-//! events out to subscriber queues. Events are observability only: overflow is
-//! coalesced and never used for lifecycle correctness.
+//! Runtime components share a cloneable [`Bus`] publisher. One
+//! [`BusReceiver`] belongs to the runtime event relay.
+//!
+//! ```text
+//! registry, actors, controller, shutdown
+//!                  │ Event
+//!                  ▼
+//!        Bus ──► bounded newest-retaining ring
+//!                  │ one BusReceiver
+//!                  ▼
+//!          runtime event relay ──► subscriber queues
+//! ```
+//!
+//! Publishing does not wait for free capacity. A full ring removes its oldest
+//! event and counts the loss. The receiver gets that count with the next
+//! retained event. This lets the relay emit one overflow diagnostic before it
+//! continues normal delivery.
+//!
+//! The bus stays disabled when the runtime has no event consumer. When the
+//! relay shuts down, it closes publication and transfers retained values out
+//! of the ring lock. Events never control runtime state.
 
 use std::{
     collections::VecDeque,
@@ -28,10 +45,9 @@ struct RingState {
 }
 
 impl RingState {
-    /// Retains `event` and transfers any displaced event to the caller.
+    /// Retains the new event and returns the oldest event when the ring is full.
     ///
-    /// Returning the displaced value is important: callers can release its
-    /// payload only after they have dropped the ring mutex guard.
+    /// The caller drops the displaced payload after releasing the ring lock.
     fn push_retaining_newest(&mut self, event: Event, capacity: usize) -> (Option<Event>, bool) {
         let was_empty = self.events.is_empty();
         let displaced = if self.events.len() == capacity {
@@ -53,13 +69,12 @@ struct Shared {
     receiver_taken: AtomicBool,
     #[cfg(test)]
     receiver_notifications: std::sync::atomic::AtomicU64,
-    /// Unit tests observe internal events without changing the production
-    /// single-consumer architecture.
+    /// Test-only observers outside the production single-consumer path.
     #[cfg(test)]
     observers: broadcast::Sender<Arc<Event>>,
 }
 
-/// Cloneable publisher for the bounded event ring.
+/// Cloneable synchronous publisher for the internal event ring.
 #[derive(Clone)]
 pub(crate) struct Bus {
     shared: Arc<Shared>,
@@ -82,15 +97,17 @@ impl fmt::Debug for Bus {
     }
 }
 
-/// Exclusive consumer owned by the runtime event relay.
+/// The event relay's exclusive production consumer.
 pub(crate) struct BusReceiver {
     shared: Arc<Shared>,
 }
 
+/// One event-ring receive result.
 #[derive(Debug)]
 pub(crate) enum BusMessage {
+    /// One retained event with no unreported ring loss before it.
     Event(Event),
-    /// One retained event plus the number of older events displaced before it.
+    /// One retained event and the number of older events displaced before it.
     ///
     /// Carrying both values atomically prevents a continuous publisher from
     /// making every receiver turn report lag without ever advancing the ring.
@@ -100,12 +117,15 @@ pub(crate) enum BusMessage {
     },
 }
 
+/// Non-blocking event-ring receive failure.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TryRecvError {
+    /// The ring has no retained event.
     Empty,
 }
 
 impl BusReceiver {
+    /// Returns the ring's logical event capacity.
     pub(crate) fn retained_capacity(&self) -> usize {
         self.shared.capacity
     }
@@ -125,6 +145,7 @@ impl BusReceiver {
         }
     }
 
+    /// Waits for the next retained event and any coalesced loss count.
     pub(crate) async fn recv(&mut self) -> BusMessage {
         loop {
             let notified = self.shared.available.notified();
@@ -137,11 +158,12 @@ impl BusReceiver {
         }
     }
 
+    /// Takes the next retained event without waiting.
     pub(crate) fn try_recv(&mut self) -> Result<BusMessage, TryRecvError> {
         self.try_message()
     }
 
-    /// Atomically closes publication and extracts all retained ingress state.
+    /// Closes publication and takes all retained events and the pending loss count.
     ///
     /// The returned events are owned by the caller so their destructors run
     /// after the ring mutex has been released.
@@ -161,7 +183,7 @@ impl BusReceiver {
 }
 
 impl Bus {
-    /// Creates one bounded event ingress. Zero is normalized to one.
+    /// Creates a disabled event ring with at least one retained slot.
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         #[cfg(test)]
@@ -188,7 +210,9 @@ impl Bus {
         }
     }
 
-    /// Publishes without waiting, retaining the newest `capacity` events.
+    /// Publishes without waiting while retention is enabled.
+    ///
+    /// A disabled or closed bus ignores the event.
     #[cfg(test)]
     pub fn publish(&self, event: Event) {
         if !self.shared.enabled.load(Ordering::Acquire) {
@@ -197,7 +221,9 @@ impl Bus {
         self.publish_enabled(event);
     }
 
-    /// Constructs and publishes an event only when delivery is enabled.
+    /// Skips event construction when delivery is already disabled.
+    ///
+    /// A concurrent relay shutdown may still discard the constructed event.
     pub(crate) fn publish_lazy(&self, make_event: impl FnOnce() -> Event) {
         if !self.shared.enabled.load(Ordering::Acquire) {
             return;
@@ -242,7 +268,7 @@ impl Bus {
         }
     }
 
-    /// Enables event retention when at least one downstream consumer exists.
+    /// Enables retention after a downstream consumer is configured.
     pub(crate) fn enable(&self) {
         let state = self
             .shared
@@ -254,12 +280,16 @@ impl Bus {
         }
     }
 
-    /// Returns whether runtime event delivery has a downstream consumer.
+    /// Returns whether event retention is enabled.
     pub(crate) fn is_enabled(&self) -> bool {
         self.shared.enabled.load(Ordering::Acquire)
     }
 
-    /// Transfers the single production consumer to the event relay.
+    /// Enables retention and transfers the only production receiver to the relay.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the production receiver was already taken.
     pub(crate) fn take_receiver(&self) -> BusReceiver {
         self.enable();
         assert!(
@@ -271,7 +301,7 @@ impl Bus {
         }
     }
 
-    /// Adds a test-only observer without changing production fan-out.
+    /// Enables retention and adds a test-only observer outside production fan-out.
     #[cfg(test)]
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
         self.enable();

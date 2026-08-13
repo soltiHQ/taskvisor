@@ -152,7 +152,7 @@ pub fn supervisor_with_collector(
 
 pub fn served_with_collector(config: SupervisorConfig) -> (SupervisorHandle, Arc<EventCollector>) {
     let (supervisor, collector) = supervisor_with_collector(config);
-    (supervisor.serve(), collector)
+    (supervisor.serve().expect("runtime startup"), collector)
 }
 
 pub async fn poll_until<F, Fut>(within: Duration, mut cond: F) -> bool

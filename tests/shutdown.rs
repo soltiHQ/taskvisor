@@ -240,7 +240,7 @@ async fn subscriber_deadline_bounds_explicit_shutdown() {
         .with_subscriber_shutdown_timeout(Duration::from_millis(50))
         .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
 
     let add_result = handle
         .add(TaskSpec::restartable("subscriber-deadline", make_coop()))
@@ -445,7 +445,7 @@ async fn concurrent_shutdown_waiters_share_subscriber_drain() {
             .with_subscriber_shutdown_timeout(Duration::from_secs(5))
             .with_subscribers(vec![subscriber as Arc<dyn Subscribe>])
             .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     handle
         .add(TaskSpec::restartable(
             "shared-subscriber-drain",
@@ -639,7 +639,7 @@ async fn run_and_handle_shutdown_share_one_operation() {
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
             .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
             .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -687,7 +687,7 @@ async fn run_joins_shutdown_that_started_first() {
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_secs(5)))
             .with_subscribers(vec![collector.clone() as Arc<dyn Subscribe>])
             .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());

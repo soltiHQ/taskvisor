@@ -43,15 +43,12 @@ fn build_with_controller_is_safe_outside_tokio() {
 #[test]
 fn failed_serve_outside_tokio_does_not_poison_start() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
-        let supervisor = Arc::clone(&supervisor);
-        move || {
-            let _ = supervisor.serve();
-        }
-    }));
     assert!(
-        attempted.is_err(),
-        "serve outside Tokio must fail explicitly"
+        matches!(
+            supervisor.serve(),
+            Err(RuntimeError::TokioRuntimeUnavailable)
+        ),
+        "serve outside Tokio must return its typed startup error"
     );
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -59,7 +56,9 @@ fn failed_serve_outside_tokio_does_not_poison_start() {
         .build()
         .expect("test runtime");
     runtime.block_on(async {
-        let handle = supervisor.serve();
+        let handle = supervisor
+            .serve()
+            .expect("retry inside Tokio must start the runtime");
         handle
             .shutdown()
             .await
@@ -75,7 +74,7 @@ fn dropping_last_public_owners_after_tokio_runtime_destruction_does_not_panic() 
         .build()
         .expect("test runtime");
     let handle = runtime.block_on(async {
-        let handle = supervisor.serve();
+        let handle = supervisor.serve().expect("runtime startup");
         let task = TaskFn::arc(|_ctx| async {
             std::future::pending::<()>().await;
             Ok(())
@@ -101,7 +100,7 @@ fn dropping_last_public_owners_after_tokio_runtime_destruction_does_not_panic() 
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_one_public_owner_keeps_other_owners_alive() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let first = supervisor.serve();
+    let first = supervisor.serve().expect("runtime startup");
     let second = first.clone();
 
     drop(supervisor);
@@ -123,7 +122,8 @@ async fn dropping_one_public_owner_keeps_other_owners_alive() {
 async fn temporary_supervisor_transfers_ownership_to_serve_handle() {
     let handle = Supervisor::builder(SupervisorConfig::default())
         .build()
-        .serve();
+        .serve()
+        .expect("runtime startup");
     let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     let (_, waiter) = handle
         .add_and_watch(TaskSpec::once("temporary-owner", task))
@@ -155,7 +155,7 @@ async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
     });
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     handle
         .add(TaskSpec::once("last-owner-cancel", task))
         .await
@@ -185,7 +185,7 @@ async fn watched_task_resolves_after_last_owner_drop() {
         }
     });
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let (_, waiter) = handle
         .add_and_watch(TaskSpec::once("abandoned-watcher", task))
         .await
@@ -206,7 +206,7 @@ async fn watched_task_resolves_after_last_owner_drop() {
 #[tokio::test(flavor = "current_thread")]
 async fn explicit_shutdown_keeps_its_result_while_other_owners_drop() {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let other = handle.clone();
     let task = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
@@ -230,7 +230,7 @@ async fn last_owner_drop_rejects_queued_controller_work() {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_controller(ControllerConfig::default())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     let owner = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())

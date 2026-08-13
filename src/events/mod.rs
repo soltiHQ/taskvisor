@@ -1,89 +1,58 @@
-//! # Runtime events
+//! Exposes Taskvisor's best-effort lifecycle stream for observability.
 //!
-//! Events describe what Taskvisor is doing.
-//! Use them for logs, metrics, dashboards, alerts, and tests.
-//!
-//! | Type                                        | Role                                       |
-//! |---------------------------------------------|--------------------------------------------|
-//! | [`EventKind`]                               | Event classification                       |
-//! | [`Event`]                                   | Event payload and metadata                 |
-//! | [`BackoffSource`]                           | Why a `BackoffScheduled` event was emitted |
-//! | [`RejectionKind`]                           | Machine-readable submission rejection      |
-//! | [`TaskOutcomeKind`](crate::TaskOutcomeKind) | Machine-readable final outcome             |
-//!
-//! ## Events and final outcomes are different
-//!
-//! Event delivery is best-effort.
-//! There are two bounded steps: the shared event bus and each subscriber's own queue.
-//! A slow consumer may miss events at either step.
+//! The registry, task actors, controller, and shutdown workflow publish ordinary
+//! [`Event`] values to an internal bounded bus. The runtime relay forwards
+//! retained events to the bounded queue of each [`Subscribe`](crate::Subscribe)
+//! implementation. Internal subscriber diagnostics can start at the relay or a
+//! subscriber lane and bypass the shared bus.
 //!
 //! ```text
-//! runtime action
-//!      ├── best-effort ──► event bus ──► subscriber queue ──► Subscribe
-//!      └── reliable terminal result ────────────────────────► TaskWaiter
+//! runtime components
+//!        │ Event
+//!        ▼
+//! bounded Bus
+//!        │ retained events
+//!        ▼
+//! event relay ──► subscriber queues ──► Subscribe callbacks
+//!
+//! internal diagnostics ──► event relay or subscriber lane ──► callbacks
 //! ```
 //!
-//! Use events for observation.
-//! Do not use them as the only proof that work finished.
-//! If you need one final result, use an `*_and_watch` method and await the returned [`TaskWaiter`](crate::TaskWaiter).
+//! # Choosing the right result path
 //!
-//! ## Common task flow
+//! | Need                                  | Use                                      |
+//! |---------------------------------------|------------------------------------------|
+//! | Logs, metrics, alerts, or diagnostics | [`Subscribe`](crate::Subscribe) events   |
+//! | Final outcome for watched work        | [`TaskWaiter`](crate::TaskWaiter)        |
+//! | Result of a management command        | The management method's returned result  |
 //!
-//! ```text
-//! Add:
-//!   TaskAddRequested ──► TaskAdded ──► AttemptStarting
-//!                   └──► TaskAddFailed
+//! The stream is observational, not a reliable confirmation channel. Bus
+//! overflow and subscriber queue pressure can drop events. Missing an event
+//! does not mean the action did not happen, and runtime state never depends on
+//! delivery.
 //!
-//! Attempt:
-//!   AttemptStarting ──► AttemptSucceeded
-//!              ├──► AttemptCanceled ──► TaskFinished(Canceled)
-//!              ├──► AttemptFailed
-//!              └──► AttemptTimedOut
+//! [`EventKind`] identifies what happened. [`Event`] carries its metadata.
+//! [`TaskOutcomeKind`](crate::TaskOutcomeKind), [`BackoffSource`], and
+//! [`RejectionKind`] provide typed details for outcomes, backoff, and rejection
+//! events. Implement [`Subscribe`](crate::Subscribe) for custom handling, or use
+//! the feature-gated `LogWriter` and `TracingBridge` subscribers for ready-made
+//! output.
 //!
-//! Successful attempt:
-//!   AttemptSucceeded ──► TaskFinished(Completed)
-//!              ├──► BackoffScheduled(Success) ──► AttemptStarting
-//!              └──► AttemptStarting (Always without an interval)
+//! Important stream rules:
 //!
-//! Retryable failure or configured timeout:
-//!   AttemptFailed | AttemptTimedOut ──► BackoffScheduled(Failure) ──► AttemptStarting
-//!                                  └──► TaskFinished(Failed)
-//!
-//! Fatal failure:
-//!   AttemptFailed ──► TaskFinished(Fatal)
-//!
-//! Registry cleanup:
-//!   [optional TaskRemoveRequested] ──► TaskFinished ──► TaskRemoved
-//!
-//! Queued controller removal (feature `controller`):
-//!   TaskRemoveRequested ──► ControllerRejected(RemovedFromQueue)
-//!
-//! Shutdown:
-//!   ShutdownRequested ──► AllStoppedWithinGrace | GraceExceeded
-//! ```
-//!
-//! [`TaskRemoved`](EventKind::TaskRemoved) confirms registry-membership removal and terminal reporting; it can race with the internal logical-completion latch.
-//! Except for [`TaskOutcomeKind::ForceAborted`](crate::TaskOutcomeKind::ForceAborted), the managed runner has been physically joined first.
-//! A force-aborted synchronous poll can remain active under reaper ownership after this event.
-//!
-//! ## Read the Stream Safely
-//!
-//! - [`AttemptFailed`](EventKind::AttemptFailed) describes one attempt.
-//!   The task may retry. [`TaskFinished`](EventKind::TaskFinished) means that a registered task has reached its final [`TaskOutcomeKind`](crate::TaskOutcomeKind).
-//!   Cancellation while waiting for a permit or backoff can produce `TaskFinished(Canceled)` without an `AttemptCanceled` event.
-//! - [`Event::seq`] is process-local construction order.
-//!   It can help sort events and detect gaps, but it is not a causal clock.
-//! - Use [`EventKind::as_label`] for a stable telemetry label.
-//!   Treat free-form [`Event::reason`] text as diagnostic, never as schema.
-//!   Use [`TaskOutcomeKind`](crate::TaskOutcomeKind) and [`RejectionKind`] for machine decisions.
-//! - Use [`RejectionKind`] for machine-readable handling of `TaskAddFailed` and `ControllerRejected`.
-//!   Rejected work never enters the registry, so it has no `TaskFinished` or `TaskRemoved` event.
-//!
-//! ## Subscribers
-//!
-//! Implement [`Subscribe`](crate::Subscribe) to consume events.
-//! With the `tracing` feature, `TracingBridge` sends them to `tracing`.
-//! With the `logging` feature, `LogWriter` prints simple development logs.
+//! - [`AttemptFailed`](EventKind::AttemptFailed) and
+//!   [`AttemptTimedOut`](EventKind::AttemptTimedOut) describe one attempt. A
+//!   later attempt may still run.
+//! - [`TaskFinished`](EventKind::TaskFinished) carries the final outcome class.
+//!   Registry cleanup then attempts [`TaskRemoved`](EventKind::TaskRemoved).
+//! - Cancellation between attempts can reach `TaskFinished(Canceled)` without
+//!   an [`AttemptCanceled`](EventKind::AttemptCanceled) event.
+//! - Rejected work never enters the registry. It has no `TaskFinished` or
+//!   `TaskRemoved` event.
+//! - [`Event::seq`] records process-local construction order. It is not a
+//!   causal clock, and gaps are expected when events are dropped.
+//! - [`Event::reason`] is diagnostic text. Use typed enums and their stable
+//!   `as_label` methods for machine decisions and telemetry.
 
 mod event;
 pub use event::{BackoffSource, Event, EventKind, RejectionKind};

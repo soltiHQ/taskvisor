@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 
     // serve() starts listeners and returns a handle for dynamic management.
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     // Add workers dynamically
     println!("Adding worker-a and worker-b...");

@@ -1,62 +1,58 @@
-//! # When a task runs again
+//! Defines whether Taskvisor may start another attempt.
 //!
-//! [`RestartPolicy`] decides if Taskvisor starts another attempt.
-//! It does not decide the delay after a failure; [`BackoffPolicy`](crate::BackoffPolicy) does that.
+//! The registry resolves this policy from [`TaskSpec`](crate::TaskSpec) and
+//! [`TaskDefaults`](crate::TaskDefaults). Taskvisor checks it after each attempt.
+//! Most applications select a policy with [`TaskSpec::once`](crate::TaskSpec::once),
+//! [`TaskSpec::restartable`](crate::TaskSpec::restartable), or
+//! [`TaskSpec::periodic`](crate::TaskSpec::periodic). Use
+//! [`TaskSpec::with_restart`](crate::TaskSpec::with_restart) to override that
+//! choice.
 //!
-//! | Policy                                  | On `Ok(())`                     | On retryable error        |
-//! |-----------------------------------------|---------------------------------|---------------------------|
-//! | [`Never`](RestartPolicy::Never)         | Stop                            | Stop                      |
-//! | [`OnFailure`](RestartPolicy::OnFailure) | Stop                            | Restart with backoff      |
-//! | [`Always`](RestartPolicy::Always)       | Restart after optional interval | Restart with backoff      |
+//! | Policy      | After success               | After retryable failure |
+//! |-------------|-----------------------------|-------------------------|
+//! | `Never`     | Stop                        | Stop                    |
+//! | `OnFailure` | Stop                        | Retry if budget allows  |
+//! | `Always`    | Repeat; use interval if set | Retry if budget allows  |
 //!
-//! [`TaskError::Fatal`](crate::TaskError::Fatal) and [`TaskError::Canceled`](crate::TaskError::Canceled) always stop the task.
-//!
-//! ## Choosing a policy
-//!
-//! - Use [`Never`](RestartPolicy::Never) for one-shot tasks.
-//! - Use [`OnFailure`](RestartPolicy::OnFailure) for long-running workers.
-//! - Use [`Always`](RestartPolicy::Always) for periodic tasks that finish and should run again.
+//! Failure timing belongs to [`BackoffPolicy`](crate::BackoffPolicy). The retry
+//! limit can stop an otherwise eligible failure retry. It does not limit
+//! successful repeats under `Always`. Fatal errors, task cancellation, and
+//! runtime cancellation always stop the task.
 
-/// Decides whether a task starts another attempt.
+/// Restart eligibility applied after one task attempt.
 ///
-/// This policy decides restart eligibility.
-/// Retry timing is controlled by [`BackoffPolicy`](crate::BackoffPolicy).
-/// Include a wildcard arm when matching because new policies may be added.
-///
-/// # Also
-///
-/// - [`BackoffPolicy`](crate::BackoffPolicy) - retry delays after failures
-/// - [`TaskSpec`](crate::TaskSpec) - inherits or overrides task execution settings
-/// - [`TaskDefaults`](crate::TaskDefaults) - supervisor-wide task settings
+/// Failure delays and retry limits are separate settings. This enum is
+/// non-exhaustive; include a wildcard arm when matching it.
 #[doc(alias = "retry")]
 #[doc(alias = "retry policy")]
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum RestartPolicy {
-    /// Run once and never restart.
-    ///
-    /// The task stops after its first attempt, whatever result it returns.
+    /// Never schedules another attempt after the current one.
     Never,
-    /// Restart only after retryable failures.
+    /// Allows another attempt only after a retryable failure.
     ///
-    /// Success, fatal failure, and cancellation stop the task.
+    /// The configured retry limit can still stop the task. Success, fatal
+    /// failure, and cancellation stop it.
     OnFailure,
-    /// Restart after success and after retryable failures.
+    /// Allows another attempt after success or a retryable failure.
     ///
     /// `interval` applies only after a successful attempt:
     ///
     /// - `Some(duration)` waits at least that long after the attempt completes.
-    /// - `None` has no configured wait.
+    /// - `None` adds no configured interval.
     ///
-    /// Taskvisor also limits very fast successful restart loops.
-    /// This safety limit applies even when `interval` is `None` or zero.
+    /// A small internal floor limits fast successful restart loops, including
+    /// when `interval` is `None` or zero.
     ///
-    /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
-    /// Fatal errors and cooperative cancellation stop the task.
+    /// Retryable failures ignore `interval` and use
+    /// [`BackoffPolicy`](crate::BackoffPolicy). The retry limit applies to a
+    /// failure streak, not to successful repeats. Fatal errors and cancellation
+    /// stop the task.
     Always {
-        /// Wait time between a successful completion and the next run.
+        /// Configured wait after success and before the next attempt.
         ///
-        /// `None` means there is no configured wait. The fast-loop safety limit still applies.
+        /// `None` adds no interval. The fast-loop safety floor still applies.
         interval: Option<std::time::Duration>,
     },
 }

@@ -1,0 +1,89 @@
+//! Reports failures to start cleanup workers or reserve cleanup capacity.
+//!
+//! [`DropDomain`](super::domain::DropDomain) returns [`DropAdmissionError`]
+//! while starting its cleanup executor or reserving ownership capacity.
+//! Runtime, controller, and builder code translate these internal failures
+//! into their public error types.
+
+use std::{fmt, io};
+
+/// Failure to configure or start a domain's worker set.
+#[derive(Debug)]
+pub(crate) struct DropStartError {
+    /// Zero-based failed worker index, or zero for invalid configuration.
+    pub(super) worker: usize,
+    /// Configuration, thread creation, or readiness-handshake error.
+    pub(super) source: io::Error,
+}
+
+impl DropStartError {
+    /// Records a configuration or worker startup failure.
+    pub(super) fn new(worker: usize, source: io::Error) -> Self {
+        Self { worker, source }
+    }
+
+    /// Returns the failed worker index, or zero for invalid configuration.
+    pub(crate) const fn worker(&self) -> usize {
+        self.worker
+    }
+
+    /// Returns the underlying startup error.
+    #[cfg(test)]
+    pub(super) fn into_source(self) -> io::Error {
+        self.source
+    }
+
+    /// Returns the category of the underlying startup error.
+    pub(crate) fn source_kind(&self) -> io::ErrorKind {
+        self.source.kind()
+    }
+
+    /// Returns the operating-system error code when one is available.
+    pub(crate) fn raw_os_error(&self) -> Option<i32> {
+        self.source.raw_os_error()
+    }
+}
+
+impl fmt::Display for DropStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "failed to start destructor-isolation worker {}: {}",
+            self.worker, self.source
+        )
+    }
+}
+
+impl std::error::Error for DropStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Ownership request rejected by the supervisor-local capacity broker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DropCapacityError {
+    /// Configured ownership limit for the domain.
+    pub(super) limit: usize,
+}
+
+impl DropCapacityError {
+    /// Records the configured limit reported for a rejected request.
+    pub(super) const fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+
+    /// Returns the configured ownership limit.
+    pub(crate) const fn limit(self) -> usize {
+        self.limit
+    }
+}
+
+/// Reason a domain could not create an ownership reservation.
+#[derive(Debug)]
+pub(crate) enum DropAdmissionError {
+    /// The required worker set did not start transactionally.
+    Start(DropStartError),
+    /// The capacity broker could not grant the request.
+    Capacity(DropCapacityError),
+}

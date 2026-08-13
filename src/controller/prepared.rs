@@ -1,21 +1,35 @@
-//! A controller submission whose identity is visible before intake.
+//! Exposes a submission ID before controller intake and events can begin.
+//!
+//! [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission)
+//! allocates a [`TaskId`] and returns it with the unsubmitted [`ControllerSpec`].
+//! This lets an application map its own ID to the `TaskId` before any event for
+//! that task can be published.
+//!
+//! ```text
+//! prepare_submission
+//!      ├── application ──► read and store TaskId
+//!      └── PreparedSubmission ──► submit* ──► controller intake
+//! ```
+//!
+//! Preparation does not reserve the task name, slot, queue capacity, or runtime
+//! capacity. It sends no command and starts no work. A submit method consumes
+//! the prepared value and performs normal controller intake. Use direct
+//! controller `submit*` methods when the ID is not needed beforehand.
 
-use super::{ControllerError, ControllerSpec, core::ControllerHandle};
+use super::{ControllerError, ControllerSpec, engine::ControllerHandle};
 use crate::{TaskId, TaskWaiter};
 
-/// A single-use controller submission with a preallocated [`TaskId`].
+/// A single-use controller request with an ID allocated before intake.
 ///
-/// Create this value with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
-/// Preparation allocates the identity but does not enqueue work or publish an event.
-/// This lets an application install its own correlation mapping before the controller can emit an event for the submission.
+/// Create this value with
+/// [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
+/// Use [`id`](Self::id) to record correlation before controller events can start.
 ///
-/// Call [`submit`](Self::submit), [`try_submit`](Self::try_submit), [`submit_and_watch`](Self::submit_and_watch), or
-/// [`try_submit_and_watch`](Self::try_submit_and_watch) to consume the value and commit it to the same controller path used by [`SupervisorHandle`](crate::SupervisorHandle).
-/// Dropping it without submitting starts no work and publishes no event.
+/// Each submit method consumes this value, including when intake returns an
+/// error. Retrying requires a new prepared value and a new task ID. Dropping a
+/// prepared value without submitting starts no work and publishes no event.
 ///
-/// This type is intentionally not [`Clone`]. One prepared value can commit at most one controller submission.
-///
-/// ## Example
+/// # Examples
 ///
 /// ```rust,no_run
 /// use taskvisor::prelude::*;
@@ -25,7 +39,7 @@ use crate::{TaskId, TaskWaiter};
 /// let supervisor = Supervisor::builder(SupervisorConfig::default())
 ///     .with_controller(ControllerConfig::default())
 ///     .build();
-/// let handle = supervisor.serve();
+/// let handle = supervisor.serve()?;
 ///
 /// let task = TaskFn::arc(|_ctx| async { Ok(()) });
 /// let request = ControllerSpec::replace(TaskSpec::once("sync-tenant-42", task))
@@ -33,7 +47,6 @@ use crate::{TaskId, TaskWaiter};
 /// let prepared = handle.prepare_submission(request)?;
 /// let id = prepared.id();
 ///
-/// // Store application_id -> id here. No event for `id` can exist yet.
 /// let (submitted_id, waiter) = prepared.submit_and_watch().await?;
 /// assert_eq!(submitted_id, id);
 /// assert!(waiter.wait().await?.is_success());
@@ -44,12 +57,18 @@ use crate::{TaskId, TaskWaiter};
 /// ```
 #[must_use = "a prepared submission starts no work until a submit method consumes it"]
 pub struct PreparedSubmission {
+    /// Controller command sender used when this value is consumed.
     controller: ControllerHandle,
+
+    /// Task ID allocated before any controller command is sent.
     id: TaskId,
+
+    /// Submission specification held until intake.
     spec: ControllerSpec,
 }
 
 impl PreparedSubmission {
+    /// Allocates a task ID without sending a controller command.
     pub(crate) fn new(controller: ControllerHandle, spec: ControllerSpec) -> Self {
         Self {
             controller,
@@ -58,30 +77,37 @@ impl PreparedSubmission {
         }
     }
 
-    /// Returns the identity reserved for this submission.
+    /// Returns the task ID allocated for this submission.
     ///
-    /// Preparation itself emits no event.
+    /// No event for this ID is published before a submit method consumes this
+    /// value. After intake, the same ID identifies controller admission, events,
+    /// cancellation, and the final outcome. An admitted runtime task uses it too.
     ///
-    /// After a submit method is called, this identity is used unchanged through controller admission, registry execution, events, cancellation, and the final outcome.
+    /// This ID does not prove that command intake or slot admission occurred.
     #[must_use]
     pub fn id(&self) -> TaskId {
         self.id
     }
 
-    /// Returns the controller specification that will be submitted.
+    /// Returns the submission specification without sending it.
     #[must_use = "use the prepared controller specification"]
     pub fn spec(&self) -> &ControllerSpec {
         &self.spec
     }
 
-    /// Waits for controller-command capacity and commits this submission.
+    /// Waits for intake resources and submits without a final-outcome waiter.
     ///
-    /// `Ok(id)` confirms only controller intake. Slot admission and registry registration happen later.
+    /// The returned ID is the value from [`id`](Self::id). Success confirms
+    /// command intake. Slot admission and runtime registration happen later.
+    /// Use [`submit_and_watch`](Self::submit_and_watch) when the caller needs
+    /// the later admission rejection or final task outcome.
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::ResourceLimit`] when process-wide task ownership admission has closed.
-    /// - [`ControllerError::Closed`] if the controller command channel is closed.
+    /// Returns [`ControllerError::ThreadStartFailed`] or
+    /// [`ControllerError::ResourceLimit`] when Taskvisor cannot reserve cleanup
+    /// ownership for the task. Returns [`ControllerError::Closed`] when the
+    /// controller command channel closes before intake.
     pub async fn submit(self) -> Result<TaskId, ControllerError> {
         let Self {
             controller,
@@ -91,13 +117,15 @@ impl PreparedSubmission {
         controller.submit_prepared(id, spec).await
     }
 
-    /// Commits this submission only if controller-command capacity is available now.
+    /// Submits without waiting for intake capacity or returning a waiter.
+    ///
+    /// Success has the same intake-only meaning as [`submit`](Self::submit).
+    /// Use this method when the caller has its own backpressure or retry policy.
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::Full`] when the controller command queue has no capacity.
-    /// - [`ControllerError::ResourceLimit`] when no process-wide task ownership slot is available.
-    /// - [`ControllerError::Closed`] when the controller command channel is closed.
+    /// Returns the intake errors from [`submit`](Self::submit). It also returns
+    /// [`ControllerError::Full`] when the command queue has no capacity.
     pub fn try_submit(self) -> Result<TaskId, ControllerError> {
         let Self {
             controller,
@@ -107,14 +135,16 @@ impl PreparedSubmission {
         controller.try_submit_prepared(id, spec)
     }
 
-    /// Waits for controller-command capacity, commits this submission, and returns its final-outcome waiter.
+    /// Waits for intake resources and returns a final-outcome waiter.
     ///
-    /// The waiter has the same reliable completion semantics as [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch).
+    /// Success confirms command intake. The waiter later reports
+    /// [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) for admission
+    /// rejection, or the final outcome of an admitted task. Call
+    /// [`TaskWaiter::wait`] to receive it.
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::ResourceLimit`] when process-wide task ownership admission has closed.
-    /// - [`ControllerError::Closed`] if the controller command channel is closed.
+    /// Returns the same intake errors as [`submit`](Self::submit).
     pub async fn submit_and_watch(self) -> Result<(TaskId, TaskWaiter), ControllerError> {
         let Self {
             controller,
@@ -125,13 +155,17 @@ impl PreparedSubmission {
         Ok((submitted_id, TaskWaiter::new(submitted_id, rx)))
     }
 
-    /// Commits this watched submission only if controller-command capacity is available now.
+    /// Returns a waiter without waiting for intake capacity.
+    ///
+    /// Success confirms command intake. The returned waiter has the same
+    /// contract as [`submit_and_watch`](Self::submit_and_watch). Use this method
+    /// when the caller needs the final result and owns its backpressure policy.
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::Full`] when the controller command queue has no capacity.
-    /// - [`ControllerError::ResourceLimit`] when no process-wide task ownership slot is available.
-    /// - [`ControllerError::Closed`] when the controller command channel is closed.
+    /// Returns the intake errors from
+    /// [`submit_and_watch`](Self::submit_and_watch). It also returns
+    /// [`ControllerError::Full`] when the command queue has no capacity.
     pub fn try_submit_and_watch(self) -> Result<(TaskId, TaskWaiter), ControllerError> {
         let Self {
             controller,

@@ -1,38 +1,18 @@
-//! # Simple stdout event printer
+//! Implements the `logging` feature's human-readable event endpoint.
 //!
-//! [`LogWriter`] prints incoming [`Event`] values to standard output.
-//! It is useful for examples, local development, and debugging.
+//! [`LogWriter`] is a [`Subscribe`] implementation at the end of the
+//! best-effort observability path.
 //!
-//! For production structured logs, prefer [`TracingBridge`](crate::TracingBridge) with the `tracing` feature.
-//!
-//! Each line starts with the event's stable label from [`EventKind::as_label`].
-//! Free-form values are quoted and control characters are escaped.
-//! Free-form values are truncated after 4096 characters.
-//!
-//! ## Example output
 //! ```text
-//! [001] [attempt_starting] task="worker" attempt=1
-//! [002] [attempt_failed] task="worker" reason="connection refused" attempt=1
-//! [003] [backoff_scheduled] task="worker" source=failure delay=2s after_attempt=1 reason="connection refused"
-//! [004] [attempt_timed_out] task="worker" timeout=5s
-//! [005] [attempt_succeeded] task="worker"
-//! [006] [task_finished] task="worker" outcome=outcome_completed
-//! [007] [task_add_requested] task="new-worker"
-//! [008] [task_added] task="new-worker"
-//! [009] [task_remove_requested] task="old-worker"
-//! [010] [task_removed] task="old-worker"
-//! [011] [shutdown_requested]
-//! [012] [all_stopped_within_grace]
+//! runtime event relay ──► subscriber queue ──► LogWriter ──► standard output
 //! ```
 //!
-//! ## Example
-//! ```rust,no_run
-//! use taskvisor::{Supervisor, SupervisorConfig, Subscribe, LogWriter};
-//! use std::sync::Arc;
-//!
-//! let subs: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter::default())];
-//! let sup = Supervisor::new(SupervisorConfig::default(), subs);
-//! ```
+//! Each line starts with the event sequence and the stable
+//! [`EventKind::as_label`] value. Event-specific fields follow as `key=value`.
+//! Free-form text is quoted, escaped, and truncated after 4096 characters. The
+//! complete line format is intended for people and is not a stable data format.
+//! It is not a complete serialization of [`Event`]; use a custom subscriber or
+//! `TracingBridge` when every typed field is needed.
 
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
@@ -48,15 +28,24 @@ fn format_value(value: &str) -> String {
     format!("{value:?}")
 }
 
-/// Prints readable events to standard output.
+/// Prints each received event as one readable line on standard output.
 ///
-/// Implements [`Subscribe`] and prints `[seq] [event-type] key=value ...` with relevant metadata.
-/// Output is intended for people and is not a stable machine-readable format.
+/// This type uses the queue, loss, panic, and shutdown contract defined by
+/// [`Subscribe`].
 ///
-/// ## Also
+/// The output is designed for local visibility. Do not parse it as an API or
+/// rely on its field set for task correlation. It omits some [`Event`] fields,
+/// including `id` and `at`.
 ///
-/// - See [`Subscribe`] for the subscriber contract and queue/overflow semantics.
-/// - See [`Event`] and [`EventKind`] for event structure.
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::sync::Arc;
+/// use taskvisor::{LogWriter, Subscribe, Supervisor, SupervisorConfig};
+///
+/// let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(LogWriter)];
+/// let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
+/// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
 #[derive(Default)]
 pub struct LogWriter;

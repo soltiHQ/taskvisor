@@ -1,4 +1,26 @@
-//! # Error model
+//! Explains which error type belongs to each Taskvisor boundary.
+//!
+//! | Boundary | Error type |
+//! |----------|------------|
+//! | Checked configuration constructors and setters | [`ConfigError`](crate::ConfigError) |
+//! | [`BackoffPolicy::new`](crate::BackoffPolicy::new) | [`BackoffError`](crate::BackoffError) |
+//! | [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) | [`BuildError`] |
+//! | Runtime lifecycle, management, and outcome waiting | [`RuntimeError`] |
+//! | Controller availability checks and submission command intake | `ControllerError` |
+//! | One task attempt | [`TaskError`] |
+//! | Code that combines runtime and controller calls | [`Error`] |
+//!
+//! ```text
+//! task future ──► TaskError ──► actor policy
+//!                                  ├── retry allowed ──► next attempt
+//!                                  └── stop ──► cleanup and TaskOutcome
+//! ```
+//!
+//! `ControllerError` is available with the `controller` feature. Task code
+//! returns [`TaskError`]. Taskvisor APIs return the error for their boundary;
+//! applications may use [`Error`] to combine runtime and controller calls.
+//! Human-readable `Display` text is not a classification API. Match variants or
+//! use `as_label` where available.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,33 +29,36 @@ use thiserror::Error;
 
 use crate::identity::TaskId;
 
-/// Owned source error stored in [`TaskError::Fail`] or [`TaskError::Fatal`].
+/// Owned source error attached to [`TaskError::Fail`] or [`TaskError::Fatal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Shared source error stored in final task outcomes.
+/// Shared source error carried by a cloneable final task outcome.
 ///
-/// [`TaskOutcome`](crate::TaskOutcome) can be cloned without requiring the original source error to implement `Clone`.
+/// This lets [`TaskOutcome`](crate::TaskOutcome) implement `Clone` without
+/// requiring the original source error to implement it.
 pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Errors returned while building a stopped supervisor.
+/// Failure to build a stopped [`Supervisor`](crate::Supervisor).
 ///
-/// Building reserves process-wide ownership for every configured subscriber
-/// before Taskvisor calls subscriber metadata or stores those user values.
-/// Match with a wildcard arm because this enum and its data-carrying variants
-/// are non-exhaustive.
+/// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) returns
+/// this type while validating capacities, reserving subscriber ownership, and
+/// starting required cleanup workers. No [`Supervisor`](crate::Supervisor) is
+/// returned on failure.
+/// This enum and its data-carrying variants are non-exhaustive; keep a fallback
+/// arm and use `..` when matching fields.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum BuildError {
-    /// A process-wide library-owned user-lifetime budget was exhausted.
+    /// The supervisor cannot reserve every required user-owned lifetime.
     #[error("resource limit reached for {resource}: {limit}")]
     #[non_exhaustive]
     ResourceLimitReached {
         /// Stable resource name suitable for diagnostics.
         resource: &'static str,
-        /// Effective process-wide maximum at the rejected build.
+        /// Reported supervisor-local limit.
         limit: usize,
     },
-    /// A bounded async capacity exceeds the implementation's structural maximum.
+    /// A bounded async capacity exceeds Tokio's structural limit.
     #[error("{field} must not exceed {max}; got {value}")]
     #[non_exhaustive]
     CapacityTooLarge {
@@ -41,97 +66,137 @@ pub enum BuildError {
         field: &'static str,
         /// Rejected value.
         value: usize,
-        /// Largest accepted value.
+        /// Largest value accepted by the underlying primitive.
         max: usize,
+    },
+    /// A required build-time cleanup worker could not start.
+    ///
+    /// Subscriber metadata callbacks have not run when this error is returned.
+    #[error(
+        "failed to start {component} worker {worker}: {kind:?} (raw OS error: {raw_os_error:?})"
+    )]
+    #[non_exhaustive]
+    ThreadStartFailed {
+        /// Stable build component name suitable for diagnostics.
+        component: &'static str,
+        /// Zero-based position in the worker startup batch.
+        worker: usize,
+        /// Portable I/O error category.
+        kind: std::io::ErrorKind,
+        /// Platform-specific OS error code, when one was available.
+        raw_os_error: Option<i32>,
     },
 }
 
 impl BuildError {
-    /// Returns a stable machine-readable label for logs and metrics.
+    /// Returns the stable category label used by logs and metrics.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
             BuildError::ResourceLimitReached { .. } => "build_resource_limit_reached",
             BuildError::CapacityTooLarge { .. } => "build_capacity_too_large",
+            BuildError::ThreadStartFailed { .. } => "build_thread_start_failed",
         }
     }
 }
 
-/// Errors from supervisor lifecycle and management operations.
+/// Failure of a supervisor lifecycle or management operation.
 ///
-/// These errors come from add, remove, cancel, shutdown, and run operations.
-/// They are separate from [`TaskError`], which comes from a task attempt.
+/// Runtime startup, static runs, dynamic management, outcome waiting, and
+/// shutdown return this type. Task attempts return [`TaskError`] instead. This
+/// enum and its data-carrying variants are non-exhaustive; keep a fallback arm
+/// and use `..` when matching fields.
 ///
-/// Match with a wildcard arm because this enum is non-exhaustive.
-/// Data-carrying variants are also non-exhaustive; include `..` when matching their fields.
+/// # See also
 ///
-/// # Also
-///
-/// - [`Supervisor`](crate::Supervisor) - returns `RuntimeError` from [`run`](crate::Supervisor::run)
-/// - [`SupervisorHandle`](crate::SupervisorHandle) - returns `RuntimeError` from management methods
+/// - [`Error`] combines runtime and feature-gated controller errors.
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`ControllerError`](crate::ControllerError) - errors from optional controller configuration and `submit*` methods"
+    doc = "- [`ControllerError`](crate::ControllerError) - controller availability and submission intake errors"
 )]
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum RuntimeError {
-    /// Shutdown grace period was exceeded.
+    /// Runtime startup was requested without an active Tokio runtime.
     ///
-    /// Some managed task runners did not stop cooperatively before the deadline.
-    /// Taskvisor committed their logical force-abort and retained physical
-    /// ownership in its reaper. Synchronous task code can keep running until it
-    /// returns control to Tokio.
-    /// Work detached by user code is outside this ownership guarantee.
+    /// The supervisor remains stopped and startup may be retried from inside
+    /// a Tokio runtime.
+    #[error("runtime startup requires an active Tokio runtime")]
+    TokioRuntimeUnavailable,
+
+    /// A required Taskvisor worker thread could not start.
+    ///
+    /// The operation that needed the worker remains uncommitted. The source
+    /// identifies the failed thread-creation or startup handshake.
+    #[error("failed to start {component} thread: {source}")]
+    #[non_exhaustive]
+    ThreadStartFailed {
+        /// Stable runtime component name suitable for diagnostics.
+        component: &'static str,
+        /// I/O error from thread creation or the transactional startup handshake.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Task cleanup did not finish within the shared shutdown grace period.
+    ///
+    /// A listed name belongs to an actor that required logical force-abort or a
+    /// removal owner still finishing at the deadline. A force-aborted actor can
+    /// remain physically active under Taskvisor's cleanup ownership after this
+    /// error is returned.
     #[error("shutdown timeout {grace:?} exceeded; logically force-aborted: {stuck:?}")]
     #[non_exhaustive]
     GraceExceeded {
         /// Configured shutdown grace duration.
         grace: Duration,
-        /// Task names that did not stop in time.
+        /// Task names whose removal did not finish within the grace period.
         stuck: Vec<Arc<str>>,
     },
 
-    /// A task name is already registered or repeated in an all-or-nothing batch.
+    /// A task name is already reserved or repeated in an atomic static batch.
+    ///
+    /// Registry membership and cleanup ownership of a physically active
+    /// force-aborted actor can both reserve a name.
     #[error("task name '{name}' already exists")]
     #[non_exhaustive]
     TaskAlreadyExists {
-        /// Duplicate task name.
+        /// Conflicting task name.
         name: Arc<str>,
     },
 
-    /// A configured runtime resource budget or the shared process-wide
-    /// library-owned user-lifetime budget was exhausted.
+    /// A configured runtime or user-lifetime budget was exhausted.
     #[error("resource limit reached for {resource}: {limit}")]
     #[non_exhaustive]
     ResourceLimitReached {
-        /// Stable resource name suitable for diagnostics.
+        /// Stable resource name used by diagnostics.
         resource: &'static str,
-        /// Effective maximum at the rejected admission point.
+        /// Reported bound for the rejected resource. For `owned_user_lifetimes`,
+        /// this is the domain's configured capacity; retired poisoned slots can
+        /// make the currently usable capacity smaller.
         limit: usize,
     },
 
-    /// A bounded management command queue has no free capacity.
+    /// A fail-fast management call found its command queue full.
     ///
-    /// A fail-fast management call could not enqueue its requested state change.
-    /// That request does not change task or slot ownership.
+    /// The rejected request does not change task or controller-slot ownership.
     #[error("management command queue is full")]
     CommandQueueFull,
 
-    /// Timed out while waiting for terminal registry cleanup.
+    /// The caller's bounded wait for terminal registry cleanup expired.
     ///
-    /// The stop request remains active.
-    /// This error only ends the caller's wait; it does not undo cancellation or change the supervisor grace period.
+    /// The stop request remains active. This error does not undo cancellation
+    /// or change the supervisor's shutdown grace period.
     #[error("timeout waiting for task {id} termination after {timeout:?}")]
     #[non_exhaustive]
     TaskTerminationTimeout {
-        /// Task id whose terminal cleanup did not finish in time.
+        /// Task whose terminal cleanup remained pending.
         id: TaskId,
         /// Wait duration before timing out.
         timeout: Duration,
     },
 
-    /// The reliable outcome channel closed without a terminal result.
+    /// A watched task or controller submission's direct outcome channel closed
+    /// without a result.
     #[error("final outcome for task {id} is unavailable")]
     #[non_exhaustive]
     OutcomeUnavailable {
@@ -139,10 +204,11 @@ pub enum RuntimeError {
         id: TaskId,
     },
 
-    /// Explicit OS signal listener setup failed.
+    /// Explicit operating-system signal setup failed.
     ///
-    /// Signal-based shutdown requested through [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals) is unavailable.
-    /// The I/O error kind, message, and source chain are preserved for callers that join the shared shutdown operation.
+    /// This can only come from
+    /// [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals).
+    /// Every caller joining that shared shutdown receives an equivalent source.
     #[error("failed to install shutdown signal handlers: {source}")]
     #[non_exhaustive]
     SignalSetupFailed {
@@ -155,7 +221,7 @@ pub enum RuntimeError {
     #[error("supervisor is shutting down")]
     ShuttingDown,
 
-    /// A static supervisor run method was called more than once.
+    /// A static run tried to acquire an already owned or committed lifecycle.
     ///
     /// [`Supervisor::run`](crate::Supervisor::run),
     /// [`Supervisor::run_until`](crate::Supervisor::run_until), and
@@ -166,12 +232,14 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
-    /// Returns a stable machine-readable label for logs and metrics.
+    /// Returns the stable category label used by logs and metrics.
     ///
     /// This label is not the same as `Display`.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
+            RuntimeError::TokioRuntimeUnavailable => "runtime_tokio_runtime_unavailable",
+            RuntimeError::ThreadStartFailed { .. } => "runtime_thread_start_failed",
             RuntimeError::GraceExceeded { .. } => "runtime_grace_exceeded",
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::ResourceLimitReached { .. } => "runtime_resource_limit_reached",
@@ -185,78 +253,72 @@ impl RuntimeError {
     }
 }
 
-/// Result categories that a task attempt can return.
+/// Error returned by one [`Task`](crate::Task) attempt.
 ///
-/// A task returns `Result<(), TaskError>` from [`Task::spawn`](crate::Task::spawn).
-///
-/// | Variant                      | Retry category | Meaning                              |
-/// |------------------------------|----------------|--------------------------------------|
-/// | [`Canceled`](Self::Canceled) | never          | cooperative stop                     |
-/// | [`Fatal`](Self::Fatal)       | never          | permanent failure                    |
-/// | [`Timeout`](Self::Timeout)   | eligible       | per-attempt time limit was exceeded  |
-/// | [`Fail`](Self::Fail)         | eligible       | temporary or unknown failure         |
-///
-/// Match with a wildcard arm because this enum is non-exhaustive.
-/// Data-carrying variants are also non-exhaustive; include `..` when matching their fields.
-///
-/// # Also
-///
-/// - [`Task`](crate::Task) - task trait
-/// - [`RestartPolicy`](crate::RestartPolicy) - decides whether retryable errors restart
+/// [`Fail`](Self::Fail) and [`Timeout`](Self::Timeout) are retry-eligible.
+/// [`Fatal`](Self::Fatal) and [`Canceled`](Self::Canceled) stop the actor.
+/// Retry eligibility does not guarantee another attempt; restart policy and the
+/// retry limit make the final decision. This enum and its data-carrying variants
+/// are non-exhaustive; keep a fallback arm and use `..` when matching fields.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum TaskError {
-    /// The attempt exceeded its configured timeout.
+    /// A timeout was reported for this attempt.
+    ///
+    /// The runner creates this variant when its configured attempt deadline
+    /// expires. Task code may also return it directly. It is retry-eligible.
     #[error("timed out after {timeout:?}")]
     #[non_exhaustive]
     Timeout {
-        /// Timeout duration that was exceeded.
+        /// Duration reported for the timeout.
         timeout: Duration,
     },
 
-    /// Permanent task failure.
+    /// Permanent task failure that stops the actor.
     ///
-    /// This stops the managed task and is not retried.
+    /// This category is never retried.
     #[error("fatal error (no retry): {reason}")]
     #[non_exhaustive]
     Fatal {
-        /// Readable failure reason.
+        /// Human-readable diagnostic reason.
         reason: String,
         /// Process-style exit code, when available.
         ///
         /// `None` means this was a logical error with no process exit code.
         exit_code: Option<i32>,
-        /// Underlying error preserved for source chains.
+        /// Optional source preserved for error-chain inspection.
         #[source]
         source: Option<BoxError>,
     },
 
-    /// Retryable task failure.
+    /// Retry-eligible task failure.
     ///
-    /// Taskvisor may restart after this error if the restart policy and retry limit allow it.
+    /// Restart policy and the retry limit still decide whether another attempt
+    /// starts.
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
-        /// Readable failure reason.
+        /// Human-readable diagnostic reason.
         reason: String,
         /// Process-style exit code, when available.
         ///
         /// `None` means this was a logical error with no process exit code.
         exit_code: Option<i32>,
-        /// Underlying error preserved for source chains.
+        /// Optional source preserved for error-chain inspection.
         #[source]
         source: Option<BoxError>,
     },
 
     /// Cooperative cancellation.
     ///
-    /// Tasks should return this when they stop because [`TaskContext`](crate::TaskContext) was cancelled.
+    /// Return this after observing cancellation through
+    /// [`TaskContext`](crate::TaskContext).
     #[error("context canceled")]
     Canceled,
 }
 
 impl TaskError {
-    /// Creates a retryable failure with no source error.
+    /// Creates a retry-eligible failure without a source error.
     pub fn fail(reason: impl Into<String>) -> Self {
         TaskError::Fail {
             reason: reason.into(),
@@ -265,7 +327,7 @@ impl TaskError {
         }
     }
 
-    /// Creates a permanent failure with no source error.
+    /// Creates a permanent failure without a source error.
     pub fn fatal(reason: impl Into<String>) -> Self {
         TaskError::Fatal {
             reason: reason.into(),
@@ -274,10 +336,10 @@ impl TaskError {
         }
     }
 
-    /// Creates a retryable failure from a source error.
+    /// Creates a retry-eligible failure from a source error.
     ///
-    /// The display reason is copied from `source.to_string()`.
-    /// The original error remains available through [`std::error::Error::source`].
+    /// The display reason comes from `source.to_string()`. The original value
+    /// remains available through [`std::error::Error::source`].
     pub fn fail_from<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -291,8 +353,7 @@ impl TaskError {
 
     /// Creates a permanent failure from a source error.
     ///
-    /// The display reason is copied from `source.to_string()`.
-    /// The original error remains available through [`std::error::Error::source`].
+    /// Uses the source-preservation contract from [`fail_from`](Self::fail_from).
     pub fn fatal_from<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -304,7 +365,7 @@ impl TaskError {
         }
     }
 
-    /// Creates a retry-eligible timeout error.
+    /// Creates a retry-eligible timeout with the reported duration.
     #[must_use]
     pub const fn timeout(timeout: Duration) -> Self {
         TaskError::Timeout { timeout }
@@ -312,7 +373,8 @@ impl TaskError {
 
     /// Sets or clears the process-style exit code on `Fail` or `Fatal`.
     ///
-    /// Pass an integer to set it or `None` to clear it. This has no effect on `Timeout` or `Canceled`.
+    /// Pass an integer to set it or `None` to clear it. Other variants are
+    /// returned unchanged.
     #[must_use]
     pub fn with_exit_code(mut self, code: impl Into<Option<i32>>) -> Self {
         let code = code.into();
@@ -322,7 +384,7 @@ impl TaskError {
         self
     }
 
-    /// Sets a source error on `Fail` or `Fatal`.
+    /// Attaches a source error to `Fail` or `Fatal`.
     ///
     /// No-op for `Timeout` and `Canceled`.
     #[must_use]
@@ -342,7 +404,7 @@ impl TaskError {
         }
     }
 
-    /// Returns a stable machine-readable label for logs and metrics.
+    /// Returns the stable category label used by logs and metrics.
     ///
     /// This label is not the same as `Display`.
     #[must_use]
@@ -379,32 +441,31 @@ impl TaskError {
     }
 }
 
-/// Umbrella error for code that mixes runtime and controller operations.
+/// Error wrapper for code that combines runtime and controller operations.
 ///
-/// [`RuntimeError`] and `ControllerError` (feature `controller`) convert into this type with `?`.
-/// Match on the variant to get the original error back.
-///
-/// Use it when one function mixes `add*` and `submit*` calls:
+/// [`RuntimeError`] and `ControllerError` with the `controller` feature convert
+/// into this type through `?`. Match the variant to recover the original error.
 ///
 /// ```rust
 /// use taskvisor::{Error, RuntimeError};
 ///
-/// fn stop() -> Result<(), Error> {
-///     Err(RuntimeError::ShuttingDown)? // `?` converts automatically
+/// fn stopped() -> Result<(), Error> {
+///     Err(RuntimeError::ShuttingDown)?;
+///     Ok(())
 /// }
 ///
-/// assert!(matches!(stop(), Err(Error::Runtime(_))));
+/// assert!(matches!(stopped(), Err(Error::Runtime(_))));
 /// ```
 ///
 /// Match with a wildcard arm because this enum is non-exhaustive.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum Error {
-    /// Core runtime error from `run`, `add*`, waiters, and management methods.
+    /// Error from runtime lifecycle, management, or outcome waiting.
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
 
-    /// Controller submission error from `submit*` methods.
+    /// Error from a controller availability check or submission command intake.
     ///
     /// Requires the `controller` feature.
     #[cfg(feature = "controller")]
@@ -414,9 +475,9 @@ pub enum Error {
 }
 
 impl Error {
-    /// Returns a stable machine-readable label for logs and metrics.
+    /// Returns the wrapped error's stable category label.
     ///
-    /// The label comes from the wrapped error.
+    /// The wrapper does not introduce a second category.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
@@ -459,9 +520,37 @@ mod tests {
     }
 
     #[test]
+    fn build_thread_start_error_preserves_copyable_public_diagnostics() {
+        let error = BuildError::ThreadStartFailed {
+            component: "destructor_isolation",
+            worker: 2,
+            kind: std::io::ErrorKind::WouldBlock,
+            raw_os_error: Some(11),
+        };
+        assert_eq!(error.as_label(), "build_thread_start_failed");
+        assert_eq!(
+            error.to_string(),
+            "failed to start destructor_isolation worker 2: WouldBlock (raw OS error: Some(11))"
+        );
+        let copied = error;
+        assert_eq!(copied, error);
+    }
+
+    #[test]
     fn runtime_error_labels_are_stable() {
         let id = TaskId::next();
         let cases = [
+            (
+                RuntimeError::TokioRuntimeUnavailable,
+                "runtime_tokio_runtime_unavailable",
+            ),
+            (
+                RuntimeError::ThreadStartFailed {
+                    component: "subscriber_dispatch",
+                    source: std::io::Error::other("worker unavailable"),
+                },
+                "runtime_thread_start_failed",
+            ),
             (
                 RuntimeError::GraceExceeded {
                     grace: Duration::from_secs(1),
@@ -504,6 +593,26 @@ mod tests {
 
     #[test]
     fn runtime_error_displays_are_stable() {
+        assert_eq!(
+            RuntimeError::TokioRuntimeUnavailable.to_string(),
+            "runtime startup requires an active Tokio runtime"
+        );
+
+        let startup = RuntimeError::ThreadStartFailed {
+            component: "subscriber_dispatch",
+            source: std::io::Error::new(std::io::ErrorKind::WouldBlock, "thread limit"),
+        };
+        assert_eq!(
+            startup.to_string(),
+            "failed to start subscriber_dispatch thread: thread limit"
+        );
+        assert_eq!(
+            std::error::Error::source(&startup)
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::WouldBlock)
+        );
+
         assert_eq!(
             RuntimeError::CommandQueueFull.to_string(),
             "management command queue is full"

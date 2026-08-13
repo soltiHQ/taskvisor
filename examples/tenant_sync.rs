@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::builder(SupervisorConfig::default())
         .with_controller(ControllerConfig::default())
         .build();
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     let tenant_42_old = SyncGate::new(true);
     let tenant_42_latest = SyncGate::new(false);

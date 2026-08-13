@@ -271,7 +271,7 @@ Dynamic management uses `TaskId`:
 
 ```rust,ignore
 let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-let handle = supervisor.serve();
+let handle = supervisor.serve()?;
 
 let id = handle
     .add(TaskSpec::restartable("worker", worker))
@@ -319,7 +319,7 @@ async fn wait_for_task(
 
 Events carry a process-local sequence number and, where relevant, task identity, attempt, duration, timeout, delay, and exit code. `TaskFinished` carries `TaskOutcomeKind` for terminal telemetry. Rejected work carries `TaskOutcomeKind::Rejected` plus a `RejectionKind` explaining why it did not start. Treat `reason` as diagnostic text; do not parse it for branching, metrics, or alerts. Stable enum labels are available for telemetry.
 
-Each subscriber has its own bounded FIFO queue and dedicated worker thread. A slow subscriber cannot block publishers or consume Tokio blocking-pool capacity, but its queue may fill and lose events. Queue drops are coalesced into one direct overflow summary after that subscriber catches up; `Event::dropped` contains the count, and the summary does not re-enter the shared event bus. Keep callbacks short and forward async work to another channel.
+Each subscriber has its own bounded FIFO queue and serial lane on a supervisor-local elastic callback executor. Startup transactionally creates one seed OS worker. When a lane is ready and every current worker is busy, the executor may add workers lazily, up to the configured subscriber count. Relaying one event still visits every subscriber queue, so fan-out work is `O(S)` in the subscriber count. A slow subscriber cannot block publishers or consume Tokio blocking-pool capacity, but its queue may fill and lose events. A blocked callback does not stop other lanes when an idle worker exists or OS worker expansion succeeds. Queue drops are coalesced into one direct overflow summary after that subscriber catches up; `Event::dropped` contains the count, and the summary does not re-enter the shared event bus. Keep callbacks short and forward async work to another channel.
 
 See [subscriber.rs](examples/subscriber.rs), the `TracingBridge` in [tracing.rs](examples/tracing.rs), and the Prometheus counters in [metrics.rs](examples/metrics.rs).
 
@@ -397,7 +397,7 @@ Main defaults:
 | Registered and reaped actors    | 1024                                             |
 | Event bus capacity              | 1024                                            |
 | Registry command capacity       | 1024                                            |
-| Library-owned user lifetimes    | 1024 process-wide across tasks and subscribers |
+| Library-owned user lifetimes    | 1024 per supervisor across tasks and subscribers |
 | Restart policy                  | On failure                                      |
 | Failure backoff                 | Exponential: 200 ms to 30 seconds, equal jitter |
 | Attempt timeout                 | None                                            |
@@ -412,8 +412,9 @@ Taskvisor defines an in-process lifecycle. Keep these boundaries explicit:
 - Events are best-effort. Do not use them as a durable audit log.
 - Watched outcomes are not durable after the process exits.
 - Cancellation depends on the task reaching an await point that observes `TaskContext`. Force-abort cannot stop synchronous code that blocks a runtime thread.
-- Subscriber callbacks may continue on their dedicated threads after the drain deadline. Taskvisor stops waiting and drops queued events, but it cannot interrupt synchronous user code already running.
-- User destructors run synchronously and cannot be interrupted. Taskvisor shares 1024 process-wide ownership slots across accepted tasks and configured subscribers, moves final library-owned destruction to two dedicated threads, and keeps public shutdown bounded. If a destructor panics, ownership admission fails closed with a resource-limit error; a blocking destructor occupies one isolation thread until it returns.
+- Subscriber callbacks may continue on callback-executor threads after the drain deadline. Taskvisor stops waiting and drops queued events, but it cannot interrupt synchronous user code already running.
+- User destructors run synchronously and cannot be interrupted. Each supervisor owns a separate 1024-slot domain across accepted tasks and configured subscribers. Configured subscribers start three core cleanup workers transactionally during construction; without subscribers, the domain remains dormant until the first non-empty task or controller ownership admission. Two indefinitely blocked destructors cannot prevent a later third bundle from starting. When cleanup remains backlogged with no idle worker, the domain may grow elastically to 16 total cleanup workers; elastic workers retire after an idle interval. Sixteen indefinitely blocked destructors can therefore stop later cleanup inside that supervisor, but cannot consume another supervisor's Taskvisor ownership capacity or worker set. Public shutdown remains bounded. A destructor panic permanently retires its charged slot; a blocking destructor occupies one cleanup worker until it returns.
+- Supervisor-local queues, budgets, and worker sets isolate Taskvisor admission and scheduling state; they are not operating-system resource partitions. Supervisors in one process still contend for the same kernel thread limits, CPU, and memory.
 - `TaskSpec` owns the immutable task name. Admission reads that data directly; `Task` implementations provide only executable attempts through `spawn`.
 - A successfully delivered watched outcome belongs to its caller. Dropping `TaskWaiter` after delivery destroys that outcome in the caller's execution context.
 - Periodic tasks use an interval after completion. They do not provide calendar scheduling or missed-run recovery.

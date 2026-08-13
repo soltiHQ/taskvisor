@@ -26,7 +26,7 @@ fn sum_of_primes(limit: u64) -> u64 {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     let attempts = Arc::new(AtomicU32::new(0));
     let job: TaskRef = TaskFn::arc({

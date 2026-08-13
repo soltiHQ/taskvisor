@@ -1,4 +1,26 @@
-//! Per-task execution settings and default resolution.
+//! Configures one named task before it enters the runtime.
+//!
+//! [`TaskSpec`] is the value an application passes to Taskvisor. It combines a
+//! [`TaskRef`] with a registration name, restart behavior, retry timing, an
+//! optional attempt timeout, and an optional retry limit. Direct adds send the
+//! spec to the registry. Controller submissions first apply slot admission.
+//! The registry resolves inherited fields from [`TaskDefaults`] before it starts
+//! the task.
+//!
+//! ```text
+//! application ──► TaskSpec
+//!                     │ direct add or controller submission
+//!                     ▼
+//!              registry admission
+//!                     ├── name ──► identity index
+//!                     ├── inherited setting ──► TaskDefaults
+//!                     └── resolved task and settings ──► TaskActor
+//! ```
+//!
+//! The name is the registry key, not a controller slot. A second registration
+//! with the same name is rejected while the first registration exists. After a
+//! force-abort, the name remains reserved until Taskvisor has observed the
+//! actor's physical exit and collected its terminal state.
 
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
@@ -9,36 +31,25 @@ use crate::{
     tasks::task::TaskRef,
 };
 
-/// Converts `Some(Duration::ZERO)` to `None`.
+/// Treats a zero timeout as disabled.
 #[inline]
 fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|d| !d.is_zero())
 }
 
-/// A named task and the rules used to run it.
+/// A ready-to-submit task with its name and execution settings.
 ///
-/// The immutable name is used for registration and observability. It must be
-/// unique among registered tasks and actors retained by the physical reaper.
-/// After a logical force-abort, the name remains reserved until the old actor
-/// has physically stopped and its reaper record is released.
-///
-/// A spec can set a value or inherit it from [`TaskDefaults`].
-/// The supervisor resolves all inherited values when it accepts the task.
-/// A `with_*` method always sets an explicit value and wins over the default.
+/// Each setting is either explicit or inherited from [`TaskDefaults`].
+/// Resolution happens once during admission. A `with_*` method makes its field
+/// explicit for this task only.
 ///
 /// ```text
-/// Resolve each field at registry admission:
-///
-/// explicit value
-/// TaskSpec.restart     = Never     ─────────────────────────────────► restart = Never
-/// TaskDefaults.restart = OnFailure ─────────────────────────────────► not selected
-///
-/// inherited value
-/// TaskSpec.timeout     = inherit   ──► TaskDefaults.timeout = 30s ──► timeout = 30s
-///
-/// ResolvedTaskSpec
-/// ├── restart = Never
-/// └── timeout = 30s
+/// TaskSpec field
+///      ├── Explicit(value) ──► value
+///      └── Inherit ──► matching TaskDefaults value
+///                              │
+///                              ▼
+///                       resolved actor settings
 /// ```
 ///
 /// | Constructor                            | Restart setting | Other settings                  |
@@ -49,32 +60,33 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// | [`from_defaults`](Self::from_defaults) | Inherited       | Inherited                       |
 /// | [`new`](Self::new)                     | Explicit        | Explicit; retries are unlimited |
 ///
-/// ## Example
+/// # Examples
 ///
 /// ```rust
 /// use std::num::NonZeroU32;
 /// use std::time::Duration;
-/// use taskvisor::{TaskFn, TaskRef, TaskSpec};
+/// use taskvisor::{TaskError, TaskFn, TaskRef, TaskSpec};
 ///
-/// let task: TaskRef = TaskFn::arc(|_ctx| async { Ok(()) });
+/// let task: TaskRef = TaskFn::arc(|_ctx| async {
+///     Err(TaskError::fail("temporary failure"))
+/// });
 ///
 /// let spec = TaskSpec::restartable("worker", task)
 ///     .with_timeout(Duration::from_secs(30))
 ///     .with_max_retries(NonZeroU32::new(5).unwrap());
 /// ```
 ///
-/// > `max_retries = 5` allows the first failed attempt plus five retries.
+/// Here, `max_retries = 5` allows the first failed attempt and five retries in
+/// one failure streak. A success resets the counter.
 ///
-/// A successful attempt resets this count; an `Always` task may still have more than six attempts over its full lifetime.
+/// # See also
 ///
-/// ## See Also
-///
-/// - See [`Task`](crate::Task) for the execution contract and cancellation semantics.
-/// - For the closure-based implementation see [`TaskFn`](crate::TaskFn).
+/// - [`Task`](crate::Task) defines the attempt contract.
+/// - [`TaskFn`](crate::TaskFn) adapts an async closure.
 #[derive(Clone)]
 #[must_use]
 pub struct TaskSpec {
-    /// Immutable registration and observability identity.
+    /// Immutable name used by registry identity and events.
     name: Arc<str>,
     /// Restart policy selected explicitly or inherited from [`TaskDefaults`].
     restart: TaskSetting<RestartPolicy>,
@@ -85,14 +97,14 @@ pub struct TaskSpec {
     /// Retry limit; `Explicit(None)` selects unlimited retries.
     max_retries: TaskSetting<Option<NonZeroU32>>,
 
-    /// Task object reused across all attempts started from this spec.
+    /// Task object reused for attempts in this registration.
     task: TaskRef,
 }
 
-/// Whether a [`TaskSpec`] setting is inherited or explicitly selected.
+/// Marks a task setting as explicit or inherited from [`TaskDefaults`].
 ///
-/// Optional settings use `TaskSetting<Option<T>>`. This keeps inherited and
-/// explicitly disabled values distinct without exposing `Option<Option<T>>`:
+/// For optional fields, `TaskSetting<Option<T>>` distinguishes inheritance from
+/// an explicit `None`:
 ///
 /// ```rust
 /// use taskvisor::TaskSetting;
@@ -106,9 +118,9 @@ pub struct TaskSpec {
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskSetting<T> {
-    /// Resolve the field from [`TaskDefaults`] at registry admission.
+    /// Uses the matching [`TaskDefaults`] field at registry admission.
     Inherit,
-    /// Use this explicit value instead of the corresponding default.
+    /// Uses this value instead of the matching default.
     Explicit(T),
 }
 
@@ -130,7 +142,7 @@ impl<T: Copy> TaskSetting<T> {
     }
 }
 
-/// A task specification after default resolution.
+/// Actor settings produced by registry-time default resolution.
 #[derive(Clone)]
 #[must_use]
 pub(crate) struct ResolvedTaskSpec {
@@ -171,8 +183,8 @@ impl std::fmt::Debug for ResolvedTaskSpec {
 impl TaskSpec {
     /// Creates a named spec that inherits every execution setting.
     ///
-    /// The supervisor resolves restart, backoff, timeout, and retry limit from its [`TaskDefaults`] when it accepts the task.
-    /// > A later `with_*` call sets that one field explicitly.
+    /// Registry admission resolves restart, backoff, timeout, and retry limit
+    /// from [`TaskDefaults`]. A later `with_*` call makes that field explicit.
     pub fn from_defaults(name: impl Into<Arc<str>>, task: TaskRef) -> Self {
         Self {
             name: name.into(),
@@ -184,15 +196,15 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named spec with explicit main settings.
+    /// Creates a named spec with explicit restart, backoff, and timeout settings.
     ///
-    /// Prefer the named constructors for common cases: [`once`](Self::once), [`restartable`](Self::restartable), [`periodic`](Self::periodic).
+    /// Use this constructor when these settings must not inherit supervisor
+    /// defaults. The named constructors are shorter for common lifecycles.
     ///
-    /// `timeout` accepts a [`Duration`] or `Option<Duration>`.
-    /// `None` and zero disable the attempt timeout.
-    ///
-    /// The retry limit is set to unlimited.
-    /// > _change it with [`with_max_retries`](Self::with_max_retries)_.
+    /// `timeout` accepts a [`Duration`] or `Option<Duration>`; `None` and zero
+    /// disable the attempt timeout. The retry limit starts as explicitly
+    /// unlimited. Use [`with_max_retries`](Self::with_max_retries) to set a
+    /// limit.
     pub fn new(
         name: impl Into<Arc<str>>,
         task: TaskRef,
@@ -210,10 +222,10 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named one-shot task that never restarts.
+    /// Creates a named task that never starts a second attempt.
     ///
-    /// Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
-    /// > Override them with the matching `with_*` methods.
+    /// Restart is explicitly [`Never`](RestartPolicy::Never). Backoff, timeout,
+    /// and retry limit remain inherited, although restart never permits a retry.
     pub fn once(name: impl Into<Arc<str>>, task: TaskRef) -> Self {
         Self {
             name: name.into(),
@@ -225,10 +237,11 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named task that restarts after retryable failures.
+    /// Creates a named task that may retry a retryable failure.
     ///
-    /// Success, fatal failure, and cancellation stop the task.
-    /// > Backoff, timeout, and retry limit are inherited from [`TaskDefaults`].
+    /// Restart is explicitly [`OnFailure`](RestartPolicy::OnFailure). Success,
+    /// fatal failure, and cancellation stop the actor. Backoff, timeout, and the
+    /// retry limit are inherited.
     pub fn restartable(name: impl Into<Arc<str>>, task: TaskRef) -> Self {
         Self {
             name: name.into(),
@@ -240,18 +253,18 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a task that runs again after each success.
+    /// Creates a named task that may run again after success or retryable failure.
     ///
-    /// After success, the supervisor waits `every` before the next attempt.
-    /// A zero value means no configured interval;
-    /// > _a small internal guard still prevents an instant task from creating a hot loop._
+    /// After success, the actor waits `every` before the next attempt. A zero
+    /// value removes the configured interval; an internal one-millisecond floor
+    /// still prevents an instant attempt from forming a hot loop.
     ///
     /// Retryable failures use the backoff policy, not `every`.
     /// A retry limit can stop the task after repeated failures.
     /// Fatal failure and cancellation always stop it.
     ///
-    /// The interval starts after an attempt completes.
-    /// > *This is not a wall-clock schedule such as "daily at 03:00".*
+    /// The delay begins after an attempt completes. This is not a wall-clock
+    /// schedule.
     ///
     /// ```rust
     /// use std::time::Duration;
@@ -262,7 +275,7 @@ impl TaskSpec {
     ///     Ok(())
     /// });
     ///
-    /// // Starts the next successful cycle 30 seconds after this one ends.
+    /// // Starts the next attempt 30 seconds after this successful attempt ends.
     /// let spec = TaskSpec::periodic("tick", tick, Duration::from_secs(30));
     /// ```
     #[doc(alias = "interval")]
@@ -280,13 +293,13 @@ impl TaskSpec {
         }
     }
 
-    /// Returns the task handle.
+    /// Returns the shared task object.
     #[must_use]
     pub fn task(&self) -> &TaskRef {
         &self.task
     }
 
-    /// Returns the task name.
+    /// Returns the immutable registration name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -297,19 +310,19 @@ impl TaskSpec {
         Arc::clone(&self.name)
     }
 
-    /// Returns the explicit restart policy, or `None` if it is inherited.
+    /// Returns the explicit restart policy, or `None` when inherited.
     #[must_use]
     pub fn restart_override(&self) -> Option<RestartPolicy> {
         self.restart.value()
     }
 
-    /// Returns the explicit backoff policy, or `None` if it is inherited.
+    /// Returns the explicit backoff policy, or `None` when inherited.
     #[must_use]
     pub fn backoff_override(&self) -> Option<BackoffPolicy> {
         self.backoff.value()
     }
 
-    /// Returns how this spec overrides the attempt timeout.
+    /// Returns the unresolved attempt-timeout setting.
     ///
     /// - [`TaskSetting::Inherit`] means inherit the default.
     /// - `TaskSetting::Explicit(None)` explicitly disables the timeout.
@@ -319,7 +332,7 @@ impl TaskSpec {
         self.timeout
     }
 
-    /// Returns how this spec overrides the retry limit.
+    /// Returns the unresolved retry-limit setting.
     ///
     /// - [`TaskSetting::Inherit`] means inherit the default.
     /// - `TaskSetting::Explicit(None)` explicitly allows unlimited retries.
@@ -329,10 +342,15 @@ impl TaskSpec {
         self.max_retries
     }
 
-    /// Sets the timeout for each attempt.
+    /// Sets an explicit timeout for each attempt.
     ///
-    /// Pass a `Duration` to enable it.
-    /// Pass `None` or zero to disable it, including a timeout inherited from [`TaskDefaults`].
+    /// A [`Duration`] enables the timeout. `None` or zero disables it, including
+    /// a timeout set in [`TaskDefaults`].
+    ///
+    /// At the deadline, Taskvisor cancels the attempt context and drops the
+    /// attempt future. This cannot interrupt synchronous code in a future poll
+    /// or undo work already performed outside the future. Dropping a future is
+    /// also synchronous; a blocking destructor can delay timeout completion.
     #[doc(alias = "watchdog")]
     #[doc(alias = "attempt deadline")]
     pub fn with_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
@@ -340,26 +358,29 @@ impl TaskSpec {
         self
     }
 
-    /// Sets the delay policy for retryable failures.
+    /// Sets an explicit delay policy for retryable failures.
     ///
-    /// This value overrides the supervisor default.
+    /// This delay is not used after success. See [`BackoffPolicy`] for the
+    /// calculation and jitter order.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
         self.backoff = TaskSetting::Explicit(backoff);
         self
     }
 
-    /// Sets when the task may run another attempt.
+    /// Sets the explicit restart policy.
     ///
-    /// This value overrides the supervisor default.
+    /// The restart policy decides whether another attempt is eligible. The
+    /// retry limit and backoff policy remain separate settings.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = TaskSetting::Explicit(restart);
         self
     }
 
-    /// Sets the number of retries after the first failed attempt in a failure streak.
+    /// Sets the maximum number of retries after the first failed attempt in one
+    /// failure streak.
     ///
     /// Pass a [`NonZeroU32`] to set a limit.
-    /// Pass `None` for unlimited retries, including when [`TaskDefaults`] has a limit.
+    /// Pass `None` for unlimited retries, overriding any default limit.
     ///
     /// A success resets the count.
     #[doc(alias = "retry limit")]
@@ -369,12 +390,12 @@ impl TaskSpec {
         self
     }
 
-    /// Sets a retry limit from a raw integer.
+    /// Sets an explicit retry limit from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_retries` is zero.
-    /// > Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
+    /// Returns [`ConfigError::Zero`] when `max_retries` is zero. Use
+    /// [`with_max_retries`](Self::with_max_retries) with `None` for no limit.
     pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
         let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
             field: "max_retries",
@@ -382,7 +403,7 @@ impl TaskSpec {
         Ok(self.with_max_retries(max_retries))
     }
 
-    /// Applies inherited defaults at registry admission.
+    /// Resolves inherited fields for registry admission.
     pub(crate) fn resolve(self, defaults: &TaskDefaults) -> ResolvedTaskSpec {
         let Self {
             name,
@@ -404,27 +425,27 @@ impl TaskSpec {
 }
 
 impl ResolvedTaskSpec {
-    /// Returns the task handle.
+    /// Returns the task object for actor construction.
     pub(crate) fn task(&self) -> &TaskRef {
         &self.task
     }
 
-    /// Returns the resolved restart policy.
+    /// Returns the actor's restart policy.
     pub(crate) fn restart(&self) -> RestartPolicy {
         self.restart
     }
 
-    /// Returns the resolved backoff policy.
+    /// Returns the actor's failure-backoff policy.
     pub(crate) fn backoff(&self) -> BackoffPolicy {
         self.backoff
     }
 
-    /// Returns the resolved attempt timeout.
+    /// Returns the actor's attempt timeout.
     pub(crate) fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
 
-    /// Returns the resolved failure-retry limit.
+    /// Returns the actor's retry limit for one failure streak.
     pub(crate) fn max_retries(&self) -> Option<NonZeroU32> {
         self.max_retries
     }

@@ -5,8 +5,8 @@
 //!
 //! ```text
 //! supervisor events
-//!       ├──► bounded queue ──► dedicated thread ──► on_event(metrics)
-//!       └──► bounded queue ──► dedicated thread ──► on_event(other)
+//!       ├──► bounded FIFO lane ──┐
+//!       └──► bounded FIFO lane ──┴──► local callback executor ──► on_event
 //! ```
 //!
 //! A slow subscriber does not block event producers, but its queue can overflow

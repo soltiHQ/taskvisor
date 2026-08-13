@@ -1,56 +1,35 @@
-//! # Runtime API
+//! Implements the runtime behind Taskvisor's public supervision API.
 //!
-//! This module contains the public runtime types:
+//! Applications build a [`Supervisor`], choose a static or dynamic entry path,
+//! and describe work with [`TaskSpec`](crate::TaskSpec). Static `run*` methods
+//! add an initial batch and start shutdown when registry membership becomes
+//! empty. [`Supervisor::serve`] returns a [`SupervisorHandle`] for work added and
+//! managed while the application is running. The two paths can share one
+//! runtime when `serve` is called before the single static run.
 //!
-//! - [`Supervisor`] and [`SupervisorBuilder`] create and start a runtime.
-//! - [`BuildError`](crate::BuildError) reports process-wide ownership exhaustion while building.
-//! - [`SupervisorHandle`] manages tasks in dynamic mode.
-//! - [`SupervisorConfig`] sets runtime limits.
-//! - [`TaskDefaults`] sets inherited task behavior.
-//! - [`TaskWaiter`] returns a final [`TaskOutcome`].
+//! ```text
+//! application ──► SupervisorBuilder ──► Supervisor
+//!                                             ├── run* ──► initial task batch
+//!                                             └── serve ──► SupervisorHandle
+//!                                                                  │ commands
+//!                                                                  ▼
+//!                                                               registry
+//!                                                                  │ task
+//!                                                                  ▼
+//!                                                              TaskActor
+//!                                                                  │
+//!                                                                  ▼
+//!                                                        sequential attempts
+//! ```
 //!
-//! ## Runtime Paths
+//! The registry is the source of truth for registered membership and task
+//! activity. Direct replies confirm management decisions. A [`TaskWaiter`]
+//! receives one final [`TaskOutcome`] through a reliable in-process channel.
+//! Events use a separate best-effort observability path and never confirm state.
 //!
-//! State changes, final results, and observations use different paths:
-//!
-//! | Path                                                                     | Route                                                                           |
-//! |--------------------------------------------------------------------------|---------------------------------------------------------------------------------|
-//! | Direct `add*`, label operations, and identity stops without a controller | `SupervisorHandle` -> registry -> direct reply                                  |
-//! | `submit*` and identity stops with a controller                           | `SupervisorHandle` -> controller -> registry when needed                        |
-//! | Watched final result                                                     | registry or controller -> direct one-shot -> `TaskWaiter`                       |
-//! | Observability                                                            | runtime components -> bounded event ingress -> event relay -> subscribers       |
-//! | Attempt activity                                                         | attempt guard -> registry activity bit -> handle query                          |
-//!
-//! The registry is the source of truth for registered identities and names.
-//! Events are for observability and may be lost when consumers are slow.
-//! Attempt-activity queries are backed by registry state and are independent of events.
-//!
-//! ## When a Command Returns
-//!
-//! | Operation  | What the return value confirms                                                              |
-//! |------------|---------------------------------------------------------------------------------------------|
-//! | `add*`     | The registry accepted or rejected the task. The first attempt may not have started yet.     |
-//! | `remove*`  | Whether this caller claimed the stop request. Registered task cleanup may still be running. |
-//! | `cancel*`  | Known work reached logical terminal cleanup, unless the explicit wait timeout expired.     |
-//! | `shutdown` | The bounded shared cleanup workflow finished. The result reports its final status.          |
-//!
-//! Regular management methods wait for capacity in every bounded queue they use.
-//! Their `try_*` versions fail fast at those queue boundaries.
-//!
-//! After a command is accepted, both forms may still wait for a direct decision or terminal cleanup.
-//! [`SupervisorHandle::list`] reads authoritative registry membership.
-//! [`SupervisorHandle::alive_snapshot`] and [`SupervisorHandle::is_alive`] read authoritative attempt activity from registry entries.
-//!
-//! ## Important Rules
-//!
-//! - Static run methods are single-shot and register their initial tasks as one batch.
-//! - [`Supervisor::run`] and [`Supervisor::run_until`] do not install process signal handlers.
-//! - Attempts for one registered task are sequential.
-//! - New task admission closes when shutdown starts.
-//! - Explicit shutdown completes the bounded task, listener, and subscriber cleanup workflow.
-//! - A force-reaped synchronous task, detached subscriber callback, or isolated user destructor can remain physically active afterward.
-//! - Dropping the last public owner only starts best-effort cancellation.
-//! - Event sequence numbers help sort observations, but do not prove causal order between concurrent tasks.
+//! Shutdown closes admission before it drains tasks and runtime workers. The
+//! last public owner can only start non-blocking cancellation from `Drop`; use
+//! [`SupervisorHandle::shutdown`] when the final shutdown result is required.
 
 mod outcome;
 pub use outcome::{TaskOutcome, TaskOutcomeKind, TaskWaiter};
@@ -98,9 +77,13 @@ pub(crate) use runtime::ControllerAddPermit;
 /// ownership before any user-provided destructor can run.
 #[cfg(feature = "controller")]
 pub(crate) struct UncommittedWatchedAdd {
+    /// Registry error that prevented command commit.
     pub(crate) error: crate::RuntimeError,
+    /// Stable task name prepared for registry admission.
     pub(crate) label: std::sync::Arc<str>,
+    /// Task specification and its reserved cleanup ownership.
     pub(crate) owned: deferred_drop::OwnedTask<crate::TaskSpec>,
+    /// Watched-outcome sender returned to controller ownership.
     pub(crate) done: Option<registry::OutcomeTx>,
 }
 

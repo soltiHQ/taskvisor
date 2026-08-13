@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     // serve() returns a handle for dynamic task submission.
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     // Queue: tasks run sequentially
     println!("=== Queue Policy ===");

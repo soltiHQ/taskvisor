@@ -1,4 +1,13 @@
-//! Create a [`Task`] from an async closure.
+//! Adapts an async closure to the [`Task`] contract.
+//!
+//! [`TaskFn`] is the short path from application code to a
+//! [`TaskRef`](crate::TaskRef).
+//! The resulting task is placed in a [`TaskSpec`](crate::TaskSpec) before direct
+//! or controller admission.
+//!
+//! ```text
+//! async closure ──► TaskFn ──► TaskRef ──► TaskSpec ──► admission
+//! ```
 
 use std::{future::Future, sync::Arc};
 
@@ -8,15 +17,17 @@ use crate::{
     tasks::task::{BoxTaskFuture, Task},
 };
 
-/// A task backed by an async closure.
+/// A reusable [`Task`] backed by an async closure.
 ///
-/// This is the simplest way to define a task.
-/// The supervisor calls the closure for every attempt. Each call creates a fresh future.
-/// [`TaskSpec`](crate::TaskSpec) owns the task's registration name.
+/// [`Task::spawn`] invokes the closure once for each attempt. The closure must
+/// create a fresh future on every call. Captured state lives in the reusable
+/// closure; clone owned state into each returned future when needed.
 ///
-/// ## Long-Running Worker
+/// One registration runs attempts sequentially. Reusing the same task under
+/// several [`TaskSpec`](crate::TaskSpec) names can invoke the closure from
+/// separate actors.
 ///
-/// No type annotations are needed: the constructor bounds drive inference.
+/// # Long-running worker
 ///
 /// ```rust
 /// use taskvisor::{TaskError, TaskFn, TaskRef};
@@ -33,10 +44,9 @@ use crate::{
 /// });
 /// ```
 ///
-/// ## Task With Shared State
+/// # Task with shared state
 ///
-/// The closure can run more than once.
-/// Clone shared state into the closure, then clone it again into each returned future:
+/// Clone shared state into the closure, then into each attempt future:
 ///
 /// ```rust
 /// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
@@ -60,10 +70,10 @@ use crate::{
 /// });
 /// ```
 ///
-/// ## See Also
+/// # See also
 ///
-/// - See the [`Task`] trait documentation.
-/// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
+/// - [`Task`] defines the attempt and cancellation contract.
+/// - [`TaskSpec`](crate::TaskSpec) adds registration and execution settings.
 pub struct TaskFn<F> {
     f: F,
 }
@@ -79,16 +89,20 @@ where
     F: Fn(TaskContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
-    /// Creates a task from a closure.
+    /// Wraps `f` as a concrete [`TaskFn`].
     ///
-    /// Rust normally infers the context and error types from these bounds.
+    /// Use this form when code needs the concrete adapter type. Use
+    /// [`arc`](Self::arc) when the task will go directly into a
+    /// [`TaskSpec`](crate::TaskSpec).
     pub fn new(f: F) -> Self {
         Self { f }
     }
 
-    /// Creates a task inside an [`Arc`].
+    /// Wraps `f` in a task shared through [`Arc`].
     ///
-    /// The result converts to [`TaskRef`](crate::TaskRef) where needed.
+    /// This is the shortest path from an async closure to a
+    /// [`TaskSpec`](crate::TaskSpec). The returned `Arc<Self>` can coerce to
+    /// [`TaskRef`](crate::TaskRef).
     pub fn arc(f: F) -> Arc<Self> {
         Arc::new(Self::new(f))
     }

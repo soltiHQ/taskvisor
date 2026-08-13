@@ -160,7 +160,7 @@ fn bench_queue(c: &mut Criterion) {
                                 .with_subscribers(subs)
                                 .with_controller(ControllerConfig::default())
                                 .build();
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
@@ -206,7 +206,7 @@ fn bench_replace(c: &mut Criterion) {
                             let sup = Supervisor::builder(bench_config())
                                 .with_controller(ControllerConfig::default())
                                 .build();
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
@@ -247,7 +247,7 @@ fn bench_drop_if_running(c: &mut Criterion) {
                             let sup = Supervisor::builder(bench_config())
                                 .with_controller(ControllerConfig::default())
                                 .build();
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
@@ -294,7 +294,7 @@ fn bench_submit_hotpath(c: &mut Criterion) {
                                     ),
                                 )
                                 .build();
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
                             let template = instant_task("slot-h");
 
                             let start = std::time::Instant::now();
@@ -339,7 +339,7 @@ fn bench_multi_slot(c: &mut Criterion) {
                                 .with_subscribers(subs)
                                 .with_controller(ControllerConfig::default())
                                 .build();
-                            let handle = sup.serve();
+                            let handle = sup.serve().expect("runtime startup");
 
                             let start = std::time::Instant::now();
                             for i in 0..count {
