@@ -1,9 +1,8 @@
 //! Builds one keyed admission request for the controller.
 //!
-//! [`ControllerSpec`] combines the work described by [`TaskSpec`] with a slot
-//! and a busy-slot [`AdmissionPolicy`]. Controller `submit*` methods consume
-//! this value. Direct runtime `add*` methods accept `TaskSpec` instead and
-//! bypass keyed admission.
+//! [`ControllerSpec`] combines the work described by [`TaskSpec`] with a slot and a busy-slot [`AdmissionPolicy`].
+//! Controller `submit*` methods consume this value.
+//! Direct runtime `add*` methods accept `TaskSpec` instead and bypass keyed admission.
 //!
 //! See the [`controller`](crate::controller) module for the complete user flow.
 
@@ -14,18 +13,17 @@ use crate::TaskSpec;
 
 /// A task, admission slot, and busy-slot policy submitted as one request.
 ///
-/// The contained [`TaskSpec`] defines how the task runs after registry
-/// admission. The controller settings define when it may enter the registry:
+/// The contained [`TaskSpec`] defines how the task runs after registry admission.
+/// The controller settings define when it may enter the registry:
 ///
 /// - an [`AdmissionPolicy`] for a busy slot;
 /// - an optional slot that groups work which must not overlap.
 ///
 /// Pass the request to
-/// [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)
-/// when application logic needs to know whether work was rejected or how an
-/// admitted task ended. Use [`SupervisorHandle::submit`](crate::SupervisorHandle::submit)
-/// when command intake alone is enough. Allocate its task ID before intake with
-/// [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
+/// [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) when application
+/// logic needs to know whether work was rejected or how an admitted task ended.
+/// Use [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) when command intake alone is enough.
+/// Allocate its task ID before intake with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
 ///
 /// # Admission flow
 ///
@@ -44,13 +42,11 @@ use crate::TaskSpec;
 ///
 /// # Task name and slot
 ///
-/// A task name is a unique registry key and diagnostic label. A slot groups
-/// work for controller admission. Different task names can share a slot.
-/// Without an explicit slot, the task name is used for both roles.
+/// A task name is a unique registry key and diagnostic label. A slot groups work for controller admission.
+/// Different task names can share a slot. Without an explicit slot, the task name is used for both roles.
 ///
-/// Slots do not create a second task namespace. A task name stays reserved while
-/// it belongs to the registry or to Taskvisor's cleanup of a force-aborted task.
-/// The name can be admitted again after that ownership ends.
+/// Slots do not create a second task namespace. A task name stays reserved while it belongs to the registry
+/// or to Taskvisor's cleanup of a force-aborted task. The name can be admitted again after that ownership ends.
 ///
 /// # Examples
 ///
@@ -95,10 +91,8 @@ impl std::fmt::Debug for ControllerSpec {
 impl ControllerSpec {
     /// Creates a request from an explicit policy and task specification.
     ///
-    /// The task name is the effective slot until [`with_slot`](Self::with_slot)
-    /// sets a separate key. Prefer [`queue`](Self::queue),
-    /// [`replace`](Self::replace), or [`drop_if_running`](Self::drop_if_running)
-    /// when the policy is known at the call site.
+    /// The task name is the effective slot until [`with_slot`](Self::with_slot) sets a separate key.
+    /// Prefer [`queue`](Self::queue), [`replace`](Self::replace), or [`drop_if_running`](Self::drop_if_running) when the policy is known at the call site.
     pub fn new(admission: AdmissionPolicy, task_spec: TaskSpec) -> Self {
         Self {
             admission,
@@ -136,16 +130,15 @@ impl ControllerSpec {
 
     /// Removes controller settings and returns the runtime task specification.
     ///
-    /// The returned value can be passed to a direct `add*` method when the
-    /// caller decides to bypass slot admission.
+    /// The returned value can be passed to a direct `add*` method when the caller decides to bypass slot admission.
     pub fn into_task_spec(self) -> TaskSpec {
         self.task_spec
     }
 
     /// Groups this task under an admission key separate from its task name.
     ///
-    /// Tasks with the same effective slot cannot own that slot together. The
-    /// task name remains unchanged and is still checked by the runtime registry.
+    /// Tasks with the same effective slot cannot own that slot together.
+    /// The task name remains unchanged and is still checked by the runtime registry.
     pub fn with_slot(mut self, slot: impl Into<Arc<str>>) -> Self {
         self.slot = Some(slot.into());
         self
@@ -178,17 +171,17 @@ impl ControllerSpec {
 
     /// Creates a request that queues behind older work in a busy slot.
     ///
-    /// Use this when incoming work should join the FIFO order. Queue limits can
-    /// still reject the submission after command intake. See
-    /// [`AdmissionPolicy::Queue`] for the full contract.
+    /// Use this when incoming work should join the FIFO order.
+    /// Queue limits can still reject the submission after command intake.
+    /// See [`AdmissionPolicy::Queue`] for the full contract.
     pub fn queue(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Queue, task_spec)
     }
 
     /// Creates a request that becomes the newest queue head in a busy slot.
     ///
-    /// Use this when the next item should carry the newest value. This retires
-    /// the current owner but does not clear older FIFO entries behind the head.
+    /// Use this when the next item should carry the newest value.
+    /// This retires the current owner but does not clear older FIFO entries behind the head.
     /// See [`AdmissionPolicy::Replace`] for the full contract.
     pub fn replace(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::Replace, task_spec)
@@ -196,9 +189,9 @@ impl ControllerSpec {
 
     /// Creates a request that runs only when the slot is idle.
     ///
-    /// A busy slot rejects the request without starting its task body. Use a
-    /// watched submit method when the caller must observe that decision. See
-    /// [`AdmissionPolicy::DropIfRunning`] for the full contract.
+    /// A busy slot rejects the request without starting its task body.
+    /// Use a watched submit method when the caller must observe that decision.
+    /// See [`AdmissionPolicy::DropIfRunning`] for the full contract.
     pub fn drop_if_running(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::DropIfRunning, task_spec)
     }

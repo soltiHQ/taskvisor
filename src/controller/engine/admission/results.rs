@@ -1,14 +1,11 @@
 //! Applies authoritative runtime results to slot state.
 //!
-//! The controller driver passes direct registry Add decisions and reliable
-//! physical completion signals to this module. A successful Add moves the
-//! matching admission to `Running`, unless an earlier replacement requires
-//! immediate removal. A rejected Add clears the admission and advances queued
-//! work.
+//! The controller driver passes direct registry Add decisions and reliable physical completion signals to this module.
+//! A successful Add moves the matching admission to `Running`, unless an earlier replacement requires immediate removal.
+//! A rejected Add clears the admission and advances queued work.
 //!
-//! Physical completion is the normal signal that releases a `Running` or
-//! `Terminating` owner. Slot name and [`TaskId`] correlation make stale results
-//! harmless.
+//! Physical completion is the normal signal that releases a `Running` or `Terminating` owner.
+//! Slot name and [`TaskId`] correlation make stale results harmless.
 
 use std::sync::Arc;
 

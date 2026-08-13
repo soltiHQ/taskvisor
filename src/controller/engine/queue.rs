@@ -1,8 +1,7 @@
 //! Keeps slot queues and controller indexes consistent.
 //!
-//! Admission code uses these helpers to update a slot queue and its reverse
-//! task index in the same serialized transition. This module also enforces slot
-//! and pending limits, replaces queue heads, and removes unused slots.
+//! Admission code uses these helpers to update a slot queue and its reverse task index in the same serialized transition.
+//! This module also enforces slot and pending limits, replaces queue heads, and removes unused slots.
 
 use std::sync::Arc;
 
@@ -109,8 +108,7 @@ impl Controller {
 
     /// Returns an existing slot or creates one without exceeding the aggregate slot budget.
     ///
-    /// The serialized controller loop performs the limit check and insertion as
-    /// one controller-state transition.
+    /// The serialized controller loop performs the limit check and insertion as one controller-state transition.
     #[inline]
     pub(super) fn try_get_or_create_slot(
         &self,
@@ -213,8 +211,7 @@ impl Controller {
     /// Replaces the queue head with the latest submission.
     ///
     /// An existing head is rejected with [`RejectionKind::SupersededByReplace`].
-    /// The remaining queue keeps its order. An empty queue receives the new
-    /// head without applying `max_slot_queue`.
+    /// The remaining queue keeps its order. An empty queue receives the new head without applying `max_slot_queue`.
     pub(super) fn replace_head_or_push(
         &self,
         slot: &mut SlotState,

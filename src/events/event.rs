@@ -1,11 +1,9 @@
 //! Defines the event values delivered to subscribers.
 //!
-//! Runtime components create an [`Event`] to describe a lifecycle action.
-//! Ordinary events enter the bounded bus and may reach subscriber callbacks.
-//! Internal overflow and relay-failure diagnostics can enter subscriber lanes
-//! directly. No event feeds back into task management or registry cleanup.
-//! Applications normally read events through [`Subscribe`](crate::Subscribe),
-//! not construct them.
+//! Runtime components create an [`Event`] to describe a lifecycle action. Ordinary events enter the bounded
+//! bus and may reach subscriber callbacks. Internal overflow and relay-failure diagnostics can enter subscriber
+//! lanes directly. No event feeds back into task management or registry cleanup. Applications normally read
+//! events through [`Subscribe`](crate::Subscribe), not construct them.
 //!
 //! ```text
 //! runtime action
@@ -18,18 +16,15 @@
 //!      └── internal diagnostic ──► subscriber lanes
 //! ```
 //!
-//! [`EventKind`] defines the event meaning. [`BackoffSource`],
-//! [`RejectionKind`], and [`TaskOutcomeKind`] provide typed categories where
-//! free-form text would be unsafe for machine decisions.
+//! [`EventKind`] defines the event meaning. [`BackoffSource`], [`RejectionKind`], and [`TaskOutcomeKind`]
+//! provide typed categories where free-form text would be unsafe for machine decisions.
 //!
-//! Every event contains `kind`, `at`, and `seq`. Other fields depend on the
-//! event kind. Read the variant documentation before using an optional field.
-//! Duration builders store whole milliseconds and clamp values above
-//! `u32::MAX` milliseconds.
+//! Every event contains `kind`, `at`, and `seq`. Other fields depend on the event kind.
+//! Read the variant documentation before using an optional field. Duration builders store whole
+//! milliseconds and clamp values above `u32::MAX` milliseconds.
 //!
-//! `seq` is an increasing process-local construction sequence. Concurrent
-//! effects and callbacks may occur in another order. The sequence is not
-//! persisted and panics on exhaustion instead of wrapping.
+//! `seq` is an increasing process-local construction sequence. Concurrent effects and callbacks may
+//! occur in another order. The sequence is not persisted and panics on exhaustion instead of wrapping.
 //!
 //! # Interpreting an event
 //!
@@ -89,10 +84,9 @@ fn next_event_seq() -> u64 {
 
 /// Classifies one best-effort runtime event.
 ///
-/// Every [`Event`] has `seq`, `at`, and `kind`. Variant documentation lists the
-/// additional metadata set by Taskvisor. Match on this value before reading
-/// optional metadata. This enum is non-exhaustive; include a wildcard arm when
-/// matching it.
+/// Every [`Event`] has `seq`, `at`, and `kind`. Variant documentation lists the additional metadata
+/// set by Taskvisor. Match on this value before reading optional metadata. This enum is non-exhaustive;
+/// include a wildcard arm when matching it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventKind {
@@ -108,14 +102,14 @@ pub enum EventKind {
 
     /// An event path fell behind or closed before delivery.
     ///
-    /// `task` identifies the subscriber or internal relay. `dropped` carries a
-    /// loss count when known. `reason` contains diagnostic details.
+    /// `task` identifies the subscriber or internal relay.
+    /// `dropped` carries a loss count when known. `reason` contains diagnostic details.
     SubscriberOverflow,
 
     /// Explicit shutdown entered the shared shutdown workflow.
     ///
-    /// This includes a handle request, an application shutdown future, or a
-    /// configured operating-system signal. Natural shutdown does not emit it.
+    /// This includes a handle request, an application shutdown future, or a configured
+    /// operating-system signal. Natural shutdown does not emit it.
     ShutdownRequested,
 
     /// Registry task cleanup finished within the shared grace window.
@@ -133,8 +127,7 @@ pub enum EventKind {
 
     /// One task attempt returned `Ok(())`.
     ///
-    /// This is not always the final task result. Carries `id`, `task`,
-    /// `attempt`, and `duration_ms`.
+    /// This is not always the final task result. Carries `id`, `task`, `attempt`, and `duration_ms`.
     AttemptSucceeded,
 
     /// One task attempt returned [`TaskError::Canceled`](crate::TaskError::Canceled).
@@ -144,11 +137,10 @@ pub enum EventKind {
 
     /// One task attempt returned or produced a failure.
     ///
-    /// This includes retryable and fatal errors, task-returned timeouts, and
-    /// caught task panics. A configured deadline normally emits
-    /// [`AttemptTimedOut`](Self::AttemptTimedOut). Cleanup failure at that
-    /// deadline emits this variant instead. Carries `id`, `task`, `attempt`,
-    /// `duration_ms`, `reason`, and an optional `exit_code`.
+    /// This includes retryable and fatal errors, task-returned timeouts, and caught task panics.
+    /// A configured deadline normally emits [`AttemptTimedOut`](Self::AttemptTimedOut).
+    /// Cleanup failure at that deadline emits this variant instead.
+    /// Carries `id`, `task`, `attempt`, `duration_ms`, `reason`, and an optional `exit_code`.
     AttemptFailed,
 
     /// One task attempt exceeded its configured deadline.
@@ -158,15 +150,14 @@ pub enum EventKind {
 
     /// The task actor scheduled a delay before another attempt.
     ///
-    /// Carries `id`, `task`, the previous `attempt`, `delay_ms`, and
-    /// `backoff_source`. Failure backoff also carries the last error in `reason`.
+    /// Carries `id`, `task`, the previous `attempt`, `delay_ms`, and `backoff_source`.
+    /// Failure backoff also carries the last error in `reason`.
     BackoffScheduled,
 
     /// A task add request was published before registry processing.
     ///
-    /// This does not confirm admission. An all-or-nothing batch publishes one
-    /// event per item before sending its single registry command. Carries the
-    /// reserved `id` and requested `task` name.
+    /// This does not confirm admission. An all-or-nothing batch publishes one event per item before
+    /// sending its single registry command. Carries the reserved `id` and requested `task` name.
     TaskAddRequested,
 
     /// Registry admission accepted the task.
@@ -176,9 +167,8 @@ pub enum EventKind {
 
     /// Registry admission rejected a task add.
     ///
-    /// No rejected task body starts. Batch rejection starts no item in the
-    /// batch. Carries `id`, `task`, diagnostic `reason`,
-    /// [`TaskOutcomeKind::Rejected`], and a registry [`RejectionKind`].
+    /// No rejected task body starts. Batch rejection starts no item in the batch. Carries `id`, `task`,
+    /// diagnostic `reason`, [`TaskOutcomeKind::Rejected`], and a registry [`RejectionKind`].
     TaskAddFailed,
 
     /// A remove or cancel request entered runtime or controller processing.
@@ -189,27 +179,24 @@ pub enum EventKind {
 
     /// Registry cleanup attempted the closing event for a removed task.
     ///
-    /// Registry membership is already absent. Final watched-outcome delivery,
-    /// when requested, was attempted first. A force-aborted task may still be
-    /// physically active. Carries `id` and `task`.
+    /// Registry membership is already absent. Final watched-outcome delivery, when requested,
+    /// was attempted first. A force-aborted task may still be physically active. Carries `id` and `task`.
     TaskRemoved,
 
     /// Registry cleanup classified the final outcome of a registered task.
     ///
-    /// Membership is already absent. This event is attempted before watched
-    /// outcome delivery and [`TaskRemoved`](Self::TaskRemoved). Except for
-    /// force-abort, task execution is physically joined first. Carries `id`,
-    /// `task`, `outcome_kind`, and optional diagnostic `reason` and `exit_code`.
-    /// Use [`TaskWaiter`](crate::TaskWaiter) when the final outcome must not rely
-    /// on best-effort event delivery.
+    /// Membership is already absent. This event is attempted before watched outcome delivery and
+    /// [`TaskRemoved`](Self::TaskRemoved). Except for force-abort, task execution is physically
+    /// joined first. Carries `id`, `task`, `outcome_kind`, and optional diagnostic `reason`
+    /// and `exit_code`. Use [`TaskWaiter`](crate::TaskWaiter) when the final
+    /// outcome must not rely on best-effort event delivery.
     TaskFinished,
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     /// The controller rejected a submission before registry admission.
     ///
-    /// Carries `id`, [`TaskOutcomeKind::Rejected`], `rejection_kind`, diagnostic
-    /// `reason`, and the slot name in `task` when known.
+    /// Carries `id`, [`TaskOutcomeKind::Rejected`], `rejection_kind`, diagnostic `reason`, and the slot name in `task` when known.
     ControllerRejected,
 
     #[cfg(feature = "controller")]
@@ -217,16 +204,14 @@ pub enum EventKind {
     /// The controller accepted a submission into slot ownership or its queue.
     ///
     /// Runtime registry admission and task execution may not have started.
-    /// Carries `id`, the slot name in `task`, and a diagnostic summary in
-    /// `reason`.
+    /// Carries `id`, the slot name in `task`, and a diagnostic summary in `reason`.
     ControllerSubmitted,
 
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     /// A controller slot changed admission state.
     ///
-    /// Carries the slot name in `task` and diagnostic transition text in
-    /// `reason`.
+    /// Carries the slot name in `task` and diagnostic transition text in `reason`.
     ControllerSlotTransition,
 }
 
@@ -301,9 +286,8 @@ impl BackoffSource {
 
 /// Classifies why submitted work was rejected before its task body ran.
 ///
-/// Use this enum for branching and telemetry. [`Event::reason`] and
-/// [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) keep readable details.
-/// This enum is non-exhaustive; include a wildcard arm when matching it.
+/// Use this enum for branching and telemetry. [`Event::reason`] and [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
+/// keep readable details. This enum is non-exhaustive; include a wildcard arm when matching it.
 ///
 /// ```rust
 /// use taskvisor::RejectionKind;
@@ -316,9 +300,8 @@ impl BackoffSource {
 pub enum RejectionKind {
     /// The name is reserved or repeated in the same all-or-nothing batch.
     ///
-    /// An active or removing task reserves its name. A force-aborted task keeps
-    /// the name reserved until Taskvisor has observed the actor's physical exit
-    /// and collected its terminal state.
+    /// An active or removing task reserves its name. A force-aborted task keeps the name reserved until
+    /// Taskvisor has observed the actor's physical exit and collected its terminal state.
     AlreadyExists,
     /// A conflict elsewhere caused this item in an all-or-nothing batch to fail.
     BatchRejected,
@@ -358,13 +341,12 @@ impl RejectionKind {
 
 /// One best-effort runtime event with optional typed metadata.
 ///
-/// Subscriber callbacks receive this value by reference. Match [`kind`](Self::kind)
-/// first, then read the fields documented for that variant. Do not parse
-/// [`reason`](Self::reason) for program logic; use typed category fields and
-/// their stable labels.
+/// Subscriber callbacks receive this value by reference. Match [`kind`](Self::kind) first, then read the
+/// fields documented for that variant. Do not parse [`reason`](Self::reason) for program logic;
+/// use typed category fields and their stable labels.
 ///
-/// [`Event::new`] sets `kind`, `at`, and `seq`. The `with_*` builders attach
-/// metadata but do not validate that a field belongs to the selected kind.
+/// [`Event::new`] sets `kind`, `at`, and `seq`. The `with_*` builders attach metadata but do not
+/// validate that a field belongs to the selected kind.
 ///
 /// This struct is non-exhaustive; use `..` when matching it.
 #[derive(Clone)]
@@ -373,8 +355,8 @@ pub struct Event {
     /// Process-local construction sequence.
     ///
     /// It increases without wrapping and is not persisted across restarts.
-    /// Gaps can appear because event delivery is best-effort. Concurrent effects
-    /// may occur in a different order.
+    /// Gaps can appear because event delivery is best-effort.
+    /// Concurrent effects may occur in a different order.
     pub seq: u64,
     /// Wall-clock timestamp captured when the event was created.
     ///
@@ -391,14 +373,12 @@ pub struct Event {
     pub dropped: Option<u64>,
     /// Human-readable diagnostic detail.
     ///
-    /// This text is not schema and may change. Use typed fields such as
-    /// [`outcome_kind`](Self::outcome_kind) and
-    /// [`rejection_kind`](Self::rejection_kind) for machine decisions.
+    /// This text is not schema and may change. Use typed fields such as [`outcome_kind`](Self::outcome_kind)
+    /// and [`rejection_kind`](Self::rejection_kind) for machine decisions.
     pub reason: Option<Arc<str>>,
     /// Final category for `TaskFinished` and rejected work.
     ///
-    /// Use [`TaskOutcomeKind`] for branching and [`TaskOutcomeKind::as_label`]
-    /// for telemetry labels.
+    /// Use [`TaskOutcomeKind`] for branching and [`TaskOutcomeKind::as_label`] for telemetry labels.
     pub outcome_kind: Option<TaskOutcomeKind>,
     /// Rejection category for `TaskAddFailed` and `ControllerRejected`.
     ///
@@ -410,8 +390,8 @@ pub struct Event {
     pub attempt: Option<u32>,
     /// Name associated with the event.
     ///
-    /// Usually a task name. Diagnostics may store a subscriber, relay, or
-    /// runtime component name. Controller events store a slot name.
+    /// Usually a task name. Diagnostics may store a subscriber, relay, or runtime component name.
+    /// Controller events store a slot name.
     pub task: Option<Arc<str>>,
     /// Submission and run identity associated with the event.
     ///
@@ -474,8 +454,7 @@ impl Event {
 
     /// Attaches a machine-readable submission rejection category.
     ///
-    /// This also sets [`outcome_kind`](Self::outcome_kind) to
-    /// [`TaskOutcomeKind::Rejected`].
+    /// This also sets [`outcome_kind`](Self::outcome_kind) to [`TaskOutcomeKind::Rejected`].
     #[inline]
     #[must_use]
     pub fn with_rejection_kind(mut self, kind: RejectionKind) -> Self {

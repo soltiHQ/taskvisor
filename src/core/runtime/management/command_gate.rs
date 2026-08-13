@@ -1,9 +1,9 @@
 //! Prevents management commands from committing after shutdown closes admission.
 //!
-//! Every mutating management path uses this gate for its last shutdown check.
-//! The shutdown workflow takes the same gate, closes admission, and then asks
-//! the registry for an ordering fence. Commands already committed are ahead of
-//! that fence. A queue reservation by itself is not a commit.
+//! Every mutating management path uses this gate for its last shutdown check. The shutdown workflow
+//! takes the same gate, closes admission, and then asks the registry for an ordering fence.
+//! Commands already committed are ahead of that fence.
+//! A queue reservation by itself is not a commit.
 
 use std::sync::atomic::Ordering;
 

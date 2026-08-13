@@ -1,10 +1,9 @@
 //! Commits final registry state after a join owner produces a result.
 //!
 //! Every removal source reaches this module with one [`RemovalReport`]. The join result is first
-//! mapped to its public outcome. Terminal commit then removes the identity and label indexes
-//! under the state lock. After the lock is released, it publishes terminal events, resolves
-//! a watched outcome, and transfers user values with their capacity reservation to physical
-//! and deferred cleanup.
+//! mapped to its public outcome. Terminal commit then removes the identity and label indexes under
+//! the state lock. After the lock is released, it publishes terminal events, resolves a watched outcome,
+//! and transfers user values with their capacity reservation to physical and deferred cleanup.
 //!
 //! Logical completion, pending-join release, and empty-registry notification form a guarded tail.
 //! They still run if reporting unwinds. If a future waiting for the state lock is cancelled,
@@ -120,8 +119,7 @@ impl PendingTerminalReport {
 
     /// Removes membership and commits terminal side effects without another await.
     ///
-    /// Completion waiters wake only after both indexes are updated, reporting is
-    /// attempted, and the state lock is released.
+    /// Completion waiters wake only after both indexes are updated, reporting is attempted, and the state lock is released.
     async fn commit(&mut self) {
         let removed = {
             let mut st = self.state.write().await;
@@ -299,8 +297,7 @@ impl Drop for TerminalFinalizer<'_> {
 impl Registry {
     /// Commits terminal cleanup for one removing entry.
     ///
-    /// Membership removal, reporting, and pending-join accounting finish before
-    /// an empty-registry waiter can continue.
+    /// Membership removal, reporting, and pending-join accounting finish before an empty-registry waiter can continue.
     pub(in crate::core::registry) async fn finish_removal(
         state: &Arc<RwLock<Inner>>,
         empty_notify: &Arc<Notify>,

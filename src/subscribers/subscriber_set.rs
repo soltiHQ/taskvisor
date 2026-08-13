@@ -1,36 +1,31 @@
 //! Implements the internal fan-out engine behind [`Subscribe`].
 //!
-//! [`SupervisorBuilder`](crate::SupervisorBuilder) creates a [`SubscriberSet`]
-//! from the configured subscribers. Construction reserves ownership for the
-//! complete set before it reads subscriber names or queue capacities. Runtime
-//! startup then creates one bounded lane per subscriber and starts the
-//! supervisor-local callback executor.
+//! [`SupervisorBuilder`](crate::SupervisorBuilder) creates a [`SubscriberSet`] from the configured subscribers.
+//! Construction reserves ownership for the complete set before it reads subscriber names or queue capacities.
+//! Runtime startup then creates one bounded lane per subscriber and starts the supervisor-local callback executor.
 //!
 //! ```text
 //! SupervisorBuilder ──► SubscriberSet::from_reserved ──► pending definitions
-//! runtime start ──► SubscriberSet::start ──► lanes + callback executor
+//! runtime start ──────► SubscriberSet::start ──────────► lanes + callback executor
 //!
 //! runtime event relay
 //!      │ Arc<Event>
 //!      ▼
 //! SubscriberSet::emit_arc
-//!      ├── full lane for ordinary event ──► count one lane drop
+//!      ├── full lane for ordinary event ───────► count one lane drop
 //!      ├── full lane for internal diagnostic ──► discard silently
-//!      └── lane with room ──► callback executor ──► Subscribe::on_event
+//!      └── lane with room ─────────────────────► callback executor ──► Subscribe::on_event
 //! ```
 //!
-//! Fan-out performs one bounded enqueue attempt per subscriber and never waits
-//! for callbacks. Each lane preserves FIFO order. Separate lanes may run at the
-//! same time. For a non-empty set, the executor starts with one worker. It may
-//! add workers up to the subscriber count when lanes contend, and it retires
-//! idle extra workers.
-//! Ordinary drops in one full lane are counted and coalesced into a direct
-//! overflow callback after that lane catches up.
+//! Fan-out performs one bounded enqueue attempt per subscriber and never waits for callbacks.
+//! Each lane preserves FIFO order. Separate lanes may run at the same time. For a non-empty set,
+//! the executor starts with one worker. It may add workers up to the subscriber count when lanes
+//! contend, and it retires idle extra workers. Ordinary drops in one full lane are counted and
+//! coalesced into a direct overflow callback after that lane catches up.
 //!
-//! Callback unwinding is isolated with `catch_unwind`. Taskvisor transfers its
-//! retained subscriber `Arc` to the supervisor's deferred-drop domain. Shutdown
-//! closes all lanes and gives them one shared drain deadline. A callback already
-//! running at that deadline may continue on a detached worker.
+//! Callback unwinding is isolated with `catch_unwind`. Taskvisor transfers its retained subscriber `Arc`
+//! to the supervisor's deferred-drop domain. Shutdown closes all lanes and gives them one shared
+//! drain deadline. A callback already running at that deadline may continue on a detached worker.
 
 use std::{
     collections::VecDeque,
@@ -136,7 +131,7 @@ struct SubscriberWorkerHandle {
     thread: std::thread::JoinHandle<()>,
 }
 
-/// Snapshotted metadata and charged ownership retained until startup.
+/// Snapshot metadata and charged ownership retained until startup.
 struct SubscriberDefinition {
     name: Arc<str>,
     capacity: usize,
@@ -145,8 +140,7 @@ struct SubscriberDefinition {
 
 /// Callback ownership installed before any subscriber metadata is read.
 ///
-/// Field order keeps the final charged reference in the cleanup bundle while
-/// unwinding drops the callback reference.
+/// Field order keeps the final charged reference in the cleanup bundle while unwinding drops the callback reference.
 struct OwnedSubscriber {
     subscriber: Arc<dyn Subscribe>,
     cleanup: DropBundle,
@@ -1121,7 +1115,7 @@ mod tests {
     fn wait_for_test_reservations(
         source: &crate::core::deferred_drop::TestReservationSource,
         count: usize,
-    ) -> Vec<crate::core::deferred_drop::DropReservation> {
+    ) -> Vec<DropReservation> {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             if let Ok(reservations) = source.try_reserve_many(count) {

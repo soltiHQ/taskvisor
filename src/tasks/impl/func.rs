@@ -1,9 +1,7 @@
 //! Adapts an async closure to the [`Task`] contract.
 //!
-//! [`TaskFn`] is the short path from application code to a
-//! [`TaskRef`](crate::TaskRef).
-//! The resulting task is placed in a [`TaskSpec`](crate::TaskSpec) before direct
-//! or controller admission.
+//! [`TaskFn`] is the short path from application code to a [`TaskRef`](crate::TaskRef).
+//! The resulting task is placed in a [`TaskSpec`](crate::TaskSpec) before direct or controller admission.
 //!
 //! ```text
 //! async closure ──► TaskFn ──► TaskRef ──► TaskSpec ──► admission
@@ -19,13 +17,11 @@ use crate::{
 
 /// A reusable [`Task`] backed by an async closure.
 ///
-/// [`Task::spawn`] invokes the closure once for each attempt. The closure must
-/// create a fresh future on every call. Captured state lives in the reusable
-/// closure; clone owned state into each returned future when needed.
+/// [`Task::spawn`] invokes the closure once for each attempt. The closure must create a fresh future on every call.
+/// Captured state lives in the reusable closure; clone owned state into each returned future when needed.
 ///
-/// One registration runs attempts sequentially. Reusing the same task under
-/// several [`TaskSpec`](crate::TaskSpec) names can invoke the closure from
-/// separate actors.
+/// One registration runs attempts sequentially. Reusing the same task under several [`TaskSpec`](crate::TaskSpec)
+/// names can invoke the closure from separate actors.
 ///
 /// # Long-running worker
 ///
@@ -91,18 +87,16 @@ where
 {
     /// Wraps `f` as a concrete [`TaskFn`].
     ///
-    /// Use this form when code needs the concrete adapter type. Use
-    /// [`arc`](Self::arc) when the task will go directly into a
-    /// [`TaskSpec`](crate::TaskSpec).
+    /// Use this form when code needs the concrete adapter type.
+    /// Use [`arc`](Self::arc) when the task will go directly into a [`TaskSpec`](crate::TaskSpec).
     pub fn new(f: F) -> Self {
         Self { f }
     }
 
     /// Wraps `f` in a task shared through [`Arc`].
     ///
-    /// This is the shortest path from an async closure to a
-    /// [`TaskSpec`](crate::TaskSpec). The returned `Arc<Self>` can coerce to
-    /// [`TaskRef`](crate::TaskRef).
+    /// This is the shortest path from an async closure to a [`TaskSpec`](crate::TaskSpec).
+    /// The returned `Arc<Self>` can coerce to [`TaskRef`](crate::TaskRef).
     pub fn arc(f: F) -> Arc<Self> {
         Arc::new(Self::new(f))
     }

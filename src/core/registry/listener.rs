@@ -1,15 +1,12 @@
 //! Runs the registry's ordered command and completion loop.
 //!
-//! [`SupervisorCore`](crate::core::runtime::SupervisorCore) starts this listener
-//! with the other runtime workers. The loop dispatches bounded management commands
-//! to admission or removal. It receives actor completion identities and shutdown
-//! fences on separate channels.
+//! [`SupervisorCore`](crate::core::runtime::SupervisorCore) starts this listener with the other runtime workers.
+//! The loop dispatches bounded management commands to admission or removal.
+//! It receives actor completion identities and shutdown fences on separate channels.
 //!
-//! Completion cleanup gets bounded bursts. The listener then gives command and
-//! control input an explicit turn. Runtime cancellation closes intake, drains
-//! buffered commands to direct decisions, claims remaining registered actors,
-//! and waits for removal owners. Joining the listener also closes the actor
-//! reaper coordinator.
+//! Completion cleanup gets bounded bursts. The listener then gives command and control input an explicit turn.
+//! Runtime cancellation closes intake, drains buffered commands to direct decisions, claims remaining registered
+//! actors, and waits for removal owners. Joining the listener also closes the actor reaper coordinator.
 
 use std::{
     future::Future,
@@ -28,8 +25,7 @@ use super::{
 };
 use crate::{error::RuntimeError, events::Event, identity::TaskId};
 
-/// Completion cleanup gets a bounded burst before management and control input
-/// receives an explicit turn.
+/// Completion cleanup gets a bounded burst before management and control input receives an explicit turn.
 pub(super) const COMPLETION_BURST_LIMIT: usize = 64;
 
 /// Listener-owned channel endpoints and the single listener task handle.
@@ -239,8 +235,7 @@ impl Registry {
 
     /// Waits for the registry listener task to finish.
     ///
-    /// Safe to call after shutdown has started.
-    /// If the listener was never started, this is a no-op.
+    /// Safe to call after shutdown has started. If the listener was never started, this is a no-op.
     /// Returns `false` when Tokio reports that the listener did not join cleanly.
     pub async fn join_listener(&self) -> bool {
         let handle = self
@@ -286,8 +281,7 @@ impl Registry {
 
     /// Runs one listener operation under a panic boundary.
     ///
-    /// A processing panic becomes a diagnostic event.
-    /// The registry listener remains available.
+    /// A processing panic becomes a diagnostic event. The registry listener remains available.
     async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
         if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
             self.bus

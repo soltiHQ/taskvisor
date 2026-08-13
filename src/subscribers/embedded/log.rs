@@ -1,18 +1,16 @@
 //! Implements the `logging` feature's human-readable event endpoint.
 //!
-//! [`LogWriter`] is a [`Subscribe`] implementation at the end of the
-//! best-effort observability path.
+//! [`LogWriter`] is a [`Subscribe`] implementation at the end of the best-effort observability path.
 //!
 //! ```text
 //! runtime event relay ──► subscriber queue ──► LogWriter ──► standard output
 //! ```
 //!
-//! Each line starts with the event sequence and the stable
-//! [`EventKind::as_label`] value. Event-specific fields follow as `key=value`.
-//! Free-form text is quoted, escaped, and truncated after 4096 characters. The
-//! complete line format is intended for people and is not a stable data format.
-//! It is not a complete serialization of [`Event`]; use a custom subscriber or
-//! `TracingBridge` when every typed field is needed.
+//! Each line starts with the event sequence and the stable [`EventKind::as_label`] value.
+//! Event-specific fields follow as `key=value`. Free-form text is quoted, escaped, and
+//! truncated after 4096 characters. The complete line format is intended for people and
+//! is not a stable data format. It is not a complete serialization of [`Event`];
+//! use a custom subscriber or `TracingBridge` when every typed field is needed.
 
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;
@@ -30,12 +28,10 @@ fn format_value(value: &str) -> String {
 
 /// Prints each received event as one readable line on standard output.
 ///
-/// This type uses the queue, loss, panic, and shutdown contract defined by
-/// [`Subscribe`].
+/// This type uses the queue, loss, panic, and shutdown contract defined by [`Subscribe`].
 ///
-/// The output is designed for local visibility. Do not parse it as an API or
-/// rely on its field set for task correlation. It omits some [`Event`] fields,
-/// including `id` and `at`.
+/// The output is designed for local visibility. Do not parse it as an API or rely on its field
+/// set for task correlation. It omits some [`Event`] fields, including `id` and `at`.
 ///
 /// # Examples
 ///

@@ -1,10 +1,8 @@
 //! Configures the delay after a retryable task failure.
 //!
-//! Taskvisor calls [`BackoffPolicy::delay_for_retry`] only after
-//! [`RestartPolicy`](crate::RestartPolicy) and the retry limit allow another
-//! attempt. Successful `RestartPolicy::Always` runs do not use failure backoff.
-//! Applications attach a policy with
-//! [`TaskSpec::with_backoff`](crate::TaskSpec::with_backoff), or set a shared
+//! Taskvisor calls [`BackoffPolicy::delay_for_retry`] only after [`RestartPolicy`](crate::RestartPolicy)
+//! and the retry limit allow another attempt. Successful `RestartPolicy::Always` runs do not use failure backoff.
+//! Applications attach a policy with [`TaskSpec::with_backoff`](crate::TaskSpec::with_backoff), or set a shared
 //! default with [`TaskDefaults::with_backoff`](crate::TaskDefaults::with_backoff).
 //!
 //! ```text
@@ -17,10 +15,9 @@
 //! task actor sleep ──► next attempt
 //! ```
 //!
-//! Use [`BackoffPolicy::constant`] for a fixed base delay and
-//! [`BackoffPolicy::exponential`] for a doubling delay. Both named constructors
-//! are deterministic until [`BackoffPolicy::with_jitter`] is added. The built-in
-//! default is exponential from `200ms` to `30s` with equal jitter.
+//! Use [`BackoffPolicy::constant`] for a fixed base delay and [`BackoffPolicy::exponential`] for a doubling delay.
+//! Both named constructors are deterministic until [`BackoffPolicy::with_jitter`] is added.
+//! The built-in default is exponential from `200ms` to `30s` with equal jitter.
 //!
 //! # Calculation
 //!
@@ -28,15 +25,15 @@
 //! In the formula, `n` is `retry_index`.
 //!
 //! ```text
-//! base = min(first * factor^n, max)
+//! base  = min(first * factor^n, max)
 //! delay = jitter(base)
 //! delay = max(delay, user_floor)
 //! delay = max(delay, 1ms) for non-zero base, capped at max
 //! ```
 //!
-//! The final `1ms` safety floor limits fast retry loops after a non-zero base
-//! delay. `first = 0` disables only this safety floor. A user floor set with
-//! [`BackoffPolicy::with_floor`] still applies.
+//! The final `1ms` safety floor limits fast retry loops after a non-zero base delay.
+//! `first = 0` disables only this safety floor.
+//! A user floor set with [`BackoffPolicy::with_floor`] still applies.
 //!
 //! # Example
 //!
@@ -57,8 +54,7 @@
 //! assert_eq!(backoff.delay_for_retry(10), Duration::from_secs(10));
 //! ```
 //!
-//! [`BackoffPolicy::new`] accepts a custom growth factor and returns a typed
-//! error for invalid initial values.
+//! [`BackoffPolicy::new`] accepts a custom growth factor and returns a typed error for invalid initial values.
 
 use std::time::Duration;
 
@@ -68,8 +64,8 @@ use crate::policies::jitter::JitterPolicy;
 
 /// Reports an invalid [`BackoffPolicy`] configuration.
 ///
-/// The enum and its data-carrying variants are non-exhaustive. Use a wildcard
-/// arm for the enum and `..` for variant payloads.
+/// The enum and its data-carrying variants are non-exhaustive.
+/// Use a wildcard arm for the enum and `..` for variant payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 #[non_exhaustive]
 pub enum BackoffError {
@@ -90,10 +86,9 @@ pub enum BackoffError {
 
 /// Immutable delay policy for retryable task failures.
 ///
-/// Configure it on a [`TaskSpec`](crate::TaskSpec) or
-/// [`TaskDefaults`](crate::TaskDefaults). Taskvisor tracks the retry index and
-/// applies the policy automatically. The module documentation defines the
-/// calculation order and its safety floor.
+/// Configure it on a [`TaskSpec`](crate::TaskSpec) or [`TaskDefaults`](crate::TaskDefaults).
+/// Taskvisor tracks the retry index and applies the policy automatically. The module documentation
+/// defines the calculation order and its safety floor.
 #[doc(alias = "retry delay")]
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffPolicy {
@@ -160,10 +155,10 @@ impl BackoffPolicy {
 
     /// Creates a constant policy with no jitter.
     ///
-    /// The maximum is 30 seconds or `delay`, whichever is larger. Add jitter
-    /// with [`with_jitter`](Self::with_jitter).
-    /// For a non-zero value below `1ms`, the safety floor can make the actual
-    /// delay longer. A zero value disables that floor.
+    /// The maximum is 30 seconds or `delay`, whichever is larger.
+    /// Add jitter with [`with_jitter`](Self::with_jitter).
+    /// For a non-zero value below `1ms`, the safety floor can make the actual delay longer.
+    /// A zero value disables that floor.
     ///
     /// ```rust
     /// use std::time::Duration;
@@ -186,11 +181,9 @@ impl BackoffPolicy {
 
     /// Creates a doubling policy with no jitter.
     ///
-    /// The maximum is 30 seconds or `first`, whichever is larger. Change it
-    /// with [`with_max`](Self::with_max) and add jitter with
-    /// [`with_jitter`](Self::with_jitter).
-    /// For a non-zero `first` below `1ms`, the safety floor can make early
-    /// delays longer.
+    /// The maximum is 30 seconds or `first`, whichever is larger.
+    /// Change it with [`with_max`](Self::with_max) and add jitter with [`with_jitter`](Self::with_jitter).
+    /// For a non-zero `first` below `1ms`, the safety floor can make early delays longer.
     /// A zero value disables that floor.
     ///
     /// ```rust
@@ -240,8 +233,7 @@ impl BackoffPolicy {
 
     /// Sets the minimum result after jitter.
     ///
-    /// Useful with [`JitterPolicy::Full`], which can otherwise return a
-    /// near-zero delay.
+    /// Useful with [`JitterPolicy::Full`], which can otherwise return a near-zero delay.
     /// A floor above `max` is clamped to `max`.
     #[must_use]
     pub fn with_floor(mut self, floor: Duration) -> Self {
@@ -283,15 +275,13 @@ impl BackoffPolicy {
 
     /// Computes one delay from a zero-based failure retry index.
     ///
-    /// Index `0` follows the first failure in a failure streak. The policy
-    /// stores no retry counter; callers pass the index for each draw. See the
-    /// module documentation for the formula and floor order.
-    /// Taskvisor calls this method automatically for supervised retries. Direct
-    /// calls are useful for inspecting or testing a policy.
+    /// Index `0` follows the first failure in a failure streak. The policy stores no retry counter;
+    /// callers pass the index for each draw. See the module documentation for the formula and floor order.
+    /// Taskvisor calls this method automatically for supervised retries.
+    /// Direct calls are useful for inspecting or testing a policy.
     ///
-    /// A raw [`JitterPolicy::RandomizedBand`] value may exceed the base delay.
-    /// Other raw jitter values do not. User floors can raise either result, but
-    /// the final delay remains capped at [`Self::max`].
+    /// A raw [`JitterPolicy::RandomizedBand`] value may exceed the base delay. Other raw jitter values do not.
+    /// User floors can raise either result, but the final delay remains capped at [`Self::max`].
     #[must_use]
     pub fn delay_for_retry(&self, retry_index: u32) -> Duration {
         let clamped_exp = retry_index.min(i32::MAX as u32) as i32;

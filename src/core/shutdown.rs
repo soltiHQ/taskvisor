@@ -1,13 +1,11 @@
 //! Waits for the operating-system signal used by explicit signal mode.
 //!
-//! [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals)
-//! calls this helper. Other run modes install no process signal listeners. The
-//! helper only waits; the runtime lifecycle code starts shutdown after it
-//! returns.
+//! [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals) calls this helper.
+//! Other run modes install no process signal listeners. The helper only waits; the runtime
+//! lifecycle code starts shutdown after it returns.
 //!
-//! Unix waits for `SIGINT`, `SIGTERM`, or `SIGQUIT`. Other platforms use
-//! Tokio's Ctrl-C listener. On Unix, installing Tokio signal handlers changes
-//! process-global behavior that is not restored when the listeners are dropped.
+//! Unix waits for `SIGINT`, `SIGTERM`, or `SIGQUIT`. Other platforms use Tokio's Ctrl-C listener.
+//! On Unix, installing Tokio signal handlers changes process-global behavior that is not restored when the listeners are dropped.
 
 /// Waits for a supported process shutdown signal.
 ///

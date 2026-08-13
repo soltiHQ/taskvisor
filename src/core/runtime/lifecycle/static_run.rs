@@ -1,9 +1,7 @@
 //! Owns the single-use lifecycle behind the supervisor's static run methods.
 //!
-//! [`Supervisor::run`](crate::Supervisor::run),
-//! [`Supervisor::run_until`](crate::Supervisor::run_until), and
-//! [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals)
-//! converge here.
+//! [`Supervisor::run`](crate::Supervisor::run), [`Supervisor::run_until`](crate::Supervisor::run_until),
+//! and [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals) converge here.
 //! A non-empty initial task set reserves cleanup ownership as one batch and reaches the registry
 //! in one atomic command. After successful admission, the workflow joins shared shutdown when its
 //! trigger wins or the registry becomes empty.
@@ -40,8 +38,7 @@ impl<'a> StaticRunClaim<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::AlreadyRunning`] when another call owns the claim
-    /// or an earlier call committed it.
+    /// Returns [`RuntimeError::AlreadyRunning`] when another call owns the claim or an earlier call committed it.
     fn acquire(running: &'a AtomicBool) -> Result<Self, RuntimeError> {
         running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -115,16 +112,14 @@ impl SupervisorCore {
 
     /// Orders the lifecycle claim, batch admission, and shutdown races.
     ///
-    /// Preflight failures and shutdown observed before non-empty ownership
-    /// reservation release the claim. If the caller's trigger wins, this method
-    /// starts the runtime and commits the claim. After ownership is
+    /// Preflight failures and shutdown observed before non-empty ownership reservation release the claim.
+    /// If the caller's trigger wins, this method starts the runtime and commits the claim. After ownership is
     /// reserved, successful runtime startup or an observed shared shutdown also commits it.
     ///
     /// # Errors
     ///
     /// Returns [`RuntimeError::AlreadyRunning`] when the lifecycle is already owned or committed.
-    /// It also returns resource, startup, registry, signal-setup, and shared
-    /// shutdown errors from the selected path.
+    /// It also returns resource, startup, registry, signal-setup, and shared shutdown errors from the selected path.
     async fn run_until_trigger<F>(
         self: &Arc<Self>,
         tasks: Vec<TaskSpec>,

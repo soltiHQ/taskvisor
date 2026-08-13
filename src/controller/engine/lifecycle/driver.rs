@@ -1,9 +1,8 @@
 //! Runs and joins the serialized controller task.
 //!
-//! The driver polls ordered commands, tracked runtime results, and shutdown in
-//! one loop. A burst limit gives command intake regular turns when internal
-//! results stay ready. Panic boundaries keep one failed work item from stopping
-//! the loop.
+//! The driver polls ordered commands, tracked runtime results, and shutdown in one loop.
+//! A burst limit gives command intake regular turns when internal results stay ready.
+//! Panic boundaries keep one failed work item from stopping the loop.
 
 use std::{future::Future, sync::Arc};
 

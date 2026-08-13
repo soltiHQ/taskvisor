@@ -1,13 +1,11 @@
 //! Carries accepted user-owned values to isolated cleanup.
 //!
-//! A [`DropReservation`] is bound to one retained value before controller,
-//! registry, or subscriber ownership begins. Those paths may add an
-//! undelivered outcome, a caught panic payload, or a physical attempt result to
-//! [`DropBundle`]. Submission turns the collected values into one worker batch.
+//! A [`DropReservation`] is bound to one retained value before controller, registry, or subscriber ownership begins.
+//! Those paths may add an undelivered outcome, a caught panic payload, or a physical attempt result to [`DropBundle`].
+//! Submission turns the collected values into one worker batch.
 //!
-//! A bundle has one required retained value and at most one outcome, one
-//! auxiliary value, and one panic reporter. Its [`Drop`] implementation submits
-//! defensively when a normal terminal path does not.
+//! A bundle has one required retained value and at most one outcome, one auxiliary value, and one panic reporter.
+//! Its [`Drop`] implementation submits defensively when a normal terminal path does not.
 
 use std::{
     any::Any,
@@ -126,8 +124,7 @@ impl DropBundle {
 
     /// Stores a final outcome that its watcher did not accept.
     ///
-    /// A duplicate poisons the bundle.
-    /// An outcome received after storage is unavailable is retained permanently.
+    /// A duplicate poisons the bundle. An outcome received after storage is unavailable is retained permanently.
     /// Both paths avoid caller-context destruction.
     pub(crate) fn attach_outcome(&mut self, outcome: TaskOutcome) {
         let Some(inner) = self.inner_mut() else {

@@ -1,18 +1,16 @@
 //! Tracks public ownership of one supervisor runtime.
 //!
-//! [`Supervisor`](crate::Supervisor) and every
-//! [`SupervisorHandle`](crate::SupervisorHandle) share one [`RuntimeOwner`].
-//! Internal workers hold [`SupervisorCore`] directly and do not extend the
-//! public ownership lease.
+//! [`Supervisor`](crate::Supervisor) and every [`SupervisorHandle`](crate::SupervisorHandle) share one [`RuntimeOwner`].
+//! Internal workers hold [`SupervisorCore`] directly and do not extend the public ownership lease.
 //!
 //! ```text
 //! Supervisor ──► RuntimeOwner ──► SupervisorCore
-//! handles ──► RuntimeOwner
-//! workers ──► SupervisorCore
+//! handles ─────► RuntimeOwner
+//! workers ─────► SupervisorCore
 //! ```
 //!
-//! Dropping the last public owner calls [`SupervisorCore::abandon`]. This closes
-//! admission and propagates cancellation when no shutdown operation exists.
+//! Dropping the last public owner calls [`SupervisorCore::abandon`].
+//! This closes admission and propagates cancellation when no shutdown operation exists.
 //! If a shared shutdown operation already exists, `Drop` leaves it unchanged.
 
 use std::sync::Arc;
@@ -49,8 +47,7 @@ impl std::fmt::Debug for RuntimeOwner {
 /// Starts the non-blocking last-owner fallback.
 ///
 /// `Drop` cannot await joins or return a shutdown result.
-/// Confirmed cleanup must go through
-/// [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
+/// Confirmed cleanup must go through [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
 impl Drop for RuntimeOwner {
     fn drop(&mut self) {
         self.core.abandon();

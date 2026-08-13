@@ -1,15 +1,12 @@
 //! Runs the restart loop for one registered task.
 //!
-//! Registry admission creates one [`TaskActor`] for a [`TaskId`]. The actor runs
-//! attempts sequentially, applies restart and backoff policy, and returns one
-//! [`ActorExitReason`] to registry cleanup.
+//! Registry admission creates one [`TaskActor`] for a [`TaskId`]. The actor runs attempts sequentially,
+//! applies restart and backoff policy, and returns one [`ActorExitReason`] to registry cleanup.
 //!
 //! ```text
 //! registry admission ──► TaskActor
-//!                            │
 //!                            ▼
 //!                   wait for attempt permit
-//!                            │
 //!                            ▼
 //!                        run_once
 //!                            ├── success ──► stop or repeat
@@ -17,10 +14,9 @@
 //!                            └── fatal or canceled ──► stop
 //! ```
 //!
-//! [`run_once`] owns timeout, panic capture, and terminal events for one attempt.
-//! The actor owns the retry counter and delays between attempts. A concurrency
-//! permit and activity flag remain held until the physical attempt exits. A
-//! success resets the failure retry counter.
+//! [`run_once`] owns timeout, panic capture, and terminal events for one attempt. The actor owns
+//! the retry counter and delays between attempts. A concurrency permit and activity flag remain
+//! held until the physical attempt exits. A success resets the failure retry counter.
 
 use std::{
     num::NonZeroU32,
@@ -128,8 +124,6 @@ fn classify_attempt(
     }
 
     let AttemptFailure { error, reason, .. } = failure;
-    // Retry-only sources must not escape the charged attempt boundary. Their
-    // synchronous destruction therefore happens before its guards are released.
     match std::panic::catch_unwind(AssertUnwindSafe(|| drop(error))) {
         Ok(()) => AttemptDecision::Retry { reason },
         Err(payload) => {
@@ -272,9 +266,6 @@ impl TaskActor {
                     .with_attempt(attempt)
             });
             let attempt_start = Instant::now();
-            // The actor task owns both guards. Force-aborting the actor transfers
-            // that whole Tokio task to the reaper, so neither resource is released
-            // before a synchronously blocked poll or destructor physically exits.
             let permit_guard = permit;
             let activity_guard = activity;
             let result = run_once(
@@ -427,7 +418,6 @@ impl TaskActor {
             return false;
         }
         if duration.is_zero() {
-            // Preserve cooperative fairness without allocating a Tokio timer.
             tokio::task::yield_now().await;
             return !token.is_cancelled();
         }

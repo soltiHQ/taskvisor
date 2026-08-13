@@ -1,21 +1,19 @@
 //! Turns one accepted controller command into a slot or runtime decision.
 //!
-//! This module tree owns the path from submission preflight through slot
-//! placement and runtime handoff. It also applies registry replies and physical
-//! completion signals to the matching slot.
+//! This module tree owns the path from submission preflight through slot placement and runtime handoff.
+//! It also applies registry replies and physical completion signals to the matching slot.
 //!
 //! ```text
 //! Submit command
-//!      │
 //!      ▼
 //! preflight and slot policy
 //!      ├── rejected ──► optional watched outcome and cleanup
-//!      ├── queued ──► slot queue
+//!      ├── queued ────► slot queue
 //!      └── selected ──► registry handoff
 //!
 //! registry handoff
 //!      ├── registry queue full ──► capacity pump ──► registry decision
-//!      └── command sent ──► registry decision
+//!      └── command sent ─────────► registry decision
 //!
 //! registry decision
 //!      ├── rejected ──► next queued item
@@ -27,9 +25,10 @@
 //! `results` and `advance` apply authoritative results and continue queued work.
 //! `watcher` and `cleanup` protect outcome and user-value ownership.
 //!
-//! Slot changes run in the serialized controller loop. A registry reply confirms
-//! or rejects admission. Physical completion releases an accepted owner. Events
-//! only report these decisions.
+//! Slot changes run in the serialized controller loop.
+//! A registry reply confirms or rejects admission.
+//! Physical completion releases an accepted owner.
+//! Events only report these decisions.
 //!
 //! Rejected user values leave slot locks before destructor cleanup starts.
 

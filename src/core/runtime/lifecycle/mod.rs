@@ -1,8 +1,8 @@
 //! Starts the workers that make a wired supervisor operational.
 //!
-//! [`Supervisor::serve`](crate::Supervisor::serve) and the static run methods
-//! enter this package after the builder has connected the core components.
-//! Startup is idempotent after success and serialized while it is in progress.
+//! [`Supervisor::serve`](crate::Supervisor::serve) and the static run methods enter this package
+//! after the builder has connected the core components. Startup is idempotent after success and
+//! serialized while it is in progress.
 //!
 //! ```text
 //! builder-wired core
@@ -10,12 +10,11 @@
 //!       start
 //!         ├── subscribers ──► callback executor
 //!         ├── enabled bus ──► event relay
-//!         ├── registry ──► listener and reaper
-//!         └── controller ──► optional worker
+//!         ├── registry ─────► listener and reaper
+//!         └── controller ───► optional worker
 //! ```
 //!
-//! The `static_run` submodule adds the single-use lifecycle
-//! used by `run`, `run_until`, and `run_with_os_signals`.
+//! The `static_run` submodule adds the single-use lifecycle used by `run`, `run_until`, and `run_with_os_signals`.
 
 mod static_run;
 

@@ -1,9 +1,4 @@
 //! Reports failures to start cleanup workers or reserve cleanup capacity.
-//!
-//! [`DropDomain`](super::domain::DropDomain) returns [`DropAdmissionError`]
-//! while starting its cleanup executor or reserving ownership capacity.
-//! Runtime, controller, and builder code translate these internal failures
-//! into their public error types.
 
 use std::{fmt, io};
 

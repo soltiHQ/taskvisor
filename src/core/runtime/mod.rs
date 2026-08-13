@@ -1,29 +1,25 @@
 //! Coordinates startup, management, events, queries, and shutdown for one supervisor.
 //!
-//! [`SupervisorBuilder`](crate::SupervisorBuilder) creates [`SupervisorCore`] from
-//! the registry, event bus, subscribers, and cleanup ownership domain. Public
-//! [`Supervisor`](super::supervisor::Supervisor) and
-//! [`SupervisorHandle`](super::handle::SupervisorHandle) methods then use this
-//! core to reach those components.
+//! [`SupervisorBuilder`](crate::SupervisorBuilder) creates [`SupervisorCore`] from the registry,
+//! event bus, subscribers, and cleanup ownership domain. Public [`Supervisor`](super::supervisor::Supervisor)
+//! and [`SupervisorHandle`](super::handle::SupervisorHandle) methods then use this core to reach those components.
 //!
 //! ```text
 //! Supervisor / SupervisorHandle
 //!              ▼
 //!       SupervisorCore
-//!          ├── management ──► bounded command queue ──► Registry
-//!          ├── lifecycle ──► runtime workers and listeners
-//!          ├── events ──► Bus ──► event relay ──► subscriber queues
-//!          └── shutdown ──► fence ──► trigger-specific drain
-//!                                             ▼
-//!                                         worker joins
+//!          ├── management ──► bounded command queue ────────► Registry
+//!          ├── lifecycle ───► runtime workers and listeners
+//!          ├── events ──────► Bus ──────────────────────────► event relay ──► subscriber queues
+//!          └── shutdown ────────────────────────────────────► fence ────────► trigger-specific drain
+//!                                                                                     ▼
+//!                                                                                worker joins
 //! ```
 //!
-//! The registry owns task membership and management decisions. Those decisions
-//! return through direct reply channels. Events are best-effort and never drive
-//! runtime state. Activity queries also include attempts retained by the
-//! physical reaper after registry membership ends.
-//! Requested and natural shutdown drain tasks. Signal-setup failure skips that
-//! drain and still runs the common worker-cleanup tail.
+//! The registry owns task membership and management decisions. Those decisions return through direct reply channels.
+//! Events are best-effort and never drive runtime state. Activity queries also include attempts retained by the
+//! physical reaper after registry membership ends. Requested and natural shutdown drain tasks. Signal-setup
+//! failure skips that drain and still runs the common worker-cleanup tail.
 
 mod event_relay;
 mod lifecycle;

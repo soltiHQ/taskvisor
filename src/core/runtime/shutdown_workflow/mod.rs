@@ -1,22 +1,20 @@
 //! Creates one cancellation-safe shutdown operation shared by every runtime caller.
 //!
-//! Explicit requests, static-run triggers, and natural registry completion
-//! enter [`ShutdownCoordinator`]. The first trigger installs a detached owner.
-//! Canceling the initiating future does not cancel that owner. Concurrent and
-//! later callers join the same operation and receive its cached result.
+//! Explicit requests, static-run triggers, and natural registry completion enter [`ShutdownCoordinator`].
+//! The first trigger installs a detached owner. Canceling the initiating future does not cancel that owner.
+//! Concurrent and later callers join the same operation and receive its cached result.
 //!
 //! ```text
 //! first trigger ──► shared operation
-//!                         ├── admission ──► close and request Registry fence
-//!                         ├── requested or natural ──► drain tasks within grace
+//!                         ├── admission ───────────────► close and request Registry fence
+//!                         ├── requested or natural ────► drain tasks within grace
 //!                         └── mandatory cleanup tail ──► cached result
 //! ```
 //!
-//! The cleanup submodule owns the ordered drain and cleanup phases. A signal
-//! setup failure skips the normal task drain but still closes admission,
-//! attempts the registry fence, and runs the common tail. Dropping the last
-//! runtime owner before an operation exists can only close admission and cancel
-//! runtime tokens; that synchronous fallback cannot await or report cleanup.
+//! The cleanup submodule owns the ordered drain and cleanup phases. A signal setup failure skips
+//! the normal task drain but still closes admission, attempts the registry fence, and runs the common tail.
+//! Dropping the last runtime owner before an operation exists can only close admission and cancel runtime tokens;
+//! that synchronous fallback cannot await or report cleanup.
 
 mod cleanup;
 
@@ -235,8 +233,7 @@ impl SupervisorCore {
     ///
     /// # Errors
     ///
-    /// Returns the cached error when grace is exceeded, signal setup fails, or
-    /// internal cleanup cannot finish cleanly.
+    /// Returns the cached error when grace is exceeded, signal setup fails, or internal cleanup cannot finish cleanly.
     pub(super) async fn join_shutdown(
         self: &Arc<Self>,
         trigger: ShutdownTrigger,
@@ -266,8 +263,7 @@ impl SupervisorCore {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::SignalSetupFailed`] when this call joins an
-    /// operation started by failed operating-system signal setup.
+    /// Returns [`RuntimeError::SignalSetupFailed`] when this call joins an operation started by failed operating-system signal setup.
     /// Returns [`RuntimeError::GraceExceeded`] when tasks remain after the grace window.
     /// Returns [`RuntimeError::ShuttingDown`] when internal cleanup cannot finish cleanly.
     pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), RuntimeError> {

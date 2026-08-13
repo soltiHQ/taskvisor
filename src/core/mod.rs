@@ -1,11 +1,10 @@
 //! Implements the runtime behind Taskvisor's public supervision API.
 //!
-//! Applications build a [`Supervisor`], choose a static or dynamic entry path,
-//! and describe work with [`TaskSpec`](crate::TaskSpec). Static `run*` methods
-//! add an initial batch and start shutdown when registry membership becomes
-//! empty. [`Supervisor::serve`] returns a [`SupervisorHandle`] for work added and
-//! managed while the application is running. The two paths can share one
-//! runtime when `serve` is called before the single static run.
+//! Applications build a [`Supervisor`], choose a static or dynamic entry path, and describe work
+//! with [`TaskSpec`](crate::TaskSpec). Static `run*` methods add an initial batch and start
+//! shutdown when registry membership becomes empty. [`Supervisor::serve`] returns a
+//! [`SupervisorHandle`] for work added and managed while the application is running.
+//! The two paths can share one runtime when `serve` is called before the single static run.
 //!
 //! ```text
 //! application ──► SupervisorBuilder ──► Supervisor
@@ -17,19 +16,17 @@
 //!                                                                  │ task
 //!                                                                  ▼
 //!                                                              TaskActor
-//!                                                                  │
 //!                                                                  ▼
 //!                                                        sequential attempts
 //! ```
 //!
-//! The registry is the source of truth for registered membership and task
-//! activity. Direct replies confirm management decisions. A [`TaskWaiter`]
-//! receives one final [`TaskOutcome`] through a reliable in-process channel.
-//! Events use a separate best-effort observability path and never confirm state.
+//! The registry is the source of truth for registered membership and task activity. Direct replies
+//! confirm management decisions. A [`TaskWaiter`] receives one final [`TaskOutcome`] through a
+//! reliable in-process channel. Events use a separate best-effort observability path and never confirm state.
 //!
-//! Shutdown closes admission before it drains tasks and runtime workers. The
-//! last public owner can only start non-blocking cancellation from `Drop`; use
-//! [`SupervisorHandle::shutdown`] when the final shutdown result is required.
+//! Shutdown closes admission before it drains tasks and runtime workers.
+//! The last public owner can only start non-blocking cancellation from `Drop`;
+//! use [`SupervisorHandle::shutdown`] when the final shutdown result is required.
 
 mod outcome;
 pub use outcome::{TaskOutcome, TaskOutcomeKind, TaskWaiter};

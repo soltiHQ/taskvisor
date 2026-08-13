@@ -1,14 +1,12 @@
-//! Lets one task attempt observe cancellation.
+//! Lets one task attempt to observe cancellation.
 //!
-//! Taskvisor passes a [`TaskContext`] to every [`Task::spawn`](crate::Task::spawn)
-//! call. Await [`TaskContext::cancelled`] in a `tokio::select!`, check
-//! [`TaskContext::is_cancelled`] between units of work, or wrap a drop-safe
-//! future with [`TaskContext::run_until_cancelled`].
+//! Taskvisor passes a [`TaskContext`] to every [`Task::spawn`](crate::Task::spawn) call.
+//! Await [`TaskContext::cancelled`] in a `tokio::select!`, check [`TaskContext::is_cancelled`]
+//! between units of work, or wrap a drop-safe future with [`TaskContext::run_until_cancelled`].
 //!
-//! Task removal and runtime shutdown cancel the active attempt. A configured
-//! timeout cancels only that attempt, then drops its future. Cancellation is
-//! cooperative: it cannot interrupt synchronous code, and timeout does not
-//! poll the future again to run application cleanup after setting the signal.
+//! Task removal and runtime shutdown cancel the active attempt. A configured timeout cancels only that attempt,
+//! then drops its future. Cancellation is cooperative: it cannot interrupt synchronous code, and timeout
+//! does not poll the future again to run application cleanup after setting the signal.
 //!
 //! ```text
 //! registry removal or runtime shutdown
@@ -18,14 +16,13 @@
 //!                 ▼
 //!              run_once
 //!                 ├── start attempt ──► child token ──► TaskContext
-//!                 │                                      │
 //!                 │                                      ▼
 //!                 │                                  Task::spawn
 //!                 └── timeout ──► cancel attempt token ──► drop future
 //! ```
 //!
-//! A long-running attempt must observe the signal and return. Use ordinary Rust
-//! guards for cleanup that must run when the future is dropped.
+//! A long-running attempt must observe the signal and return.
+//! Use ordinary Rust guards for cleanup that must run when the future is dropped.
 
 use std::future::Future;
 
@@ -35,10 +32,9 @@ use crate::error::TaskError;
 
 /// A cloneable cancellation view for one [`Task`](crate::Task) attempt.
 ///
-/// Clones share the same signal. Await [`cancelled`](Self::cancelled), check
-/// [`is_cancelled`](Self::is_cancelled), or use
-/// [`run_until_cancelled`](Self::run_until_cancelled) around a future that is
-/// safe to stop by dropping.
+/// Clones share the same signal.
+/// Await [`cancelled`](Self::cancelled), check [`is_cancelled`](Self::is_cancelled), or use
+/// [`run_until_cancelled`](Self::run_until_cancelled) around a future that is safe to stop by dropping.
 #[derive(Clone, Debug)]
 pub struct TaskContext {
     cancel: CancellationToken,
@@ -86,8 +82,8 @@ impl TaskContext {
 
     /// Waits until cancellation is requested.
     ///
-    /// Returns immediately after the signal has been set. The same context may
-    /// be awaited more than once or used in `tokio::select!`.
+    /// Returns immediately after the signal has been set.
+    /// The same context may be awaited more than once or used in `tokio::select!`.
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await;
     }
@@ -100,9 +96,10 @@ impl TaskContext {
 
     /// Polls `fut` until it completes or cancellation wins.
     ///
-    /// Returns `Ok(output)` when `fut` finishes first. Cancellation wins a tie
-    /// and returns [`TaskError::Canceled`]. An already-cancelled context does not
-    /// poll `fut`. In both cancellation cases, `fut` is dropped.
+    /// Returns `Ok(output)` when `fut` finishes first.
+    /// Cancellation wins a tie and returns [`TaskError::Canceled`].
+    /// An already-cancelled context does not poll `fut`.
+    /// In both cancellation cases, `fut` is dropped.
     ///
     /// Use this method only with futures that are safe to cancel by dropping.
     ///
@@ -128,8 +125,8 @@ impl TaskContext {
 
     /// Creates a child cancellation scope.
     ///
-    /// Parent cancellation reaches the child. Cancelling the child through an
-    /// interop API does not cancel this context.
+    /// Parent cancellation reaches the child.
+    /// Cancelling the child through an interop API does not cancel this context.
     #[must_use]
     pub fn child(&self) -> TaskContext {
         TaskContext {

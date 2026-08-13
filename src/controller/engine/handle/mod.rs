@@ -1,19 +1,17 @@
 //! Owns the command-side boundary of the controller engine.
 //!
 //! Submission methods first reserve safe cleanup ownership for the user task.
-//! They then send the task through the same ordered channel used by task-ID
-//! remove and cancel operations.
+//! They then send the task through the same ordered channel used by task-ID remove and cancel operations.
 //!
 //! ```text
 //! caller
-//!      ├── submission ──► cleanup ownership ──► ordered command queue
+//!      ├── submission ──────────► cleanup ownership ──► ordered command queue
 //!      └── identity operation ──► ordered command queue
 //! ```
 //!
-//! The shared queue preserves intake order between submissions and identity
-//! commands. The lifecycle driver owns controller-side processing and state
-//! transitions after intake. Registry replies and physical completion remain
-//! authoritative for runtime results.
+//! The shared queue preserves intake order between submissions and identity commands.
+//! The lifecycle driver owns controller-side processing and state transitions after intake.
+//! Registry replies and physical completion remain authoritative for runtime results.
 
 use tokio::sync::mpsc;
 

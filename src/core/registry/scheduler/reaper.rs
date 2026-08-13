@@ -1,8 +1,7 @@
 //! Retains force-aborted attempts until physical ownership is safe to release.
 //!
-//! Logical removal can finish when a grace deadline aborts an actor, but Tokio
-//! abort is not proof that the actor has physically exited.
-//! [`AttemptReaper`] registers the task label and activity before abort.
+//! Logical removal can finish when a grace deadline aborts an actor, but Tokio abort is not proof that the actor
+//! has physically exited. [`AttemptReaper`] registers the task label and activity before abort.
 //! Admission and activity queries consult those reservations after registry membership is gone.
 //!
 //! Physical actor output and the terminal [`DropBundle`] can arrive in either order.

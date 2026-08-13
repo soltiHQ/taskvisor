@@ -1,13 +1,11 @@
 //! Defines messages between runtime management and the registry.
 //!
-//! [`SupervisorCore`](crate::core::runtime::SupervisorCore) commits ordered
-//! management commands to a bounded queue. The registry listener returns its
-//! decision through the command's one-shot sender. These direct replies are the
-//! source of truth for add, remove, and cancel calls. Lifecycle events are not
-//! part of the reply path.
+//! [`SupervisorCore`](crate::core::runtime::SupervisorCore) commits ordered management commands to a bounded queue.
+//! The registry listener returns its decision through the command's one-shot sender. These direct replies are the
+//! source of truth for add, remove, and cancel calls. Lifecycle events are not part of the reply path.
 //!
-//! [`RegistryControl`] uses a separate channel. Its fence can drain commands that
-//! passed shutdown admission without waiting for management queue capacity.
+//! [`RegistryControl`] uses a separate channel.
+//! Its fence can drain commands that passed shutdown admission without waiting for management queue capacity.
 
 use std::sync::Arc;
 
@@ -105,8 +103,7 @@ pub(crate) enum RegistryCommand {
     },
     /// Resolve a label and claim its current owner in one registry operation.
     ///
-    /// The registry claims under the state lock, then publishes
-    /// `TaskRemoveRequested` with the resolved identity.
+    /// The registry claims under the state lock, then publishes `TaskRemoveRequested` with the resolved identity.
     RemoveByLabel {
         label: Arc<str>,
         /// Reports the claim without waiting for terminal cleanup.

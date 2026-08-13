@@ -1,26 +1,24 @@
 //! Owns the supervisor's authoritative task membership.
 //!
-//! Runtime management, static runs, and controller admission send commands here
-//! through [`SupervisorCore`](super::runtime::SupervisorCore). The listener gives
-//! each command a registry decision. It also receives actor completion signals.
+//! Runtime management, static runs, and controller admission send commands here through
+//! [`SupervisorCore`](super::runtime::SupervisorCore). The listener gives each command a registry decision.
+//! It also receives actor completion signals.
 //!
 //! ```text
-//! SupervisorCore ──► command queue ──► listener
-//! listener ──► admission ──► state ──► actor runtime
+//! SupervisorCore ─────────────► command queue ─────► listener
+//! listener ───────────────────► admission ─────────► state ───────────► actor runtime
 //! actor completion identity ──► completion queue ──► listener
-//! listener ──► removal ──► terminal state ──► outcome and cleanup
+//! listener ───────────────────► removal ───────────► terminal state ──► outcome and cleanup
 //! ```
 //!
-//! `state` maps each [`TaskId`](crate::TaskId) and label to one lifecycle entry.
-//! An entry moves from registered to removing before it disappears. The winning
-//! removal claim owns the actor handle. Joins may run outside the listener, but
-//! terminal removal always returns to the shared state.
+//! `state` maps each [`TaskId`](crate::TaskId) and label to one lifecycle entry. An entry moves from
+//! registered to removing before it disappears. The winning removal claim owns the actor handle.
+//! Joins may run outside the listener, but terminal removal always returns to the shared state.
 //!
-//! Management commands, actor completion, and control use separate channels.
-//! A full management queue does not discard actor completion or control input.
-//! A shutdown fence replies after the listener processes commands committed
-//! before admission closed. Lifecycle events are observations. Direct replies,
-//! completion latches, and watched outcomes carry registry results.
+//! Management commands, actor completion, and control use separate channels. A full management queue
+//! does not discard actor completion or control input. A shutdown fence replies after the listener
+//! processes commands committed before admission closed. Lifecycle events are observations.
+//! Direct replies, completion latches, and watched outcomes carry registry results.
 //!
 //! A force-aborted attempt can outlive membership. `scheduler` keeps its label,
 //! activity, and user values in the physical reaper until the attempt exits.

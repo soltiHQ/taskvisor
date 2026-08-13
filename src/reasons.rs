@@ -1,9 +1,9 @@
-//! Supplies shared human-readable text for admission diagnostics.
+//! Supplies shared readable text for admission diagnostics.
 //!
 //! ```text
 //! registry or controller decision
 //!      ├── category ──► RejectionKind
-//!      └── detail ──► reason text built from these fragments
+//!      └── detail ────► reason text built from these fragments
 //! ```
 //!
 //! Registry and controller paths reuse these strings when they build event and

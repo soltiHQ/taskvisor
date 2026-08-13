@@ -1,9 +1,8 @@
 //! Reserves supervisor-owned cleanup capacity for submissions.
 //!
-//! Submission methods wrap each [`ControllerSpec`] in an `OwnedTask` before
-//! command intake. Waiting stops if the controller channel closes. Fail-fast
-//! reservation converts capacity and worker-start failures into controller
-//! errors.
+//! Submission methods wrap each [`ControllerSpec`] in an `OwnedTask` before command intake.
+//! Waiting stops if the controller channel closes.
+//! Fail-fast reservation converts capacity and worker-start failures into controller errors.
 
 use std::future::Future;
 

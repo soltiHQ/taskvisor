@@ -1,16 +1,12 @@
 //! Defines limits and shutdown settings shared by one runtime.
 //!
-//! [`SupervisorConfig`] is read while [`SupervisorBuilder`](crate::SupervisorBuilder)
-//! builds the runtime. The resulting settings stay immutable. Per-task restart,
-//! backoff, timeout, and retry defaults belong to
-//! [`TaskDefaults`](crate::TaskDefaults).
-//! Queue capacities control backpressure and retained observability data. They
-//! do not make events reliable. Use watched outcomes and direct management
-//! replies for application decisions.
+//! [`SupervisorConfig`] is read while [`SupervisorBuilder`](crate::SupervisorBuilder) builds the runtime.
+//! The resulting settings stay immutable. Per-task restart, backoff, timeout, and retry defaults belong to
+//! [`TaskDefaults`](crate::TaskDefaults). Queue capacities control backpressure and retained observability data.
+//! They do not make events reliable. Use watched outcomes and direct management replies for application decisions.
 //!
 //! ```text
 //! application ──► SupervisorConfig ──► SupervisorBuilder
-//!                                             │
 //!                                             ▼
 //!                                     runtime resources
 //!                                          ├── registry ──► queue and membership limit
@@ -99,11 +95,9 @@ pub enum ConfigError {
 
 /// Immutable runtime-wide settings for one supervisor.
 ///
-/// These settings control task shutdown, subscriber draining, bounded queues,
-/// registry membership, event ingress, and concurrent task attempts. Start with
-/// [`Default`] and change the limits whose behavior the application needs. Pass
-/// the result to [`Supervisor::new`](crate::Supervisor::new) or
-/// [`Supervisor::builder`](crate::Supervisor::builder).
+/// These settings control task shutdown, subscriber draining, bounded queues, registry membership, event ingress,
+/// and concurrent task attempts. Start with [`Default`] and change the limits whose behavior the application needs.
+/// Pass the result to [`Supervisor::new`](crate::Supervisor::new) or [`Supervisor::builder`](crate::Supervisor::builder).
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct SupervisorConfig {
@@ -130,9 +124,9 @@ impl SupervisorConfig {
 
     /// Returns the cooperative task-stop window.
     ///
-    /// Explicit removal, requested shutdown, and natural shutdown use this
-    /// window. After it expires, Taskvisor commits a logical force-abort. The
-    /// physical task code may remain active after that point. Zero skips the wait.
+    /// Explicit removal, requested shutdown, and natural shutdown use this window.
+    /// After it expires, Taskvisor commits a logical force-abort.
+    /// The physical task code may remain active after that point. Zero skips the wait.
     #[must_use]
     pub const fn grace(&self) -> Duration {
         self.grace
@@ -141,8 +135,7 @@ impl SupervisorConfig {
     /// Returns the shared deadline for draining subscriber queues.
     ///
     /// Zero closes the queues without waiting for pending events.
-    /// The deadline can drop queued events. It cannot stop a callback already
-    /// running.
+    /// The deadline can drop queued events. It cannot stop a callback already running.
     #[must_use]
     pub const fn subscriber_shutdown_timeout(&self) -> Duration {
         self.subscriber_shutdown_timeout
@@ -151,8 +144,8 @@ impl SupervisorConfig {
     /// Returns the limit for task attempts running at the same time.
     ///
     /// `None` means no limit.
-    /// Permit waits and retry backoff do not count. A started attempt holds its
-    /// permit until its physical attempt boundary exits.
+    /// Permit waits and retry backoff do not count.
+    /// A started attempt holds its permit until its physical attempt boundary exits.
     #[must_use]
     pub const fn max_concurrent(&self) -> Option<NonZeroUsize> {
         self.max_concurrent
@@ -160,14 +153,12 @@ impl SupervisorConfig {
 
     /// Returns the registry membership limit.
     ///
-    /// Registered and removing tasks count until terminal cleanup removes their
-    /// identity. Force-aborted work can keep consuming the limit after
-    /// membership ends. During cleanup handoff, one task may temporarily consume
-    /// two units.
+    /// Registered and removing tasks count until terminal cleanup removes their identity.
+    /// Force-aborted work can keep consuming the limit after membership ends.
+    /// During cleanup handoff, one task may temporarily consume two units.
     ///
     /// `None` disables this limit.
-    /// A separate ownership budget still limits tasks and subscribers to 1024
-    /// combined.
+    /// A separate ownership budget still limits tasks and subscribers to 1024 combined.
     #[must_use]
     pub const fn max_registered_tasks(&self) -> Option<NonZeroUsize> {
         self.max_registered_tasks
@@ -175,8 +166,8 @@ impl SupervisorConfig {
 
     /// Returns the number of newest events retained by the event ingress.
     ///
-    /// The bus remains best-effort. When publishers outrun the relay, older
-    /// events are replaced and loss is reported through overflow diagnostics.
+    /// The bus remains best-effort.
+    /// When publishers outrun the relay, older events are replaced and loss is reported through overflow diagnostics.
     #[must_use]
     pub const fn bus_capacity(&self) -> NonZeroUsize {
         self.bus_capacity
@@ -184,9 +175,8 @@ impl SupervisorConfig {
 
     /// Returns the capacity of the registry management queue.
     ///
-    /// Regular management methods wait for this capacity. Their `try_*` forms
-    /// return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull)
-    /// when no slot is available immediately.
+    /// Regular management methods wait for this capacity.
+    /// Their `try_*` forms return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when no slot is available immediately.
     #[must_use]
     pub const fn registry_queue_capacity(&self) -> NonZeroUsize {
         self.registry_queue_capacity
@@ -194,8 +184,8 @@ impl SupervisorConfig {
 
     /// Sets the cooperative task-stop window before logical force-abort.
     ///
-    /// Values above 30 years are normalized to 30 years. [`grace`](Self::grace)
-    /// always returns the effective value used by timeout logic and diagnostics.
+    /// Values above 30 years are normalized to 30 years.
+    /// [`grace`](Self::grace) always returns the effective value used by timeout logic and diagnostics.
     pub const fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = normalize_grace(grace);
         self
@@ -203,8 +193,8 @@ impl SupervisorConfig {
 
     /// Sets the shared deadline for draining subscriber queues.
     ///
-    /// Zero closes the queues without waiting for pending events. The deadline
-    /// does not interrupt a subscriber callback already running.
+    /// Zero closes the queues without waiting for pending events.
+    /// The deadline does not interrupt a subscriber callback already running.
     pub const fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.subscriber_shutdown_timeout = timeout;
         self
@@ -212,10 +202,8 @@ impl SupervisorConfig {
 
     /// Sets or clears the limit for task attempts running at the same time.
     ///
-    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build)
-    /// rejects values above Tokio's structural limit.
-    /// Use [`try_with_max_concurrent`](Self::try_with_max_concurrent) for a raw
-    /// integer. Pass `None` to remove the limit.
+    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) rejects values above Tokio's structural limit.
+    /// Use [`try_with_max_concurrent`](Self::try_with_max_concurrent) for a raw integer. Pass `None` to remove the limit.
     pub const fn with_max_concurrent(mut self, max_concurrent: Option<NonZeroUsize>) -> Self {
         self.max_concurrent = max_concurrent;
         self
@@ -225,8 +213,7 @@ impl SupervisorConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero, or
-    /// [`ConfigError::TooLarge`] above Tokio's structural limit.
+    /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero, or [`ConfigError::TooLarge`] above Tokio's structural limit.
     /// Use [`with_max_concurrent`](Self::with_max_concurrent) with `None` for no limit.
     pub fn try_with_max_concurrent(self, max_concurrent: usize) -> Result<Self, ConfigError> {
         let value = checked_async_capacity("max_concurrent", max_concurrent)?;
@@ -235,13 +222,11 @@ impl SupervisorConfig {
 
     /// Sets or clears the registry membership limit.
     ///
-    /// Registered and removing tasks count until terminal cleanup finishes.
-    /// Force-aborted work can keep consuming the limit after membership ends.
-    /// `None` disables only this limit. It does not disable the separate ownership
-    /// budget shared by tasks and subscribers.
+    /// Registered and removing tasks count until terminal cleanup finishes. Force-aborted work can keep
+    /// consuming the limit after membership ends. `None` disables only this limit. It does not disable
+    /// the separate ownership budget shared by tasks and subscribers.
     ///
-    /// Use [`try_with_max_registered_tasks`](Self::try_with_max_registered_tasks)
-    /// for a raw integer.
+    /// Use [`try_with_max_registered_tasks`](Self::try_with_max_registered_tasks) for a raw integer.
     pub const fn with_max_registered_tasks(
         mut self,
         max_registered_tasks: Option<NonZeroUsize>,
@@ -267,11 +252,9 @@ impl SupervisorConfig {
 
     /// Sets how many newest events the event ingress retains.
     ///
-    /// Increasing this value absorbs a larger event burst but does not make
-    /// lifecycle events reliable.
+    /// Increasing this value absorbs a larger event burst but does not make lifecycle events reliable.
     ///
-    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build)
-    /// rejects values above Tokio's structural limit.
+    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) rejects values above Tokio's structural limit.
     pub const fn with_bus_capacity(mut self, bus_capacity: NonZeroUsize) -> Self {
         self.bus_capacity = bus_capacity;
         self
@@ -281,8 +264,7 @@ impl SupervisorConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero, or
-    /// [`ConfigError::TooLarge`] above Tokio's structural limit.
+    /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero, or [`ConfigError::TooLarge`] above Tokio's structural limit.
     pub fn try_with_bus_capacity(self, bus_capacity: usize) -> Result<Self, ConfigError> {
         let value = checked_async_capacity("bus_capacity", bus_capacity)?;
         Ok(self.with_bus_capacity(value))
@@ -290,11 +272,10 @@ impl SupervisorConfig {
 
     /// Sets the capacity of the registry management queue.
     ///
-    /// This bounds management commands waiting for the registry. It does not
-    /// change the task membership or attempt-concurrency limits.
+    /// This bounds management commands waiting for the registry.
+    /// It does not change the task membership or attempt-concurrency limits.
     ///
-    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build)
-    /// rejects values above Tokio's structural limit.
+    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) rejects values above Tokio's structural limit.
     pub const fn with_registry_queue_capacity(
         mut self,
         registry_queue_capacity: NonZeroUsize,
@@ -307,8 +288,7 @@ impl SupervisorConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero, or
-    /// [`ConfigError::TooLarge`] above Tokio's structural limit.
+    /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero, or [`ConfigError::TooLarge`] above Tokio's structural limit.
     pub fn try_with_registry_queue_capacity(
         self,
         registry_queue_capacity: usize,

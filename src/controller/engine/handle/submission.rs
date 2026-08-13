@@ -1,9 +1,8 @@
 //! Builds submission commands for the controller queue.
 //!
-//! Ordinary and prepared paths differ only in where the [`TaskId`] is
-//! allocated. Watched paths attach an outcome sender. Waiting methods wait for
-//! command capacity, while fail-fast methods reserve command capacity before
-//! taking ownership of the task.
+//! Ordinary and prepared paths differ only in where the [`TaskId`] is allocated.
+//! Watched paths attach an outcome sender. Waiting methods wait for command capacity,
+//! while fail-fast methods reserve command capacity before taking ownership of the task.
 
 use tokio::sync::{mpsc, oneshot};
 

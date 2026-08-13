@@ -1,8 +1,8 @@
 //! Slot owner phases and pending work for one admission lane.
 //!
-//! `placement` starts admissions and replacement transitions. `results` applies
-//! direct registry decisions and physical completion. `snapshot` reads the same
-//! phases for diagnostics.
+//! `placement` starts admissions and replacement transitions.
+//! `results` applies direct registry decisions and physical completion.
+//! `snapshot` reads the same phases for diagnostics.
 //!
 //! ```text
 //! Idle ──► Admitting
@@ -14,7 +14,6 @@
 //!           └── replace ──► CancelPendingAdmission
 //!                              ├── registry rejects ──► Idle
 //!                              └── registry accepts ──► Terminating
-//!                                                          │
 //!                                                          └── completion ──► Idle
 //! ```
 //!
@@ -78,8 +77,7 @@ pub(in crate::controller::engine) enum SlotPhase {
 
     /// Registry admission has started but has no final Add decision.
     ///
-    /// The controller may still be waiting for bounded registry command
-    /// capacity, or the registration request is waiting for its reply.
+    /// The controller may still be waiting for bounded registry command capacity, or the registration request is waiting for its reply.
     Admitting {
         /// Task identity waiting for registry admission.
         owner: TaskId,

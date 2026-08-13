@@ -1,11 +1,5 @@
 //! Tests runtime coordination and ordering boundaries through internal entry points.
-//!
-//! These tests exercise [`SupervisorCore`] directly rather than through the
-//! public handle. They cover startup, event relay loss, bounded management
-//! admission, cleanup ownership, static-run commit rules, registry fences, and
-//! shared shutdown. Helpers create unstarted cores, saturated queues, and
-//! injected ownership states for those checks.
-//!
+
 use std::{
     future::Future,
     num::NonZeroUsize,
@@ -36,15 +30,11 @@ use crate::{
     tasks::TaskSpec,
 };
 
-/// Records subscriber callbacks and wakes tests waiting for a matching event.
 struct RecordingSub {
-    /// Events observed by the subscriber callback worker.
     seen: Arc<Mutex<Vec<Event>>>,
-    /// Notification sent after each recorded event.
     changed: tokio::sync::Notify,
 }
 impl RecordingSub {
-    /// Returns a subscriber and an external view of its event buffer.
     fn new() -> (Arc<Self>, Arc<Mutex<Vec<Event>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         (
@@ -56,7 +46,6 @@ impl RecordingSub {
         )
     }
 
-    /// Waits until the recorded stream contains an event matching `predicate`.
     async fn wait_for(&self, predicate: impl Fn(&Event) -> bool) {
         loop {
             let changed = self.changed.notified();
@@ -80,7 +69,6 @@ impl Subscribe for RecordingSub {
     }
 }
 
-/// Supplies a live subscriber lane when a test does not need event inspection.
 struct NoopSub;
 
 impl Subscribe for NoopSub {
@@ -95,18 +83,15 @@ impl Subscribe for NoopSub {
     }
 }
 
-/// Builds an unstarted test core without subscribers.
 fn core(cfg: SupervisorConfig) -> Arc<SupervisorCore> {
     core_with_subs(cfg, Vec::new())
 }
 
-/// Wraps a test task with an already-acquired cleanup reservation.
 fn owned_task(spec: TaskSpec) -> OwnedTask<TaskSpec> {
     let retained = Arc::clone(spec.task());
     OwnedTask::new(spec, retained, test_reservation())
 }
 
-/// Builds an unstarted core with the requested subscriber set.
 fn core_with_subs(
     cfg: SupervisorConfig,
     subs: Vec<Arc<dyn crate::subscribers::Subscribe>>,
@@ -139,7 +124,6 @@ fn core_with_subs(
     )
 }
 
-/// Builds an unstarted core with a caller-controlled cleanup ownership domain.
 fn core_with_domain(cfg: SupervisorConfig, drop_domain: DropDomain) -> Arc<SupervisorCore> {
     let task_defaults = TaskDefaults::default();
     let bus = Bus::new(cfg.bus_capacity().get());
@@ -174,7 +158,6 @@ fn core_with_domain(cfg: SupervisorConfig, drop_domain: DropDomain) -> Arc<Super
     )
 }
 
-/// Checks that cleanup-worker startup details survive runtime error conversion.
 fn assert_destructor_start_failure(error: RuntimeError, worker: usize) {
     match error {
         RuntimeError::ThreadStartFailed { component, source } => {
@@ -191,7 +174,6 @@ fn assert_destructor_start_failure(error: RuntimeError, worker: usize) {
     }
 }
 
-/// Polls once and requires the future to remain pending at an ordering boundary.
 async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
     std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
         Poll::Pending => Poll::Ready(()),
@@ -200,7 +182,6 @@ async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
     .await;
 }
 
-/// Builds an unstarted core whose only registry command slot is occupied.
 fn core_with_full_command_queue() -> (Arc<SupervisorCore>, RemoveReplyRx) {
     let cfg =
         SupervisorConfig::default().with_registry_queue_capacity(NonZeroUsize::new(1).unwrap());
@@ -211,7 +192,6 @@ fn core_with_full_command_queue() -> (Arc<SupervisorCore>, RemoveReplyRx) {
     (core, filler_reply)
 }
 
-/// Starts the registry listener and confirms that it consumes the queue filler.
 async fn start_and_release_command_queue(core: &SupervisorCore, filler_reply: RemoveReplyRx) {
     core.start().expect("runtime startup");
     assert!(matches!(
@@ -222,25 +202,17 @@ async fn start_and_release_command_queue(core: &SupervisorCore, filler_reply: Re
     ));
 }
 
-/// Enumerates management paths that share queue and shutdown contracts.
 #[derive(Clone, Copy, Debug)]
 enum ManagementOperation {
-    /// Identity removal without a completion wait.
     RemoveId,
-    /// Label removal without a completion wait.
     RemoveLabel,
-    /// Identity cancellation with an unbounded completion wait.
     CancelId,
-    /// Label cancellation with an unbounded completion wait.
     CancelLabel,
-    /// Identity cancellation with a zero completion deadline.
     CancelIdWithTimeout,
-    /// Label cancellation with a zero completion deadline.
     CancelLabelWithTimeout,
 }
 
 impl ManagementOperation {
-    /// Every management path covered by shared admission tests.
     const ALL: [Self; 6] = [
         Self::RemoveId,
         Self::RemoveLabel,
@@ -250,7 +222,6 @@ impl ManagementOperation {
         Self::CancelLabelWithTimeout,
     ];
 
-    /// Runs the capacity-waiting form of this operation.
     async fn execute(self, core: &SupervisorCore, id: TaskId) -> Result<bool, RuntimeError> {
         match self {
             Self::RemoveId => core.remove(id).await,
@@ -265,7 +236,6 @@ impl ManagementOperation {
         }
     }
 
-    /// Runs the fail-fast queue-admission form of this operation.
     async fn try_execute(self, core: &SupervisorCore, id: TaskId) -> Result<bool, RuntimeError> {
         match self {
             Self::RemoveId => core.try_remove(id).await,
@@ -280,23 +250,17 @@ impl ManagementOperation {
         }
     }
 
-    /// Reports whether this path publishes an identity removal request event.
     fn publishes_identity_request(self) -> bool {
         matches!(self, Self::RemoveId)
     }
 }
 
-/// Holds a task whose post-cancellation exit is controlled by the test.
 struct ControlledCancellationTask {
-    /// Managed task submitted to the runtime.
     task: TaskRef,
-    /// Notification sent after the task observes cancellation.
     cancellation_seen: Arc<tokio::sync::Notify>,
-    /// Notification that allows the task body to return.
     release: Arc<tokio::sync::Notify>,
 }
 
-/// Builds a task that pauses after observing cancellation.
 fn controlled_cancellation_task() -> ControlledCancellationTask {
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -320,7 +284,6 @@ fn controlled_cancellation_task() -> ControlledCancellationTask {
     }
 }
 
-/// Extracts the preserved I/O source from a signal-setup shutdown result.
 fn signal_setup_source(result: Result<(), RuntimeError>) -> std::io::Error {
     match result {
         Err(RuntimeError::SignalSetupFailed { source }) => source,

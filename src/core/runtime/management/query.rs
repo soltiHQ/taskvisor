@@ -1,9 +1,8 @@
 //! Exposes registry-backed task state to runtime callers without the command queue.
 //!
-//! [`SupervisorHandle`](crate::SupervisorHandle) uses these reads for membership
-//! and current-attempt queries. Membership comes from the registry. Physical
-//! activity combines registry activity bits with attempts still retained by
-//! the reaper after membership ends.
+//! [`SupervisorHandle`](crate::SupervisorHandle) uses these reads for membership and current-attempt queries.
+//! Membership comes from the registry. Physical activity combines registry activity bits with attempts
+//! still retained by the reaper after membership ends.
 
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
 //! Buffers runtime events before subscriber fan-out.
 //!
-//! Runtime components share a cloneable [`Bus`] publisher. One
-//! [`BusReceiver`] belongs to the runtime event relay.
+//! Runtime components share a cloneable [`Bus`] publisher.
+//! One [`BusReceiver`] belongs to the runtime event relay.
 //!
 //! ```text
 //! registry, actors, controller, shutdown
@@ -13,14 +13,12 @@
 //!          runtime event relay ──► subscriber queues
 //! ```
 //!
-//! Publishing does not wait for free capacity. A full ring removes its oldest
-//! event and counts the loss. The receiver gets that count with the next
-//! retained event. This lets the relay emit one overflow diagnostic before it
-//! continues normal delivery.
+//! Publishing does not wait for free capacity. A full ring removes its oldest event and counts the loss.
+//! The receiver gets that count with the next retained event. This lets the relay emit one overflow
+//! diagnostic before it continues normal delivery.
 //!
-//! The bus stays disabled when the runtime has no event consumer. When the
-//! relay shuts down, it closes publication and transfers retained values out
-//! of the ring lock. Events never control runtime state.
+//! The bus stays disabled when the runtime has no event consumer. When the relay shuts down, it closes
+//! publication and transfers retained values out of the ring lock. Events never control runtime state.
 
 use std::{
     collections::VecDeque,
@@ -165,8 +163,7 @@ impl BusReceiver {
 
     /// Closes publication and takes all retained events and the pending loss count.
     ///
-    /// The returned events are owned by the caller so their destructors run
-    /// after the ring mutex has been released.
+    /// The returned events are owned by the caller so their destructors run after the ring mutex has been released.
     pub(crate) fn close_and_take_pending(&mut self) -> (VecDeque<Event>, u64) {
         let mut state = self
             .shared
@@ -192,9 +189,6 @@ impl Bus {
             shared: Arc::new(Shared {
                 capacity,
                 state: Mutex::new(RingState {
-                    // Capacity is a logical retention limit. Growing on demand
-                    // avoids an eager allocation proportional to a configured
-                    // maximum before the first event exists.
                     events: VecDeque::new(),
                     dropped: 0,
                     closed: false,
@@ -240,9 +234,6 @@ impl Bus {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            // `enabled` is only a fast-path hint. A publisher may have observed
-            // it before shutdown closed the ring, so admission is decided
-            // again under the same mutex that linearizes close-and-take.
             if state.closed {
                 drop(state);
                 return;
@@ -250,15 +241,9 @@ impl Bus {
             state.push_retaining_newest(event, self.shared.capacity)
         };
 
-        // Event payloads can own the final strong reference to arbitrary-sized
-        // diagnostic strings. Release displaced ownership without serializing
-        // other publishers or the relay behind its destructor/deallocation.
         drop(displaced);
         #[cfg(test)]
         let _ = self.shared.observers.send(observed);
-        // There is exactly one production receiver (`take_receiver` enforces
-        // that invariant). It either observes this non-empty ring directly or
-        // consumes the permit/wakeup registered before its empty check.
         if became_nonempty {
             #[cfg(test)]
             self.shared
@@ -508,8 +493,6 @@ mod tests {
         bus.publish(Event::new(EventKind::AttemptStarting).with_attempt(1));
 
         let (pending, dropped) = rx.close_and_take_pending();
-        // Calling the inner path models a publisher that observed `enabled`
-        // before close and reached the mutex afterwards.
         bus.publish_enabled(Event::new(EventKind::AttemptStarting).with_attempt(2));
 
         assert_eq!(pending.len(), 1);
@@ -537,9 +520,6 @@ mod tests {
             .try_lock()
             .expect("close-and-take must release the ring mutex before returning");
         drop(ring);
-
-        // The mutex was released by `close_and_take_pending`; dropping the
-        // extracted ring cannot run an event destructor while holding it.
         drop(pending);
         assert!(reason_probe.upgrade().is_none());
     }

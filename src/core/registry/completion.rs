@@ -2,11 +2,10 @@
 //!
 //! Natural actor exit, remove, cancel, and shutdown all enter the same removal path.
 //! [`RemovalCompletion`] lets other components observe that path without owning the actor join.
-//! Public cancellation waits for logical completion.
-//! The controller also waits for physical completion before it reuses a slot.
+//! Public cancellation waits for logical completion. The controller also waits for physical completion before it reuses a slot.
 //!
 //! ```text
-//! registered ──► removing ──► membership and reporting ──► logical
+//! registered ───────────► removing ──────────────────────────► membership and reporting ──► logical
 //! force-aborted actor ──► physical exit and terminal match ──► physical
 //! ```
 //!

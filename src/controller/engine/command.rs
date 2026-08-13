@@ -1,9 +1,8 @@
 //! Messages that cross the controller loop boundary.
 //!
-//! [`ControllerHandle`](super::ControllerHandle) sends [`ControllerCommand`]
-//! values through the ordered command queue. Tracked runtime operations return
-//! the result types in this module to the same loop. Task and slot identities
-//! let the loop discard results that no longer match current state.
+//! [`ControllerHandle`](super::ControllerHandle) sends [`ControllerCommand`] values through the ordered command queue.
+//! Tracked runtime operations return the result types in this module to the same loop.
+//! Task and slot identities let the loop discard results that no longer match current state.
 
 use std::sync::Arc;
 

@@ -1,9 +1,8 @@
 //! Resolves controller-owned work when the loop stops.
 //!
-//! After tracked operations are dropped, the driver drains buffered commands,
-//! queued submissions, capacity waiters, and controller-owned outcome senders.
-//! Pending identity calls and watched controller-owned submissions receive an
-//! explicit shutdown or rejection result.
+//! After tracked operations are dropped, the driver drains buffered commands, queued submissions,
+//! capacity waiters, and controller-owned outcome senders. Pending identity calls and watched
+//! controller-owned submissions receive an explicit shutdown or rejection result.
 //! Submissions already handed to the registry remain runtime-owned.
 
 use std::sync::Arc;

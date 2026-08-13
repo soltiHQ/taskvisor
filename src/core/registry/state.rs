@@ -1,17 +1,15 @@
 //! Stores the registry's authoritative membership and removal phase.
 //!
-//! Admission inserts one [`Entry`] into the identity map and label index while
-//! holding a single write lock.
+//! Admission inserts one [`Entry`] into the identity map and label index while holding a single write lock.
 //! Remove, cancel, natural completion, and shutdown compete for the same transition:
 //!
 //! ```text
 //! registered ──► removing ──► absent
 //! ```
 //!
-//! The winning claim moves the only [`ActorHandle`] out of the entry. Both indexes remain
-//! until terminal commit finishes the removing phase. Activity bits serve physical-attempt queries.
-//! [`HandleCleanup`] is a fallback that keeps user values on the reserved cleanup path
-//! if normal removal does not extract them.
+//! The winning claim moves the only [`ActorHandle`] out of the entry. Both indexes remain until terminal
+//! commit finishes the removing phase. Activity bits serve physical-attempt queries. [`HandleCleanup`] is
+//! a fallback that keeps user values on the reserved cleanup path if normal removal does not extract them.
 
 use std::{
     collections::HashMap,
@@ -36,8 +34,7 @@ pub(super) struct Handle {
     pub(super) completion: RemovalCompletion,
     /// Keeps the user task and its cleanup capacity until terminal cleanup.
     ///
-    /// The wrapper prevents the final library-owned `Arc` from running a user
-    /// destructor on the actor task or registry listener.
+    /// The wrapper prevents the final library-owned `Arc` from running a user destructor on the actor task or registry listener.
     cleanup: HandleCleanup,
 }
 
@@ -72,11 +69,9 @@ impl Handle {
         self.join.abort();
     }
 
-    /// Separates reporting data only after the actor is physically joined or
-    /// has already transferred itself to the reaper.
+    /// Separates reporting data only after the actor is physically joined or has already transferred itself to the reaper.
     ///
-    /// Dropping `join` first preserves the same ownership ordering as ordinary
-    /// `Handle` teardown before the reserved cleanup bundle is extracted.
+    /// Dropping `join` first preserves the same ownership ordering as ordinary `Handle` teardown before the reserved cleanup bundle is extracted.
     pub(super) fn into_report_parts(self) -> (Option<OutcomeTx>, DropBundle) {
         let Self {
             join,

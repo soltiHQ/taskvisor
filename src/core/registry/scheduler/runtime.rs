@@ -1,8 +1,7 @@
 //! Starts accepted actors and polls physical reaper work.
 //!
-//! The registry listener starts [`ActorRuntime`] during supervisor startup.
-//! Admission gives it actors only after registry commit. Force-abort work enters
-//! the shared [`AttemptReaper`] and is polled by one coordinator task.
+//! The registry listener starts [`ActorRuntime`] during supervisor startup. Admission gives it actors
+//! only after registry commit. Force-abort work enters the shared [`AttemptReaper`] and is polled by one coordinator task.
 //!
 //! Closing the coordinator stops new reaper admission and drains queued work.
 //! The shutdown join waits for the coordinator only when no physical attempt is active.
@@ -110,8 +109,7 @@ impl ActorRuntime {
 
     /// Closes the coordinator and performs a best-effort join.
     ///
-    /// Active reaper attempts skip the join and leave the coordinator handle
-    /// retained by this runtime.
+    /// Active reaper attempts skip the join and leave the coordinator handle retained by this runtime.
     /// The method returns `false` only when an idle coordinator task fails while being joined.
     pub(in crate::core::registry) async fn join(&self) -> bool {
         self.attempt_reaper.close();

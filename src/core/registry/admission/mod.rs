@@ -1,18 +1,15 @@
 //! Turns add commands into committed registry entries.
 //!
-//! The registry listener calls this package for single adds and static batches.
-//! Admission checks label ownership and the registration limit. It builds actors
-//! outside the state write lock. It repeats the checks after acquiring the write
-//! lock because preparation did not hold registry state.
+//! The registry listener calls this package for single adds and static batches. Admission checks label
+//! ownership and the registration limit. It builds actors outside the state write lock.
+//! It repeats the checks after acquiring the write lock because preparation did not hold registry state.
 //!
 //! ```text
 //! add command ──► initial check ──► prepare actor
-//!                                      │
 //!                                      ▼
 //!                                 locked check
 //!                                      ├── reject ──► direct error or outcome
 //!                                      └── accept ──► index ──► scheduler
-//!                                                               │
 //!                                                               ▼
 //!                                                        open start gate
 //! ```

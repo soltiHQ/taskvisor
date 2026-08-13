@@ -1,14 +1,12 @@
 //! Splits one actor into a registry-owned handle and a task started after admission.
 //!
-//! [`ScheduledActor`] owns the future before spawn. [`ActorHandle`] is inserted
-//! into registry state first and later owns the spawned Tokio task. A shared slot
-//! connects the pair because admission must commit the handle before the actor can start.
+//! [`ScheduledActor`] owns the future before spawn. [`ActorHandle`] is inserted into registry state
+//! first and later owns the spawned Tokio task. A shared slot connects the pair because admission
+//! must commit the handle before the actor can start.
 //!
-//! The actor wrapper catches outer panics and sends its result through a one-shot
-//! before it sends the completion identity to the registry listener.
-//! A normal join resolves that result.
-//! A forced abort moves the Tokio handle, result receiver, activity reservation,
-//! and physical latch to the attempt reaper.
+//! The actor wrapper catches outer panics and sends its result through a one-shot before it sends
+//! the completion identity to the registry listener. A normal join resolves that result.
+//! A forced abort moves the Tokio handle, result receiver, activity reservation, and physical latch to the attempt reaper.
 
 use std::{
     future::Future,

@@ -1,10 +1,9 @@
 //! Contains panics from internal asynchronous operations.
 //!
-//! [`guarded`] catches panics while polling or destroying a future and returns
-//! readable panic text. Registry, controller, and shutdown loops use this
-//! boundary to report one failed work unit and continue their own recovery.
-//! It does not roll back state. User task attempts use the separate boundary in
-//! the attempt runner.
+//! [`guarded`] catches panics while polling or destroying a future and returns readable panic text.
+//! Registry, controller, and shutdown loops use this boundary to report one failed work unit and
+//! continue their own recovery. It does not roll back state. User task attempts use
+//! the separate boundary in the attempt runner.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -24,8 +23,7 @@ impl<F: Future> Guarded<F> {
         }
     }
 
-    /// Destroys one future without allowing its panic payload (or a nested
-    /// payload-destructor panic) to unwind into the owner task.
+    /// Destroys one future without allowing its panic payload (or a nested payload-destructor panic) to unwind into the owner task.
     fn dispose_future(future: Pin<Box<F>>) -> Option<String> {
         match std::panic::catch_unwind(AssertUnwindSafe(|| drop(future))) {
             Ok(()) => None,
@@ -96,8 +94,6 @@ pub(crate) fn guarded<F: Future>(fut: F) -> impl Future<Output = Result<F::Outpu
 /// Destroys a panic payload without allowing a nested panic to escape.
 fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
-        // A second destructor attempt cannot be made safely. Retaining this one
-        // payload prevents a double panic from escaping the owner boundary.
         std::mem::forget(nested);
     }
 }

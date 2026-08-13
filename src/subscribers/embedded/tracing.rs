@@ -7,25 +7,21 @@
 //! event relay ──► subscriber queue ──► TracingBridge ──► tracing dispatcher
 //! ```
 //!
-//! Each callback emits one `tracing` event with target `taskvisor`. The
-//! `event` field contains [`EventKind::as_label`], and `event_seq` preserves
-//! the Taskvisor sequence. `event_unix_ms` is set when the timestamp is at or
-//! after the Unix epoch. Set payload fields use these names:
+//! Each callback emits one `tracing` event with target `taskvisor`. The `event` field
+//! contains [`EventKind::as_label`], and `event_seq` preserves the Taskvisor sequence.
+//! `event_unix_ms` is set when the timestamp is at or after the Unix epoch.
+//! Set payload fields use these names:
 //!
-//! - identity and context: `taskvisor_id`, `task_name`, `subscriber`,
-//!   `component`, and `slot`;
-//! - lifecycle data: `attempt`, `backoff_source`, `outcome_kind`,
-//!   `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`,
-//!   and `exit_code`.
+//! - identity and context: `taskvisor_id`, `task_name`, `subscriber`, `component`, and `slot`;
+//! - lifecycle data: `attempt`, `backoff_source`, `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, and `exit_code`.
 //!
-//! Free-form [`Event::reason`] text is excluded by default. Applications can
-//! opt in through [`TracingBridge::with_reasons`].
+//! Free-form [`Event::reason`] text is excluded by default.
+//! Applications can opt in through [`TracingBridge::with_reasons`].
 //!
-//! Longer task, subscriber, component, and slot names keep their first 4096
-//! characters and add a truncation marker.
+//! Longer task, subscriber, component, and slot names keep their first 4096 characters and add a truncation marker.
 //!
-//! The bridge emits into the active `tracing` dispatcher. It does not install a
-//! tracing subscriber or choose application filters.
+//! The bridge emits into the active `tracing` dispatcher.
+//! It does not install a tracing subscriber or choose application filters.
 
 use std::{borrow::Cow, time::UNIX_EPOCH};
 use tracing::Level;
@@ -48,18 +44,16 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 
 /// Sends runtime events to `tracing` without free-form reason text.
 ///
-/// Register this value with Taskvisor, then configure a `tracing` subscriber in
-/// the application. Filter on target `taskvisor` and the stable `event` field.
+/// Register this value with Taskvisor, then configure a `tracing` subscriber in the application.
+/// Filter on target `taskvisor` and the stable `event` field.
 /// Other typed labels are suitable for structured filtering and metrics.
 ///
 /// Event kinds map to tracing levels as follows:
 ///
 /// - `ERROR`: runtime failures, subscriber panics, and fatal or panicked final outcomes.
-/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry;
-///   overflow; and `AdmissionFailed` or unclassified rejections.
+/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry; overflow; and `AdmissionFailed` or unclassified rejections.
 /// - `INFO`: completed or canceled outcomes and shutdown milestones.
-/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal,
-///   controller submissions, and all other typed rejections.
+/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, controller submissions, and all other typed rejections.
 /// - `TRACE`: attempt transitions, management requests, and controller slot transitions.
 ///
 /// # Examples
@@ -78,8 +72,8 @@ pub struct TracingBridge;
 impl TracingBridge {
     /// Creates a tracing subscriber that includes [`Event::reason`].
     ///
-    /// Task code and runtime errors can supply this free-form text. Longer
-    /// reasons keep their first 4096 characters and add a truncation marker.
+    /// Task code and runtime errors can supply this free-form text.
+    /// Longer reasons keep their first 4096 characters and add a truncation marker.
     #[must_use]
     pub const fn with_reasons() -> TracingBridgeWithReasons {
         TracingBridgeWithReasons
@@ -88,8 +82,8 @@ impl TracingBridge {
 
 /// Sends runtime events to `tracing` and includes free-form reason text.
 ///
-/// Create this variant with [`TracingBridge::with_reasons`]. It otherwise uses
-/// the same fields and level mapping as [`TracingBridge`].
+/// Create this variant with [`TracingBridge::with_reasons`].
+/// It otherwise uses the same fields and level mapping as [`TracingBridge`].
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
 #[derive(Default)]
 pub struct TracingBridgeWithReasons;

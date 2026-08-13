@@ -1,9 +1,7 @@
 //! Limits how many user-owned values one supervisor can retain.
 //!
-//! [`CapacityBroker`] sits between a started cleanup executor and
-//! [`DropReservation`](super::bundle::DropReservation) creation.
-//! A request receives every requested unit or none.
-//! Dropping a healthy [`OwnershipPermit`] returns its units.
+//! [`CapacityBroker`] sits between a started cleanup executor and [`DropReservation`](super::bundle::DropReservation) creation.
+//! A request receives every requested unit or none. Dropping a healthy [`OwnershipPermit`] returns its units.
 //! Cleanup that panics or is marked poisoned retires them.
 
 use std::{
@@ -75,11 +73,9 @@ struct CapacityState {
 
 /// Cancellation-safe ownership admission with bounded bypass.
 ///
-/// An older request may be bypassed while it cannot fit.
-/// Each older request counts the units granted past it.
-/// Newer requests may pass only while that count stays within
-/// the current effective capacity. Once the count reaches
-/// the limit, released capacity accumulates for the older request.
+/// An older request may be bypassed while it cannot fit. Each older request counts the units granted past it.
+/// Newer requests may pass only while that count stays within the current effective capacity.
+/// Once the count reaches the limit, released capacity accumulates for the older request.
 pub(super) struct CapacityBroker {
     /// Original unit limit and maximum number of queued requests.
     capacity: usize,

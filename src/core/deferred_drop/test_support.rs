@@ -1,8 +1,4 @@
 //! Builds isolated cleanup domains for cross-module tests.
-//!
-//! These helpers expose production ownership semantics while tests control
-//! capacity, startup, and worker failure. Callers that only need a reservation
-//! share one large domain. Saturation and startup tests create isolated domains.
 
 use std::{
     io,

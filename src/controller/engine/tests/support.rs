@@ -29,7 +29,6 @@ use crate::controller::engine::{
     Controller, ControllerState, OperationSet, Submission, TrackedOperations,
 };
 
-/// Task that fails the test if admission reaches `Task::spawn`.
 pub(super) struct SpawnBombTask;
 
 impl Task for SpawnBombTask {
@@ -38,9 +37,7 @@ impl Task for SpawnBombTask {
     }
 }
 
-/// Pending task whose destructor records and then triggers a panic.
 pub(super) struct PanickingDropTask {
-    /// Number of destructor calls.
     pub(super) drops: Arc<AtomicUsize>,
 }
 
@@ -58,19 +55,13 @@ impl Drop for PanickingDropTask {
 }
 
 #[derive(Default)]
-/// Shared checkpoints for a destructor blocked by a condition variable.
 pub(super) struct BlockingDropState {
-    /// Whether the destructor reached the blocking section.
     pub(super) entered: bool,
-    /// Whether the test allowed the destructor to continue.
     pub(super) released: bool,
-    /// Whether the destructor returned from its blocking section.
     pub(super) finished: bool,
 }
 
-/// Pending task whose destructor waits for an explicit test release.
 pub(super) struct BlockingDropTask {
-    /// Shared destructor checkpoints and wake-up signal.
     pub(super) gate: Arc<(StdMutex<BlockingDropState>, Condvar)>,
 }
 
@@ -96,13 +87,9 @@ impl Drop for BlockingDropTask {
     }
 }
 
-/// Pending task that inspects controller state during shutdown destruction.
 pub(super) struct ShutdownDropProbeTask {
-    /// Controller whose indexes are inspected at destruction time.
     pub(super) controller: Weak<Controller>,
-    /// Whether controller state was empty when destruction started.
     pub(super) state_clean_at_drop: Arc<AtomicBool>,
-    /// Number of destructor calls.
     pub(super) drops: Arc<AtomicUsize>,
 }
 
@@ -128,13 +115,11 @@ impl Drop for ShutdownDropProbeTask {
     }
 }
 
-/// Creates a one-shot task specification that completes successfully.
 pub(super) fn make_spec(name: &str) -> TaskSpec {
     let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     TaskSpec::once(name, task)
 }
 
-/// Creates a `Queue`-policy controller spec that counts task spawns.
 pub(super) fn spawn_counting_controller_spec(
     name: &'static str,
     spawn_calls: &Arc<AtomicUsize>,
@@ -147,7 +132,6 @@ pub(super) fn spawn_counting_controller_spec(
     ControllerSpec::queue(TaskSpec::once(name, task))
 }
 
-/// Checks the typed error from lazy cleanup-worker startup.
 pub(super) fn assert_lazy_start_failure(error: ControllerError, worker: usize) {
     let ControllerError::ThreadStartFailed {
         component,
@@ -165,13 +149,11 @@ pub(super) fn assert_lazy_start_failure(error: ControllerError, worker: usize) {
     assert_eq!(error.as_label(), "controller_thread_start_failed");
 }
 
-/// Wraps a task specification as controller-owned pending work.
 pub(super) fn pending(id: TaskId, task_spec: TaskSpec) -> PendingSubmission {
     let task_name = task_spec.shared_name();
     PendingSubmission::new(id, task_name, owned_task_spec(task_spec))
 }
 
-/// Wraps a task specification with the standard test cleanup reservation.
 pub(super) fn owned_task_spec(
     task_spec: TaskSpec,
 ) -> crate::core::deferred_drop::OwnedTask<TaskSpec> {
@@ -180,7 +162,6 @@ pub(super) fn owned_task_spec(
     crate::core::deferred_drop::OwnedTask::new(task_spec, retained, reservation)
 }
 
-/// Wraps a task specification with an isolated cleanup reservation.
 pub(super) fn isolated_owned_task_spec(
     task_spec: TaskSpec,
 ) -> crate::core::deferred_drop::OwnedTask<TaskSpec> {
@@ -189,7 +170,6 @@ pub(super) fn isolated_owned_task_spec(
     crate::core::deferred_drop::OwnedTask::new(task_spec, retained, reservation)
 }
 
-/// Wraps a controller specification with the standard test cleanup reservation.
 pub(super) fn owned_controller_spec(
     spec: ControllerSpec,
 ) -> crate::core::deferred_drop::OwnedTask<ControllerSpec> {
@@ -198,7 +178,6 @@ pub(super) fn owned_controller_spec(
     crate::core::deferred_drop::OwnedTask::new(spec, retained, reservation)
 }
 
-/// Wraps a controller specification with an isolated cleanup reservation.
 pub(super) fn isolated_owned_controller_spec(
     spec: ControllerSpec,
 ) -> crate::core::deferred_drop::OwnedTask<ControllerSpec> {
@@ -207,7 +186,6 @@ pub(super) fn isolated_owned_controller_spec(
     crate::core::deferred_drop::OwnedTask::new(spec, retained, reservation)
 }
 
-/// Attaches the controller's destructor-panic diagnostic to an owned value.
 pub(super) fn with_controller_panic_reporter<T>(
     mut owned: crate::core::deferred_drop::OwnedTask<T>,
     bus: &Bus,
@@ -222,12 +200,10 @@ pub(super) fn with_controller_panic_reporter<T>(
     owned
 }
 
-/// Returns the shared slot key used by state-level tests.
 pub(super) fn slot_arc_name() -> Arc<str> {
     Arc::from("s")
 }
 
-/// Removes and returns all events currently available from a receiver.
 pub(super) fn drain_events(
     events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
 ) -> Vec<Arc<Event>> {
@@ -238,7 +214,6 @@ pub(super) fn drain_events(
     drained
 }
 
-/// Collects events until a matching runtime-failure reason appears.
 pub(super) async fn drain_until_runtime_failure(
     events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
     needle: &str,
@@ -263,7 +238,6 @@ pub(super) async fn drain_until_runtime_failure(
     .expect("the deferred panic reporter must publish its diagnostic")
 }
 
-/// Checks that a rejection event and watched outcome report the same decision.
 pub(super) fn assert_rejection_parity(event: &Event, id: TaskId, outcome: &TaskOutcome) {
     let TaskOutcome::Rejected { kind, reason, .. } = outcome else {
         panic!("expected a rejected task outcome, got {outcome:?}");
@@ -275,7 +249,6 @@ pub(super) fn assert_rejection_parity(event: &Event, id: TaskId, outcome: &TaskO
     assert_eq!(event.reason.as_deref(), Some(reason.as_ref()));
 }
 
-/// Receives a oneshot value within the shared test timeout.
 pub(super) async fn receive_oneshot<T>(receiver: oneshot::Receiver<T>, context: &str) -> T {
     tokio::time::timeout(Duration::from_secs(2), receiver)
         .await
@@ -283,14 +256,12 @@ pub(super) async fn receive_oneshot<T>(receiver: oneshot::Receiver<T>, context: 
         .unwrap_or_else(|_| panic!("{context} sender was dropped"))
 }
 
-/// Creates a slot in the `Admitting` phase.
 pub(super) fn admitting_slot(owner: TaskId) -> SlotState {
     let mut slot = SlotState::new();
     assert!(slot.begin_admission(owner, Instant::now()));
     slot
 }
 
-/// Creates a slot in the `Running` phase.
 pub(super) fn running_slot(owner: TaskId) -> SlotState {
     let mut slot = admitting_slot(owner);
     assert_eq!(
@@ -300,7 +271,6 @@ pub(super) fn running_slot(owner: TaskId) -> SlotState {
     slot
 }
 
-/// Creates a slot in the `Terminating` phase.
 pub(super) fn terminating_slot(owner: TaskId) -> SlotState {
     let mut slot = running_slot(owner);
     assert_eq!(
@@ -310,12 +280,10 @@ pub(super) fn terminating_slot(owner: TaskId) -> SlotState {
     slot
 }
 
-/// Drops every future in a tracked operation set.
 pub(super) async fn abort_and_drain<T: 'static>(operations: &mut OperationSet<T>) {
     operations.clear();
 }
 
-/// Creates tracked operation sets from a controller's runtime and limits.
 pub(super) fn tracked_operations(ctrl: &Controller) -> TrackedOperations {
     TrackedOperations::new(
         ctrl.supervisor.clone(),
@@ -323,7 +291,6 @@ pub(super) fn tracked_operations(ctrl: &Controller) -> TrackedOperations {
     )
 }
 
-/// Runs one submission directly through the admission handler.
 pub(super) async fn handle_submission_fully(
     ctrl: &Controller,
     submission: Submission,
@@ -332,13 +299,11 @@ pub(super) async fn handle_submission_fully(
     ctrl.handle_submission(submission, operations).await;
 }
 
-/// Creates an unstarted controller with no live runtime owner.
 pub(super) fn make_controller(config: ControllerConfig, bus: Bus) -> Controller {
     let drop_domain = crate::core::deferred_drop::TestReservationSource::new(64).domain();
     make_controller_with_domain(config, bus, drop_domain)
 }
 
-/// Creates an unstarted controller with a selected cleanup domain.
 pub(super) fn make_controller_with_domain(
     config: ControllerConfig,
     bus: Bus,
@@ -359,7 +324,6 @@ pub(super) fn make_controller_with_domain(
     }
 }
 
-/// Creates a restartable task that waits for cancellation.
 pub(super) fn waiting_spec(name: &'static str) -> TaskSpec {
     let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
@@ -368,7 +332,6 @@ pub(super) fn waiting_spec(name: &'static str) -> TaskSpec {
     TaskSpec::restartable(name, task)
 }
 
-/// Starts `run_inner` and waits until it owns the command receiver.
 pub(super) async fn start_controller_loop(
     ctrl: &Arc<Controller>,
     token: &CancellationToken,
@@ -390,7 +353,6 @@ pub(super) async fn start_controller_loop(
     runner
 }
 
-/// Cancels a test controller loop and waits for clean completion.
 pub(super) async fn stop_controller_loop(
     token: CancellationToken,
     runner: tokio::task::JoinHandle<Result<(), &'static str>>,
@@ -403,7 +365,6 @@ pub(super) async fn stop_controller_loop(
         .expect("controller loop must exit cleanly");
 }
 
-/// Polls an async condition until it succeeds or the deadline passes.
 pub(super) async fn poll_until<F, Fut>(within: Duration, mut cond: F) -> bool
 where
     F: FnMut() -> Fut,

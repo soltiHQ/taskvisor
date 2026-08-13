@@ -1,12 +1,11 @@
 //! Owns one supervisor's cleanup capacity and starts cleanup workers lazily.
 //!
-//! `SupervisorBuilder` creates a [`DropDomain`] and stores it in `SupervisorCore`.
-//! Subscriber construction reserves a complete batch from the domain.
-//! Runtime and controller admission reserve one unit per accepted task.
+//! `SupervisorBuilder` creates a [`DropDomain`] and stores it in `SupervisorCore`. Subscriber construction
+//! reserves a complete batch from the domain. Runtime and controller admission reserve one unit per accepted task.
 //!
 //! The first valid, non-empty reservation attempts to start the cleanup executor.
-//! Startup is transactional. No executor is published unless every required core
-//! worker reports ready. Clones share this gate and the same capacity budget.
+//! Startup is transactional. No executor is published unless every required core worker reports ready.
+//! Clones share this gate and the same capacity budget.
 
 use std::{
     io,

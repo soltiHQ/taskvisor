@@ -1,9 +1,8 @@
 //! Guards task and outcome ownership before admission commits.
 //!
-//! `submission` creates this guard with local `ControllerSpec` ownership and an
-//! optional watched-outcome sender. Parking moves the sender into controller
-//! state. Committing disarms the guard after queue or admission ownership
-//! becomes authoritative.
+//! `submission` creates this guard with local `ControllerSpec` ownership and an optional watched-outcome sender.
+//! Parking moves the sender into controller state.
+//! Committing disarms the guard after queue or admission ownership becomes authoritative.
 //!
 //! Rejection resolves the sender once. Dropping an uncommitted guard reports an
 //! interrupted admission and routes any local task value through reserved cleanup.

@@ -1,14 +1,12 @@
 //! Reads registry membership and physical attempt activity.
 //!
-//! [`SupervisorHandle`](crate::SupervisorHandle) uses these reads for task lists
-//! and activity checks. Calls reach this module through
-//! [`SupervisorCore`](crate::core::runtime::SupervisorCore). Static run also waits
-//! here for membership to become empty. Queries read shared state directly.
+//! [`SupervisorHandle`](crate::SupervisorHandle) uses these reads for task lists and activity checks.
+//! Calls reach this module through [`SupervisorCore`](crate::core::runtime::SupervisorCore).
+//! Static run also waits here for membership to become empty. Queries read shared state directly.
 //! They do not pass through the command listener and do not drive lifecycle work.
 //!
-//! Membership includes registered and removing entries. An empty registry can
-//! still have a force-aborted attempt in the reaper. Activity queries combine
-//! both sources because they answer whether a task is physically in an attempt.
+//! Membership includes registered and removing entries. An empty registry can still have a force-aborted attempt in the reaper.
+//! Activity queries combine both sources because they answer whether a task is physically in an attempt.
 
 use std::sync::{Arc, atomic::Ordering};
 

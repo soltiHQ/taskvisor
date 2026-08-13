@@ -1,14 +1,12 @@
 //! Commits one add command or returns its rejection.
 //!
-//! The registry listener calls this module after it receives
-//! [`RegistryCommand::Add`](crate::core::registry::RegistryCommand::Add).
+//! The registry listener calls this module after it receives [`RegistryCommand::Add`](crate::core::registry::RegistryCommand::Add).
 //! Label conflicts include current membership and labels held by the physical reaper.
 //! The configured registration limit includes both groups.
 //!
 //! Validation runs before actor preparation and again under the state write lock.
-//! On success, both indexes are updated before the `TaskAdded` event, the direct reply,
-//! actor spawn, and start-gate release. On rejection, no task body starts.
-//! A watched rejection is delivered or moved to deferred cleanup.
+//! On success, both indexes are updated before the `TaskAdded` event, the direct reply, actor spawn, and start-gate release.
+//! On rejection, no task body starts. A watched rejection is delivered or moved to deferred cleanup.
 
 use std::sync::Arc;
 

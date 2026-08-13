@@ -5,12 +5,10 @@
 //! A command resolves an identity or label and claims removal at one registry ordering point.
 //! Unlike `remove`, cancellation then waits for the registry's shared completion signal.
 //!
-//! The returned boolean records whether this call made the stop claim. A caller that joins
-//! an existing claim waits for the same completion and returns `false`. A missing task returns
-//! `false` without a completion wait. Timeout variants start their timer after
-//! the registry decision. A timeout ends only that caller's wait; removal
-//! continues. Completion is logical registry cleanup.
-//! A force-aborted attempt can remain physically active under reaper ownership.
+//! The returned boolean records whether this call made the stop claim. A caller that joins an existing claim
+//! waits for the same completion and returns `false`. A missing task returns`false` without a completion wait.
+//! Timeout variants start their timer after the registry decision. A timeout ends only that caller's wait; removal
+//! continues. Completion is logical registry cleanup. A force-aborted attempt can remain physically active under reaper ownership.
 
 use std::{sync::Arc, time::Duration};
 
@@ -203,8 +201,7 @@ impl SupervisorCore {
 
     /// Waits on a known task's shared completion and preserves claim ownership.
     ///
-    /// A deadline is checked again against completion to avoid reporting a
-    /// timeout when completion won at the same boundary.
+    /// A deadline is checked again against completion to avoid reporting a timeout when completion won at the same boundary.
     async fn wait_cancel_decision(
         decision: Option<CancelDecision>,
         wait_for: Option<Duration>,

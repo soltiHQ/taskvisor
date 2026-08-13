@@ -1,12 +1,10 @@
 //! Reserves cleanup capacity before the runtime accepts a user-owned task.
 //!
-//! Direct adds and static batches use this layer before registry handoff.
-//! A reservation is attached to the [`TaskSpec`] inside an [`OwnedTask`].
-//! It then follows that task through registry membership, actor execution,
-//! physical reaping, and final destruction.
+//! Direct adds and static batches use this layer before registry handoff. A reservation is attached
+//! to the [`TaskSpec`] inside an [`OwnedTask`]. It then follows that task through registry membership,
+//! actor execution, physical reaping, and final destruction.
 //!
-//! Waiting admission observes shutdown. Static batches use one immediate
-//! atomic reservation for the full batch.
+//! Waiting admission observes shutdown. Static batches use one immediate atomic reservation for the full batch.
 //! Admission failures are translated into the runtime's thread-start or resource-limit errors here.
 
 use std::{future::Future, sync::Arc};

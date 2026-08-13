@@ -9,10 +9,10 @@
 //!     ▼
 //! DropExecutor
 //!     ├── capacity ──► CapacityBroker ──► DropReservation
-//!     └── cleanup ──► DropBatch ──► WorkerQueue ──► worker
+//!     └── cleanup ───► DropBatch ───────► WorkerQueue ──► worker
 //!                                               ▼
 //!                                         DropBatch::run
-//!                                               ├── clean ──► return healthy permit
+//!                                               ├── clean ────────────► return healthy permit
 //!                                               └── poison or panic ──► retire permit
 //! ```
 //!

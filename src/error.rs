@@ -1,26 +1,25 @@
 //! Explains which error type belongs to each Taskvisor boundary.
 //!
-//! | Boundary | Error type |
-//! |----------|------------|
-//! | Checked configuration constructors and setters | [`ConfigError`](crate::ConfigError) |
-//! | [`BackoffPolicy::new`](crate::BackoffPolicy::new) | [`BackoffError`](crate::BackoffError) |
-//! | [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) | [`BuildError`] |
-//! | Runtime lifecycle, management, and outcome waiting | [`RuntimeError`] |
-//! | Controller availability checks and submission command intake | `ControllerError` |
-//! | One task attempt | [`TaskError`] |
-//! | Code that combines runtime and controller calls | [`Error`] |
+//! | Boundary                                                              | Error type                            |
+//! |-----------------------------------------------------------------------|---------------------------------------|
+//! | Checked configuration constructors and setters                        | [`ConfigError`](crate::ConfigError)   |
+//! | [`BackoffPolicy::new`](crate::BackoffPolicy::new)                     | [`BackoffError`](crate::BackoffError) |
+//! | [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) | [`BuildError`]                        |
+//! | Runtime lifecycle, management, and outcome waiting                    | [`RuntimeError`]                      |
+//! | Controller availability checks and submission command intake          | `ControllerError`                     |
+//! | One task attempt                                                      | [`TaskError`]                         |
+//! | Code that combines runtime and controller calls                       | [`Error`]                             |
 //!
 //! ```text
 //! task future ──► TaskError ──► actor policy
 //!                                  ├── retry allowed ──► next attempt
-//!                                  └── stop ──► cleanup and TaskOutcome
+//!                                  └── stop ───────────► cleanup and TaskOutcome
 //! ```
 //!
-//! `ControllerError` is available with the `controller` feature. Task code
-//! returns [`TaskError`]. Taskvisor APIs return the error for their boundary;
-//! applications may use [`Error`] to combine runtime and controller calls.
-//! Human-readable `Display` text is not a classification API. Match variants or
-//! use `as_label` where available.
+//! `ControllerError` is available with the `controller` feature. Task code returns [`TaskError`].
+//! Taskvisor APIs return the error for their boundary; applications may use [`Error`] to combine
+//! runtime and controller calls. Readable `Display` text is not a classification API.
+//! Match variants or use `as_label` where available.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,12 +39,11 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Failure to build a stopped [`Supervisor`](crate::Supervisor).
 ///
-/// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) returns
-/// this type while validating capacities, reserving subscriber ownership, and
-/// starting required cleanup workers. No [`Supervisor`](crate::Supervisor) is
-/// returned on failure.
-/// This enum and its data-carrying variants are non-exhaustive; keep a fallback
-/// arm and use `..` when matching fields.
+/// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) returns this type while
+/// validating capacities, reserving subscriber ownership, and starting required cleanup workers.
+/// No [`Supervisor`](crate::Supervisor) is returned on failure.
+///
+/// This enum and its data-carrying variants are non-exhaustive; keep a fallback arm and use `..` when matching fields.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum BuildError {
@@ -102,10 +100,9 @@ impl BuildError {
 
 /// Failure of a supervisor lifecycle or management operation.
 ///
-/// Runtime startup, static runs, dynamic management, outcome waiting, and
-/// shutdown return this type. Task attempts return [`TaskError`] instead. This
-/// enum and its data-carrying variants are non-exhaustive; keep a fallback arm
-/// and use `..` when matching fields.
+/// Runtime startup, static runs, dynamic management, outcome waiting, and shutdown return this type.
+/// Task attempts return [`TaskError`] instead. This enum and its data-carrying variants are non-exhaustive;
+/// keep a fallback arm and use `..` when matching fields.
 ///
 /// # See also
 ///
@@ -119,15 +116,14 @@ impl BuildError {
 pub enum RuntimeError {
     /// Runtime startup was requested without an active Tokio runtime.
     ///
-    /// The supervisor remains stopped and startup may be retried from inside
-    /// a Tokio runtime.
+    /// The supervisor remains stopped and startup may be retried from inside a Tokio runtime.
     #[error("runtime startup requires an active Tokio runtime")]
     TokioRuntimeUnavailable,
 
     /// A required Taskvisor worker thread could not start.
     ///
-    /// The operation that needed the worker remains uncommitted. The source
-    /// identifies the failed thread-creation or startup handshake.
+    /// The operation that needed the worker remains uncommitted.
+    /// The source identifies the failed thread-creation or startup handshake.
     #[error("failed to start {component} thread: {source}")]
     #[non_exhaustive]
     ThreadStartFailed {
@@ -140,10 +136,9 @@ pub enum RuntimeError {
 
     /// Task cleanup did not finish within the shared shutdown grace period.
     ///
-    /// A listed name belongs to an actor that required logical force-abort or a
-    /// removal owner still finishing at the deadline. A force-aborted actor can
-    /// remain physically active under Taskvisor's cleanup ownership after this
-    /// error is returned.
+    /// A listed name belongs to an actor that required logical force-abort or a removal owner still
+    /// finishing at the deadline. A force-aborted actor can remain physically active under Taskvisor's
+    /// cleanup ownership after this error is returned.
     #[error("shutdown timeout {grace:?} exceeded; logically force-aborted: {stuck:?}")]
     #[non_exhaustive]
     GraceExceeded {
@@ -170,9 +165,8 @@ pub enum RuntimeError {
     ResourceLimitReached {
         /// Stable resource name used by diagnostics.
         resource: &'static str,
-        /// Reported bound for the rejected resource. For `owned_user_lifetimes`,
-        /// this is the domain's configured capacity; retired poisoned slots can
-        /// make the currently usable capacity smaller.
+        /// Reported bound for the rejected resource. For `owned_user_lifetimes`, this is the domain's
+        /// configured capacity; retired poisoned slots can make the currently usable capacity smaller.
         limit: usize,
     },
 
@@ -184,8 +178,8 @@ pub enum RuntimeError {
 
     /// The caller's bounded wait for terminal registry cleanup expired.
     ///
-    /// The stop request remains active. This error does not undo cancellation
-    /// or change the supervisor's shutdown grace period.
+    /// The stop request remains active.
+    /// This error does not undo cancellation or change the supervisor's shutdown grace period.
     #[error("timeout waiting for task {id} termination after {timeout:?}")]
     #[non_exhaustive]
     TaskTerminationTimeout {
@@ -195,8 +189,7 @@ pub enum RuntimeError {
         timeout: Duration,
     },
 
-    /// A watched task or controller submission's direct outcome channel closed
-    /// without a result.
+    /// A watched task or controller submission's direct outcome channel closed without a result.
     #[error("final outcome for task {id} is unavailable")]
     #[non_exhaustive]
     OutcomeUnavailable {
@@ -206,8 +199,7 @@ pub enum RuntimeError {
 
     /// Explicit operating-system signal setup failed.
     ///
-    /// This can only come from
-    /// [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals).
+    /// This can only come from [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals).
     /// Every caller joining that shared shutdown receives an equivalent source.
     #[error("failed to install shutdown signal handlers: {source}")]
     #[non_exhaustive]
@@ -257,16 +249,16 @@ impl RuntimeError {
 ///
 /// [`Fail`](Self::Fail) and [`Timeout`](Self::Timeout) are retry-eligible.
 /// [`Fatal`](Self::Fatal) and [`Canceled`](Self::Canceled) stop the actor.
-/// Retry eligibility does not guarantee another attempt; restart policy and the
-/// retry limit make the final decision. This enum and its data-carrying variants
-/// are non-exhaustive; keep a fallback arm and use `..` when matching fields.
+/// Retry eligibility does not guarantee another attempt; restart policy and
+/// the retry limit make the final decision. This enum and its data-carrying
+/// variants are non-exhaustive; keep a fallback arm and use `..` when matching fields.
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum TaskError {
     /// A timeout was reported for this attempt.
     ///
-    /// The runner creates this variant when its configured attempt deadline
-    /// expires. Task code may also return it directly. It is retry-eligible.
+    /// The runner creates this variant when its configured attempt deadline expires.
+    /// Task code may also return it directly. It is retry-eligible.
     #[error("timed out after {timeout:?}")]
     #[non_exhaustive]
     Timeout {
@@ -293,8 +285,7 @@ pub enum TaskError {
 
     /// Retry-eligible task failure.
     ///
-    /// Restart policy and the retry limit still decide whether another attempt
-    /// starts.
+    /// Restart policy and the retry limit still decide whether another attempt starts.
     #[error("execution failed: {reason}")]
     #[non_exhaustive]
     Fail {
@@ -311,8 +302,7 @@ pub enum TaskError {
 
     /// Cooperative cancellation.
     ///
-    /// Return this after observing cancellation through
-    /// [`TaskContext`](crate::TaskContext).
+    /// Return this after observing cancellation through [`TaskContext`](crate::TaskContext).
     #[error("context canceled")]
     Canceled,
 }
@@ -338,8 +328,8 @@ impl TaskError {
 
     /// Creates a retry-eligible failure from a source error.
     ///
-    /// The display reason comes from `source.to_string()`. The original value
-    /// remains available through [`std::error::Error::source`].
+    /// The display reason comes from `source.to_string()`.
+    /// The original value remains available through [`std::error::Error::source`].
     pub fn fail_from<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -373,8 +363,7 @@ impl TaskError {
 
     /// Sets or clears the process-style exit code on `Fail` or `Fatal`.
     ///
-    /// Pass an integer to set it or `None` to clear it. Other variants are
-    /// returned unchanged.
+    /// Pass an integer to set it or `None` to clear it. Other variants are returned unchanged.
     #[must_use]
     pub fn with_exit_code(mut self, code: impl Into<Option<i32>>) -> Self {
         let code = code.into();
@@ -443,8 +432,8 @@ impl TaskError {
 
 /// Error wrapper for code that combines runtime and controller operations.
 ///
-/// [`RuntimeError`] and `ControllerError` with the `controller` feature convert
-/// into this type through `?`. Match the variant to recover the original error.
+/// [`RuntimeError`] and `ControllerError` with the `controller` feature convert into this type through `?`.
+/// Match the variant to recover the original error.
 ///
 /// ```rust
 /// use taskvisor::{Error, RuntimeError};

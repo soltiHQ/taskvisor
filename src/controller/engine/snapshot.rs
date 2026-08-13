@@ -1,7 +1,6 @@
 //! Maps internal slot state to the public snapshot API.
 //!
-//! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot)
-//! calls [`Controller::snapshot`] on the configured controller.
+//! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot) calls [`Controller::snapshot`] on the configured controller.
 //! The mapping exposes public status values without exposing slot locks or internal phases.
 
 use std::sync::Arc;

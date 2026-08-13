@@ -1,10 +1,9 @@
 //! Delivers the final result of watched work outside the best-effort event bus.
 //!
-//! A [`TaskWaiter`] follows one [`TaskId`] through a direct one-shot channel.
-//! For admitted work, the registry delivers a [`TaskOutcome`] after its join
-//! owner produces a terminal result and registry membership is removed.
-//! Controller submissions can instead resolve as [`TaskOutcome::Rejected`]
-//! before the task body starts.
+//! A [`TaskWaiter`] follows one [`TaskId`] through a direct one-shot channel. For admitted work,
+//! the registry delivers a [`TaskOutcome`] after its join owner produces a terminal result
+//! and registry membership is removed. Controller submissions can instead resolve
+//! as [`TaskOutcome::Rejected`] before the task body starts.
 //!
 //! ```text
 //! watched work
@@ -15,11 +14,10 @@
 //!                                                 TaskWaiter
 //! ```
 //!
-//! Except for [`TaskOutcome::ForceAborted`], the registry joins the managed
-//! actor before delivering the outcome. A force-aborted actor can remain under
-//! reaper ownership until physical exit. Dropping the waiter does not cancel
-//! the work. This path is reliable while the process and runtime are alive; it
-//! is not durable storage across process termination.
+//! Except for [`TaskOutcome::ForceAborted`], the registry joins the managed actor before delivering the outcome.
+//! A force-aborted actor can remain under reaper ownership until physical exit. Dropping the waiter does not
+//! cancel the work. This path is reliable while the process and runtime are alive; it is not durable storage
+//! across process termination.
 
 use std::sync::Arc;
 
@@ -31,9 +29,9 @@ use crate::identity::TaskId;
 
 /// Machine-readable category of a final [`TaskOutcome`].
 ///
-/// It mirrors [`TaskOutcome`] without diagnostic text or source errors. Events
-/// use it for machine-readable reporting. Use [`TaskOutcome::kind`] when the
-/// complete outcome is already available.
+/// It mirrors [`TaskOutcome`] without diagnostic text or source errors.
+/// Events use it for machine-readable reporting.
+/// Use [`TaskOutcome::kind`] when the complete outcome is already available.
 ///
 /// Match with a wildcard arm because new outcome categories may be added.
 #[non_exhaustive]
@@ -73,13 +71,12 @@ impl TaskOutcomeKind {
 
 /// Final classified result of one watched task or controller submission.
 ///
-/// Admitted work receives this value after terminal registry cleanup removes
-/// its membership. Except for [`ForceAborted`](Self::ForceAborted), cleanup
-/// first joins the managed actor. Controller admission can produce
-/// [`Rejected`](Self::Rejected) without running the task body.
+/// Admitted work receives this value after terminal registry cleanup removes its membership.
+/// Except for [`ForceAborted`](Self::ForceAborted), cleanup first joins the managed actor.
+/// Controller admission can produce [`Rejected`](Self::Rejected) without running the task body.
 ///
-/// This enum and its data-carrying variants are non-exhaustive. Use a fallback
-/// arm and `..` when matching fields.
+/// This enum and its data-carrying variants are non-exhaustive.
+/// Use a fallback arm and `..` when matching fields.
 ///
 /// Watched work is created by:
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
@@ -88,8 +85,8 @@ impl TaskOutcomeKind {
     feature = "controller",
     doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
 )]
-/// Events carry [`TaskOutcomeKind`] for best-effort observation. A
-/// [`TaskWaiter`] delivers this complete value directly.
+/// Events carry [`TaskOutcomeKind`] for best-effort observation.
+/// A [`TaskWaiter`] delivers this complete value directly.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
@@ -128,16 +125,14 @@ pub enum TaskOutcome {
 
     /// Task stopped because cancellation was requested or reported.
     ///
-    /// This can come from shutdown, explicit removal, or a returned
-    /// [`TaskError::Canceled`](crate::TaskError::Canceled).
+    /// This can come from shutdown, explicit removal, or a returned [`TaskError::Canceled`](crate::TaskError::Canceled).
     Canceled,
 
     /// The registry stopped waiting and requested abort before cooperative stop completed.
     ///
     /// This normally happens after the configured grace period.
     /// Last-owner fallback and signal-setup failure cleanup cannot wait for that period.
-    /// A synchronous poll can remain physically active until it returns control
-    /// to Tokio.
+    /// A synchronous poll can remain physically active until it returns control to Tokio.
     ForceAborted,
 
     /// The actor or a protected user-value cleanup boundary panicked.
@@ -267,9 +262,8 @@ impl TaskOutcome {
     doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)\n- [`PreparedSubmission::submit_and_watch`](crate::PreparedSubmission::submit_and_watch)\n- [`PreparedSubmission::try_submit_and_watch`](crate::PreparedSubmission::try_submit_and_watch)"
 )]
 ///
-/// [`wait`](Self::wait) consumes the waiter. Dropping it does not cancel the
-/// task or submission. Keep the waiter when application behavior depends on
-/// the result; use events only for best-effort observation.
+/// [`wait`](Self::wait) consumes the waiter. Dropping it does not cancel the task or submission.
+/// Keep the waiter when application behavior depends on the result; use events only for best-effort observation.
 ///
 /// # Examples
 ///
@@ -313,14 +307,12 @@ impl TaskWaiter {
 
     /// Waits for the final outcome.
     ///
-    /// For admitted work, this normally resolves after registry membership is
-    /// removed. Controller rejection can resolve without starting the task.
-    /// Shutdown does not replace an outcome already owned by terminal cleanup.
+    /// For admitted work, this normally resolves after registry membership is removed. Controller rejection
+    /// can resolve without starting the task. Shutdown does not replace an outcome already owned by terminal cleanup.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::OutcomeUnavailable`] if the sender closes before
-    /// producing an outcome.
+    /// Returns [`RuntimeError::OutcomeUnavailable`] if the sender closes before producing an outcome.
     pub async fn wait(self) -> Result<TaskOutcome, RuntimeError> {
         let id = self.id;
         self.rx

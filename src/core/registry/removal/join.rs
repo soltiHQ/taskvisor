@@ -1,11 +1,11 @@
 //! Joins claimed actors and hands their results to terminal cleanup.
 //!
-//! Command handlers and completion cleanup use this module after a successful
-//! registered-to-removing transition. The actor handle leaves shared state before any wait.
-//! A ready natural result can finish inline. Other joins run in detached reporters.
-//! Every result returns through [`Registry::finish_removal`].
+//! Command handlers and completion cleanup use this module after a successful registered-to-removing transition.
+//! The actor handle leaves shared state before any wait. A ready natural result can finish inline.
+//! Other joins run in detached reporters. Every result returns through [`Registry::finish_removal`].
 //!
-//! Shutdown also claims entries here. [`PendingJoins`] provides its barrier and diagnostic labels.
+//! Shutdown also claims entries here.
+//! [`PendingJoins`] provides its barrier and diagnostic labels.
 
 use std::{sync::Arc, time::Duration};
 
@@ -33,8 +33,8 @@ impl Registry {
 
     /// Claims and cancels all registered entries within one shared grace window.
     ///
-    /// Entries already being removed keep their owner. This method waits for all
-    /// pending removal owners only until the same deadline.
+    /// Entries already being removed keep their owner.
+    /// This method waits for all pending removal owners only until the same deadline.
     ///
     /// Returns labels for actors claimed here that required force-abort.
     /// [`wait_joins_within`](Self::wait_joins_within) reports older owners.
@@ -90,8 +90,7 @@ impl Registry {
 
     /// Cleans up a finished actor by identity.
     ///
-    /// Duplicate or stale completion signals are no-ops. An early signal starts
-    /// a bounded detached join.
+    /// Duplicate or stale completion signals are no-ops. An early signal starts a bounded detached join.
     /// A ready result is collected inline because the actor tail no longer owns user values.
     pub(in crate::core::registry) async fn cleanup_completed_task(&self, id: TaskId) {
         let Some((_label, mut handle, removal_completion)) = self.claim_task(id).await else {
@@ -163,8 +162,7 @@ impl Registry {
 
     /// Joins an actor in a detached task and commits its terminal result.
     ///
-    /// `force_after` bounds the join when present.
-    /// Runtime shutdown always aborts an unfinished actor.
+    /// `force_after` bounds the join when present. Runtime shutdown always aborts an unfinished actor.
     /// Both paths commit through `finish_removal`.
     pub(super) fn spawn_join_report(
         &self,

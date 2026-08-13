@@ -1,10 +1,8 @@
 //! Defines the executable side of a supervised task.
 //!
-//! [`Task`] is a factory for attempt futures. Application code usually creates
-//! one with [`TaskFn`](crate::TaskFn), or implements the trait for a named type.
-//! [`TaskRef`] erases that concrete type for [`TaskSpec`](crate::TaskSpec).
-//! After admission, Taskvisor calls [`Task::spawn`] once for each attempt and
-//! polls the returned [`BoxTaskFuture`].
+//! [`Task`] is a factory for attempt futures. Application code usually creates one with [`TaskFn`](crate::TaskFn),
+//! or implements the trait for a named type. [`TaskRef`] erases that concrete type for [`TaskSpec`](crate::TaskSpec).
+//! After admission, Taskvisor calls [`Task::spawn`] once for each attempt and polls the returned [`BoxTaskFuture`].
 //!
 //! ```text
 //! application task ──► TaskRef ──► TaskSpec ──► registry admission
@@ -31,21 +29,19 @@ pub type TaskRef = Arc<dyn Task>;
 
 /// A factory for supervised attempt futures.
 ///
-/// Task identity belongs to [`TaskSpec`](crate::TaskSpec), not to the executable
-/// object. The same [`TaskRef`] can be registered through different specs.
-/// Separate registrations may call [`spawn`](Task::spawn) concurrently on that
-/// shared object.
+/// Task identity belongs to [`TaskSpec`](crate::TaskSpec), not to the executable object.
+/// The same [`TaskRef`] can be registered through different specs.
+/// Separate registrations may call [`spawn`](Task::spawn) concurrently on that shared object.
 ///
 /// # Attempt contract
 ///
-/// The actor reuses the task object. Its attempt runner calls
-/// [`spawn`](Task::spawn) once per attempt. Each call must return a new future.
-/// Fields in the task object may keep state across retries; values owned by the
-/// returned future belong only to that attempt.
+/// The actor reuses the task object. Its attempt runner calls [`spawn`](Task::spawn) once per attempt.
+/// Each call must return a new future. Fields in the task object may keep state across retries;
+/// values owned by the returned future belong only to that attempt.
 ///
 /// ```text
 /// Task object
-///      ├── spawn(ctx) ──► attempt 1
+///      ├── spawn(ctx) ────────► attempt 1
 ///      └── later spawn(ctx) ──► attempt 2
 /// ```
 ///
@@ -68,17 +64,13 @@ pub type TaskRef = Arc<dyn Task>;
 ///
 /// # Cancellation
 ///
-/// Long-running tasks must observe [`TaskContext`] and return
-/// [`TaskError::Canceled`] after a cooperative stop. Cancellation is never
-/// retried. A task that does not stop within the removal or shutdown grace
-/// window may be aborted. Timeout drops the future inside the attempt runner.
-/// Abort asks Tokio to drop it after the current poll returns. Neither action
-/// rolls back external side effects or interrupts synchronous code inside a poll.
+/// Long-running tasks must observe [`TaskContext`] and return [`TaskError::Canceled`] after a cooperative stop.
+/// Cancellation is never retried. A task that does not stop within the removal or shutdown grace window may be aborted.
+/// Timeout drops the future inside the attempt runner. Abort asks Tokio to drop it after the current poll returns.
+/// Neither action rolls back external side effects or interrupts synchronous code inside a poll.
 ///
-/// Taskvisor drops every attempt future synchronously on its Tokio worker. Keep
-/// destructors for future-owned values short and non-blocking. A blocking
-/// destructor delays attempt release and holds any concurrency permit until it
-/// returns.
+/// Taskvisor drops every attempt future synchronously on its Tokio worker. Keep destructors for future-owned values
+/// short and non-blocking. A blocking destructor delays attempt release and holds any concurrency permit until it returns.
 ///
 /// # Attempt results
 ///
@@ -87,12 +79,12 @@ pub type TaskRef = Arc<dyn Task>;
 /// | `Ok(())`                | Repeat only under `RestartPolicy::Always`           |
 /// | [`TaskError::Fail`]     | Retry when policy and retry limit allow it          |
 /// | [`TaskError::Timeout`]  | Retry when policy and retry limit allow it          |
-/// | [`TaskError::Canceled`] | Stop                                                 |
-/// | [`TaskError::Fatal`]    | Stop                                                 |
+/// | [`TaskError::Canceled`] | Stop                                                |
+/// | [`TaskError::Fatal`]    | Stop                                                |
 ///
-/// A primary panic while creating or polling the future is classified as
-/// [`TaskError::Fail`]. A cleanup panic while dropping user-owned attempt data
-/// stops normal retry handling. Do not use panic for expected failures.
+/// A primary panic while creating or polling the future is classified as [`TaskError::Fail`].
+/// A cleanup panic while dropping user-owned attempt data stops normal retry handling.
+/// Do not use panic for expected failures.
 ///
 /// # See also
 ///
@@ -101,8 +93,8 @@ pub type TaskRef = Arc<dyn Task>;
 pub trait Task: Send + Sync + 'static {
     /// Creates a fresh future for one attempt.
     ///
-    /// This method runs synchronously before the attempt timeout starts. Return
-    /// the future quickly and perform task work inside it. Use `ctx` inside the
-    /// future for cooperative cancellation.
+    /// This method runs synchronously before the attempt timeout starts.
+    /// Return the future quickly and perform task work inside it.
+    /// Use `ctx` inside the future for cooperative cancellation.
     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture;
 }

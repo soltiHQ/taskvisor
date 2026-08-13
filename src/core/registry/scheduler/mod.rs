@@ -1,15 +1,14 @@
 //! Starts admitted actors and retains force-aborted actors until physical exit.
 //!
-//! Admission creates a [`ScheduledActor`] and its registry-owned [`ActorHandle`]
-//! before it writes the indexes. [`ActorRuntime`] spawns the actor only after that commit.
-//! The wrapper sends a reliable result before its completion identity.
-//! Removal can claim a ready result without using lifecycle events.
+//! Admission creates a [`ScheduledActor`] and its registry-owned [`ActorHandle`] before it writes the indexes.
+//! [`ActorRuntime`] spawns the actor only after that commit. The wrapper sends a reliable result before
+//! its completion identity. Removal can claim a ready result without using lifecycle events.
 //!
 //! ```text
 //! admission commit ──► scheduled actor ──► actor wrapper
-//!                                              ├── completed ──► completion identity
+//!                                              ├── completed ──────► completion identity
 //!                                              └── force-aborted ──► attempt reaper
-//! terminal commit ──► attempt reaper ──► deferred cleanup
+//! terminal commit ───► attempt reaper ───► deferred cleanup
 //! ```
 //!
 //! Force-abort transfers physical ownership to [`AttemptReaper`] before requesting abort.

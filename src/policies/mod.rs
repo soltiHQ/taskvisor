@@ -1,8 +1,8 @@
 //! Controls whether Taskvisor starts another attempt and when it starts.
 //!
-//! Applications normally select policies through [`TaskSpec`](crate::TaskSpec)
-//! or supervisor-wide [`TaskDefaults`](crate::TaskDefaults). Admission resolves
-//! those choices once. Taskvisor then applies them after every attempt.
+//! Applications normally select policies through [`TaskSpec`](crate::TaskSpec) or supervisor-wide
+//! [`TaskDefaults`](crate::TaskDefaults). Admission resolves those choices once.
+//! Taskvisor then applies them after every attempt.
 //!
 //! ```text
 //! TaskSpec + TaskDefaults
@@ -26,25 +26,21 @@
 //!
 //! # Choosing a task lifecycle
 //!
+//! - Use [`TaskSpec::periodic`](crate::TaskSpec::periodic) to repeat after success and allow retries for retryable failures.
+//! - Use [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults) to inherit every runtime default.
+//! - Use [`TaskSpec::restartable`](crate::TaskSpec::restartable) to retry retryable failures.
 //! - Use [`TaskSpec::once`](crate::TaskSpec::once) for one attempt only.
-//! - Use [`TaskSpec::restartable`](crate::TaskSpec::restartable) to retry
-//!   retryable failures.
-//! - Use [`TaskSpec::periodic`](crate::TaskSpec::periodic) to repeat after
-//!   success and allow retries for retryable failures.
-//! - Use [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults) to inherit
-//!   every runtime default.
 //!
-//! Use [`TaskSpec::with_restart`](crate::TaskSpec::with_restart) for a custom
-//! combination. Backoff and the retry limit only affect retryable failures.
+//! Use [`TaskSpec::with_restart`](crate::TaskSpec::with_restart) for a custom combination.
+//! Backoff and the retry limit only affect retryable failures.
 //! A periodic success uses its configured interval instead.
 //!
-//! The built-in defaults use [`RestartPolicy::OnFailure`], exponential backoff
-//! from `200ms` to `30s`, equal jitter, no attempt timeout, and no retry-count
-//! limit. Named backoff constructors have no jitter unless it is added
-//! explicitly.
+//! The built-in defaults use [`RestartPolicy::OnFailure`], exponential backoff from `200ms` to `30s`,
+//! equal jitter, no attempt timeout, and no retry-count limit. Named backoff constructors have no
+//! jitter unless it is added explicitly.
 //!
-//! The retry limit counts retries after the first failed attempt in one failure
-//! streak. Success resets the count. Fatal errors and cancellation always stop.
+//! The retry limit counts retries after the first failed attempt in one failure streak.
+//! Success resets the count. Fatal errors and cancellation always stop.
 //!
 //! # Example
 //!

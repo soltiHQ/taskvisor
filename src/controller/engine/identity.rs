@@ -1,9 +1,8 @@
 //! Identity operations across controller and runtime ownership.
 //!
-//! The controller loop first looks for a queued or capacity-waiting submission
-//! in its reverse indexes. Other identities are passed to a bounded runtime
-//! registry operation. Queue lookup stays ordered with submissions, while the
-//! registry operation can finish alongside later controller work.
+//! The controller loop first looks for a queued or capacity-waiting submission in its reverse indexes.
+//! Other identities are passed to a bounded runtime registry operation. Queue lookup stays ordered
+//! with submissions, while the registry operation can finish alongside later controller work.
 
 use std::sync::Arc;
 
@@ -79,8 +78,7 @@ impl Controller {
     /// Removes one queued, not-yet-admitted submission by identity.
     ///
     /// Returns `true` only when this call claimed the queued submission.
-    /// A claimed watcher receives `TaskOutcome::Rejected` with
-    /// `RejectionKind::RemovedFromQueue` because its task never ran.
+    /// A claimed watcher receives `TaskOutcome::Rejected` with `RejectionKind::RemovedFromQueue` because its task never ran.
     pub(super) async fn remove_queued_submission(
         &self,
         id: TaskId,

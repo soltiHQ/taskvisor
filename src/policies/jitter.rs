@@ -5,7 +5,6 @@
 //!
 //! ```text
 //! BackoffPolicy base delay
-//!            │
 //!            ▼
 //!      JitterPolicy
 //!            │ raw delay
@@ -20,9 +19,8 @@
 //! | `Full`           | `[0, base]`                   | may be near zero        |
 //! | `RandomizedBand` | `[first, min(base * 3, max)]` | may be above the base   |
 //!
-//! These ranges are inclusive and apply before backoff floors.
-//! `RandomizedBand` uses `first`, the current base, and `max` from the backoff
-//! policy. The policy value keeps no retry history; the backoff policy supplies
+//! These ranges are inclusive and apply before backoff floors. `RandomizedBand` uses `first`, the current base,
+//! and `max` from the backoff policy. The policy value keeps no retry history; the backoff policy supplies
 //! the current bounds for each draw.
 
 use std::time::Duration;
@@ -30,8 +28,8 @@ use std::time::Duration;
 /// Randomization choice for a retry delay.
 ///
 /// Most callers select it through [`BackoffPolicy`](crate::BackoffPolicy).
-/// [`Equal`](Self::Equal) is the built-in backoff default. Named backoff
-/// constructors start with [`None`](Self::None).
+/// [`Equal`](Self::Equal) is the built-in backoff default.
+/// Named backoff constructors start with [`None`](Self::None).
 /// This enum is non-exhaustive; include a wildcard arm when matching it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -44,15 +42,13 @@ pub enum JitterPolicy {
     /// Chooses a random delay in `[0, base]`.
     ///
     /// This gives the largest spread below the base and may retry very quickly.
-    /// Use [`BackoffPolicy::with_floor`](crate::BackoffPolicy::with_floor) for a
-    /// strict minimum.
+    /// Use [`BackoffPolicy::with_floor`](crate::BackoffPolicy::with_floor) for a strict minimum.
     Full,
 
     /// Chooses a random delay in `[base / 2, base]`.
     ///
     /// The average is about 75% of the base delay.
-    /// This is the jitter used by
-    /// [`BackoffPolicy::default`](crate::BackoffPolicy::default).
+    /// This is the jitter used by [`BackoffPolicy::default`](crate::BackoffPolicy::default).
     Equal,
 
     /// Chooses a wider random band that may be above the base delay.
@@ -70,8 +66,7 @@ pub enum JitterPolicy {
 impl Default for JitterPolicy {
     /// Returns [`JitterPolicy::None`].
     ///
-    /// [`BackoffPolicy::default`](crate::BackoffPolicy::default) selects
-    /// [`JitterPolicy::Equal`] explicitly.
+    /// [`BackoffPolicy::default`](crate::BackoffPolicy::default) selects [`JitterPolicy::Equal`] explicitly.
     fn default() -> Self {
         JitterPolicy::None
     }
@@ -80,9 +75,8 @@ impl Default for JitterPolicy {
 impl JitterPolicy {
     /// Applies jitter using only `delay`.
     ///
-    /// [`RandomizedBand`](Self::RandomizedBand) needs `first` and `max` for its
-    /// normal range. This method has neither and uses the same `[0, delay]`
-    /// range as [`Full`](Self::Full).
+    /// [`RandomizedBand`](Self::RandomizedBand) needs `first` and `max` for its normal range.
+    /// This method has neither and uses the same `[0, delay]` range as [`Full`](Self::Full).
     ///
     /// Use [`Self::apply_randomized_band`] when all band bounds are available.
     #[must_use]
@@ -96,10 +90,9 @@ impl JitterPolicy {
 
     /// Applies a randomized band with explicit lower, growth, and maximum bounds.
     ///
-    /// [`RandomizedBand`](Self::RandomizedBand) first clamps `lower` to `max`.
-    /// It draws uniformly up to `min(upper_seed × 3, max)`, or returns the
-    /// clamped lower bound when that upper value is smaller. Other policies
-    /// apply themselves to the clamped lower bound and ignore `upper_seed`.
+    /// [`RandomizedBand`](Self::RandomizedBand) first clamps `lower` to `max`. It draws uniformly
+    /// up to `min(upper_seed × 3, max)`, or returns the clamped lower bound when that upper value is smaller.
+    /// Other policies apply themselves to the clamped lower bound and ignore `upper_seed`.
     #[must_use]
     pub fn apply_randomized_band(
         &self,
@@ -214,7 +207,7 @@ mod tests {
         let lower = Duration::from_millis(100);
         let upper_seed = Duration::from_secs(1);
         let max = Duration::from_secs(30);
-        let upper = Duration::from_secs(3); // seed*3 = 3s < max
+        let upper = Duration::from_secs(3);
         for _ in 0..32 {
             let d = JitterPolicy::RandomizedBand.apply_randomized_band(lower, upper_seed, max);
             assert!(

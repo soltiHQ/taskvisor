@@ -1,54 +1,35 @@
 //! Reports failures before a controller submission enters slot admission.
-//!
-//! [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission)
-//! checks that the supervisor has a controller before creating a local
-//! [`PreparedSubmission`](crate::PreparedSubmission). Controller `submit*`
-//! methods can return active [`ControllerError`] variants at command intake.
-//!
-//! Slot admission and runtime registration happen after command intake. Their
-//! rejections are not `ControllerError` values. A watched submission reports
-//! them as [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) through its
-//! [`TaskWaiter`](crate::TaskWaiter).
 
 use thiserror::Error;
 
 /// A failure before controller slot admission.
 ///
-/// [`NotConfigured`](Self::NotConfigured) can come from preparation or
-/// submission. The active variants below describe submission command intake;
-/// [`AlreadyStarted`](Self::AlreadyStarted) remains only for compatibility.
-/// `Ok` from preparation creates a local prepared value. `Ok` from a submit
-/// method confirms command intake. Neither result confirms slot admission.
+/// [`NotConfigured`](Self::NotConfigured) can come from preparation or submission.
+/// The active variants below describe submission command intake; [`AlreadyStarted`](Self::AlreadyStarted) remains only for compatibility.
+/// `Ok` from preparation creates a local prepared value. `Ok` from a submit method confirms command intake. Neither result confirms slot admission.
 ///
 /// Use the error variants as follows:
 ///
-/// - [`NotConfigured`](Self::NotConfigured) means the builder did not install a
-///   controller.
-/// - [`Full`](Self::Full) is fail-fast command-queue backpressure; the async
-///   submit form waits for that capacity.
-/// - [`ResourceLimit`](Self::ResourceLimit) and
-///   [`ThreadStartFailed`](Self::ThreadStartFailed) describe cleanup ownership
-///   that Taskvisor could not reserve before intake.
+/// - [`NotConfigured`](Self::NotConfigured) means the builder did not install a controller.
+/// - [`Full`](Self::Full) is fail-fast command-queue backpressure; the async submit form waits for that capacity.
+/// - [`ResourceLimit`](Self::ResourceLimit) and [`ThreadStartFailed`](Self::ThreadStartFailed) describe cleanup ownership that Taskvisor could not reserve before intake.
 /// - [`Closed`](Self::Closed) means controller shutdown has closed intake.
 ///
-/// Match the enum with a wildcard arm because it is non-exhaustive. Use `..`
-/// when matching a data-carrying variant.
+/// Match the enum with a wildcard arm because it is non-exhaustive.
+/// Use `..` when matching a data-carrying variant.
 #[non_exhaustive]
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerError {
     /// No controller was installed on this supervisor.
     ///
-    /// Configure one with
-    /// [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller)
-    /// before building the supervisor.
+    /// Configure one with [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller) before building the supervisor.
     #[error("controller not configured")]
     NotConfigured,
 
     /// The ordered controller command queue has no capacity now.
     ///
-    /// Only fail-fast `try_submit*` methods return this variant. It describes
-    /// command intake, not a full per-slot queue. The corresponding async method
-    /// waits for command capacity.
+    /// Only fail-fast `try_submit*` methods return this variant.
+    /// It describes command intake, not a full per-slot queue. The corresponding async method waits for command capacity.
     #[error("submission queue full")]
     Full,
 
@@ -66,8 +47,7 @@ pub enum ControllerError {
 
     /// Taskvisor could not start a cleanup worker required before intake.
     ///
-    /// The fields preserve the worker identity and the available operating
-    /// system error details.
+    /// The fields preserve the worker identity and the available operating system error details.
     #[error(
         "failed to start {component} worker {worker} during controller submission: {kind:?} (raw OS error: {raw_os_error:?})"
     )]
@@ -91,8 +71,8 @@ pub enum ControllerError {
 
     /// A compatibility variant for the former fallible controller-start guard.
     ///
-    /// Current controller startup does not return this variant. It remains
-    /// available for source compatibility.
+    /// Current controller startup does not return this variant.
+    /// It remains available for source compatibility.
     #[error("controller already started")]
     AlreadyStarted,
 }
@@ -100,8 +80,7 @@ pub enum ControllerError {
 impl ControllerError {
     /// Returns the stable variant label for logs and metrics.
     ///
-    /// The label is distinct from the human-readable [`Display`](std::fmt::Display)
-    /// message.
+    /// The label is distinct from the human-readable [`Display`](std::fmt::Display) message.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {

@@ -1,27 +1,26 @@
 //! Internal slot admission engine.
 //!
-//! One loop owns the ordered command receiver. It applies commands, registry
-//! replies, runtime completion, and shutdown to controller state.
+//! One loop owns the ordered command receiver.
+//! It applies commands, registry replies, runtime completion, and shutdown to controller state.
 //!
 //! ```text
-//! handle ──► command queue ──► lifecycle driver
+//! handle ───────────► command queue ──► lifecycle driver
 //! runtime results ──► lifecycle driver
 //! shutdown signal ──► lifecycle driver
 //!
 //! lifecycle driver
-//!      ├── admission ──► runtime registry
-//!      ├── identity ──► runtime registry
+//!      ├── admission ──────► runtime registry
+//!      ├── identity ───────► runtime registry
 //!      └── state changes ──► state and slots
 //! ```
 //!
-//! The engine owns queued task payloads, watched outcome senders, slot state,
-//! and reverse indexes. User task ownership is reserved before command intake.
+//! The engine owns queued task payloads, watched outcome senders, slot state, and reverse indexes.
+//! User task ownership is reserved before command intake.
 //!
-//! Registry replies and runtime completion are authoritative. Events are
-//! best-effort and never drive slot transitions.
+//! Registry replies and runtime completion are authoritative.
+//! Events are best-effort and never drive slot transitions.
 //!
-//! The shared state lock is not held across asynchronous waits, event
-//! publication, reply delivery, or user-value destruction.
+//! The shared state lock is not held across asynchronous waits, event publication, reply delivery, or user-value destruction.
 
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, Weak};
 
@@ -75,9 +74,8 @@ pub(crate) struct Controller {
     shutdown_token: CancellationToken,
     /// Per-slot state, reverse indexes, and pre-commit watcher ownership.
     ///
-    /// This lock is never held across `.await`, event publication, reply
-    /// delivery, or user-value destruction. One lock makes aggregate limits and
-    /// cross-index updates atomic.
+    /// This lock is never held across `.await`, event publication, reply delivery, or user-value destruction.
+    /// One lock makes aggregate limits and cross-index updates atomic.
     state: StdMutex<ControllerState>,
     /// Ordered command sender cloned into `ControllerHandle`.
     tx: mpsc::Sender<ControllerCommand>,
@@ -123,8 +121,7 @@ impl Controller {
 
     /// Resolves a parked watched submission as `Rejected`.
     ///
-    /// This is a no-op for unwatched submissions and for watched submissions
-    /// already handed to the runtime registry.
+    /// This is a no-op for unwatched submissions and for watched submissions already handed to the runtime registry.
     fn finalize_rejected(
         &self,
         id: TaskId,

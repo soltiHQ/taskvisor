@@ -1,11 +1,9 @@
 //! Resolves remove and cancel commands against authoritative state.
 //!
-//! The registry listener calls this module after a management command reaches its
-//! ordering point. Identity commands inspect one entry. Label commands resolve the
-//! current identity and make the claim under the same state lock.
+//! The registry listener calls this module after a management command reaches its ordering point.
+//! Identity commands inspect one entry. Label commands resolve the current identity and make the claim under the same state lock.
 //!
-//! Remove returns only whether this command won the actor handle. It does not
-//! wait for terminal cleanup.
+//! Remove returns only whether this command won the actor handle. It does not wait for terminal cleanup.
 //! Cancel returns the logical completion latch. A later cancel of an entry already being removed
 //! joins the same completion instead of creating another join owner.
 

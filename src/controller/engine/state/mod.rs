@@ -1,23 +1,23 @@
 //! Stores controller admission state.
 //!
 //! This module tree stores mutable admission data indexed by slot and [`TaskId`].
-//! [`ControllerState`] holds cross-slot indexes. [`SlotState`] holds the owner
-//! phase and pending queue for one slot.
+//! [`ControllerState`] holds cross-slot indexes.
+//! [`SlotState`] holds the owner phase and pending queue for one slot.
 //!
 //! ```text
 //! ControllerState
-//!      ├── slot name ──► shared SlotState
-//!      ├── queued TaskId ──► slot name
+//!      ├── slot name ────────► shared SlotState
+//!      ├── queued TaskId ────► slot name
 //!      ├── capacity TaskId ──► retained admission
-//!      └── watched TaskId ──► outcome sender
+//!      └── watched TaskId ───► outcome sender
 //! ```
 //!
-//! The global state lock protects the indexes. Each slot has its own async lock
-//! for phase and queue changes. The serialized controller loop keeps queue and
-//! reverse-index mutations in one transition.
+//! The global state lock protects the indexes.
+//! Each slot has its own async lock for phase and queue changes.
+//! The serialized controller loop keeps queue and reverse-index mutations in one transition.
 //!
-//! The `slot` module defines the slot state machine. Admission and completion
-//! handlers drive it with registry results and physical completion signals.
+//! The `slot` module defines the slot state machine.
+//! Admission and completion handlers drive it with registry results and physical completion signals.
 
 use std::{collections::HashMap, sync::Arc};
 

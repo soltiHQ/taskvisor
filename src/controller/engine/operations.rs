@@ -1,8 +1,7 @@
 //! In-loop operations tracked by the controller driver.
 //!
-//! The lifecycle driver polls registry capacity, admission replies, completion,
-//! removal, and identity work inside the serialized controller task. This keeps
-//! state transitions in one loop without spawning a Tokio task per operation.
+//! The lifecycle driver polls registry capacity, admission replies, completion, removal, and identity work
+//! inside the serialized controller task. This keeps state transitions in one loop without spawning a Tokio task per operation.
 
 use std::{
     collections::VecDeque,
@@ -73,8 +72,8 @@ pub(super) struct CapacityResult {
 
 /// FIFO queue for bounded registry-capacity reservations.
 ///
-/// At most one reservation future is active. Canceling that identity drops its
-/// future and removes its waiter from the registry command channel.
+/// At most one reservation future is active.
+/// Canceling that identity drops its future and removes its waiter from the registry command channel.
 pub(super) struct CapacityAdmissionPump {
     /// Runtime registry used to reserve command capacity.
     supervisor: Weak<SupervisorCore>,
@@ -125,8 +124,8 @@ impl CapacityAdmissionPump {
 
     /// Cancels a queued or active identity.
     ///
-    /// Dropping an active reservation future is the cancellation acknowledgement; no ghost
-    /// waiter remains in the registry command channel.
+    /// Dropping an active reservation future is the cancellation acknowledgement;
+    /// no ghost waiter remains in the registry command channel.
     pub(super) fn cancel(&mut self, id: TaskId) -> bool {
         if self
             .active
@@ -229,8 +228,8 @@ impl Controller {
 
     /// Reports a failed removal request for the current slot owner.
     ///
-    /// Stale results are ignored. A successful request also leaves ownership in
-    /// place; physical completion releases the slot.
+    /// Stale results are ignored.
+    /// A successful request also leaves ownership in place; physical completion releases the slot.
     pub(super) async fn handle_removal_result(&self, result: RemovalResult) {
         let Some(slot) = self.slot(&result.slot_name) else {
             return;

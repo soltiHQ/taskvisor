@@ -1,14 +1,12 @@
 //! Requests a task stop without waiting for terminal cleanup.
 //!
-//! [`SupervisorHandle`](crate::SupervisorHandle) uses this path directly.
-//! The controller also uses it when an identity is no longer in its queued-work index.
-//! Identity and label variants commit to the bounded registry queue, then wait
-//! for the registry's direct claim decision.
+//! [`SupervisorHandle`](crate::SupervisorHandle) uses this path directly. The controller also uses
+//! it when an identity is no longer in its queued-work index. Identity and label variants commit to
+//! the bounded registry queue, then wait for the registry's direct claim decision.
 //! Label lookup and claim happen in the same registry command.
 //!
-//! `true` means this command claimed removal. `false` means the target was absent
-//! or another stop path had already claimed it. Either result can arrive before
-//! the actor reaches terminal cleanup.
+//! `true` means this command claimed removal. `false` means the target was absent or another stop
+//! path had already claimed it. Either result can arrive before the actor reaches terminal cleanup.
 //! Identity paths publish a best-effort `TaskRemoveRequested` event before queue commit.
 //! Label paths publish it after the registry resolves the label to an identity.
 

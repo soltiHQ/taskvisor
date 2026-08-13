@@ -1,12 +1,9 @@
 //! Defines whether Taskvisor may start another attempt.
 //!
-//! The registry resolves this policy from [`TaskSpec`](crate::TaskSpec) and
-//! [`TaskDefaults`](crate::TaskDefaults). Taskvisor checks it after each attempt.
-//! Most applications select a policy with [`TaskSpec::once`](crate::TaskSpec::once),
-//! [`TaskSpec::restartable`](crate::TaskSpec::restartable), or
-//! [`TaskSpec::periodic`](crate::TaskSpec::periodic). Use
-//! [`TaskSpec::with_restart`](crate::TaskSpec::with_restart) to override that
-//! choice.
+//! The registry resolves this policy from [`TaskSpec`](crate::TaskSpec) and [`TaskDefaults`](crate::TaskDefaults).
+//! Taskvisor checks it after each attempt. Most applications select a policy with [`TaskSpec::once`](crate::TaskSpec::once),
+//! [`TaskSpec::restartable`](crate::TaskSpec::restartable), or [`TaskSpec::periodic`](crate::TaskSpec::periodic).
+//! Use [`TaskSpec::with_restart`](crate::TaskSpec::with_restart) to override that choice.
 //!
 //! | Policy      | After success               | After retryable failure |
 //! |-------------|-----------------------------|-------------------------|
@@ -14,15 +11,14 @@
 //! | `OnFailure` | Stop                        | Retry if budget allows  |
 //! | `Always`    | Repeat; use interval if set | Retry if budget allows  |
 //!
-//! Failure timing belongs to [`BackoffPolicy`](crate::BackoffPolicy). The retry
-//! limit can stop an otherwise eligible failure retry. It does not limit
-//! successful repeats under `Always`. Fatal errors, task cancellation, and
-//! runtime cancellation always stop the task.
+//! Failure timing belongs to [`BackoffPolicy`](crate::BackoffPolicy). The retry limit can stop an otherwise
+//! eligible failure retry. It does not limit successful repeats under `Always`. Fatal errors, task cancellation,
+//! and runtime cancellation always stop the task.
 
 /// Restart eligibility applied after one task attempt.
 ///
-/// Failure delays and retry limits are separate settings. This enum is
-/// non-exhaustive; include a wildcard arm when matching it.
+/// Failure delays and retry limits are separate settings.
+/// This enum is non-exhaustive; include a wildcard arm when matching it.
 #[doc(alias = "retry")]
 #[doc(alias = "retry policy")]
 #[derive(Clone, Copy, Debug)]
@@ -32,8 +28,8 @@ pub enum RestartPolicy {
     Never,
     /// Allows another attempt only after a retryable failure.
     ///
-    /// The configured retry limit can still stop the task. Success, fatal
-    /// failure, and cancellation stop it.
+    /// The configured retry limit can still stop the task.
+    /// Success, fatal failure, and cancellation stop it.
     OnFailure,
     /// Allows another attempt after success or a retryable failure.
     ///
@@ -42,13 +38,11 @@ pub enum RestartPolicy {
     /// - `Some(duration)` waits at least that long after the attempt completes.
     /// - `None` adds no configured interval.
     ///
-    /// A small internal floor limits fast successful restart loops, including
-    /// when `interval` is `None` or zero.
+    /// A small internal floor limits fast successful restart loops, including when `interval` is `None` or zero.
     ///
-    /// Retryable failures ignore `interval` and use
-    /// [`BackoffPolicy`](crate::BackoffPolicy). The retry limit applies to a
-    /// failure streak, not to successful repeats. Fatal errors and cancellation
-    /// stop the task.
+    /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
+    /// The retry limit applies to a failure streak, not to successful repeats.
+    /// Fatal errors and cancellation stop the task.
     Always {
         /// Configured wait after success and before the next attempt.
         ///

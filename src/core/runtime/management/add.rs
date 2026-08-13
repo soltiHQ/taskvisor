@@ -1,9 +1,8 @@
 //! Moves direct tasks, controller handoffs, and static batches into registry admission.
 //!
-//! [`SupervisorHandle`](crate::SupervisorHandle) direct add methods reserve
-//! cleanup ownership and bounded queue capacity before they transfer a
-//! [`TaskSpec`]. The optional controller can reserve queue capacity while it
-//! retains its owned task, then commit through the same final shutdown gate.
+//! [`SupervisorHandle`](crate::SupervisorHandle) direct add methods reserve cleanup ownership and bounded
+//! queue capacity before they transfer a [`TaskSpec`]. The optional controller can reserve queue capacity
+//! while it retains its owned task, then commit through the same final shutdown gate.
 //! A non-empty static run sends its complete initial set as one `AddBatch` command.
 //!
 //! Direct add methods do not report success before the registry's reply.
@@ -75,8 +74,7 @@ impl SupervisorCore {
     ///
     /// The returned completion tracks registry cleanup and physical actor or reaper release.
     /// The controller waits for both before reusing the slot.
-    /// Pre-commit failure returns the task and outcome sender inside
-    /// [`crate::core::UncommittedWatchedAdd`].
+    /// Pre-commit failure returns the task and outcome sender inside [`crate::core::UncommittedWatchedAdd`].
     #[cfg(feature = "controller")]
     pub(crate) fn add_task_with_id_watched(
         &self,
@@ -115,9 +113,8 @@ impl SupervisorCore {
 
     /// Runs the final shutdown check and transfers a controller task into its reserved slot.
     ///
-    /// The returned completion lets the controller wait for registry cleanup
-    /// and physical actor or reaper release before slot reuse. A failed check
-    /// returns every uncommitted user-owned value to the controller.
+    /// The returned completion lets the controller wait for registry cleanup and physical actor or reaper
+    /// release before slot reuse. A failed check returns every uncommitted user-owned value to the controller.
     #[cfg(feature = "controller")]
     pub(crate) fn commit_reserved_controller_add(
         &self,

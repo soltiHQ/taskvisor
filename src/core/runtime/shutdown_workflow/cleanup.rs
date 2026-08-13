@@ -1,15 +1,13 @@
 //! Runs trigger-specific task drain logic and the mandatory cleanup tail.
 //!
-//! The detached shutdown owner calls this package after the coordinator chooses
-//! the first trigger. Explicit and natural shutdown close command admission and
-//! require a registry fence before draining tasks within the configured grace
-//! period. A signal setup failure closes admission and attempts the same fence,
-//! but skips that normal drain.
+//! The detached shutdown owner calls this package after the coordinator chooses the first trigger.
+//! Explicit and natural shutdown close command admission and require a registry fence before draining
+//! tasks within the configured grace period. A signal setup failure closes admission and attempts the
+//! same fence, but skips that normal drain.
 //!
-//! Every trigger then attempts the same cleanup order: join the optional
-//! controller, cancel runtime listeners, join the registry listener, join the
-//! event relay, and close subscriber callback workers. Later phases still run
-//! after a failure or panic.
+//! Every trigger then attempts the same cleanup order: join the optional controller, cancel runtime
+//! listeners, join the registry listener, join the event relay, and close subscriber callback workers.
+//! Later phases still run after a failure or panic.
 //! Subscriber cleanup has its own timeout and is not part of the task grace period.
 
 use super::{ShutdownOutcome, ShutdownTrigger};
@@ -111,9 +109,8 @@ impl SupervisorCore {
 
     /// Fences prior registry commands and spends one grace window on task cleanup.
     ///
-    /// `cancel_all_within` spends the shared deadline on newly claimed actors
-    /// and removal owners already in progress. The follow-up wait receives only
-    /// the unused part. Forced actors and owners still pending form `stuck`.
+    /// `cancel_all_within` spends the shared deadline on newly claimed actors and removal owners already in progress.
+    /// The follow-up wait receives only the unused part. Forced actors and owners still pending form `stuck`.
     ///
     /// # Errors
     ///

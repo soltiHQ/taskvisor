@@ -1,8 +1,7 @@
 //! Assembles the configuration and resources for a stopped [`Supervisor`].
 //!
-//! [`SupervisorBuilder`] combines runtime limits, task defaults, subscribers,
-//! and optional controller settings. Building validates bounded capacities,
-//! creates the runtime state and channels, and reserves subscriber ownership.
+//! [`SupervisorBuilder`] combines runtime limits, task defaults, subscribers, and optional controller settings.
+//! Building validates bounded capacities, creates the runtime state and channels, and reserves subscriber ownership.
 //! It does not spawn Tokio tasks.
 //!
 //! ```text
@@ -17,9 +16,8 @@
 //! running runtime
 //! ```
 //!
-//! With subscribers, construction starts the supervisor's destructor-isolation
-//! domain before reading subscriber metadata. Without subscribers, that domain
-//! stays dormant until the first task or controller ownership admission.
+//! With subscribers, construction starts the supervisor's destructor-isolation domain before reading subscriber metadata.
+//! Without subscribers, that domain stays dormant until the first task or controller ownership admission.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -42,16 +40,12 @@ use crate::{
 
 /// Collects all immutable settings used by one [`Supervisor`].
 ///
-/// Use [`Supervisor::new`] when runtime configuration and subscribers are
-/// enough. Use this builder to change inherited task settings, enable
-/// controller admission, or handle construction failure with
-/// [`try_build`](Self::try_build).
+/// Use [`Supervisor::new`] when runtime configuration and subscribers are enough. Use this builder to change
+/// inherited task settings, enable controller admission, or handle construction failure with [`try_build`](Self::try_build).
 ///
-/// Setter calls consume and return the builder. Calling
-/// [`with_runtime_config`](Self::with_runtime_config) replaces changes made by
-/// earlier runtime-setting shortcuts. Call [`build`](Self::build) for a
-/// convenience panic on failure or [`try_build`](Self::try_build) for a typed
-/// [`BuildError`].
+/// Setter calls consume and return the builder. Calling [`with_runtime_config`](Self::with_runtime_config) replaces changes
+/// made by earlier runtime-setting shortcuts. Call [`build`](Self::build) for a convenience panic on failure
+/// or [`try_build`](Self::try_build) for a typed [`BuildError`].
 #[must_use]
 pub struct SupervisorBuilder {
     runtime: SupervisorConfig,
@@ -79,8 +73,7 @@ impl SupervisorBuilder {
 
     /// Replaces all runtime settings stored by this builder.
     ///
-    /// This also replaces values set by earlier runtime-setting shortcuts such
-    /// as [`with_grace`](Self::with_grace).
+    /// This also replaces values set by earlier runtime-setting shortcuts such as [`with_grace`](Self::with_grace).
     pub fn with_runtime_config(mut self, runtime: SupervisorConfig) -> Self {
         self.runtime = runtime;
         self
@@ -102,8 +95,7 @@ impl SupervisorBuilder {
 
     /// Sets the shared deadline for draining subscriber queues during shutdown.
     ///
-    /// See [`SupervisorConfig::with_subscriber_shutdown_timeout`] for the
-    /// callback boundary.
+    /// See [`SupervisorConfig::with_subscriber_shutdown_timeout`] for the callback boundary.
     pub fn with_subscriber_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.runtime = self.runtime.with_subscriber_shutdown_timeout(timeout);
         self
@@ -121,8 +113,7 @@ impl SupervisorBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] for zero or [`ConfigError::TooLarge`] above
-    /// Tokio's structural limit.
+    /// Returns [`ConfigError::Zero`] for zero or [`ConfigError::TooLarge`] above Tokio's structural limit.
     pub fn try_with_max_concurrent(mut self, max_concurrent: usize) -> Result<Self, ConfigError> {
         self.runtime = self.runtime.try_with_max_concurrent(max_concurrent)?;
         Ok(self)
@@ -130,8 +121,7 @@ impl SupervisorBuilder {
 
     /// Sets or clears the registry membership limit.
     ///
-    /// See [`SupervisorConfig::with_max_registered_tasks`] for which lifecycle
-    /// phases consume the limit.
+    /// See [`SupervisorConfig::with_max_registered_tasks`] for which lifecycle phases consume the limit.
     pub fn with_max_registered_tasks(
         mut self,
         max_registered_tasks: impl Into<Option<NonZeroUsize>>,
@@ -161,8 +151,7 @@ impl SupervisorBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] for zero or [`ConfigError::TooLarge`] above
-    /// Tokio's structural limit.
+    /// Returns [`ConfigError::Zero`] for zero or [`ConfigError::TooLarge`] above Tokio's structural limit.
     pub fn try_with_bus_capacity(mut self, bus_capacity: usize) -> Result<Self, ConfigError> {
         self.runtime = self.runtime.try_with_bus_capacity(bus_capacity)?;
         Ok(self)
@@ -182,8 +171,7 @@ impl SupervisorBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] for zero or [`ConfigError::TooLarge`] above
-    /// Tokio's structural limit.
+    /// Returns [`ConfigError::Zero`] for zero or [`ConfigError::TooLarge`] above Tokio's structural limit.
     pub fn try_with_registry_queue_capacity(
         mut self,
         registry_queue_capacity: usize,
@@ -212,10 +200,8 @@ impl SupervisorBuilder {
 
     /// Enables slot admission for `SupervisorHandle::submit*` methods.
     ///
-    /// Without this setting, `submit*` methods return
-    /// [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured).
-    /// Direct `add*` methods always bypass the controller and register with the
-    /// runtime.
+    /// Without this setting, `submit*` methods return [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured).
+    /// Direct `add*` methods always bypass the controller and register with the runtime.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {
@@ -226,8 +212,7 @@ impl SupervisorBuilder {
     /// Builds a stopped supervisor and panics if construction fails.
     ///
     /// This method is safe to call outside Tokio and does not spawn Tokio tasks.
-    /// Use [`try_build`](Self::try_build) when the application must report or
-    /// recover from resource and capacity failures.
+    /// Use [`try_build`](Self::try_build) when the application must report or recover from resource and capacity failures.
     ///
     /// # Examples
     ///
@@ -248,8 +233,7 @@ impl SupervisorBuilder {
     /// # Panics
     ///
     /// Panics when [`try_build`](Self::try_build) would return an error.
-    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] also
-    /// reaches the caller.
+    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] also reaches the caller.
     #[must_use]
     pub fn build(self) -> Arc<Supervisor> {
         self.try_build().unwrap_or_else(|error| {
@@ -262,24 +246,19 @@ impl SupervisorBuilder {
     /// Builds a stopped supervisor and returns typed construction failures.
     ///
     /// This method is safe to call outside Tokio and does not spawn Tokio tasks.
-    /// It reserves all subscriber ownership slots as one batch before calling
-    /// [`Subscribe::name`] or [`Subscribe::queue_capacity`]. A rejected batch
-    /// calls neither method and keeps no ownership slots.
+    /// It reserves all subscriber ownership slots as one batch before calling [`Subscribe::name`] or [`Subscribe::queue_capacity`].
+    /// A rejected batch calls neither method and keeps no ownership slots.
     ///
     /// # Errors
     ///
-    /// - [`BuildError::ResourceLimitReached`] when the supervisor cannot own
-    ///   every configured subscriber.
-    /// - [`BuildError::ThreadStartFailed`] when the destructor-isolation domain
-    ///   cannot start its base worker set.
-    /// - [`BuildError::CapacityTooLarge`] when a runtime, controller, or
-    ///   subscriber capacity exceeds Tokio's structural limit.
+    /// - [`BuildError::ResourceLimitReached`] when the supervisor cannot own every configured subscriber.
+    /// - [`BuildError::ThreadStartFailed`] when the destructor-isolation domain cannot start its base worker set.
+    /// - [`BuildError::CapacityTooLarge`] when a runtime, controller, or subscriber capacity exceeds Tokio's structural limit.
     ///
     /// # Panics
     ///
-    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`]
-    /// reaches the caller after subscriber ownership has entered destructor
-    /// isolation.
+    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] reaches the caller after subscriber ownership
+    /// has entered destructor isolation.
     pub fn try_build(self) -> Result<Arc<Supervisor>, BuildError> {
         self.validate_configuration()?;
         let drop_domain = deferred_drop::DropDomain::unstarted(deferred_drop::OWNERSHIP_CAPACITY);

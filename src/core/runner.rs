@@ -1,9 +1,8 @@
 //! Executes one physical task attempt.
 //!
-//! [`TaskActor`](super::actor::TaskActor) calls [`run_once`] after acquiring any
-//! concurrency permit. The runner creates the attempt context, calls
-//! [`Task::spawn`], applies the attempt timeout, and contains user panics.
-//! When the attempt returns, the runner publishes one terminal attempt event.
+//! [`TaskActor`](super::actor::TaskActor) calls [`run_once`] after acquiring any concurrency permit.
+//! The runner creates the attempt context, calls [`Task::spawn`], applies the attempt timeout, and contains
+//! user panics. When the attempt returns, the runner publishes one terminal attempt event.
 //!
 //! ```text
 //! TaskActor ──► run_once
@@ -13,8 +12,8 @@
 //!                  └── task error or panic ──► AttemptFailed
 //! ```
 //!
-//! The attempt future is destroyed before its activity flag and concurrency
-//! permit are released. This remains true during timeout and Tokio abort.
+//! The attempt future is destroyed before its activity flag and concurrency permit are released.
+//! This remains true during timeout and Tokio abort.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -38,8 +37,8 @@ use crate::{
 
 /// Failure returned by the task-future panic boundary.
 ///
-/// Polling panics become [`TaskError::Fail`] values. The cleanup flag records a
-/// second panic while destroying a user-owned value; that case is not retried.
+/// Polling panics become [`TaskError::Fail`] values.
+/// The cleanup flag records a second panic while destroying a user-owned value; that case is not retried.
 struct CaughtFailure {
     /// Task error produced from a returned error or panic payload.
     error: TaskError,
@@ -102,10 +101,9 @@ impl<'a> CatchPanic<'a> {
 
     /// Destroys one user future inside the physical attempt boundary.
     ///
-    /// `Future::drop` is synchronous and can block. Keeping it here means the
-    /// attempt still owns its concurrency permit and activity bit until that
-    /// destructor really returns. The caller classifies a destructor panic as
-    /// an attempt failure or an abort-time runtime diagnostic; a second panic
+    /// `Future::drop` is synchronous and can block. Keeping it here means the attempt still owns its
+    /// concurrency permit and activity bit until that destructor really returns. The caller classifies
+    /// a destructor panic as an attempt failure or an abort-time runtime diagnostic; a second panic
     /// from destroying its payload is intentionally retained.
     fn drop_future(future: BoxTaskFuture, cleanup_poisoned: &AtomicBool) -> Option<CaughtFailure> {
         match std::panic::catch_unwind(AssertUnwindSafe(|| drop(future))) {
@@ -121,9 +119,8 @@ impl<'a> CatchPanic<'a> {
         }
     }
 
-    /// Explicitly destroys an in-flight future while the attempt still owns its
-    /// permit. Timeout uses this path so a destructor panic cannot be mistaken
-    /// for an ordinary, retryable timeout.
+    /// Explicitly destroys an in-flight future while the attempt still owns its permit. Timeout uses
+    /// this path so a destructor panic cannot be mistaken for an ordinary, retryable timeout.
     fn dispose(self: Pin<&mut Self>) -> Option<CaughtFailure> {
         let this = self.get_mut();
         let future = this.future.take()?;
@@ -155,9 +152,6 @@ impl Future for CatchPanic<'_> {
                     .expect("a ready task future is destroyed exactly once");
                 match Self::drop_future(future, self.cleanup_poisoned.as_ref()) {
                     Some(failure) => {
-                        // A returned TaskError can itself retain user values. If
-                        // future cleanup already failed, destroy that result under
-                        // the same physical attempt boundary before terminalizing.
                         Self::dispose_value(result, self.cleanup_poisoned.as_ref());
                         Poll::Ready(Err(failure))
                     }
@@ -175,9 +169,6 @@ impl Future for CatchPanic<'_> {
                     .future
                     .take()
                     .expect("a panicked task future is destroyed exactly once");
-                // Preserve the polling panic as the primary attempt failure.
-                // Destruction is still isolated from unwinding so a hostile Drop
-                // cannot cause a double panic in this boundary.
                 let cleanup_panicked =
                     Self::drop_future(future, self.cleanup_poisoned.as_ref()).is_some();
                 Poll::Ready(Err(CaughtFailure {
@@ -192,9 +183,6 @@ impl Future for CatchPanic<'_> {
 impl Drop for CatchPanic<'_> {
     fn drop(&mut self) {
         if let Some(future) = self.future.take() {
-            // Cancellation and force-abort reach this path. The enclosing
-            // attempt continues to own its permit/activity while the synchronous
-            // destructor executes and while its best-effort diagnostic is queued.
             if let Some(failure) = Self::drop_future(future, self.cleanup_poisoned.as_ref()) {
                 self.drop_diagnostic.publish(&failure);
             }
@@ -220,9 +208,6 @@ pub(crate) fn dispose_panic_payload(
     cleanup_poisoned: &AtomicBool,
 ) -> bool {
     if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
-        // No bounded execution context can safely run a destructor that has
-        // already panicked while being destroyed. Retaining the nested payload
-        // prevents a double panic and keeps this physical attempt well-defined.
         cleanup_poisoned.store(true, Ordering::Release);
         std::mem::forget(nested);
         true
@@ -233,9 +218,8 @@ pub(crate) fn dispose_panic_payload(
 
 /// One failed attempt with diagnostics computed exactly once.
 ///
-/// The runner publishes the attempt event and the actor later decides whether
-/// to retry or terminate. Carrying the formatted reason across that boundary
-/// avoids formatting the same user error on both paths.
+/// The runner publishes the attempt event and the actor later decides whether to retry or terminate.
+/// Carrying the formatted reason across that boundary avoids formatting the same user error on both paths.
 #[derive(Debug)]
 pub(crate) struct AttemptFailure {
     /// Original classified task error.
@@ -287,10 +271,9 @@ impl AttemptFailure {
 
 /// Runs one attempt and returns its classified result to the task actor.
 ///
-/// A positive timeout applies only to this attempt. Expiry cancels and destroys
-/// the attempt future before returning [`TaskError::Timeout`]. A timeout returned
-/// by the task follows the ordinary failure path. Panics from `spawn` or polling
-/// become attempt failures. A cleanup panic makes the actor stop instead of retrying.
+/// A positive timeout applies only to this attempt. Expiry cancels and destroys the attempt future before
+/// returning [`TaskError::Timeout`]. A timeout returned by the task follows the ordinary failure path.
+/// Panics from `spawn` or polling become attempt failures. A cleanup panic makes the actor stop instead of retrying.
 pub(crate) async fn run_once<T: Task + ?Sized>(
     task: &T,
     task_name: &Arc<str>,

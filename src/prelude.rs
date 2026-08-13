@@ -8,16 +8,15 @@
 //!
 //! ```text
 //! application module ──► taskvisor::prelude
-//!                              ├── core API ──► always available
-//!                              ├── controller API ──► controller feature
-//!                              ├── Subscribe ──► always available
+//!                              ├── core API ──────────────► always available
+//!                              ├── controller API ────────► controller feature
+//!                              ├── Subscribe ─────────────► always available
 //!                              ├── built-in subscribers ──► logging or tracing feature
-//!                              └── cancellation token ──► tokio-util-interop feature
+//!                              └── cancellation token ────► tokio-util-interop feature
 //! ```
 //!
-//! This module only shortens imports. It creates no runtime state and changes no
-//! behavior. Prefer explicit crate-root imports when a smaller local namespace
-//! or clearer dependencies matter.
+//! This module only shortens imports. It creates no runtime state and changes no behavior.
+//! Prefer explicit crate-root imports when a smaller local namespace or clearer dependencies matter.
 
 /// Supervisor construction, control, configuration, and final outcomes.
 pub use crate::core::{

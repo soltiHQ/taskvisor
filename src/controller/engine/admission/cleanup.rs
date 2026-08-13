@@ -1,11 +1,10 @@
 //! Routes rejected controller-owned values to destructor isolation.
 //!
-//! Admission, identity removal, and shutdown call these helpers after they finish
-//! the related controller-state transition. Each task already owns a cleanup
-//! reservation. An undelivered terminal outcome stays in the same bundle.
+//! Admission, identity removal, and shutdown call these helpers after they finish the related controller-state transition.
+//! Each task already owns a cleanup reservation. An undelivered terminal outcome stays in the same bundle.
 //!
-//! This module is the final controller-side ownership step for rejected work. It
-//! does not change slot or queue state.
+//! This module is the final controller-side ownership step for rejected work.
+//! It does not change slot or queue state.
 
 use crate::{
     RuntimeError,

@@ -1,11 +1,11 @@
 //! Advances an idle slot to its next queued submission.
 //!
-//! Registry rejection, physical completion, or removal of a capacity waiter can
-//! clear a slot owner. Their handlers call this module after the slot returns to
-//! `Idle`. It pops work in queue order and sends each candidate to `handoff`.
+//! Registry rejection, physical completion, or removal of a capacity waiter can clear a slot owner.
+//! Their handlers call this module after the slot returns to `Idle`.
+//! It pops work in queue order and sends each candidate to `handoff`.
 //!
-//! A handoff failure before registry commit rejects that candidate and moves to
-//! the next one. Recovered values return for cleanup after the slot unlocks.
+//! A handoff failure before registry commit rejects that candidate and moves to the next one.
+//! Recovered values return for cleanup after the slot unlocks.
 
 use std::sync::Arc;
 

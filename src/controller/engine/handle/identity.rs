@@ -1,8 +1,7 @@
 //! Sends task removal and cancellation through the controller queue.
 //!
-//! Waiting variants use normal channel intake. Fail-fast variants use immediate
-//! intake. After acceptance, queued-task lookup remains ordered with
-//! submissions; other identities are handled by the runtime registry.
+//! Waiting variants use normal channel intake. Fail-fast variants use immediate intake.
+//! After acceptance, queued-task lookup remains ordered with submissions; other identities are handled by the runtime registry.
 
 use tokio::sync::oneshot;
 
