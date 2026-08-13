@@ -2,8 +2,9 @@
 //!
 //! [`SupervisorConfig`] is read while [`SupervisorBuilder`](crate::SupervisorBuilder) builds the runtime.
 //! The resulting settings stay immutable. Per-task restart, backoff, timeout, and retry defaults belong to
-//! [`TaskDefaults`](crate::TaskDefaults). Queue capacities control backpressure and retained observability data.
-//! They do not make events reliable. Use watched outcomes and direct management replies for application decisions.
+//! [`TaskDefaults`](crate::TaskDefaults). This configuration also bounds queues, task admission,
+//! concurrent attempts, and user lifetimes retained for cleanup. Queue capacity does not make events reliable.
+//! Use watched outcomes and direct management replies for application decisions.
 //!
 //! ```text
 //! application ──► SupervisorConfig ──► SupervisorBuilder
@@ -11,6 +12,7 @@
 //!                                     runtime resources
 //!                                          ├── registry ──► queue and membership limit
 //!                                          ├── attempts ──► concurrency limit
+//!                                          ├── ownership ──► retained user-lifetime limit
 //!                                          └── lifecycle ──► shutdown and events
 //! ```
 
@@ -19,7 +21,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-/// Default capacity of the event bus and registry command queue.
+/// Default capacity for bounded runtime resources.
 const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 /// Default deadline for draining subscriber queues during shutdown.
@@ -96,7 +98,8 @@ pub enum ConfigError {
 /// Immutable runtime-wide settings for one supervisor.
 ///
 /// These settings control task shutdown, subscriber draining, bounded queues, registry membership, event ingress,
-/// and concurrent task attempts. Start with [`Default`] and change the limits whose behavior the application needs.
+/// concurrent attempts, and user lifetimes retained for cleanup.
+/// Start with [`Default`] and change the limits needed by the application.
 /// Pass the result to [`Supervisor::new`](crate::Supervisor::new) or [`Supervisor::builder`](crate::Supervisor::builder).
 #[derive(Clone, Debug)]
 #[must_use]
@@ -105,6 +108,7 @@ pub struct SupervisorConfig {
     subscriber_shutdown_timeout: Duration,
     max_concurrent: Option<NonZeroUsize>,
     max_registered_tasks: Option<NonZeroUsize>,
+    ownership_capacity: Option<NonZeroUsize>,
     bus_capacity: NonZeroUsize,
     registry_queue_capacity: NonZeroUsize,
 }
@@ -117,6 +121,7 @@ impl SupervisorConfig {
             subscriber_shutdown_timeout: DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT,
             max_concurrent: None,
             max_registered_tasks: Some(DEFAULT_CAPACITY),
+            ownership_capacity: Some(DEFAULT_CAPACITY),
             bus_capacity: DEFAULT_CAPACITY,
             registry_queue_capacity: DEFAULT_CAPACITY,
         }
@@ -158,10 +163,25 @@ impl SupervisorConfig {
     /// During cleanup handoff, one task may temporarily consume two units.
     ///
     /// `None` disables this limit.
-    /// A separate ownership budget still limits tasks and subscribers to 1024 combined.
+    /// The separately configured [`ownership_capacity`](Self::ownership_capacity) still applies.
     #[must_use]
     pub const fn max_registered_tasks(&self) -> Option<NonZeroUsize> {
         self.max_registered_tasks
+    }
+
+    /// Returns the limit for user lifetimes owned by this supervisor.
+    ///
+    /// Configured subscribers and accepted tasks share this limit. Each accepted lifetime keeps
+    /// one unit through queued work, its physical execution path, and isolated terminal destruction.
+    /// Force-aborted work can remain charged after logical completion.
+    /// A destructor panic permanently retires its unit from a finite limit.
+    ///
+    /// `None` removes the ownership admission limit. Destructor isolation and its worker ceiling
+    /// remain active. Blocked destructors can then retain an unbounded number of user values and
+    /// cleanup batches.
+    #[must_use]
+    pub const fn ownership_capacity(&self) -> Option<NonZeroUsize> {
+        self.ownership_capacity
     }
 
     /// Returns the number of newest events retained by the event ingress.
@@ -223,8 +243,8 @@ impl SupervisorConfig {
     /// Sets or clears the registry membership limit.
     ///
     /// Registered and removing tasks count until terminal cleanup finishes. Force-aborted work can keep
-    /// consuming the limit after membership ends. `None` disables only this limit. It does not disable
-    /// the separate ownership budget shared by tasks and subscribers.
+    /// consuming the limit after membership ends. `None` disables only this limit. It does not change
+    /// the separate [`ownership_capacity`](Self::ownership_capacity) setting.
     ///
     /// Use [`try_with_max_registered_tasks`](Self::try_with_max_registered_tasks) for a raw integer.
     pub const fn with_max_registered_tasks(
@@ -248,6 +268,37 @@ impl SupervisorConfig {
             field: "max_registered_tasks",
         })?;
         Ok(self.with_max_registered_tasks(Some(value)))
+    }
+
+    /// Sets or clears the limit for user lifetimes owned by this supervisor.
+    ///
+    /// Configured subscribers and accepted tasks share the limit. `None` disables ownership admission backpressure
+    /// but keeps destructor isolation and its worker ceiling enabled. Without this limit, blocked destructors can
+    /// retain an unbounded number of user values and cleanup batches.
+    ///
+    /// Use [`try_with_ownership_capacity`](Self::try_with_ownership_capacity) for a raw integer.
+    pub const fn with_ownership_capacity(
+        mut self,
+        ownership_capacity: Option<NonZeroUsize>,
+    ) -> Self {
+        self.ownership_capacity = ownership_capacity;
+        self
+    }
+
+    /// Sets the user-lifetime ownership limit from a raw integer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Zero`] when `ownership_capacity` is zero.
+    /// Use [`with_ownership_capacity`](Self::with_ownership_capacity) with `None` for no limit.
+    pub fn try_with_ownership_capacity(
+        self,
+        ownership_capacity: usize,
+    ) -> Result<Self, ConfigError> {
+        let value = NonZeroUsize::new(ownership_capacity).ok_or(ConfigError::Zero {
+            field: "ownership_capacity",
+        })?;
+        Ok(self.with_ownership_capacity(Some(value)))
     }
 
     /// Sets how many newest events the event ingress retains.
@@ -315,6 +366,7 @@ impl Default for SupervisorConfig {
     /// - subscriber drain: 5 seconds,
     /// - task-attempt concurrency: unlimited,
     /// - registered-task membership: 1024,
+    /// - owned user lifetimes: 1024,
     /// - event bus capacity: 1024,
     /// - registry command capacity: 1024.
     fn default() -> Self {
@@ -343,6 +395,10 @@ mod tests {
             config.max_registered_tasks().map(NonZeroUsize::get),
             Some(1024)
         );
+        assert_eq!(
+            config.ownership_capacity().map(NonZeroUsize::get),
+            Some(1024)
+        );
         assert_eq!(config.bus_capacity().get(), 1024);
         assert_eq!(config.registry_queue_capacity().get(), 1024);
     }
@@ -354,6 +410,7 @@ mod tests {
             .with_subscriber_shutdown_timeout(Duration::from_secs(2))
             .with_max_concurrent(NonZeroUsize::new(4))
             .with_max_registered_tasks(NonZeroUsize::new(32))
+            .with_ownership_capacity(NonZeroUsize::new(64))
             .with_bus_capacity(NonZeroUsize::new(8).unwrap())
             .with_registry_queue_capacity(NonZeroUsize::new(16).unwrap());
 
@@ -364,6 +421,7 @@ mod tests {
             config.max_registered_tasks().map(NonZeroUsize::get),
             Some(32)
         );
+        assert_eq!(config.ownership_capacity().map(NonZeroUsize::get), Some(64));
         assert_eq!(config.bus_capacity().get(), 8);
         assert_eq!(config.registry_queue_capacity().get(), 16);
     }
@@ -385,11 +443,15 @@ mod tests {
     #[test]
     fn raw_zero_values_return_clear_errors() {
         type RawSetter = fn(SupervisorConfig, usize) -> Result<SupervisorConfig, ConfigError>;
-        let cases: [(&str, RawSetter); 4] = [
+        let cases: [(&str, RawSetter); 5] = [
             ("max_concurrent", SupervisorConfig::try_with_max_concurrent),
             (
                 "max_registered_tasks",
                 SupervisorConfig::try_with_max_registered_tasks,
+            ),
+            (
+                "ownership_capacity",
+                SupervisorConfig::try_with_ownership_capacity,
             ),
             ("bus_capacity", SupervisorConfig::try_with_bus_capacity),
             (
@@ -404,6 +466,12 @@ mod tests {
                 ConfigError::Zero { field }
             );
         }
+    }
+
+    #[test]
+    fn ownership_capacity_can_be_disabled_explicitly() {
+        let config = SupervisorConfig::default().with_ownership_capacity(None);
+        assert_eq!(config.ownership_capacity(), None);
     }
 
     #[test]

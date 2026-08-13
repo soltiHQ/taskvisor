@@ -1,6 +1,6 @@
 //! Reports failures to start cleanup workers or reserve cleanup capacity.
 
-use std::{fmt, io};
+use std::{fmt, io, num::NonZeroUsize};
 
 /// Failure to configure or start a domain's worker set.
 #[derive(Debug)]
@@ -58,18 +58,20 @@ impl std::error::Error for DropStartError {
 /// Ownership request rejected by the supervisor-local capacity broker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DropCapacityError {
-    /// Configured ownership limit for the domain.
-    pub(super) limit: usize,
+    /// Configured ownership limit, or `None` when an unlimited domain closed.
+    pub(super) limit: Option<NonZeroUsize>,
 }
 
 impl DropCapacityError {
-    /// Records the configured limit reported for a rejected request.
-    pub(super) const fn new(limit: usize) -> Self {
+    /// Records the configured limit when one applies to the rejection.
+    pub(super) const fn new(limit: Option<NonZeroUsize>) -> Self {
         Self { limit }
     }
 
     /// Returns the configured ownership limit.
-    pub(crate) const fn limit(self) -> usize {
+    ///
+    /// `None` means an unlimited domain rejected admission because it closed.
+    pub(crate) const fn limit(self) -> Option<NonZeroUsize> {
         self.limit
     }
 }

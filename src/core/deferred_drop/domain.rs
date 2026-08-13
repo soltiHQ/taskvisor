@@ -9,6 +9,7 @@
 
 use std::{
     io,
+    num::NonZeroUsize,
     sync::{Arc, Mutex},
 };
 
@@ -22,8 +23,8 @@ use super::{
 struct DropDomainInner {
     /// Requested persistent worker count before the capacity ceiling.
     worker_count: usize,
-    /// Maximum accepted user lifetimes charged at one time.
-    capacity: usize,
+    /// Maximum accepted user lifetimes, or `None` for unlimited admission.
+    capacity: Option<NonZeroUsize>,
     /// Thread factory used for core and elastic workers.
     spawner: Arc<WorkerSpawner>,
     /// Executor published only after transactional startup succeeds.
@@ -39,12 +40,8 @@ pub(crate) struct DropDomain(
 
 impl DropDomain {
     /// Creates the production domain without starting worker threads.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `capacity` is zero.
-    pub(crate) fn unstarted(capacity: usize) -> Self {
-        Self::unstarted_with(CORE_WORKER_COUNT, capacity, system_spawner())
+    pub(crate) fn unstarted(capacity: Option<NonZeroUsize>) -> Self {
+        Self::unstarted_with_limit(CORE_WORKER_COUNT, capacity, system_spawner())
             .expect("the production drop domain configuration must be valid")
     }
 
@@ -79,18 +76,34 @@ impl DropDomain {
     /// # Errors
     ///
     /// Returns an error when the worker count or capacity is zero.
+    #[cfg(test)]
     pub(super) fn unstarted_with(
         worker_count: usize,
         capacity: usize,
         spawner: Arc<WorkerSpawner>,
     ) -> Result<Self, DropStartError> {
-        if worker_count == 0 || capacity == 0 {
-            return Err(DropStartError::new(
+        let capacity = NonZeroUsize::new(capacity).ok_or_else(|| {
+            DropStartError::new(
                 0,
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "worker count and capacity must be positive",
                 ),
+            )
+        })?;
+        Self::unstarted_with_limit(worker_count, Some(capacity), spawner)
+    }
+
+    /// Stores finite or unlimited worker policy without starting the executor.
+    fn unstarted_with_limit(
+        worker_count: usize,
+        capacity: Option<NonZeroUsize>,
+        spawner: Arc<WorkerSpawner>,
+    ) -> Result<Self, DropStartError> {
+        if worker_count == 0 {
+            return Err(DropStartError::new(
+                0,
+                io::Error::new(io::ErrorKind::InvalidInput, "worker count must be positive"),
             ));
         }
         Ok(Self(Arc::new(DropDomainInner {
@@ -126,7 +139,7 @@ impl DropDomain {
     }
 
     /// Returns the supervisor-local ownership limit.
-    pub(crate) fn capacity(&self) -> usize {
+    pub(crate) fn capacity(&self) -> Option<NonZeroUsize> {
         self.0.capacity
     }
 
@@ -169,7 +182,11 @@ impl DropDomain {
         if count == 0 {
             return Ok(Vec::new());
         }
-        if count > self.0.capacity {
+        if self
+            .0
+            .capacity
+            .is_some_and(|capacity| count > capacity.get())
+        {
             return Err(DropAdmissionError::Capacity(DropCapacityError::new(
                 self.0.capacity,
             )));

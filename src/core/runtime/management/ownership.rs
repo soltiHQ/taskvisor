@@ -5,7 +5,8 @@
 //! actor execution, physical reaping, and final destruction.
 //!
 //! Waiting admission observes shutdown. Static batches use one immediate atomic reservation for the full batch.
-//! Admission failures are translated into the runtime's thread-start or resource-limit errors here.
+//! A configured ownership limit can delay or reject admission. With no limit, reservation remains an ownership
+//! handoff and destructor-isolation boundary. Failures are translated into runtime errors here.
 
 use std::{future::Future, sync::Arc};
 
@@ -18,7 +19,7 @@ use crate::{
 };
 
 impl SupervisorCore {
-    /// Waits for one slot in this supervisor's cleanup ownership domain.
+    /// Reserves one unit in this supervisor's cleanup ownership domain.
     pub(super) async fn reserve_ownership(
         &self,
     ) -> Result<deferred_drop::DropReservation, deferred_drop::DropAdmissionError> {
@@ -72,12 +73,13 @@ impl SupervisorCore {
                     source: std::io::Error::new(kind, error),
                 }
             }
-            deferred_drop::DropAdmissionError::Capacity(error) => {
-                RuntimeError::ResourceLimitReached {
+            deferred_drop::DropAdmissionError::Capacity(error) => match error.limit() {
+                Some(limit) => RuntimeError::ResourceLimitReached {
                     resource: deferred_drop::OWNERSHIP_RESOURCE,
-                    limit: error.limit(),
-                }
-            }
+                    limit: limit.get(),
+                },
+                None => RuntimeError::ShuttingDown,
+            },
         }
     }
 

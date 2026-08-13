@@ -98,8 +98,6 @@ fn controller_spec_components_are_configured_through_accessors() {
     assert_eq!(spec.into_task_spec().name(), "replacement");
 }
 
-// Watched submission contracts.
-
 #[tokio::test(flavor = "current_thread")]
 async fn prepared_submission_exposes_identity_before_events_and_preserves_it() {
     let (handle, collector) = served_controller(ControllerConfig::default());
@@ -331,8 +329,6 @@ async fn cancel_immediately_removes_a_watched_queued_submission() {
     .await;
 }
 
-// Identity routing and event identity.
-
 #[tokio::test(flavor = "current_thread")]
 async fn direct_add_still_cancels_when_controller_is_configured() {
     let (handle, _collector) = served_controller(ControllerConfig::default());
@@ -432,8 +428,6 @@ async fn remove_of_queued_submission_purges_it_before_start() {
     .await;
 }
 
-// Shutdown and configuration edges.
-
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_does_not_start_queued_tasks() {
     let (handle, collector) = served_controller(ControllerConfig::default());
@@ -511,8 +505,6 @@ async fn submit_without_controller_is_consistent_across_construction_paths() {
     })
     .await;
 }
-
-// Admission policies and slot behavior.
 
 #[tokio::test(flavor = "current_thread")]
 async fn idle_submit_admits_emits_submitted_then_running_transition() {
@@ -945,8 +937,6 @@ async fn slot_freed_and_reusable_after_task_completes() {
     .await;
 }
 
-// Capacity, backpressure, and public snapshots.
-
 #[tokio::test(flavor = "current_thread")]
 async fn queue_full_rejects_with_controller_rejected_event() {
     let (handle, collector) = served_controller(ControllerConfig::default().with_max_slot_queue(1));
@@ -1051,8 +1041,6 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
     })
     .await;
 }
-
-// Controller lifecycle integration.
 
 #[tokio::test(flavor = "current_thread")]
 async fn natural_run_joins_controller_before_return() {

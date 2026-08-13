@@ -139,15 +139,12 @@ impl SupervisorCore {
             });
         }
 
-        if tasks.len()
-            > self
-                .drop_domain()
-                .capacity()
-                .saturating_sub(self.subs.ownership_slots())
+        if let Some(limit) = self.drop_domain().capacity()
+            && tasks.len() > limit.get().saturating_sub(self.subs.ownership_slots())
         {
             return Err(RuntimeError::ResourceLimitReached {
                 resource: deferred_drop::OWNERSHIP_RESOURCE,
-                limit: self.drop_domain().capacity(),
+                limit: limit.get(),
             });
         }
 

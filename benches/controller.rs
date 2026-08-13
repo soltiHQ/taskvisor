@@ -1,88 +1,83 @@
-//! # Controller: admission policy overhead
+//! # Controller admission and lifecycle benchmarks
 //!
-//! Measures controller submission and admission policies (Queue, Replace, DropIfRunning).
-//! The groups cover queued completion, replacement, rejection, the `try_submit` hot path, and multi-slot fan-out.
+//! Separates first-use startup, caller-side intake, verified policy decisions, and complete
+//! controller-managed task lifecycles. Every measured operation is checked; rejected, timed-out,
+//! or incomplete work cannot silently enter the statistics.
 //!
-//! ## What is measured
-//!
-//! | Benchmark              | Description                                                         |
-//! |------------------------|---------------------------------------------------------------------|
-//! | `queue/N`              | Submit N tasks (Queue) in one slot; drain to `N` `TaskRemoved`.     |
-//! | `replace/N`            | Time N Replace admission decisions (completions vary by design).    |
-//! | `drop_if_running/N`    | Time N DropIfRunning admission decisions.                           |
-//! | `submit_hotpath/N`     | Isolated synchronous admission cost (`try_submit` enqueue only).    |
-//! | `multi_slot/N`         | N submissions fanned out across `SLOTS` distinct slots, drained.    |
-//!
-//! `queue` and `multi_slot` measure real completion via an event-driven drain (wait for the expected `TaskRemoved` count).
-//! `replace`/`drop_if_running` admit a timing-dependent number of runs; time only the admission decisions (teardown is excluded).
-//! `submit_hotpath` isolates the caller-side enqueue cost, and `multi_slot` exercises the per-slot `DashMap` sharding the single-slot benches never touch.
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo bench --bench controller --features controller
-//! ```
+//! Run with `cargo bench --bench controller --features controller`.
 
+mod support;
+
+use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use taskvisor::TaskContext;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
+use taskvisor::{
+    BackoffPolicy, ControllerConfig, ControllerSpec, RejectionKind, RestartPolicy, Supervisor,
+    SupervisorConfig, SupervisorHandle, TaskContext, TaskFn, TaskOutcome, TaskRef, TaskSpec,
+    TaskWaiter,
+};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
-use taskvisor::{
-    BackoffPolicy, ControllerConfig, ControllerSpec, Event, EventKind, RestartPolicy, Subscribe,
-    Supervisor, SupervisorConfig, TaskFn, TaskRef, TaskSpec,
-};
+use support::{CaseFamily, print_suite_header, record_case};
 
-struct RemovalCounter {
-    seen: AtomicUsize,
-    target: usize,
-    done: Notify,
-}
+const COLD_INTAKE: CaseFamily = CaseFamily::intake(
+    "controller/cold/first_try_submit",
+    "COLD FIRST TRY_SUBMIT",
+    "accepted submission",
+    "accepted submissions",
+    "first caller-side try_submit on a fresh served supervisor, including lazy cleanup-worker startup",
+    "Supervisor/controller startup, request construction, controller decision, task outcome, shutdown, and Tokio runtime construction",
+);
 
-impl RemovalCounter {
-    fn new(target: usize) -> Arc<Self> {
-        Arc::new(Self {
-            seen: AtomicUsize::new(0),
-            target,
-            done: Notify::new(),
-        })
-    }
+const STEADY_INTAKE: CaseFamily = CaseFamily::intake(
+    "controller/steady/intake_try_submit",
+    "STEADY TRY_SUBMIT BURST",
+    "accepted submission",
+    "accepted submissions",
+    "prewarmed caller-side try_submit burst",
+    "Supervisor/controller startup, warmup, request construction, controller decisions, task outcomes, shutdown, and Tokio runtime construction",
+);
 
-    async fn wait_drained(self: &Arc<Self>) {
-        loop {
-            let notified = self.done.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.seen.load(Ordering::Acquire) >= self.target {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
+const DROP_REJECTION: CaseFamily = CaseFamily::policy(
+    "controller/steady/drop_busy_rejection",
+    "DROP_IF_RUNNING · BUSY SLOT",
+    "verified rejection",
+    "verified rejections",
+    "watched intake through verified SlotBusy outcomes",
+    "Supervisor/controller startup, held-owner setup/release/cleanup, request construction, and Tokio runtime construction",
+);
 
-impl Subscribe for RemovalCounter {
-    fn on_event(&self, ev: &Event) {
-        if ev.kind == EventKind::TaskRemoved
-            && self.seen.fetch_add(1, Ordering::AcqRel) + 1 >= self.target
-        {
-            self.done.notify_waiters();
-        }
-    }
+const REPLACE_PLACEMENT: CaseFamily = CaseFamily::policy(
+    "controller/steady/replace_busy_placement",
+    "REPLACE · BUSY SLOT",
+    "processed replacement",
+    "processed replacements",
+    "N watched Replace submissions through N-1 SupersededByReplace outcomes and retention of the newest request",
+    "Supervisor/controller startup, held-owner setup/release, request construction, newest task completion, and Tokio runtime construction",
+);
 
-    fn name(&self) -> &'static str {
-        "removal-counter"
-    }
+const QUEUE_ONE: CaseFamily = CaseFamily::lifecycle(
+    "controller/steady/queue_one_slot",
+    "QUEUE · ONE SLOT",
+    "completed task",
+    "completed tasks",
+    "watched controller intake through final outcomes in one slot",
+    "Supervisor/controller startup, warmup, request construction, shutdown, and Tokio runtime construction",
+);
 
-    fn queue_capacity(&self) -> NonZeroUsize {
-        NonZeroUsize::new(65536).unwrap()
-    }
-}
+const QUEUE_EIGHT: CaseFamily = CaseFamily::lifecycle(
+    "controller/steady/queue_eight_slots",
+    "QUEUE · EIGHT SLOTS",
+    "completed task",
+    "completed tasks",
+    "watched controller intake through final outcomes across eight slots",
+    "Supervisor/controller startup, warmup, request construction, shutdown, and Tokio runtime construction",
+);
 
 fn rt_current_thread() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -108,11 +103,11 @@ const RUNTIMES: [(&str, RtFactory); 2] = [
 
 fn bench_config() -> SupervisorConfig {
     SupervisorConfig::default()
-        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
+        .with_bus_capacity(NonZeroUsize::new(16384).unwrap())
         .with_grace(Duration::from_secs(5))
 }
 
-fn instant_task(name: &str) -> TaskSpec {
+fn instant_task(name: impl Into<Arc<str>>) -> TaskSpec {
     let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     TaskSpec::new(
         name,
@@ -123,11 +118,50 @@ fn instant_task(name: &str) -> TaskSpec {
     )
 }
 
-fn short_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(5)) => Ok(()),
-            _ = ctx.cancelled() => Ok(()),
+struct AsyncFlag {
+    set: AtomicBool,
+    changed: Notify,
+}
+
+impl AsyncFlag {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            set: AtomicBool::new(false),
+            changed: Notify::new(),
+        })
+    }
+
+    fn mark(&self) {
+        self.set.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.set.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+fn held_owner_task(
+    name: impl Into<Arc<str>>,
+    started: Arc<AsyncFlag>,
+    release: Arc<AsyncFlag>,
+) -> TaskSpec {
+    let task: TaskRef = TaskFn::arc(move |ctx: TaskContext| {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        async move {
+            started.mark();
+            ctx.cancelled().await;
+            release.wait().await;
+            Ok(())
         }
     });
     TaskSpec::new(
@@ -139,233 +173,447 @@ fn short_task(name: &str) -> TaskSpec {
     )
 }
 
-fn bench_queue(c: &mut Criterion) {
-    let mut group = c.benchmark_group("controller/queue");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
+async fn expect_within<F, T>(label: &str, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(Duration::from_secs(10), future)
+        .await
+        .unwrap_or_else(|_| panic!("benchmark timed out while waiting for {label}"))
+}
+
+async fn expect_completed(waiter: TaskWaiter) {
+    let outcome = expect_within("a completed task outcome", waiter.wait())
+        .await
+        .expect("task outcome channel closed");
+    assert!(
+        matches!(outcome, TaskOutcome::Completed),
+        "expected Completed, got {outcome:?}"
+    );
+}
+
+async fn expect_canceled(waiter: TaskWaiter) {
+    let outcome = expect_within("a canceled owner outcome", waiter.wait())
+        .await
+        .expect("owner outcome channel closed");
+    assert!(
+        matches!(outcome, TaskOutcome::Canceled),
+        "expected Canceled, got {outcome:?}"
+    );
+}
+
+async fn expect_rejected(waiter: TaskWaiter, expected: RejectionKind) {
+    let outcome = expect_within("a controller rejection", waiter.wait())
+        .await
+        .expect("submission outcome channel closed");
+    assert!(
+        matches!(outcome, TaskOutcome::Rejected { kind, .. } if kind == expected),
+        "expected {expected:?}, got {outcome:?}"
+    );
+}
+
+async fn warm_controller(handle: &SupervisorHandle, label: &str) {
+    let (_, waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(instant_task(format!("warm-{label}")))
+                .with_slot(format!("warm-slot-{label}")),
+        )
+        .await
+        .expect("controller warmup intake failed");
+    expect_completed(waiter).await;
+}
+
+async fn start_held_owner(
+    handle: &SupervisorHandle,
+    slot: &str,
+    name: &str,
+) -> (taskvisor::TaskId, TaskWaiter, Arc<AsyncFlag>) {
+    let started = AsyncFlag::new();
+    let release = AsyncFlag::new();
+    let (_, waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(held_owner_task(
+                name,
+                Arc::clone(&started),
+                Arc::clone(&release),
+            ))
+            .with_slot(slot),
+        )
+        .await
+        .expect("held owner intake failed");
+    let id = waiter.id();
+    expect_within("the held owner to start", started.wait()).await;
+    (id, waiter, release)
+}
+
+fn bench_cold_first_try_submit(c: &mut Criterion) {
+    print_suite_header("controller");
+    let mut group = c.benchmark_group(COLD_INTAKE.group_id);
+    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(10));
+    group.throughput(Throughput::Elements(1));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
-        for n in [5, 20, 50] {
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new(rt_name, n), &n, |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let rt = rt_fn();
-                        total += rt.block_on(async {
-                            let counter = RemovalCounter::new(count);
-                            let subs: Vec<Arc<dyn Subscribe>> =
-                                vec![Arc::clone(&counter) as Arc<dyn Subscribe>];
-                            let sup = Supervisor::builder(bench_config())
-                                .with_subscribers(subs)
-                                .with_controller(ControllerConfig::default())
-                                .build();
-                            let handle = sup.serve().expect("runtime startup");
+        group.bench_function(rt_name, |b| {
+            record_case(COLD_INTAKE, rt_name, None);
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for i in 0..iters {
+                    let rt = rt_fn();
+                    total += rt.block_on(async {
+                        let supervisor = Supervisor::builder(bench_config())
+                            .with_controller(ControllerConfig::default())
+                            .build();
+                        let handle = supervisor.serve().expect("runtime startup");
+                        let request = ControllerSpec::queue(instant_task(format!("cold-{i}")))
+                            .with_slot("cold-slot");
 
-                            let start = std::time::Instant::now();
-                            for i in 0..count {
-                                let spec = instant_task(&format!("q-{i}"));
-                                handle
-                                    .submit(ControllerSpec::queue(spec).with_slot("slot-q"))
-                                    .await
-                                    .unwrap();
-                            }
-                            let _ = tokio::time::timeout(
-                                Duration::from_secs(10),
-                                counter.wait_drained(),
-                            )
-                            .await;
-                            let elapsed = start.elapsed();
+                        let start = Instant::now();
+                        let id = handle
+                            .try_submit(request)
+                            .expect("first controller intake failed");
+                        let elapsed = start.elapsed();
+                        black_box(id);
 
-                            let _ = handle.shutdown().await;
-                            elapsed
-                        });
-                    }
-                    total
-                });
+                        handle.shutdown().await.expect("shutdown failed");
+                        elapsed
+                    });
+                }
+                total
             });
-        }
+        });
     }
     group.finish();
 }
 
-fn bench_replace(c: &mut Criterion) {
-    let mut group = c.benchmark_group("controller/replace");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
-
-    for &(rt_name, rt_fn) in &RUNTIMES {
-        for n in [5, 20, 50] {
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new(rt_name, n), &n, |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let rt = rt_fn();
-                        total += rt.block_on(async {
-                            let sup = Supervisor::builder(bench_config())
-                                .with_controller(ControllerConfig::default())
-                                .build();
-                            let handle = sup.serve().expect("runtime startup");
-
-                            let start = std::time::Instant::now();
-                            for i in 0..count {
-                                let spec = short_task(&format!("r-{i}"));
-                                handle
-                                    .submit(ControllerSpec::replace(spec).with_slot("slot-r"))
-                                    .await
-                                    .unwrap();
-                            }
-                            let elapsed = start.elapsed();
-
-                            let _ = handle.shutdown().await;
-                            elapsed
-                        });
-                    }
-                    total
-                });
-            });
-        }
-    }
-    group.finish();
-}
-
-fn bench_drop_if_running(c: &mut Criterion) {
-    let mut group = c.benchmark_group("controller/drop_if_running");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
-
-    for &(rt_name, rt_fn) in &RUNTIMES {
-        for n in [5, 20, 50] {
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new(rt_name, n), &n, |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let rt = rt_fn();
-                        total += rt.block_on(async {
-                            let sup = Supervisor::builder(bench_config())
-                                .with_controller(ControllerConfig::default())
-                                .build();
-                            let handle = sup.serve().expect("runtime startup");
-
-                            let start = std::time::Instant::now();
-                            for i in 0..count {
-                                let spec = short_task(&format!("d-{i}"));
-                                handle
-                                    .submit(
-                                        ControllerSpec::drop_if_running(spec).with_slot("slot-d"),
-                                    )
-                                    .await
-                                    .unwrap();
-                            }
-                            let elapsed = start.elapsed();
-
-                            let _ = handle.shutdown().await;
-                            elapsed
-                        });
-                    }
-                    total
-                });
-            });
-        }
-    }
-    group.finish();
-}
-
-fn bench_submit_hotpath(c: &mut Criterion) {
-    let mut group = c.benchmark_group("controller/submit_hotpath");
+fn bench_steady_try_submit(c: &mut Criterion) {
+    let mut group = c.benchmark_group(STEADY_INTAKE.group_id);
     group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
-        for n in [100, 500, 1000] {
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new(rt_name, n), &n, |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let rt = rt_fn();
-                        total += rt.block_on(async {
-                            let sup = Supervisor::builder(bench_config())
-                                .with_controller(
-                                    ControllerConfig::default().with_queue_capacity(
-                                        NonZeroUsize::new(count.max(1024))
-                                            .expect("benchmark queue capacity is non-zero"),
-                                    ),
-                                )
-                                .build();
-                            let handle = sup.serve().expect("runtime startup");
-                            let template = instant_task("slot-h");
+        for count in [100usize, 500, 1000] {
+            group.throughput(Throughput::Elements(count as u64));
+            group.bench_with_input(
+                BenchmarkId::new(rt_name, format!("{count}_accepted_submissions")),
+                &count,
+                |b, &count| {
+                    record_case(
+                        STEADY_INTAKE,
+                        rt_name,
+                        Some(format!("{count}_accepted_submissions")),
+                    );
+                    b.iter_custom(|iters| {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let rt = rt_fn();
+                            total += rt.block_on(async {
+                                let queue_capacity = NonZeroUsize::new(count + 64).unwrap();
+                                let supervisor = Supervisor::builder(bench_config())
+                                    .with_controller(
+                                        ControllerConfig::default()
+                                            .with_queue_capacity(queue_capacity),
+                                    )
+                                    .build();
+                                let handle = supervisor.serve().expect("runtime startup");
+                                warm_controller(&handle, &format!("intake-{iteration}")).await;
+                                let requests: Vec<_> = (0..count)
+                                    .map(|i| {
+                                        ControllerSpec::drop_if_running(instant_task(format!(
+                                            "intake-{iteration}-{i}"
+                                        )))
+                                        .with_slot("intake-slot")
+                                    })
+                                    .collect();
 
-                            let start = std::time::Instant::now();
-                            for _ in 0..count {
-                                let _ = handle
-                                    .try_submit(ControllerSpec::drop_if_running(template.clone()));
-                            }
-                            let elapsed = start.elapsed();
+                                let start = Instant::now();
+                                for request in requests {
+                                    let id = handle
+                                        .try_submit(request)
+                                        .expect("steady try_submit intake failed");
+                                    black_box(id);
+                                }
+                                let elapsed = start.elapsed();
 
-                            let _ = handle.shutdown().await;
-                            elapsed
-                        });
-                    }
-                    total
-                });
-            });
+                                handle.shutdown().await.expect("shutdown failed");
+                                elapsed
+                            });
+                        }
+                        total
+                    });
+                },
+            );
         }
     }
     group.finish();
 }
 
-fn bench_multi_slot(c: &mut Criterion) {
+fn bench_drop_busy_rejection(c: &mut Criterion) {
+    let mut group = c.benchmark_group(DROP_REJECTION.group_id);
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(12));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        for count in [5usize, 20, 50] {
+            group.throughput(Throughput::Elements(count as u64));
+            group.bench_with_input(
+                BenchmarkId::new(rt_name, format!("{count}_verified_rejections")),
+                &count,
+                |b, &count| {
+                    record_case(
+                        DROP_REJECTION,
+                        rt_name,
+                        Some(format!("{count}_verified_rejections")),
+                    );
+                    b.iter_custom(|iters| {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let rt = rt_fn();
+                            total += rt.block_on(async {
+                                let supervisor = Supervisor::builder(bench_config())
+                                    .with_controller(ControllerConfig::default())
+                                    .build();
+                                let handle = supervisor.serve().expect("runtime startup");
+                                let (owner_id, owner_waiter, release) = start_held_owner(
+                                    &handle,
+                                    "drop-slot",
+                                    &format!("drop-owner-{iteration}"),
+                                )
+                                .await;
+                                let requests: Vec<_> = (0..count)
+                                    .map(|i| {
+                                        ControllerSpec::drop_if_running(instant_task(format!(
+                                            "drop-{iteration}-{i}"
+                                        )))
+                                        .with_slot("drop-slot")
+                                    })
+                                    .collect();
+
+                                let start = Instant::now();
+                                let mut waiters = Vec::with_capacity(count);
+                                for request in requests {
+                                    let (_, waiter) = handle
+                                        .submit_and_watch(request)
+                                        .await
+                                        .expect("DropIfRunning intake failed");
+                                    waiters.push(waiter);
+                                }
+                                for waiter in waiters {
+                                    expect_rejected(waiter, RejectionKind::SlotBusy).await;
+                                }
+                                let elapsed = start.elapsed();
+
+                                release.mark();
+                                assert!(
+                                    handle.cancel(owner_id).await.expect("owner cancel failed"),
+                                    "benchmark must claim the held owner"
+                                );
+                                expect_canceled(owner_waiter).await;
+                                handle.shutdown().await.expect("shutdown failed");
+                                elapsed
+                            });
+                        }
+                        total
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+fn bench_replace_busy_placement(c: &mut Criterion) {
+    let mut group = c.benchmark_group(REPLACE_PLACEMENT.group_id);
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(12));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        for count in [5usize, 20, 50] {
+            group.throughput(Throughput::Elements(count as u64));
+            group.bench_with_input(
+                BenchmarkId::new(rt_name, format!("{count}_processed_replacements")),
+                &count,
+                |b, &count| {
+                    record_case(
+                        REPLACE_PLACEMENT,
+                        rt_name,
+                        Some(format!("{count}_processed_replacements")),
+                    );
+                    b.iter_custom(|iters| {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let rt = rt_fn();
+                            total += rt.block_on(async {
+                                let supervisor = Supervisor::builder(bench_config())
+                                    .with_controller(ControllerConfig::default())
+                                    .build();
+                                let handle = supervisor.serve().expect("runtime startup");
+                                let (_, owner_waiter, release) = start_held_owner(
+                                    &handle,
+                                    "replace-slot",
+                                    &format!("replace-owner-{iteration}"),
+                                )
+                                .await;
+                                let requests: Vec<_> = (0..count)
+                                    .map(|i| {
+                                        ControllerSpec::replace(instant_task(format!(
+                                            "replace-{iteration}-{i}"
+                                        )))
+                                        .with_slot("replace-slot")
+                                    })
+                                    .collect();
+
+                                let start = Instant::now();
+                                let mut waiters = Vec::with_capacity(count);
+                                for request in requests {
+                                    let (_, waiter) = handle
+                                        .submit_and_watch(request)
+                                        .await
+                                        .expect("Replace intake failed");
+                                    waiters.push(waiter);
+                                }
+                                let newest = waiters.pop().expect("replacement batch is non-empty");
+                                for waiter in waiters {
+                                    expect_rejected(waiter, RejectionKind::SupersededByReplace)
+                                        .await;
+                                }
+                                let elapsed = start.elapsed();
+
+                                release.mark();
+                                expect_canceled(owner_waiter).await;
+                                expect_completed(newest).await;
+                                handle.shutdown().await.expect("shutdown failed");
+                                elapsed
+                            });
+                        }
+                        total
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+fn bench_queue_one_slot(c: &mut Criterion) {
+    let mut group = c.benchmark_group(QUEUE_ONE.group_id);
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(12));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        for count in [5usize, 20, 50] {
+            group.throughput(Throughput::Elements(count as u64));
+            group.bench_with_input(
+                BenchmarkId::new(rt_name, format!("{count}_completed_tasks")),
+                &count,
+                |b, &count| {
+                    record_case(QUEUE_ONE, rt_name, Some(format!("{count}_completed_tasks")));
+                    b.iter_custom(|iters| {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let rt = rt_fn();
+                            total += rt.block_on(async {
+                                let supervisor = Supervisor::builder(bench_config())
+                                    .with_controller(ControllerConfig::default())
+                                    .build();
+                                let handle = supervisor.serve().expect("runtime startup");
+                                warm_controller(&handle, &format!("queue-{iteration}")).await;
+                                let requests: Vec<_> = (0..count)
+                                    .map(|i| {
+                                        ControllerSpec::queue(instant_task(format!(
+                                            "queue-{iteration}-{i}"
+                                        )))
+                                        .with_slot("queue-slot")
+                                    })
+                                    .collect();
+
+                                let start = Instant::now();
+                                let mut waiters = Vec::with_capacity(count);
+                                for request in requests {
+                                    let (_, waiter) = handle
+                                        .submit_and_watch(request)
+                                        .await
+                                        .expect("Queue intake failed");
+                                    waiters.push(waiter);
+                                }
+                                for waiter in waiters {
+                                    expect_completed(waiter).await;
+                                }
+                                let elapsed = start.elapsed();
+
+                                handle.shutdown().await.expect("shutdown failed");
+                                elapsed
+                            });
+                        }
+                        total
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+fn bench_queue_eight_slots(c: &mut Criterion) {
     const SLOTS: usize = 8;
 
-    let mut group = c.benchmark_group("controller/multi_slot");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
+    let mut group = c.benchmark_group(QUEUE_EIGHT.group_id);
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(12));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
-        for n in [8, 32, 64] {
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new(rt_name, n), &n, |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let rt = rt_fn();
-                        total += rt.block_on(async {
-                            let counter = RemovalCounter::new(count);
-                            let subs: Vec<Arc<dyn Subscribe>> =
-                                vec![Arc::clone(&counter) as Arc<dyn Subscribe>];
-                            let sup = Supervisor::builder(bench_config())
-                                .with_subscribers(subs)
-                                .with_controller(ControllerConfig::default())
-                                .build();
-                            let handle = sup.serve().expect("runtime startup");
+        for count in [8usize, 32, 64] {
+            group.throughput(Throughput::Elements(count as u64));
+            group.bench_with_input(
+                BenchmarkId::new(rt_name, format!("{count}_completed_tasks")),
+                &count,
+                |b, &count| {
+                    record_case(
+                        QUEUE_EIGHT,
+                        rt_name,
+                        Some(format!("{count}_completed_tasks")),
+                    );
+                    b.iter_custom(|iters| {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let rt = rt_fn();
+                            total += rt.block_on(async {
+                                let supervisor = Supervisor::builder(bench_config())
+                                    .with_controller(ControllerConfig::default())
+                                    .build();
+                                let handle = supervisor.serve().expect("runtime startup");
+                                warm_controller(&handle, &format!("multi-{iteration}")).await;
+                                let requests: Vec<_> = (0..count)
+                                    .map(|i| {
+                                        ControllerSpec::queue(instant_task(format!(
+                                            "multi-{iteration}-{i}"
+                                        )))
+                                        .with_slot(format!("multi-slot-{}", i % SLOTS))
+                                    })
+                                    .collect();
 
-                            let start = std::time::Instant::now();
-                            for i in 0..count {
-                                let spec = instant_task(&format!("ms-{i}"));
-                                handle
-                                    .submit(
-                                        ControllerSpec::queue(spec)
-                                            .with_slot(format!("slot-{}", i % SLOTS)),
-                                    )
-                                    .await
-                                    .unwrap();
-                            }
-                            let _ = tokio::time::timeout(
-                                Duration::from_secs(10),
-                                counter.wait_drained(),
-                            )
-                            .await;
-                            let elapsed = start.elapsed();
+                                let start = Instant::now();
+                                let mut waiters = Vec::with_capacity(count);
+                                for request in requests {
+                                    let (_, waiter) = handle
+                                        .submit_and_watch(request)
+                                        .await
+                                        .expect("multi-slot Queue intake failed");
+                                    waiters.push(waiter);
+                                }
+                                for waiter in waiters {
+                                    expect_completed(waiter).await;
+                                }
+                                let elapsed = start.elapsed();
 
-                            let _ = handle.shutdown().await;
-                            elapsed
-                        });
-                    }
-                    total
-                });
-            });
+                                handle.shutdown().await.expect("shutdown failed");
+                                elapsed
+                            });
+                        }
+                        total
+                    });
+                },
+            );
         }
     }
     group.finish();
@@ -373,10 +621,14 @@ fn bench_multi_slot(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_queue,
-    bench_replace,
-    bench_drop_if_running,
-    bench_submit_hotpath,
-    bench_multi_slot,
+    bench_cold_first_try_submit,
+    bench_steady_try_submit,
+    bench_drop_busy_rejection,
+    bench_replace_busy_placement,
+    bench_queue_one_slot,
+    bench_queue_eight_slots,
 );
-criterion_main!(benches);
+
+fn main() {
+    support::benchmark_main("controller", benches);
+}

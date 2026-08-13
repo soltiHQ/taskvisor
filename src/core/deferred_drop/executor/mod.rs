@@ -19,7 +19,7 @@
 //! Worker startup, growth, and idle retirement live in `worker`.
 //! Per-batch panic handling and permit disposition live in `batch`.
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use super::{
     bundle::DropReservation,
@@ -52,7 +52,7 @@ impl DropExecutor {
     /// Returns an error when any required worker cannot be created or report ready.
     pub(super) fn try_start_with(
         worker_count: usize,
-        capacity: usize,
+        capacity: Option<NonZeroUsize>,
         spawner: Arc<WorkerSpawner>,
     ) -> Result<Arc<Self>, DropStartError> {
         let max_workers = max_worker_count(capacity);

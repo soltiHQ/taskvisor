@@ -811,10 +811,6 @@ async fn controller_replace_storm_single_slot_one_alive() {
             j.await.unwrap().expect("submit ok");
         }
 
-        // `submit()` only confirms command-channel admission. Enqueue one watched
-        // command after every storm sender has completed and wait for its terminal
-        // outcome: the controller must process all earlier FIFO commands before it
-        // can admit and complete this barrier task.
         let (_, barrier) = handle
             .submit_and_watch(
                 ControllerSpec::queue(TaskSpec::once("replace-storm-barrier", make_ok_once()))

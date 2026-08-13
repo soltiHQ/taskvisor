@@ -47,8 +47,6 @@ fn child_runs_supervisor_then_sends_sigterm() {
             .expect("plain run must finish naturally");
     });
 
-    // SAFETY: `raise` is called with the platform's valid SIGTERM constant.
-    // It targets only this process and does not dereference any Rust memory.
     let sent = unsafe { libc::raise(libc::SIGTERM) };
     assert_eq!(sent, 0, "the child must be able to raise SIGTERM");
 

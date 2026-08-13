@@ -13,7 +13,6 @@ use taskvisor::{
     SupervisorHandle, TaskError, TaskFn, TaskId, TaskRef,
 };
 
-/// A [`Subscribe`] implementation that records every event it receives.
 pub struct EventCollector {
     events: Mutex<Vec<Event>>,
     changes: tokio::sync::watch::Sender<u64>,
@@ -88,10 +87,6 @@ impl EventCollector {
             .any(|e| e.kind == kind && e.reason.as_deref().is_some_and(|r| r.contains(needle)))
     }
 
-    /// Waits for an event-only predicate without timer-based polling.
-    ///
-    /// The watch version closes the check/notification race: an event published
-    /// between the predicate check and `changed()` is retained by the channel.
     pub async fn wait_until<F>(&self, within: Duration, predicate: F) -> bool
     where
         F: Fn(&[Event]) -> bool,
@@ -185,7 +180,6 @@ pub fn make_coop() -> TaskRef {
     })
 }
 
-/// A task that starts observably and then ignores cancellation forever.
 pub fn make_stubborn() -> (TaskRef, Arc<tokio::sync::Notify>) {
     let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);

@@ -4,6 +4,7 @@ use super::*;
 use std::{
     future::Future,
     io,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc, Condvar, Mutex,
@@ -14,8 +15,14 @@ use std::{
 };
 
 fn test_executor(worker_count: usize, capacity: usize) -> Arc<DropExecutor> {
-    DropExecutor::try_start_with(worker_count, capacity, system_spawner())
+    let capacity = NonZeroUsize::new(capacity).expect("test capacity must be non-zero");
+    DropExecutor::try_start_with(worker_count, Some(capacity), system_spawner())
         .expect("the test destructor executor must start")
+}
+
+fn unlimited_test_executor(worker_count: usize) -> Arc<DropExecutor> {
+    DropExecutor::try_start_with(worker_count, None, system_spawner())
+        .expect("the unlimited test destructor executor must start")
 }
 
 #[derive(Default)]
@@ -120,7 +127,7 @@ async fn batch_reservation_is_atomic_and_rejects_domain_limit_overflow() {
     assert_eq!(executor.capacity.available(), 2);
 
     assert!(
-        executor.reserve_many(OWNERSHIP_CAPACITY + 1).await.is_err(),
+        executor.reserve_many(3).await.is_err(),
         "a batch larger than the domain budget must fail without waiting"
     );
 }
@@ -217,6 +224,54 @@ async fn pending_admission_metadata_is_bounded_by_broker_capacity() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn unlimited_admission_is_immediate_and_never_queues_waiters() {
+    let executor = unlimited_test_executor(1);
+    let reservations = executor
+        .reserve_many(4096)
+        .await
+        .expect("an unlimited broker admits the complete non-zero batch");
+    assert_eq!(reservations.len(), 4096);
+    assert_eq!(executor.capacity.waiter_count(), 0);
+
+    let additional = executor
+        .try_reserve()
+        .expect("held unlimited permits do not restrict later admission");
+    assert_eq!(executor.capacity.waiter_count(), 0);
+    drop(additional);
+    drop(reservations);
+}
+
+#[test]
+fn unlimited_retirement_does_not_reduce_admission() {
+    let executor = unlimited_test_executor(1);
+    let permit = executor
+        .capacity
+        .try_acquire(8)
+        .expect("an unlimited broker admits the initial batch");
+    permit.retire();
+
+    let next = executor
+        .capacity
+        .try_acquire(8)
+        .expect("retirement is accounting-neutral in unlimited mode");
+    drop(next);
+    assert_eq!(executor.capacity.waiter_count(), 0);
+}
+
+#[test]
+fn closing_unlimited_admission_returns_an_unbounded_error() {
+    let executor = unlimited_test_executor(1);
+    executor.capacity.close();
+
+    let error = executor
+        .try_reserve()
+        .err()
+        .expect("a closed unlimited broker rejects new admission");
+    assert_eq!(error.limit(), None);
+    assert_eq!(executor.capacity.waiter_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn canceling_a_notified_grant_returns_its_capacity() {
     let executor = test_executor(1, 1);
     let held = executor.try_reserve().expect("the only slot");
@@ -285,7 +340,7 @@ fn dormant_domain_zero_batch_and_drop_spawn_no_workers() {
     let domain = DropDomain::unstarted_with(CORE_WORKER_COUNT, 4, spawner)
         .expect("the dormant configuration is valid");
 
-    assert_eq!(domain.capacity(), 4);
+    assert_eq!(domain.capacity().map(NonZeroUsize::get), Some(4));
     assert!(!domain.is_started());
     assert!(
         domain
@@ -295,7 +350,9 @@ fn dormant_domain_zero_batch_and_drop_spawn_no_workers() {
     );
     assert!(matches!(
         domain.try_reserve_many(5),
-        Err(DropAdmissionError::Capacity(DropCapacityError { limit: 4 }))
+        Err(DropAdmissionError::Capacity(DropCapacityError {
+            limit: Some(limit)
+        })) if limit.get() == 4
     ));
     assert!(!domain.is_started());
     drop(domain);
@@ -370,7 +427,7 @@ fn partial_core_failure_leaves_lazy_domain_unstarted_and_capacity_neutral_for_re
 
 #[test]
 fn reservation_keeps_started_executor_alive_after_every_domain_clone_drops() {
-    let domain = DropDomain::unstarted(1);
+    let domain = DropDomain::unstarted(NonZeroUsize::new(1));
     let clone = domain.clone();
     let reservation = domain
         .try_reserve()

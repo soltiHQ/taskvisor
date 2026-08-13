@@ -45,11 +45,14 @@ impl ControllerHandle {
         }
     }
 
-    /// Converts ownership capacity exhaustion into a controller error.
+    /// Converts bounded exhaustion or closed cleanup admission into a controller error.
     fn capacity_error(error: DropCapacityError) -> ControllerError {
-        ControllerError::ResourceLimit {
-            resource: OWNERSHIP_RESOURCE,
-            limit: error.limit(),
+        match error.limit() {
+            Some(limit) => ControllerError::ResourceLimit {
+                resource: OWNERSHIP_RESOURCE,
+                limit: limit.get(),
+            },
+            None => ControllerError::Closed,
         }
     }
 

@@ -117,17 +117,18 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`RuntimeError::ThreadStartFailed`] when the dormant destructor-isolation domain cannot start its core workers for the first ownership admission.
-    /// - [`RuntimeError::ResourceLimitReached`] when the task exceeds the ownership budget or registered-task limit.
+    /// - [`RuntimeError::ResourceLimitReached`] when the task exceeds a configured ownership or registered-task limit.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
     pub async fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         self.core().add_task(spec).await
     }
 
-    /// Registers a task only if bounded admission capacity is available now.
+    /// Registers a task without waiting for ownership admission.
     ///
-    /// This is useful when the caller must apply its own overload policy instead of waiting for bounded admission capacity.
-    /// After bounded admission, it still waits for the registry decision. `Ok(id)` has the same meaning as [`add`](Self::add).
+    /// This is useful when the caller must apply its own overload policy instead of waiting for a configured ownership limit.
+    /// After ownership admission, it still waits for the registry decision.
+    /// `Ok(id)` has the same meaning as [`add`](Self::add).
     ///
     /// # Errors
     ///
@@ -154,7 +155,7 @@ impl SupervisorHandle {
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
-    /// Registers watched work only if bounded admission capacity is available now.
+    /// Registers watched work without waiting for ownership admission.
     ///
     /// After queue admission, registration and outcome behavior match [`add_and_watch`](Self::add_and_watch).
     ///
@@ -499,7 +500,7 @@ impl SupervisorHandle {
     ///
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor has no controller.
     /// - [`ControllerError::ThreadStartFailed`](crate::ControllerError::ThreadStartFailed) when destructor-isolation workers cannot start.
-    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when the supervisor cannot own another user lifetime.
+    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when the configured ownership limit is exhausted.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]

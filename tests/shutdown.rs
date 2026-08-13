@@ -772,8 +772,6 @@ async fn blocking_task_destructor_cannot_extend_public_shutdown() {
     let shutdown = tokio::time::timeout(Duration::from_secs(1), handle.shutdown()).await;
     let destructor_entered = wait_for_destructor(&gate, |state| state.entered).await;
 
-    // Always release the isolated thread before evaluating assertions so a
-    // failed regression does not contaminate later tests in this process.
     release_destructor(&gate);
     let destructor_finished = wait_for_destructor(&gate, |state| state.finished).await;
 

@@ -85,6 +85,11 @@ tasks:
           PUBLISH_ARGS: '--all-features --locked'
 
   rust:benchmark:
-    desc: Run 'cargo bench'.
+    desc: Run the quick colorized Taskvisor lifecycle benchmark.
     cmds:
       - task: rust:bench
+        vars:
+          BENCH_ARGS: >-
+            --locked --bench controller --features controller --
+            'controller/steady/queue_one_slot/current_thread/20_completed_tasks'
+            --exact --quiet --color always

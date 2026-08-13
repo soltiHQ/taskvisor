@@ -147,6 +147,35 @@ impl SupervisorBuilder {
         Ok(self)
     }
 
+    /// Sets or clears the limit for user lifetimes owned by this supervisor.
+    ///
+    /// See [`SupervisorConfig::with_ownership_capacity`] for the shared task and
+    /// subscriber contract.
+    pub fn with_ownership_capacity(
+        mut self,
+        ownership_capacity: impl Into<Option<NonZeroUsize>>,
+    ) -> Self {
+        self.runtime = self
+            .runtime
+            .with_ownership_capacity(ownership_capacity.into());
+        self
+    }
+
+    /// Sets the user-lifetime ownership limit from a raw integer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Zero`] when `ownership_capacity` is zero.
+    pub fn try_with_ownership_capacity(
+        mut self,
+        ownership_capacity: usize,
+    ) -> Result<Self, ConfigError> {
+        self.runtime = self
+            .runtime
+            .try_with_ownership_capacity(ownership_capacity)?;
+        Ok(self)
+    }
+
     /// Sets the best-effort event-bus capacity from a raw integer.
     ///
     /// # Errors
@@ -261,7 +290,7 @@ impl SupervisorBuilder {
     /// has entered destructor isolation.
     pub fn try_build(self) -> Result<Arc<Supervisor>, BuildError> {
         self.validate_configuration()?;
-        let drop_domain = deferred_drop::DropDomain::unstarted(deferred_drop::OWNERSHIP_CAPACITY);
+        let drop_domain = deferred_drop::DropDomain::unstarted(self.runtime.ownership_capacity());
         let reservations = drop_domain
             .try_reserve_many(self.subscribers.len())
             .map_err(Self::ownership_admission_build_error)?;
@@ -315,9 +344,12 @@ impl SupervisorBuilder {
     }
 
     fn ownership_build_error(error: deferred_drop::DropCapacityError) -> BuildError {
+        let limit = error
+            .limit()
+            .expect("a fresh unlimited ownership domain cannot reject capacity");
         BuildError::ResourceLimitReached {
             resource: deferred_drop::OWNERSHIP_RESOURCE,
-            limit: error.limit(),
+            limit: limit.get(),
         }
     }
 
@@ -470,6 +502,7 @@ mod tests {
             .with_grace(Duration::from_secs(30))
             .with_subscriber_shutdown_timeout(Duration::from_secs(2))
             .with_max_concurrent(NonZeroUsize::new(4))
+            .with_ownership_capacity(NonZeroUsize::new(64))
             .with_bus_capacity(NonZeroUsize::new(2048).unwrap())
             .with_registry_queue_capacity(NonZeroUsize::new(256).unwrap());
         let task_defaults = TaskDefaults::default()
@@ -487,6 +520,10 @@ mod tests {
             runtime.subscriber_shutdown_timeout()
         );
         assert_eq!(builder.runtime.max_concurrent(), runtime.max_concurrent());
+        assert_eq!(
+            builder.runtime.ownership_capacity(),
+            runtime.ownership_capacity()
+        );
         assert_eq!(builder.runtime.bus_capacity(), runtime.bus_capacity());
         assert_eq!(
             builder.runtime.registry_queue_capacity(),
@@ -513,8 +550,12 @@ mod tests {
     #[test]
     fn raw_zero_values_return_errors_instead_of_panicking() {
         type RawSetter = fn(SupervisorBuilder, usize) -> Result<SupervisorBuilder, ConfigError>;
-        let cases: [(&str, RawSetter); 3] = [
+        let cases: [(&str, RawSetter); 4] = [
             ("max_concurrent", SupervisorBuilder::try_with_max_concurrent),
+            (
+                "ownership_capacity",
+                SupervisorBuilder::try_with_ownership_capacity,
+            ),
             ("bus_capacity", SupervisorBuilder::try_with_bus_capacity),
             (
                 "registry_queue_capacity",
@@ -544,6 +585,21 @@ mod tests {
     }
 
     #[test]
+    fn ownership_capacity_accepts_a_limit_or_an_option() {
+        let limit = NonZeroUsize::new(4).unwrap();
+        let direct =
+            SupervisorBuilder::new(SupervisorConfig::default()).with_ownership_capacity(limit);
+        let optional = SupervisorBuilder::new(SupervisorConfig::default())
+            .with_ownership_capacity(Some(limit));
+        let cleared =
+            SupervisorBuilder::new(SupervisorConfig::default()).with_ownership_capacity(None);
+
+        assert_eq!(direct.runtime.ownership_capacity(), Some(limit));
+        assert_eq!(optional.runtime.ownership_capacity(), Some(limit));
+        assert_eq!(cleared.runtime.ownership_capacity(), None);
+    }
+
+    #[test]
     fn subscriber_free_build_leaves_destructor_isolation_dormant() {
         let supervisor = SupervisorBuilder::new(SupervisorConfig::default())
             .try_build()
@@ -554,7 +610,8 @@ mod tests {
 
     #[test]
     fn subscriber_build_starts_destructor_isolation_before_metadata() {
-        let drop_domain = deferred_drop::DropDomain::unstarted(deferred_drop::OWNERSHIP_CAPACITY);
+        let drop_domain =
+            deferred_drop::DropDomain::unstarted(SupervisorConfig::default().ownership_capacity());
         let name_calls = Arc::new(AtomicUsize::new(0));
         let capacity_calls = Arc::new(AtomicUsize::new(0));
         let subscriber: Arc<dyn Subscribe> = Arc::new(StartupOrderingProbe {
@@ -643,6 +700,61 @@ mod tests {
             .try_reserve()
             .expect("an atomic rejection cannot retain partial capacity");
         drop(untouched);
+    }
+
+    #[test]
+    fn configured_ownership_limit_rejects_subscribers_before_metadata() {
+        let name_calls = Arc::new(AtomicUsize::new(0));
+        let capacity_calls = Arc::new(AtomicUsize::new(0));
+        let subscribers: Vec<Arc<dyn Subscribe>> = (0..2)
+            .map(|_| {
+                Arc::new(MetadataProbe {
+                    name_calls: Arc::clone(&name_calls),
+                    capacity_calls: Arc::clone(&capacity_calls),
+                }) as Arc<dyn Subscribe>
+            })
+            .collect();
+
+        let result = SupervisorBuilder::new(
+            SupervisorConfig::default().with_ownership_capacity(NonZeroUsize::new(1)),
+        )
+        .with_subscribers(subscribers)
+        .try_build();
+
+        assert!(matches!(
+            result,
+            Err(BuildError::ResourceLimitReached {
+                resource: deferred_drop::OWNERSHIP_RESOURCE,
+                limit: 1,
+                ..
+            })
+        ));
+        assert_eq!(name_calls.load(Ordering::Acquire), 0);
+        assert_eq!(capacity_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn disabled_ownership_limit_accepts_the_same_subscriber_batch() {
+        let name_calls = Arc::new(AtomicUsize::new(0));
+        let capacity_calls = Arc::new(AtomicUsize::new(0));
+        let subscribers: Vec<Arc<dyn Subscribe>> = (0..2)
+            .map(|_| {
+                Arc::new(MetadataProbe {
+                    name_calls: Arc::clone(&name_calls),
+                    capacity_calls: Arc::clone(&capacity_calls),
+                }) as Arc<dyn Subscribe>
+            })
+            .collect();
+
+        let supervisor =
+            SupervisorBuilder::new(SupervisorConfig::default().with_ownership_capacity(None))
+                .with_subscribers(subscribers)
+                .try_build()
+                .expect("an unlimited ownership domain must accept the subscriber batch");
+
+        assert_eq!(supervisor.runtime_config().ownership_capacity(), None);
+        assert_eq!(name_calls.load(Ordering::Acquire), 2);
+        assert_eq!(capacity_calls.load(Ordering::Acquire), 2);
     }
 
     #[test]

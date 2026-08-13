@@ -10,6 +10,7 @@
 use std::{
     collections::VecDeque,
     io,
+    num::NonZeroUsize,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
@@ -408,6 +409,8 @@ pub(in crate::core::deferred_drop) fn worker_loop(launch: WorkerLaunch) {
 }
 
 /// Caps workers by both domain capacity and the global worker limit.
-pub(super) fn max_worker_count(capacity: usize) -> usize {
-    capacity.min(MAX_WORKER_COUNT)
+pub(super) fn max_worker_count(capacity: Option<NonZeroUsize>) -> usize {
+    capacity.map_or(MAX_WORKER_COUNT, |capacity| {
+        capacity.get().min(MAX_WORKER_COUNT)
+    })
 }

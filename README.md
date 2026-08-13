@@ -187,7 +187,7 @@ There are two runtime modes:
 | `supervisor.run_with_os_signals(specs)` | Taskvisor should own process signals      | Explicit SIGINT/SIGTERM/SIGQUIT or Ctrl-C handling  |
 | `supervisor.serve()`                    | Tasks are added at runtime               | Your code calls `handle.shutdown().await`            |
 
-`run_with_os_signals` is an explicit process-wide opt-in. On Unix, Tokio does not restore the default signal disposition when its listeners are dropped, so the application remains responsible for signal handling after that method returns. `run` and `run_until` never install signal listeners.
+`run_with_os_signals` is an explicit process-wide opt-in. On Unix, Tokio does not restore the default signal disposition when its listeners are dropped. The application remains responsible for signal handling after that method returns. `run` and `run_until` never install signal listeners.
 
 `Supervisor::run(...).await == Ok(())` means the bounded supervisor lifecycle and cleanup workflow completed successfully. It does not mean that every task succeeded, and it does not prove physical exit of a force-reaped synchronous poll, detached subscriber callback, or isolated user destructor. `run` does not return per-task outcomes. Register work through `add_and_watch` or `submit_and_watch` when application logic needs the final result.
 
@@ -319,7 +319,7 @@ async fn wait_for_task(
 
 Events carry a process-local sequence number and, where relevant, task identity, attempt, duration, timeout, delay, and exit code. `TaskFinished` carries `TaskOutcomeKind` for terminal telemetry. Rejected work carries `TaskOutcomeKind::Rejected` plus a `RejectionKind` explaining why it did not start. Treat `reason` as diagnostic text; do not parse it for branching, metrics, or alerts. Stable enum labels are available for telemetry.
 
-Each subscriber has its own bounded FIFO queue and serial lane on a supervisor-local elastic callback executor. Startup transactionally creates one seed OS worker. When a lane is ready and every current worker is busy, the executor may add workers lazily, up to the configured subscriber count. Relaying one event still visits every subscriber queue, so fan-out work is `O(S)` in the subscriber count. A slow subscriber cannot block publishers or consume Tokio blocking-pool capacity, but its queue may fill and lose events. A blocked callback does not stop other lanes when an idle worker exists or OS worker expansion succeeds. Queue drops are coalesced into one direct overflow summary after that subscriber catches up; `Event::dropped` contains the count, and the summary does not re-enter the shared event bus. Keep callbacks short and forward async work to another channel.
+Each subscriber has its own bounded FIFO queue and serial lane on a supervisor-local elastic callback executor. Startup transactionally creates one seed OS worker. When a lane is ready and every current worker is busy, the executor may add workers lazily, up to the configured subscriber count. Relaying one event still visits every subscriber queue. Fan-out work is `O(S)` in the subscriber count. A slow subscriber cannot block publishers or consume Tokio blocking-pool capacity, but its queue may fill and lose events. A blocked callback does not stop other lanes when an idle worker exists or OS worker expansion succeeds. Queue drops are coalesced into one direct overflow summary after that subscriber catches up; `Event::dropped` contains the count, and the summary does not re-enter the shared event bus. Keep callbacks short and forward async work to another channel.
 
 See [subscriber.rs](examples/subscriber.rs), the `TracingBridge` in [tracing.rs](examples/tracing.rs), and the Prometheus counters in [metrics.rs](examples/metrics.rs).
 
@@ -375,7 +375,8 @@ fn configured_supervisor() -> Arc<Supervisor> {
     let runtime = SupervisorConfig::default()
         .with_grace(Duration::from_secs(30))
         .with_subscriber_shutdown_timeout(Duration::from_secs(5))
-        .with_max_concurrent(NonZeroUsize::new(16));
+        .with_max_concurrent(NonZeroUsize::new(16))
+        .with_ownership_capacity(NonZeroUsize::new(4096));
 
     let tasks = TaskDefaults::default()
         .with_timeout(Duration::from_secs(20))
@@ -397,11 +398,13 @@ Main defaults:
 | Registered and reaped actors    | 1024                                             |
 | Event bus capacity              | 1024                                            |
 | Registry command capacity       | 1024                                            |
-| Library-owned user lifetimes    | 1024 per supervisor across tasks and subscribers |
+| Ownership capacity              | 1024 per supervisor across tasks and subscribers |
 | Restart policy                  | On failure                                      |
 | Failure backoff                 | Exponential: 200 ms to 30 seconds, equal jitter |
 | Attempt timeout                 | None                                            |
 | Failure retry limit             | Unlimited                                       |
+
+`SupervisorConfig::with_ownership_capacity(None)` removes the ownership admission bound. Destructor isolation and its 16-worker ceiling remain active. Without a finite bound, accepted user lifetimes and cleanup backlog can grow without a count limit.
 
 Capacity types are non-zero where zero would make the runtime unusable. Checked `try_with_*` setters accept raw values.
 
@@ -413,7 +416,9 @@ Taskvisor defines an in-process lifecycle. Keep these boundaries explicit:
 - Watched outcomes are not durable after the process exits.
 - Cancellation depends on the task reaching an await point that observes `TaskContext`. Force-abort cannot stop synchronous code that blocks a runtime thread.
 - Subscriber callbacks may continue on callback-executor threads after the drain deadline. Taskvisor stops waiting and drops queued events, but it cannot interrupt synchronous user code already running.
-- User destructors run synchronously and cannot be interrupted. Each supervisor owns a separate 1024-slot domain across accepted tasks and configured subscribers. Configured subscribers start three core cleanup workers transactionally during construction; without subscribers, the domain remains dormant until the first non-empty task or controller ownership admission. Two indefinitely blocked destructors cannot prevent a later third bundle from starting. When cleanup remains backlogged with no idle worker, the domain may grow elastically to 16 total cleanup workers; elastic workers retire after an idle interval. Sixteen indefinitely blocked destructors can therefore stop later cleanup inside that supervisor, but cannot consume another supervisor's Taskvisor ownership capacity or worker set. Public shutdown remains bounded. A destructor panic permanently retires its charged slot; a blocking destructor occupies one cleanup worker until it returns.
+- User destructors run synchronously and cannot be interrupted. Taskvisor isolates them on supervisor-local cleanup workers, which keeps public shutdown bounded. A blocking destructor occupies one worker until it returns.
+- Ownership capacity counts accepted tasks and configured subscribers until physical cleanup releases them. The default is 1024 per supervisor. With a finite capacity, a destructor panic permanently reduces the usable capacity by one. Setting the capacity to `None` removes this admission bound and allows retained user lifetimes and cleanup backlog to grow without a count limit.
+- Without an ownership bound, destructor isolation uses three core workers and up to 16 total workers. For finite capacity, the counts are `min(capacity, 3)` and `min(capacity, 16)`. Blocked cleanup in one supervisor cannot consume another supervisor's ownership capacity or worker set.
 - Supervisor-local queues, budgets, and worker sets isolate Taskvisor admission and scheduling state; they are not operating-system resource partitions. Supervisors in one process still contend for the same kernel thread limits, CPU, and memory.
 - `TaskSpec` owns the immutable task name. Admission reads that data directly; `Task` implementations provide only executable attempts through `spawn`.
 - A successfully delivered watched outcome belongs to its caller. Dropping `TaskWaiter` after delivery destroys that outcome in the caller's execution context.
@@ -518,11 +523,26 @@ The shared [`Taskfile.yml`](Taskfile.yml) module selects the CI image from the M
 
 ## Benchmarks
 
-The repository includes Criterion suites for lifecycle, throughput, subscriber fan-out, dynamic management, and controller paths:
+The repository includes Criterion suites for cold lifecycle cost, batch throughput, subscriber
+fan-out, dynamic management, and controller paths. Case names and the final performance snapshot
+identify the timed boundary and the meaning of `elem/s`:
 
 ```bash
 cargo bench
 ```
+
+See the [benchmark reading guide](benches/README.md) for the complete boundary table and absolute
+rate-to-latency scale.
+
+For a quick colorized lifecycle snapshot without Criterion's comparison prose:
+
+```bash
+cargo bench --bench controller --features controller -- \
+  'controller/steady/queue_one_slot/current_thread/20_completed_tasks' \
+  --exact --quiet --color always
+```
+
+Run `cargo bench --all-features -- --quiet --color always` for the comprehensive five-suite report.
 
 ## Contributing
 

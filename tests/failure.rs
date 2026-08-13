@@ -100,8 +100,6 @@ async fn panicking_task_restarts_per_policy_then_succeeds() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn task_returning_canceled_without_cancellation_is_reaped() {
-    // The task lies: returns Canceled while its token was never cancelled.
-    // Worst case is Always, which would otherwise restart on any other return.
     let liar: TaskRef = TaskFn::arc(|_ctx: TaskContext| async move { Err(TaskError::Canceled) });
     let spec =
         TaskSpec::restartable("liar", liar).with_restart(RestartPolicy::Always { interval: None });

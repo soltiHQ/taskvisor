@@ -201,10 +201,10 @@ and the attempt terminal event.
 
 `TaskActor` owns the surrounding loop: restart policy, backoff, retry budget,
 and cancellation between attempts. Each accepted registration has one Tokio
-actor task, bounded by its supervisor's ownership domain and optional registry
-limit. After a permit is acquired, `run_once` is polled inline by that actor. It
-owns the permit and activity guard through result classification and synchronous
-cleanup. Backoff retains the actor task but not an attempt permit.
+actor task. Admission is subject to the supervisor's optional ownership and
+registry limits. After a permit is acquired, `run_once` is polled inline by that
+actor. It owns the permit and activity guard through result classification and
+synchronous cleanup. Backoff retains the actor task but not an attempt permit.
 
 Force-abort is a logical registry deadline. It is not proof that an
 uncooperative Tokio task has physically stopped. If an attempt is stuck inside
@@ -466,8 +466,10 @@ admission and cancels tokens, but cannot await or report graceful cleanup.
 User `Drop` implementations are outside the cooperative grace contract.
 Taskvisor cannot safely interrupt a synchronous Rust destructor.
 
-Every supervisor has a separate 1024-slot ownership domain for accepted tasks
-and configured subscribers:
+Every supervisor has a separate ownership domain for accepted tasks and
+configured subscribers. `SupervisorConfig::ownership_capacity` is
+`Some(1024)` by default. A finite value bounds ownership admission. `None`
+removes that bound without disabling destructor isolation.
 
 - A task reservation follows the task through controller queues, registry
   membership, logical force-abort, and the physical attempt reaper.
@@ -477,41 +479,45 @@ and configured subscribers:
 - Terminal cleanup transfers retained references and auxiliary terminal values
   to that supervisor's cleanup executor.
 
-A configured subscriber set starts three core cleanup workers transactionally
+A configured subscriber set starts its core cleanup workers transactionally
 during construction, before metadata callbacks. Without subscribers, the
 domain stays dormant until the first non-empty task or controller ownership
 admission. That admission starts the same core set before it returns a
 reservation. Before the first accepted user lifetime, such a supervisor owns no
 cleanup thread.
 
-When cleanup is backlogged and no worker is idle, the domain can grow to 16
-workers. Elastic workers retire after one second of idle time. The three core
-workers allow progress past two blocked destructors while the third worker is
-available. Sixteen blocked destructors stop later cleanup in that supervisor
-until a worker becomes free.
+With no ownership bound, the domain starts three core workers and can grow to
+16 total workers. For finite capacity, the core count is `min(capacity, 3)` and
+the total worker ceiling is `min(capacity, 16)`.
+Elastic workers retire after one second of idle time. Three available core
+workers allow progress past two blocked destructors. When every allowed worker
+is blocked, later cleanup waits until a worker becomes free.
 
-Every running or queued destructor bundle already owns one of the 1024 slots.
-This bounds the number of retained user lifetimes, not their byte size. A
-blocked or saturated domain cannot consume another supervisor's Taskvisor
-ownership capacity or worker set.
+Every running or queued destructor bundle remains charged to its ownership
+domain. A finite capacity bounds the number of retained user lifetimes, not
+their byte size. With `None`, retained lifetimes and cleanup backlog can grow
+without a count bound. A blocked or saturated domain cannot consume another
+supervisor's Taskvisor ownership capacity or worker set.
 
 This isolation is internal to Taskvisor. It is not an operating-system resource
 partition. Supervisors in the same process still share kernel thread limits,
 CPU, and memory.
 
-Waiting direct-add and controller submit methods wait for one ownership slot.
-Fail-fast variants, static-run batch admission, and
-`SupervisorBuilder::try_build` return resource-limit errors. Subscriber builds
-reserve their complete batch without waiting, before calling subscriber names
-or queue capacities.
+With a finite capacity, waiting direct-add and controller submit methods wait
+for one ownership unit. Fail-fast variants, static-run batch admission, and
+`SupervisorBuilder::try_build` return resource-limit errors when the required
+units cannot fit. Subscriber builds reserve their complete batch without
+waiting, before calling subscriber names or queue capacities. With `None`,
+ownership capacity neither blocks nor rejects admission. Registry and queue
+limits still apply.
 
 Cancellation before task hand-off leaves destruction in the caller's execution
 context because Taskvisor has not accepted ownership. After a watched outcome
 is delivered, the outcome belongs to the caller. Dropping its waiter then
 destroys that value in the caller's context.
 
-A destructor panic is caught after its panic payload is retained under the same
-charged slot. The domain permanently retires that slot, and later admission
+A destructor panic is caught after its panic payload is retained. With a finite
+capacity, the domain permanently retires its charged unit and later admission
 uses the reduced effective capacity. A blocking destructor occupies one cleanup
 worker until it returns, but cannot extend the public shutdown deadline.
 

@@ -96,9 +96,7 @@ fn core_with_subs(
     cfg: SupervisorConfig,
     subs: Vec<Arc<dyn crate::subscribers::Subscribe>>,
 ) -> Arc<SupervisorCore> {
-    let ownership = crate::core::deferred_drop::TestReservationSource::new(
-        crate::core::deferred_drop::OWNERSHIP_CAPACITY,
-    );
+    let ownership = DropDomain::unstarted(cfg.ownership_capacity());
     let task_defaults = TaskDefaults::default();
     let bus = Bus::new(cfg.bus_capacity().get());
     let subs = Arc::new(SubscriberSet::new(subs, bus.clone()));
@@ -118,7 +116,7 @@ fn core_with_subs(
         bus,
         subs,
         registry,
-        ownership.domain(),
+        ownership,
         token,
         cmd_tx,
     )
@@ -781,10 +779,12 @@ async fn static_batch_that_cannot_fit_beside_subscribers_fails_without_waiting()
         async { Ok(()) }
     });
     let core = core_with_subs(
-        SupervisorConfig::default().with_max_registered_tasks(None),
+        SupervisorConfig::default()
+            .with_max_registered_tasks(None)
+            .with_ownership_capacity(NonZeroUsize::new(2)),
         vec![Arc::new(NoopSub)],
     );
-    let tasks = (0..crate::core::deferred_drop::OWNERSHIP_CAPACITY)
+    let tasks = (0..2)
         .map(|_| TaskSpec::once("ownership-self-deadlock", Arc::clone(&task)))
         .collect();
 
@@ -795,7 +795,7 @@ async fn static_batch_that_cannot_fit_beside_subscribers_fails_without_waiting()
         result,
         Err(RuntimeError::ResourceLimitReached {
             resource: crate::core::deferred_drop::OWNERSHIP_RESOURCE,
-            limit: crate::core::deferred_drop::OWNERSHIP_CAPACITY,
+            limit: 2,
         })
     ));
     assert_eq!(
@@ -803,6 +803,32 @@ async fn static_batch_that_cannot_fit_beside_subscribers_fails_without_waiting()
         0,
         "an impossible ownership batch must be rejected before task execution"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn disabled_ownership_limit_skips_static_batch_capacity_preflight() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_calls = Arc::clone(&calls);
+    let task: TaskRef = TaskFn::arc(move |_ctx| {
+        task_calls.fetch_add(1, Ordering::AcqRel);
+        async { Ok(()) }
+    });
+    let core = core_with_subs(
+        SupervisorConfig::default()
+            .with_max_registered_tasks(None)
+            .with_ownership_capacity(None),
+        vec![Arc::new(NoopSub)],
+    );
+    let tasks = ["unbounded-ownership-a", "unbounded-ownership-b"]
+        .into_iter()
+        .map(|name| TaskSpec::once(name, Arc::clone(&task)))
+        .collect();
+
+    timeout(Duration::from_secs(2), core.run(tasks))
+        .await
+        .expect("the unlimited ownership batch must finish")
+        .expect("ownership capacity None must not reject the static batch");
+    assert_eq!(calls.load(Ordering::Acquire), 2);
 }
 
 #[tokio::test]
