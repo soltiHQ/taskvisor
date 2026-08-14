@@ -66,7 +66,7 @@ pub(crate) struct Controller {
     /// Runtime control surface.
     /// `Weak` avoids extending the runtime core's lifetime during teardown.
     supervisor: Weak<SupervisorCore>,
-    /// Supervisor-local ownership and destructor-isolation domain.
+    /// Supervisor-local ownership capacity and background cleanup workers.
     drop_domain: DropDomain,
     /// Runtime event bus used for controller observability and diagnostics.
     bus: Bus,

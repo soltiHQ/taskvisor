@@ -8,7 +8,8 @@
 //! | `resilient` | restart on failure | fail twice, then succeed              |
 //! | `recurring` | periodic           | wait 500 ms after each successful run |
 //!
-//! `max_retries(3)` permits the first failed attempt and up to three retries in one failure streak.
+//! `with_max_retries(NonZeroU32::new(3).unwrap())` permits the first failed attempt and up to
+//! three retries in one failure streak.
 //! The resilient task succeeds on attempt three after two backoffs.
 //! The recurring task works for 300 ms, then waits 500 ms before its next attempt.
 //!

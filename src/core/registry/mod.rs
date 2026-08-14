@@ -20,8 +20,8 @@
 //! processes commands committed before admission closed. Lifecycle events are observations.
 //! Direct replies, completion latches, and watched outcomes carry registry results.
 //!
-//! A force-aborted attempt can outlive membership. `scheduler` keeps its label,
-//! activity, and user values in the physical reaper until the attempt exits.
+//! A force-aborted attempt can outlive membership.
+//! `scheduler` keeps its label, activity, and user values until the physical attempt exits.
 
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 

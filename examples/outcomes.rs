@@ -19,7 +19,7 @@
 //!
 //! A configured timeout is retry-eligible.
 //! The timeout row is final because `once` forbids retry.
-//! `max_retries(2)` allows the first failed attempt and two retries before `Failed`.
+//! `with_max_retries(NonZeroU32::new(2).unwrap())` allows the first failed attempt and two retries before `Failed`.
 //! An admitted result normally arrives after registry membership is removed.
 //! Except for `ForceAborted`, task execution is physically joined first.
 //! `ForceAborted` is final logically while a physical actor may still be active.

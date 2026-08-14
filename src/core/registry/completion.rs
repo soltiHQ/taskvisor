@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Logical completion means membership was removed and terminal reporting was attempted.
-//! Physical completion means the actor or reaper no longer owns the attempt.
+//! Physical completion means the actor has exited and force-abort tracking has ended.
 //! These latches do not request cancellation.
 
 use tokio::sync::oneshot;
@@ -26,7 +26,7 @@ pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
 pub(crate) struct RemovalCompletion {
     /// Wakes public cancellation waiters after terminal commit.
     logical: CancellationToken,
-    /// Wakes controller replacement after actor and reaper ownership is released.
+    /// Wakes controller replacement after the physical attempt is fully released.
     physical: CancellationToken,
 }
 
@@ -57,7 +57,7 @@ impl RemovalCompletion {
     }
 
     #[cfg(test)]
-    /// Returns whether actor and reaper ownership has been released.
+    /// Returns whether the physical attempt has been fully released.
     pub(super) fn is_physical_complete(&self) -> bool {
         self.physical.is_cancelled()
     }
@@ -67,7 +67,7 @@ impl RemovalCompletion {
         self.logical.cancel();
     }
 
-    /// Marks the physical actor/reaper ownership transition complete.
+    /// Marks the physical attempt as fully released.
     pub(super) fn complete_physical(&self) {
         self.physical.cancel();
     }

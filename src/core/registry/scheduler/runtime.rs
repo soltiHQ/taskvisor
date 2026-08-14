@@ -1,4 +1,4 @@
-//! Starts accepted actors and polls physical reaper work.
+//! Starts accepted actors and polls force-aborted attempts until physical exit.
 //!
 //! The registry listener starts [`ActorRuntime`] during supervisor startup. Admission gives it actors
 //! only after registry commit. Force-abort work enters the shared [`AttemptReaper`] and is polled by one coordinator task.
@@ -17,7 +17,7 @@ use super::{
     reaper::{AttemptReaper, ReapFuture, ReaperCommand},
 };
 
-/// Spawns accepted actors and owns the physical reaper coordinator.
+/// Spawns accepted actors and owns the force-abort cleanup coordinator.
 pub(in crate::core::registry) struct ActorRuntime {
     /// Shared force-abort owner used by registry entries.
     attempt_reaper: AttemptReaper,
@@ -48,7 +48,7 @@ impl ActorRuntime {
         self.attempt_reaper.active()
     }
 
-    /// Starts the physical reaper coordinator.
+    /// Starts the force-abort cleanup coordinator.
     ///
     /// # Panics
     ///

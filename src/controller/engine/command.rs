@@ -112,7 +112,7 @@ pub(super) struct AdmissionResult {
 
 /// Physical release of one admitted slot owner.
 pub(super) struct CompletionResult {
-    /// Runtime identity whose physical actor and reaper ownership was released.
+    /// Runtime identity whose physical attempt was fully released.
     pub(super) id: TaskId,
     /// Slot that owned `id` when completion tracking started.
     pub(super) slot_name: Arc<str>,

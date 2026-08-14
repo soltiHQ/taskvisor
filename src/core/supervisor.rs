@@ -77,8 +77,8 @@ impl Supervisor {
     ///
     /// # Panics
     ///
-    /// With configured subscribers, panics when this supervisor's destructor-isolation domain cannot start or its configured
-    /// ownership limit cannot admit every subscriber. It also panics when a channel or semaphore capacity is too large or
+    /// With configured subscribers, panics when background cleanup workers cannot start or the configured ownership
+    /// limit cannot admit every subscriber. It also panics when a channel or semaphore capacity is too large or
     /// subscriber metadata panics. Use [`SupervisorBuilder::try_build`] for typed build errors.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
@@ -178,7 +178,7 @@ impl Supervisor {
     /// # Errors
     ///
     /// - [`RuntimeError::ResourceLimitReached`] when the initial batch exceeds the registry limit or the configured ownership limit.
-    /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber or destructor-isolation worker thread cannot be created.
+    /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber or background cleanup worker thread cannot be created.
     /// - [`RuntimeError::AlreadyRunning`] when another static run owns the lifecycle or a previous call committed it.
     /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
     /// - [`RuntimeError::TokioRuntimeUnavailable`] when startup is requested outside a Tokio runtime.

@@ -68,7 +68,9 @@
 //! The runtime registry still checks name uniqueness.
 //!
 //! Cancellation and removal never act on an entire slot. `TaskId` methods can claim queued or registered work.
-//! By-name methods see only work already in the registry because queued submissions do not own a registered name.
+//! [`SupervisorHandle::remove_by_name`](crate::SupervisorHandle::remove_by_name) and
+//! [`SupervisorHandle::cancel_by_name`](crate::SupervisorHandle::cancel_by_name) see only work already in the
+//! registry because queued submissions do not own a registered name.
 //! Removing one queued item leaves the other submissions in its slot unchanged.
 //!
 //! # Choose a busy-slot policy
@@ -83,7 +85,7 @@
 //! # Choose a submission API
 //!
 //! - Wait for intake capacity with [`SupervisorHandle::submit`](crate::SupervisorHandle::submit).
-//! - Fail fast when intake is full of [`SupervisorHandle::try_submit`](crate::SupervisorHandle::try_submit).
+//! - Use [`SupervisorHandle::try_submit`](crate::SupervisorHandle::try_submit) to fail fast when intake is full.
 //! - Receive rejection or the final task result with [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch).
 //! - Fail fast and receive that result with [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch).
 //! - Allocate the `TaskId` before intake or events with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).

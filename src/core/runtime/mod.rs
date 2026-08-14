@@ -17,9 +17,9 @@
 //! ```
 //!
 //! The registry owns task membership and management decisions. Those decisions return through direct reply channels.
-//! Events are best-effort and never drive runtime state. Activity queries also include attempts retained by the
-//! physical reaper after registry membership ends. Requested and natural shutdown drain tasks. Signal-setup
-//! failure skips that drain and still runs the common worker-cleanup tail.
+//! Events are best-effort and never drive runtime state. Activity queries also include force-aborted attempts that
+//! remain active after registry membership ends. Requested and natural shutdown drain tasks.
+//! Signal-setup failure skips that drain and still runs the common worker-cleanup tail.
 
 mod event_relay;
 mod lifecycle;

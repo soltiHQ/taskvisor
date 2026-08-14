@@ -182,10 +182,10 @@ impl Future for CatchPanic<'_> {
 
 impl Drop for CatchPanic<'_> {
     fn drop(&mut self) {
-        if let Some(future) = self.future.take() {
-            if let Some(failure) = Self::drop_future(future, self.cleanup_poisoned.as_ref()) {
-                self.drop_diagnostic.publish(&failure);
-            }
+        if let Some(future) = self.future.take()
+            && let Some(failure) = Self::drop_future(future, self.cleanup_poisoned.as_ref())
+        {
+            self.drop_diagnostic.publish(&failure);
         }
     }
 }

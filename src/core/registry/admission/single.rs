@@ -1,7 +1,7 @@
 //! Commits one add command or returns its rejection.
 //!
 //! The registry listener calls this module after it receives [`RegistryCommand::Add`](crate::core::registry::RegistryCommand::Add).
-//! Label conflicts include current membership and labels held by the physical reaper.
+//! Label conflicts include current membership and force-aborted attempts that have not physically exited.
 //! The configured registration limit includes both groups.
 //!
 //! Validation runs before actor preparation and again under the state write lock.

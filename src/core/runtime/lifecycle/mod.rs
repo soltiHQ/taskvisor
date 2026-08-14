@@ -10,7 +10,7 @@
 //!       start
 //!         ├── subscribers ──► callback executor
 //!         ├── enabled bus ──► event relay
-//!         ├── registry ─────► listener and reaper
+//!         ├── registry ─────► listener and force-abort tracker
 //!         └── controller ───► optional worker
 //! ```
 //!

@@ -6,8 +6,8 @@
 //! The label remains reserved during the join.
 //!
 //! ```text
-//! command or completion ──► claim ────────────────────► join owner ───► terminal commit
-//! shutdown ───────────────► claim remaining entries ──► join owners ──► terminal commit
+//! command or completion ──► claim ────────────────────► actor join ───► terminal commit
+//! shutdown ───────────────► claim remaining entries ──► actor joins ──► terminal commit
 //! ```
 //!
 //! `commands` defines remove and cancel decisions. `join` waits for actors outside the listener and
@@ -40,7 +40,7 @@ pub(super) use terminal::TerminalFinalizer;
 pub(super) enum JoinCompletion {
     /// Result returned by the actor join handle.
     Joined(Result<ActorExitReason, ActorJoinError>),
-    /// The join owner transferred an unfinished actor to the physical reaper.
+    /// Removal transferred an unfinished actor to the force-abort tracker.
     ForceAborted,
 }
 
@@ -50,7 +50,7 @@ pub(super) struct RemovalReport {
     pub(super) id: TaskId,
     /// Optional sender for a watched task outcome.
     pub(super) outcome: Option<OutcomeTx>,
-    /// Result produced by the actor join owner.
+    /// Result produced while removing the actor.
     pub(super) join: JoinCompletion,
     /// Two-phase completion for this removal.
     pub(super) completion: RemovalCompletion,

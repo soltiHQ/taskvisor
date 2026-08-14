@@ -2,7 +2,7 @@
 //!
 //! [`DropExecutor`] connects the ownership [`CapacityBroker`] to a [`WorkerQueue`].
 //! Reservations keep the executor alive. It routes submitted [`DropBatch`] values from
-//! controller, registry, subscriber, and reaper terminal paths to the worker queue.
+//! controller, registry, subscriber, and force-abort terminal paths to the worker queue.
 //!
 //! ```text
 //! DropDomain

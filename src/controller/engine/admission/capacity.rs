@@ -1,7 +1,8 @@
 //! Resumes admissions waiting for registry command capacity.
 //!
-//! When the registry channel is full and admission limits allow a wait,`handoff` stores the task in `ControllerState::capacity_pending`.
-//! The controller driver later passes the reserved permit or reservation error here.
+//! When the registry channel is full and admission limits allow a wait, `handoff` stores the task
+//! in `ControllerState::capacity_pending`. The controller driver later passes the reserved permit
+//! or reservation error here.
 //!
 //! A permit is committed only while the same [`TaskId`] still owns the slot.
 //! A failed matching commit clears that admission, resolves any watcher, and may advance the slot queue.

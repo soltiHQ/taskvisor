@@ -198,7 +198,7 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn remove_by_label_returns_true_then_false() {
+async fn remove_by_name_returns_true_then_false() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let started = Arc::new(tokio::sync::Notify::new());
@@ -222,8 +222,8 @@ async fn remove_by_label_returns_true_then_false() {
             .await
             .expect("svc must start before removal");
 
-        assert!(handle.remove_by_label("svc").await.expect("remove1"));
-        assert!(!handle.try_remove_by_label("svc").await.expect("remove2"));
+        assert!(handle.remove_by_name("svc").await.expect("remove1"));
+        assert!(!handle.try_remove_by_name("svc").await.expect("remove2"));
         assert_eq!(handle.list().await, vec![(id, Arc::from("svc"))]);
 
         release.notify_one();
@@ -235,7 +235,7 @@ async fn remove_by_label_returns_true_then_false() {
         );
         assert!(
             !handle
-                .remove_by_label("never-existed")
+                .remove_by_name("never-existed")
                 .await
                 .expect("remove unknown label")
         );
@@ -261,24 +261,59 @@ async fn cancel_by_id_true_then_false_on_double_cancel() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_by_label_true_then_false() {
+async fn cancel_by_name_true_then_false() {
     let (handle, _c) = served_with_collector(5);
     with_timeout(10, async {
         let _ = handle
             .add(TaskSpec::restartable("lbl", make_coop()))
             .await
             .expect("add lbl");
-        assert!(handle.cancel_by_label("lbl").await.expect("c1"));
+        assert!(handle.cancel_by_name("lbl").await.expect("c1"));
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 !handle.list().await.iter().any(|(_, l)| &**l == "lbl")
             })
             .await
         );
-        assert!(!handle.cancel_by_label("lbl").await.expect("c2"));
-        assert!(!handle.cancel_by_label("ghost").await.expect("c3"));
+        assert!(!handle.cancel_by_name("lbl").await.expect("c2"));
+        assert!(!handle.cancel_by_name("ghost").await.expect("c3"));
         assert!(!handle.is_alive("lbl").await);
         let _ = handle.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn by_label_compatibility_aliases_delegate_to_by_name() {
+    let (handle, _c) = served_with_collector(5);
+    with_timeout(10, async {
+        assert!(!handle.remove_by_label("missing").await.expect("remove"));
+        assert!(
+            !handle
+                .try_remove_by_label("missing")
+                .await
+                .expect("try remove")
+        );
+        assert!(!handle.cancel_by_label("missing").await.expect("cancel"));
+        assert!(
+            !handle
+                .try_cancel_by_label("missing")
+                .await
+                .expect("try cancel")
+        );
+        assert!(
+            !handle
+                .cancel_by_label_with_timeout("missing", Duration::ZERO)
+                .await
+                .expect("timed cancel")
+        );
+        assert!(
+            !handle
+                .try_cancel_by_label_with_timeout("missing", Duration::ZERO)
+                .await
+                .expect("try timed cancel")
+        );
+        handle.shutdown().await.expect("shutdown");
     })
     .await;
 }
@@ -305,9 +340,9 @@ async fn timed_cancel_variants_are_public_contracts() {
             .expect("add label-timeout");
         assert!(
             handle
-                .cancel_by_label_with_timeout("label-timeout", Duration::from_secs(2))
+                .cancel_by_name_with_timeout("label-timeout", Duration::from_secs(2))
                 .await
-                .expect("cancel_by_label_with_timeout")
+                .expect("cancel_by_name_with_timeout")
         );
 
         let _ = handle
@@ -316,9 +351,9 @@ async fn timed_cancel_variants_are_public_contracts() {
             .expect("add try-label-timeout");
         assert!(
             handle
-                .try_cancel_by_label_with_timeout("try-label-timeout", Duration::from_secs(2))
+                .try_cancel_by_name_with_timeout("try-label-timeout", Duration::from_secs(2))
                 .await
-                .expect("try_cancel_by_label_with_timeout")
+                .expect("try_cancel_by_name_with_timeout")
         );
 
         let _ = handle.shutdown().await;

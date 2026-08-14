@@ -160,8 +160,8 @@ impl Registry {
 
     /// Returns the registration limit when an incoming set would exceed it.
     ///
-    /// Reaping attempts to remain counted while registry ownership is being removed.
-    /// This keeps the bound strict without sharing locks with the reaper.
+    /// Force-aborted attempts remain counted while registry ownership is being removed.
+    /// This keeps the bound strict without sharing registry and cleanup locks.
     fn registered_limit_exceeded(&self, current: usize, incoming: usize) -> Option<usize> {
         let limit = self.max_registered_tasks?.get();
         let exceeds = current

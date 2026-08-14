@@ -72,7 +72,7 @@ impl SupervisorCore {
 
     /// Attempts registry handoff for a controller-owned task with an assigned identity.
     ///
-    /// The returned completion tracks registry cleanup and physical actor or reaper release.
+    /// The returned completion tracks registry cleanup and full physical-attempt release.
     /// The controller waits for both before reusing the slot.
     /// Pre-commit failure returns the task and outcome sender inside [`crate::core::UncommittedWatchedAdd`].
     #[cfg(feature = "controller")]
@@ -113,7 +113,7 @@ impl SupervisorCore {
 
     /// Runs the final shutdown check and transfers a controller task into its reserved slot.
     ///
-    /// The returned completion lets the controller wait for registry cleanup and physical actor or reaper
+    /// The returned completion lets the controller wait for registry cleanup and full physical-attempt
     /// release before slot reuse. A failed check returns every uncommitted user-owned value to the controller.
     #[cfg(feature = "controller")]
     pub(crate) fn commit_reserved_controller_add(

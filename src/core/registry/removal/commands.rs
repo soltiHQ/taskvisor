@@ -6,7 +6,7 @@
 //!
 //! Remove returns only whether this command won the actor handle. It does not wait for terminal cleanup.
 //! Cancel returns the logical completion latch. A later cancel of an entry already being removed
-//! joins the same completion instead of creating another join owner.
+//! joins the same completion instead of starting another actor join.
 
 use std::sync::Arc;
 
@@ -175,7 +175,7 @@ impl Registry {
         })
     }
 
-    /// Sends a cancel decision and starts its join owner when this command claimed it.
+    /// Sends a cancel decision and starts the actor join when this command claimed it.
     fn resolve_cancel_action(
         &self,
         action: Option<CancelAction>,

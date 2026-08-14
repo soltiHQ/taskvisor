@@ -45,7 +45,7 @@ pub(crate) type RemoveReplyRx = oneshot::Receiver<RemoveReply>;
 pub(crate) struct CancelDecision {
     /// Identity resolved at the command ordering point.
     pub(crate) id: TaskId,
-    /// Whether this command started the single join owner.
+    /// Whether this command claimed the actor handle and started removal.
     pub(crate) claimed: bool,
     /// Logical removal latch shared by all cancellation callers.
     pub(super) completion: RemovalCompletion,
@@ -126,7 +126,5 @@ pub(crate) enum RegistryCommand {
 /// Control messages carried outside the bounded management queue.
 pub(super) enum RegistryControl {
     /// Confirms decisions for commands committed before admission closed.
-    Fence {
-        reply: oneshot::Sender<()>,
-    },
+    Fence { reply: oneshot::Sender<()> },
 }

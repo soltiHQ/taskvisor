@@ -202,7 +202,7 @@ impl AttemptReservation {
 /// Owns actor tasks that outlive their grace-bounded logical removal.
 #[derive(Clone)]
 pub(in crate::core::registry) struct AttemptReaper {
-    /// Command sender for the physical reaper coordinator.
+    /// Command sender for the force-abort cleanup coordinator.
     tx: mpsc::UnboundedSender<ReaperCommand>,
     /// Number of physical attempts not yet committed to deferred cleanup.
     active: Arc<AtomicUsize>,

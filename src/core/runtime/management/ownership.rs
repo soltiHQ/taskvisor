@@ -5,8 +5,8 @@
 //! actor execution, physical reaping, and final destruction.
 //!
 //! Waiting admission observes shutdown. Static batches use one immediate atomic reservation for the full batch.
-//! A configured ownership limit can delay or reject admission. With no limit, reservation remains an ownership
-//! handoff and destructor-isolation boundary. Failures are translated into runtime errors here.
+//! A configured ownership limit can delay or reject admission. With no limit, the reservation still keeps final
+//! user-value destruction off runtime paths. Failures are translated into runtime errors here.
 
 use std::{future::Future, sync::Arc};
 

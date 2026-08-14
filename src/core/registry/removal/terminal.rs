@@ -1,4 +1,4 @@
-//! Commits final registry state after a join owner produces a result.
+//! Commits final registry state after the actor join produces a result.
 //!
 //! Every removal source reaches this module with one [`RemovalReport`]. The join result is first
 //! mapped to its public outcome. Terminal commit then removes the identity and label indexes under

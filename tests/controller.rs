@@ -400,7 +400,7 @@ async fn remove_of_queued_submission_purges_it_before_start() {
 
         assert!(
             handle
-                .cancel_by_label("occupant-q")
+                .cancel_by_name("occupant-q")
                 .await
                 .expect("cancel occupant")
         );

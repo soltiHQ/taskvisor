@@ -8,7 +8,7 @@
 //! | Runtime lifecycle, management, and outcome waiting                    | [`RuntimeError`]                      |
 //! | Controller availability checks and submission command intake          | `ControllerError`                     |
 //! | One task attempt                                                      | [`TaskError`]                         |
-//! | Code that combines runtime and controller calls                       | [`Error`]                             |
+//! | Code that combines runtime and controller calls                       | [`enum@Error`]                        |
 //!
 //! ```text
 //! task future ──► TaskError ──► actor policy
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! `ControllerError` is available with the `controller` feature. Task code returns [`TaskError`].
-//! Taskvisor APIs return the error for their boundary; applications may use [`Error`] to combine
+//! Taskvisor APIs return the error for their boundary; applications may use [`enum@Error`] to combine
 //! runtime and controller calls. Readable `Display` text is not a classification API.
 //! Match variants or use `as_label` where available.
 
@@ -106,7 +106,7 @@ impl BuildError {
 ///
 /// # See also
 ///
-/// - [`Error`] combines runtime and feature-gated controller errors.
+/// - [`enum@Error`] combines runtime and feature-gated controller errors.
 #[cfg_attr(
     feature = "controller",
     doc = "- [`ControllerError`](crate::ControllerError) - controller availability and submission intake errors"

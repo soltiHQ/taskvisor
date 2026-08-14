@@ -109,10 +109,7 @@ pub(crate) enum BusMessage {
     ///
     /// Carrying both values atomically prevents a continuous publisher from
     /// making every receiver turn report lag without ever advancing the ring.
-    Lagged {
-        dropped: u64,
-        event: Event,
-    },
+    Lagged { dropped: u64, event: Event },
 }
 
 /// Non-blocking event-ring receive failure.

@@ -18,6 +18,8 @@
 //!
 //! Identity-based remove and cancel operations pass through the controller when configured. This orders
 //! them after earlier submissions and lets them find work that has not reached the registry yet.
+//! Methods ending in `_by_name` use the task name from [`TaskSpec`].
+//! The older `_by_label` methods are compatibility aliases for the same registry key.
 
 use std::{sync::Arc, time::Duration};
 
@@ -112,11 +114,11 @@ impl SupervisorHandle {
     ///
     /// `Ok(id)` confirms registration.
     /// It does not mean that the first attempt has started. This confirmation is direct and does not use the event bus.
-    /// The task name must not already belong to registry membership or a force-aborted task still owned by the physical reaper.
+    /// The task name must not already identify registry membership or a force-aborted task whose physical actor has not exited.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::ThreadStartFailed`] when the dormant destructor-isolation domain cannot start its core workers for the first ownership admission.
+    /// - [`RuntimeError::ThreadStartFailed`] when background cleanup workers cannot start for the first ownership admission.
     /// - [`RuntimeError::ResourceLimitReached`] when the task exceeds a configured ownership or registered-task limit.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
@@ -220,20 +222,38 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub async fn remove_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().remove_by_label(Arc::from(name)).await
     }
 
     /// Requests removal by name only if the registry queue has capacity now.
     ///
-    /// After queue admission, behavior is the same as [`remove_by_label`](Self::remove_by_label).
+    /// After queue admission, behavior is the same as [`remove_by_name`](Self::remove_by_name).
     ///
     /// # Errors
     ///
-    /// Returns the errors from [`remove_by_label`](Self::remove_by_label). It also returns
+    /// Returns the errors from [`remove_by_name`](Self::remove_by_name). It also returns
     /// [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
-    pub async fn try_remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub async fn try_remove_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().try_remove_by_label(Arc::from(name)).await
+    }
+
+    /// Compatibility alias for [`remove_by_name`](Self::remove_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`remove_by_name`](Self::remove_by_name).
+    pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.remove_by_name(name).await
+    }
+
+    /// Compatibility alias for [`try_remove_by_name`](Self::try_remove_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`try_remove_by_name`](Self::try_remove_by_name).
+    pub async fn try_remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.try_remove_by_name(name).await
     }
 
     /// Returns the authoritative registry view as `(id, name)` pairs.
@@ -329,19 +349,19 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// Returns [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub async fn cancel_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().cancel_by_label(Arc::from(name)).await
     }
 
     /// Cancels by name only if the registry queue has capacity now.
     ///
-    /// After queue admission, behavior is the same as [`cancel_by_label`](Self::cancel_by_label).
+    /// After queue admission, behavior is the same as [`cancel_by_name`](Self::cancel_by_name).
     ///
     /// # Errors
     ///
-    /// Returns the errors from [`cancel_by_label`](Self::cancel_by_label).
+    /// Returns the errors from [`cancel_by_name`](Self::cancel_by_name).
     /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
-    pub async fn try_cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub async fn try_cancel_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().try_cancel_by_label(Arc::from(name)).await
     }
 
@@ -351,14 +371,14 @@ impl SupervisorHandle {
     /// The timer covers only the final wait for task cleanup. A timeout stops waiting.
     /// It does not undo cancellation or change the supervisor grace period.
     ///
-    /// The boolean follows [`cancel_by_label`](Self::cancel_by_label).
+    /// The boolean follows [`cancel_by_name`](Self::cancel_by_name).
     /// Queued controller work has no registered name; cancel it by [`TaskId`].
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn cancel_by_label_with_timeout(
+    pub async fn cancel_by_name_with_timeout(
         &self,
         name: &str,
         wait_for: Duration,
@@ -371,13 +391,13 @@ impl SupervisorHandle {
     /// Cancels by name with a wait limit and fail-fast queue admission.
     ///
     /// Fail-fast behavior applies only to queue admission.
-    /// Timeout and result behavior match [`cancel_by_label_with_timeout`](Self::cancel_by_label_with_timeout).
+    /// Timeout and result behavior match [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
     ///
     /// # Errors
     ///
-    /// Returns the errors from [`cancel_by_label_with_timeout`](Self::cancel_by_label_with_timeout).
+    /// Returns the errors from [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
     /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
-    pub async fn try_cancel_by_label_with_timeout(
+    pub async fn try_cancel_by_name_with_timeout(
         &self,
         name: &str,
         wait_for: Duration,
@@ -385,6 +405,53 @@ impl SupervisorHandle {
         self.core()
             .try_cancel_by_label_with_timeout(Arc::from(name), wait_for)
             .await
+    }
+
+    /// Compatibility alias for [`cancel_by_name`](Self::cancel_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`cancel_by_name`](Self::cancel_by_name).
+    pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.cancel_by_name(name).await
+    }
+
+    /// Compatibility alias for [`try_cancel_by_name`](Self::try_cancel_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`try_cancel_by_name`](Self::try_cancel_by_name).
+    pub async fn try_cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.try_cancel_by_name(name).await
+    }
+
+    /// Compatibility alias for [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from
+    /// [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
+    pub async fn cancel_by_label_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.cancel_by_name_with_timeout(name, wait_for).await
+    }
+
+    /// Compatibility alias for
+    /// [`try_cancel_by_name_with_timeout`](Self::try_cancel_by_name_with_timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from
+    /// [`try_cancel_by_name_with_timeout`](Self::try_cancel_by_name_with_timeout).
+    pub async fn try_cancel_by_label_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.try_cancel_by_name_with_timeout(name, wait_for).await
     }
 
     /// Cancels by identity and limits how long this caller waits for cleanup.
@@ -499,7 +566,7 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor has no controller.
-    /// - [`ControllerError::ThreadStartFailed`](crate::ControllerError::ThreadStartFailed) when destructor-isolation workers cannot start.
+    /// - [`ControllerError::ThreadStartFailed`](crate::ControllerError::ThreadStartFailed) when background cleanup workers cannot start.
     /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when the configured ownership limit is exhausted.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]

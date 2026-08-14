@@ -16,8 +16,9 @@
 //! running runtime
 //! ```
 //!
-//! With subscribers, construction starts the supervisor's destructor-isolation domain before reading subscriber metadata.
-//! Without subscribers, that domain stays dormant until the first task or controller ownership admission.
+//! With subscribers, construction starts background cleanup workers before reading subscriber metadata.
+//! These workers destroy retained user values outside Tokio runtime paths.
+//! Without subscribers, they stay dormant until the first task or controller ownership admission.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -281,13 +282,13 @@ impl SupervisorBuilder {
     /// # Errors
     ///
     /// - [`BuildError::ResourceLimitReached`] when the supervisor cannot own every configured subscriber.
-    /// - [`BuildError::ThreadStartFailed`] when the destructor-isolation domain cannot start its base worker set.
+    /// - [`BuildError::ThreadStartFailed`] when background cleanup workers cannot start.
     /// - [`BuildError::CapacityTooLarge`] when a runtime, controller, or subscriber capacity exceeds Tokio's structural limit.
     ///
     /// # Panics
     ///
-    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] reaches the caller after subscriber ownership
-    /// has entered destructor isolation.
+    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] reaches the caller after Taskvisor reserves
+    /// subscriber ownership for deferred cleanup.
     pub fn try_build(self) -> Result<Arc<Supervisor>, BuildError> {
         self.validate_configuration()?;
         let drop_domain = deferred_drop::DropDomain::unstarted(self.runtime.ownership_capacity());

@@ -6,9 +6,10 @@
 //! Unlike `remove`, cancellation then waits for the registry's shared completion signal.
 //!
 //! The returned boolean records whether this call made the stop claim. A caller that joins an existing claim
-//! waits for the same completion and returns `false`. A missing task returns`false` without a completion wait.
-//! Timeout variants start their timer after the registry decision. A timeout ends only that caller's wait; removal
-//! continues. Completion is logical registry cleanup. A force-aborted attempt can remain physically active under reaper ownership.
+//! waits for the same completion and returns `false`. A missing task returns `false` without a completion wait.
+//! Timeout variants start their timer after the registry decision. A timeout ends only that caller's wait;
+//! removal continues. Completion is logical registry cleanup.
+//! A force-aborted attempt can remain physically active afterward.
 
 use std::{sync::Arc, time::Duration};
 

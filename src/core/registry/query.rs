@@ -5,8 +5,9 @@
 //! Static run also waits here for membership to become empty. Queries read shared state directly.
 //! They do not pass through the command listener and do not drive lifecycle work.
 //!
-//! Membership includes registered and removing entries. An empty registry can still have a force-aborted attempt in the reaper.
-//! Activity queries combine both sources because they answer whether a task is physically in an attempt.
+//! Membership includes registered and removing entries. A force-aborted attempt can remain active
+//! after the registry becomes empty. Activity queries combine both sources because they answer
+//! whether a task is physically in an attempt.
 
 use std::sync::{Arc, atomic::Ordering};
 
@@ -46,7 +47,7 @@ impl Registry {
 
     /// Returns whether a label still owns a physical task attempt.
     ///
-    /// This checks both registry membership and the physical attempt reaper.
+    /// This checks registry activity and force-aborted attempts that remain active after removal.
     pub(in crate::core) async fn is_alive(&self, label: &str) -> bool {
         let state = self.state.read().await;
         let registered = state.by_label.get(label).is_some_and(|id| {
@@ -61,7 +62,7 @@ impl Registry {
 
     /// Returns sorted labels that still own a physical task attempt.
     ///
-    /// This combines registry membership with the physical attempt reaper.
+    /// This combines registry activity with force-aborted attempts that remain active after removal.
     pub(in crate::core) async fn alive_snapshot(&self) -> Vec<Arc<str>> {
         let state = self.state.read().await;
         let mut alive: Vec<_> = state

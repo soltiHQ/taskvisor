@@ -6,7 +6,7 @@
 //!
 //! Completion cleanup gets bounded bursts. The listener then gives command and control input an explicit turn.
 //! Runtime cancellation closes intake, drains buffered commands to direct decisions, claims remaining registered
-//! actors, and waits for removal owners. Joining the listener also closes the actor reaper coordinator.
+//! actors, and waits for removal owners. Joining the listener also closes the force-abort cleanup coordinator.
 
 use std::{
     future::Future,
@@ -79,7 +79,7 @@ impl Registry {
         reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }
 
-    /// Starts the listener and physical reaper coordinator once.
+    /// Starts the listener and force-abort cleanup coordinator once.
     ///
     /// # Panics
     ///

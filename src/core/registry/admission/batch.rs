@@ -1,7 +1,8 @@
 //! Commits a static task batch as one registry decision.
 //!
 //! Static run sends one [`RegistryCommand::AddBatch`](crate::core::registry::RegistryCommand::AddBatch)
-//! to the listener. This module rejects duplicate labels inside the batch and conflicts with registry or reaper ownership.
+//! to the listener. This module rejects duplicate labels inside the batch and conflicts with
+//! registry ownership or force-aborted attempts that have not physically exited.
 //! It also checks the registration limit for the complete batch.
 //!
 //! Validation runs before actor preparation and again under the state write lock. Rejection inserts no entries

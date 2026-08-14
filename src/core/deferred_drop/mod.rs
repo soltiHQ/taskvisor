@@ -2,8 +2,8 @@
 //!
 //! `SupervisorBuilder` creates one [`DropDomain`] for each supervisor. Runtime task admission, controller submission,
 //! and subscriber construction reserve this domain before Taskvisor accepts their user-owned values.
-//! Controller, registry, subscriber, and reaper paths carry its bundle until their final retained
-//! values are ready for destruction.
+//! Controller, registry, subscriber, and force-abort cleanup paths carry its bundle until their final
+//! retained values are ready for destruction.
 //!
 //! ```text
 //! runtime, controller, or builder

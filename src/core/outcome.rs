@@ -1,7 +1,7 @@
 //! Delivers the final result of watched work outside the best-effort event bus.
 //!
 //! A [`TaskWaiter`] follows one [`TaskId`] through a direct one-shot channel. For admitted work,
-//! the registry delivers a [`TaskOutcome`] after its join owner produces a terminal result
+//! the registry delivers a [`TaskOutcome`] after the managed actor produces a terminal result
 //! and registry membership is removed. Controller submissions can instead resolve
 //! as [`TaskOutcome::Rejected`] before the task body starts.
 //!
@@ -15,9 +15,9 @@
 //! ```
 //!
 //! Except for [`TaskOutcome::ForceAborted`], the registry joins the managed actor before delivering the outcome.
-//! A force-aborted actor can remain under reaper ownership until physical exit. Dropping the waiter does not
-//! cancel the work. This path is reliable while the process and runtime are alive; it is not durable storage
-//! across process termination.
+//! A force-aborted actor can remain physically active after the waiter resolves. Dropping the waiter does not
+//! cancel the work. This path is reliable while the process and runtime are alive;
+//! it is not durable storage across process termination.
 
 use std::sync::Arc;
 
@@ -85,6 +85,7 @@ impl TaskOutcomeKind {
     feature = "controller",
     doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
 )]
+///
 /// Events carry [`TaskOutcomeKind`] for best-effort observation.
 /// A [`TaskWaiter`] delivers this complete value directly.
 #[non_exhaustive]

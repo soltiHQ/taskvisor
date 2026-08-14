@@ -112,26 +112,34 @@
 //! ## Get results or observe events
 //!
 //! [`SupervisorHandle::add_and_watch`] returns a [`TaskWaiter`] for a direct final [`TaskOutcome`].
-//! Controller users can choose [`SupervisorHandle::submit_and_watch`]. A watched result does not
-//! depend on the lossy event path, but it is still in-memory and is not durable across process termination.
+//! A watched result does not depend on the lossy event path, but it is still in-memory and is not
+//! durable across process termination.
+#![cfg_attr(
+    feature = "controller",
+    doc = "Controller users can also choose [`SupervisorHandle::submit_and_watch`]."
+)]
 //!
 //! [`Event`] and [`Subscribe`] are for logs, metrics, tracing, and live diagnostics. The shared event bus
 //! and each subscriber queue are bounded. Event delivery is best-effort and must not drive application correctness.
-//!
-//! ## Coordinate work by key
-//!
-//! The default `controller` feature adds keyed admission before registry entry.
-//! Enable the controller for a supervisor with [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`].
-//!
-//! ```text
-//! ControllerSpec ──► controller slot
-//!                         ├── idle ──► registry admission
-//!                         └── busy ──► queue, replace, or reject
-//! ```
-//!
-//! A task name is the registry uniqueness key. A controller slot is the key used to coordinate competing submissions.
-//! Different task names can share a slot. Direct `add*` methods bypass this layer; `submit*` methods use it.
-//! See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
+#![cfg_attr(
+    feature = "controller",
+    doc = r#"
+## Coordinate work by key
+
+The default `controller` feature adds keyed admission before registry entry.
+Enable the controller for a supervisor with [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`].
+
+```text
+ControllerSpec ──► controller slot
+                        ├── idle ──► registry admission
+                        └── busy ──► queue, replace, or reject
+```
+
+A task name is the registry uniqueness key. A controller slot is the key used to coordinate competing submissions.
+Different task names can share a slot. Direct `add*` methods bypass this layer; `submit*` methods use it.
+See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
+"#
+)]
 //!
 //! ## Cancellation and shutdown boundary
 //!
@@ -167,7 +175,10 @@
 //! - [`tasks`] defines work, cancellation context, and task specifications.
 //! - [`policies`] defines restart and retry timing.
 //! - [`core`] exposes construction, runtime control, outcomes, and configuration.
-//! - [`controller`] defines optional keyed admission.
+#![cfg_attr(
+    feature = "controller",
+    doc = "- [`controller`] defines optional keyed admission."
+)]
 //! - [`events`] and [`subscribers`] define best-effort observability.
 //! - [`error`] maps the public error types to their API boundaries.
 //! - [`identity`] explains task IDs, names, and controller slots.

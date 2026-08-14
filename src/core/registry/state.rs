@@ -84,7 +84,7 @@ impl Handle {
     }
 }
 
-/// Couples raw registry teardown to the physical reaper.
+/// Keeps raw registry teardown connected to force-abort tracking.
 ///
 /// `Handle::join` is declared before this field.
 /// Ordinary field teardown first lets `ActorHandle::drop` register physical ownership.
@@ -95,7 +95,7 @@ pub(super) struct HandleCleanup {
     reaper: AttemptReaper,
     /// Release latch shared with the authoritative entry.
     completion: RemovalCompletion,
-    /// Reserved cleanup bundle extracted by the winning join owner.
+    /// Reserved cleanup bundle extracted by the winning removal claim.
     bundle: Option<DropBundle>,
 }
 
