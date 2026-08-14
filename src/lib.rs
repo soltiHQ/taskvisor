@@ -39,8 +39,8 @@
 //! }
 //! ```
 //!
-//! [`Supervisor::run`] accepts the complete static batch or rejects it. The method returns after
-//! the shared cleanup workflow, not with each task's outcome.
+//! [`Supervisor::run`] accepts the complete static batch or rejects it.
+//! The method returns after the shared cleanup workflow, not with each task's outcome.
 //! Use a watched dynamic add when application logic needs that result.
 //!
 //! ## Continue with a runnable example
