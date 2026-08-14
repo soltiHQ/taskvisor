@@ -1,9 +1,8 @@
 //! Provides an operational view of current controller slots.
 //!
 //! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot) reads slot owners,
-//! states, queue depths, and state ages directly from the admission engine.
-//! Use the result for status pages, metrics collection, diagnostics, and tests.
-//! It does not control admission or consume events.
+//! states, queue depths, and state ages directly from the admission engine. Use the result for status pages,
+//! metrics collection, diagnostics, and tests. It does not control admission or consume events.
 //!
 //! ```text
 //! controller admission engine

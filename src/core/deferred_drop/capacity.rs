@@ -241,8 +241,7 @@ impl CapacityBroker {
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid or impossible request, a closed broker,
-    /// or a full waiter queue.
+    /// Returns an error for an invalid or impossible request, a closed broker, or a full waiter queue.
     fn start_acquire(self: &Arc<Self>, units: usize) -> Result<CapacityStart, DropCapacityError> {
         if units == 0 || self.limit.is_some_and(|limit| units > limit.get()) {
             return Err(self.error());

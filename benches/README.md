@@ -1,128 +1,108 @@
-# Reading Taskvisor benchmarks
+# Taskvisor benchmarks
 
-Every suite prints a host and build header before Criterion starts. The case name states whether it
-uses a fresh unprewarmed supervisor, steady-state intake, a verified policy decision, or a complete
-task lifecycle.
+These benchmarks show how fast Taskvisor completes specific operations on the machine that runs them. 
+Each result states what was timed and what stayed outside the timer.
 
-After the statistical run, Taskvisor prints a color-aware performance snapshot with semantic units,
-amortized cost, whole-batch latency, the confidence interval, the exact timing boundary, and a bottom
-line. Completed managed-task cases receive the optional project interpretation. Lifecycle cases
-with other units stay neutral. Partial paths are never presented as completed-task throughput.
-Color follows terminal support, `NO_COLOR`, and Criterion's
-`--color auto|always|never` option; every badge remains readable without color.
+## Run the benchmarks
 
-## Criterion fields
-
-- `time` is wall time for one named operation or one whole named batch.
-- `thrpt` is the number of semantic units completed per second.
-- Criterion renders every semantic unit as `elem/s`. The final Taskvisor snapshot defines whether
-  one element is a completed task, accepted submission, verified rejection, snapshot call, or
-  add/cancel cycle.
-- With the suite's default Criterion confidence level, the three values in brackets are the 95%
-  confidence lower bound, point estimate, and 95% confidence upper bound.
-- `Performance has regressed`, `improved`, and `no change` compare with a stored local baseline.
-  They do not change the absolute `time` and `thrpt` values.
-
-For a batch case, divide `time` by the count in the case name to get amortized time per unit. This is
-not the latency observed by one task inside a concurrent or pipelined batch. Criterion already
-performs the inverse calculation for `thrpt`.
-
-| Rate | Amortized time per unit |
-|------|-----------------------|
-| 1 K/s | 1 ms |
-| 10 K/s | 100 µs |
-| 100 K/s | 10 µs |
-| 1 M/s | 1 µs |
-
-Example: a 50-task case at `1 ms` and `50 Kelem/s` completed the full 50-task batch in `1 ms`.
-Its amortized cost was `20 µs` per completed task.
-
-## Measurement boundaries
-
-| Case prefix | Timed boundary | Criterion element | Important exclusions |
-|-------------|----------------|-------------------|----------------------|
-| `lifecycle/cold/full_run` | Fresh `Supervisor` construction through one final outcome and shared cleanup | completed task | task value and Tokio runtime construction |
-| `throughput/cold/full_batch` | Fresh `Supervisor` construction through batch completion and shared cleanup; the CPU case runs 1,000 loop iterations per task | completed task | task values, subscriber value, and Tokio runtime construction |
-| `fanout/cold/full_batch` | Fresh `Supervisor` construction through 100 task completions, minimal counting callbacks, drain, and cleanup | completed task | task values, subscriber values, and Tokio runtime construction |
-| `dynamic/steady/sustained_registry_add` | Repeated prewarmed `add` calls through ownership admission and registry acceptance | accepted add call | supervisor startup, warmup, task construction, final drain, shutdown, and Tokio runtime construction; prior task lifecycles can apply backpressure |
-| `dynamic/steady/add_cancel` | One prewarmed add through terminal cancel confirmation | add/cancel cycle | supervisor startup, warmup, task construction, shutdown, and Tokio runtime construction |
-| `dynamic/steady/list_snapshot` | One registry snapshot with the named registered-task count | snapshot call | supervisor startup, registry prepopulation, shutdown, and Tokio runtime construction |
-| `dynamic/cold/add_shutdown` | First add through cleanup of the named task batch during shutdown | cleaned task | `Supervisor` construction/startup, task construction, and Tokio runtime construction |
-| `controller/cold/first_try_submit` | First caller-side `try_submit` on a fresh served supervisor | accepted intake | runtime and supervisor/controller startup, request construction, controller decision, task result, and shutdown |
-| `controller/steady/intake_try_submit` | Prewarmed caller-side `try_submit` burst | accepted intake | runtime and supervisor/controller startup, warmup, request construction, controller decisions, task results, and shutdown |
-| `controller/steady/drop_busy_rejection` | Watched intake through verified `SlotBusy` outcomes | verified rejection | runtime and supervisor/controller startup, owner setup/release/cleanup, and request construction |
-| `controller/steady/replace_busy_placement` | `N` watched Replace submissions through `N - 1` verified displaced outcomes and retention of the newest request | processed replacement | runtime and supervisor/controller startup, owner setup/release, request construction, and newest task completion |
-| `controller/steady/queue_one_slot` | Watched intake through final outcomes for one slot | completed task | runtime and supervisor/controller startup, warmup, request construction, and shutdown |
-| `controller/steady/queue_eight_slots` | Watched intake through final outcomes across eight slots | completed task | runtime and supervisor/controller startup, warmup, request construction, and shutdown |
-
-`current_thread` and `multi_thread` describe the Tokio runtime. The multi-thread runtime has four
-Tokio workers. Taskvisor can also own cleanup workers and subscriber callback threads in either case.
-
-`cold` means that the supervisor is fresh and unprewarmed. Its exact stopwatch boundary is
-case-specific and is listed in the table.
-
-## Optional project heuristic
-
-For full-lifecycle cases whose semantic unit is one completed managed task, this guide offers a
-descriptive scale:
-
-| Completed task lifecycles | Project interpretation |
-|---------------------------|------------------------|
-| below 10 K/s | below the high-throughput range |
-| 10 K/s to below 50 K/s | substantial lifecycle throughput |
-| 50 K/s to below 200 K/s | high-throughput territory |
-| 200 K/s and above | very-high-throughput territory |
-
-This is a Taskvisor project interpretation, not an industry standard, SLO, capacity promise, or
-production-readiness verdict. Do not apply it to intake, policy rejection, snapshot, or other partial
-boundaries. Application load tests still decide usable production capacity.
-
-## What the numbers can establish
-
-The results establish absolute latency and operation rate for the exact synthetic boundary on the
-machine that ran the suite. They let a reader distinguish, for example, one million accepted intake
-calls per second from one hundred thousand completed task lifecycles per second.
-
-They do not establish an application-wide capacity by themselves. Real task work, contention,
-subscriber behavior, cancellation, memory pressure, and required headroom belong to the application
-load test. Record the CPU model, operating system, Taskvisor revision, enabled features, and benchmark
-command when publishing results. The console header prints architecture, operating system, logical
-CPU count, and crate version; it cannot identify every build or host detail.
-If automatic CPU detection is unavailable, set `TASKVISOR_BENCH_CPU` before running the suite.
-
-For `controller/steady/intake_try_submit`, the `current_thread` case measures a producer burst while
-the controller cannot consume on that same thread. The `multi_thread` case can consume concurrently.
-
-## Commands
-
-Run every suite:
+Run all five benchmark suites with the colored Taskvisor report:
 
 ```bash
-cargo bench --all-features
+task rust:benchmark
 ```
 
-Print the cleanest product-facing snapshot while retaining statistical estimates:
+The equivalent Cargo command is:
 
 ```bash
-cargo bench --bench controller --features controller -- \
-  'controller/steady/queue_one_slot/current_thread/20_completed_tasks' \
-  --exact --quiet --color always
-```
-
-Run the comprehensive five-suite report:
-
-```bash
-cargo bench --all-features -- --quiet --color always
+cargo bench --bench '*' --features controller --locked -- --quiet --color always
 ```
 
 Run one suite:
 
 ```bash
-cargo bench --bench controller --features controller
+cargo bench --bench controller --features controller -- --color always
 ```
 
-Filter by a full or partial Criterion case name:
+Run matching cases from one suite:
 
 ```bash
 cargo bench --bench controller --features controller -- 'steady/queue_one_slot'
 ```
+
+## What each suite measures
+
+| Suite        | What it measures                                                              |
+|--------------|-------------------------------------------------------------------------------|
+| `lifecycle`  | One task from a fresh supervisor to its final result and cleanup.             |
+| `throughput` | Complete batches of instant tasks or tasks with small CPU work.               |
+| `fanout`     | Complete task batches with 0, 1, 4, or 8 subscribers.                         |
+| `dynamic`    | Adding, canceling, listing, and cleaning up tasks through `SupervisorHandle`. |
+| `controller` | Submission intake, queueing, replacement, rejection, and completed tasks.     |
+
+Case names use a few common labels:
+
+- `cold`: the case uses a fresh supervisor.
+- `steady`: Taskvisor is warmed up before timing starts.
+- `current_thread`: Tokio uses its current-thread runtime.
+- `multi_thread`: Tokio uses four worker threads.
+
+The runtime label describes Tokio only. Taskvisor may also use cleanup workers and subscriber threads.
+
+## How to read a result
+
+The Taskvisor snapshot translates Criterion output into named operations:
+
+Results with the same measured boundary share one card. Runtime and batch-size results appear as separate entries inside that card.
+
+- `Results` is the number of individual runtime and batch-size measurements.
+- `Groups` is the number of shared cards in the report.
+
+- `completed tasks/s` is the number of complete task lifecycles per second.
+- `amortized per completed task` is the batch time divided by the number of tasks.
+- `for the complete batch` is the measured wall time for the whole batch.
+- `95% CI` is the confidence interval reported by Criterion.
+- `Boundary` says where timing starts and ends.
+- `Outside` lists work that was not timed.
+
+Read `Boundary` and `Outside` before comparing two cases. An intake result measures accepted calls, not completed tasks. 
+A policy result measures verified controller decisions. A query result measures snapshot calls.
+
+For a batch, the report shows both total time and average time per item. 
+The average is not the latency of one task inside a concurrent batch.
+
+Criterion prints the generic unit `elem/s`. The Taskvisor snapshot replaces it with the real unit,
+such as completed tasks, accepted submissions, rejections, or snapshot calls.
+
+`Performance has regressed`, `improved`, and `no change` compare the result with a saved Criterion
+baseline. They do not change the absolute time or operation rate from the current run.
+
+In `controller/steady/intake_try_submit`, the current-thread case measures one producer burst. 
+The controller can consume submissions at the same time only in the multi-thread case.
+
+## Project guide
+
+For cases that measure one complete managed-task lifecycle, Taskvisor uses this reading guide:
+
+| Completed task lifecycles | Project reading                 |
+|---------------------------|---------------------------------|
+| Below 10 K/s              | Below the high-throughput range |
+| 10 K/s to below 50 K/s    | Substantial throughput          |
+| 50 K/s to below 200 K/s   | High-throughput range           |
+| 200 K/s and above         | Very-high-throughput range      |
+
+When every result in a card falls in the same range, the card prints one shared project reading.
+`VARIES BY RESULT` means that results in the card fall in different ranges. 
+`BAND EDGE` means that the 95% confidence interval crosses 10 K/s, 50 K/s, or 200 K/s. 
+It is not a benchmark failure.
+
+This guide applies only to complete managed-task lifecycles. 
+It does not apply to intake, policy, or query results. 
+It is a Taskvisor project guide, not an industry standard, SLO, certification, or production capacity promise.
+
+## What the result means
+
+A result describes the exact benchmark case on the machine that ran it. 
+It is useful for comparing Taskvisor operations and for finding the cost of a specific lifecycle boundary.
+
+It does not prove how much traffic an application can handle. 
+Real task work, contention, subscribers, cancellation, memory use, and safety headroom belong in an application load test.

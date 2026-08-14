@@ -1,7 +1,7 @@
 //! # Cold single-task lifecycle benchmarks
 //!
-//! Measures one fresh supervisor from construction through one final task outcome and shared
-//! cleanup. Task construction and Tokio runtime construction stay outside the stopwatch.
+//! Measures one fresh supervisor from construction through one final task outcome and shared cleanup.
+//! Task construction and Tokio runtime construction stay outside the stopwatch.
 //!
 //! Run with `cargo bench --bench lifecycle`.
 

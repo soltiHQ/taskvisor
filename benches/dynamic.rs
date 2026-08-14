@@ -1,7 +1,7 @@
 //! # Dynamic management benchmarks
 //!
-//! Measures checked `SupervisorHandle` operations against a served supervisor. Steady cases
-//! prewarm Taskvisor before timing. The cold churn case includes first ownership admission.
+//! Measures checked `SupervisorHandle` operations against a served supervisor.
+//! Steady cases prewarm Taskvisor before timing.
 //!
 //! Run with `cargo bench --bench dynamic`.
 

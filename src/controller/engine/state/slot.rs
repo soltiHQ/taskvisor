@@ -17,9 +17,9 @@
 //!                                                          └── completion ──► Idle
 //! ```
 //!
+//! Registry and completion transitions ignore stale task identities.
 //! `Terminating` returns to `Idle` only after physical completion.
 //! Every occupied phase carries its owner's [`TaskId`].
-//! Registry and completion transitions ignore stale task identities.
 
 use std::{collections::VecDeque, sync::Arc};
 

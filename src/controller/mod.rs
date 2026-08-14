@@ -83,7 +83,7 @@
 //! # Choose a submission API
 //!
 //! - Wait for intake capacity with [`SupervisorHandle::submit`](crate::SupervisorHandle::submit).
-//! - Fail fast when intake is full with [`SupervisorHandle::try_submit`](crate::SupervisorHandle::try_submit).
+//! - Fail fast when intake is full of [`SupervisorHandle::try_submit`](crate::SupervisorHandle::try_submit).
 //! - Receive rejection or the final task result with [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch).
 //! - Fail fast and receive that result with [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch).
 //! - Allocate the `TaskId` before intake or events with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
@@ -93,8 +93,8 @@
 //! [`TaskWaiter`](crate::TaskWaiter) delivers that result directly; lifecycle events remain a best-effort observability path.
 //!
 //! During shutdown, buffered and controller-owned pending submissions are rejected. A watched pending submission reports
-//! [`RejectionKind::ControllerShuttingDown`](crate::RejectionKind::ControllerShuttingDown).
-//! Work already accepted by the runtime follows the normal runtime shutdown process.
+//! [`RejectionKind::ControllerShuttingDown`](crate::RejectionKind::ControllerShuttingDown). Work already accepted by
+//! the runtime follows the normal runtime shutdown process.
 //!
 //! # Operations
 //!

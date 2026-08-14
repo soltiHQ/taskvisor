@@ -1,7 +1,7 @@
 //! # Cold batch lifecycle throughput
 //!
-//! Measures complete static batches on fresh supervisors. The stopwatch includes supervisor
-//! construction, first ownership admission, task completion, and shared shutdown cleanup.
+//! Measures complete static batches on fresh supervisors.
+//! The stopwatch includes supervisor construction, first ownership admission, task completion, and shared shutdown cleanup.
 //!
 //! Run with `cargo bench --bench throughput`.
 

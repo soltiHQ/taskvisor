@@ -1,7 +1,7 @@
 //! # Cold subscriber fan-out benchmarks
 //!
-//! Measures complete batches of 100 instant tasks on fresh supervisors with 0, 1, 4, or 8
-//! minimal counting subscribers. Supervisor construction is inside the stopwatch for every count.
+//! Measures complete batches of 100 instant tasks on fresh supervisors with 0, 1, 4, or 8 minimal counting subscribers.
+//! Supervisor construction is inside the stopwatch for every count.
 //!
 //! Run with `cargo bench --bench fanout`.
 

@@ -97,8 +97,7 @@ impl WorkerQueue {
     ///
     /// # Errors
     ///
-    /// Returns an error when a core thread cannot be created or does not finish
-    /// its startup handshake.
+    /// Returns an error when a core thread cannot be created or does not finish its startup handshake.
     pub(super) fn start_core(self: &Arc<Self>, count: usize) -> Result<(), DropStartError> {
         let mut launchers = Vec::with_capacity(count);
         for worker in 0..count {
@@ -381,8 +380,7 @@ pub(in crate::core::deferred_drop) fn system_spawner() -> Arc<WorkerSpawner> {
 
 /// Runs one worker under an outer boundary for unexpected internal panics.
 ///
-/// An unexpected panic payload is retained permanently before queue accounting
-/// replaces the worker when needed.
+/// An unexpected panic payload is retained permanently before queue accounting replaces the worker when needed.
 pub(in crate::core::deferred_drop) fn worker_loop(launch: WorkerLaunch) {
     let queue = Arc::clone(&launch.queue);
     let core = launch.core;

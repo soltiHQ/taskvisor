@@ -1,8 +1,7 @@
 //! # Controller admission and lifecycle benchmarks
 //!
-//! Separates first-use startup, caller-side intake, verified policy decisions, and complete
-//! controller-managed task lifecycles. Every measured operation is checked; rejected, timed-out,
-//! or incomplete work cannot silently enter the statistics.
+//! Separates first-use startup, caller-side intake, verified policy decisions, and complete controller-managed task lifecycles.
+//! Every measured operation is checked; rejected, timed-out, or incomplete work cannot silently enter the statistics.
 //!
 //! Run with `cargo bench --bench controller --features controller`.
 
@@ -175,7 +174,7 @@ fn held_owner_task(
 
 async fn expect_within<F, T>(label: &str, future: F) -> T
 where
-    F: std::future::Future<Output = T>,
+    F: Future<Output = T>,
 {
     tokio::time::timeout(Duration::from_secs(10), future)
         .await

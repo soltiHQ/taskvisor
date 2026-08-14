@@ -84,12 +84,12 @@ impl ControllerError {
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
+            ControllerError::ThreadStartFailed { .. } => "controller_thread_start_failed",
+            ControllerError::ResourceLimit { .. } => "controller_resource_limit",
             ControllerError::AlreadyStarted => "controller_already_started",
             ControllerError::NotConfigured => "controller_not_configured",
             ControllerError::Closed => "controller_closed",
             ControllerError::Full => "controller_full",
-            ControllerError::ResourceLimit { .. } => "controller_resource_limit",
-            ControllerError::ThreadStartFailed { .. } => "controller_thread_start_failed",
         }
     }
 }

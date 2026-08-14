@@ -89,8 +89,7 @@ impl DropExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error when the batch is invalid, admission closes, or the
-    /// complete batch can no longer be granted.
+    /// Returns an error when the batch is invalid, admission closes, or the complete batch can no longer be granted.
     #[cfg(test)]
     pub(super) async fn reserve_many(
         self: &Arc<Self>,
@@ -107,8 +106,7 @@ impl DropExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error when the batch is invalid, admission is closed, or the
-    /// complete batch is not immediately available.
+    /// Returns an error when the batch is invalid, admission is closed, or the complete batch is not immediately available.
     pub(super) fn try_reserve_many(
         self: &Arc<Self>,
         count: usize,
@@ -138,8 +136,7 @@ impl DropExecutor {
 
     /// Enqueues one charged batch for isolated destruction.
     ///
-    /// If the worker queue is closed, this closes capacity admission and
-    /// retains the batch permanently.
+    /// If the worker queue is closed, this closes capacity admission and retains the batch permanently.
     pub(super) fn submit(&self, batch: DropBatch) {
         if let Err(batch) = self.workers.submit(batch) {
             self.capacity.close();

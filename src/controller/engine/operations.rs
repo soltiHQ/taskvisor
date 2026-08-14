@@ -1,7 +1,8 @@
 //! In-loop operations tracked by the controller driver.
 //!
-//! The lifecycle driver polls registry capacity, admission replies, completion, removal, and identity work
-//! inside the serialized controller task. This keeps state transitions in one loop without spawning a Tokio task per operation.
+//! The lifecycle driver polls registry capacity, admission replies, completion,
+//! removal, and identity work inside the serialized controller task.
+//! This keeps state transitions in one loop without spawning a Tokio task per operation.
 
 use std::{
     collections::VecDeque,

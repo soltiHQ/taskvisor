@@ -40,8 +40,8 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 /// # How limits appear to callers
 ///
 /// Async submit methods wait when the ordered command queue is full. Their fail-fast `try_*` forms
-/// return [`ControllerError::Full`](crate::ControllerError::Full).
-/// Admission limits are checked later. A watched submit reports them through [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected). A full slot queue
+/// return [`ControllerError::Full`](crate::ControllerError::Full).  Admission limits are checked later.
+/// A watched submit reports them through [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected). A full slot queue
 /// uses [`RejectionKind::QueueFull`](crate::RejectionKind::QueueFull). The admission, slot-count, and total-pending
 /// budgets use [`RejectionKind::ResourceLimit`](crate::RejectionKind::ResourceLimit).
 ///
@@ -146,7 +146,8 @@ impl ControllerConfig {
 
     /// Returns the per-slot pending limit checked by `Queue` submissions.
     ///
-    /// The owner is excluded. A replacement head is included. `Replace` does not use this limit.
+    /// The owner is excluded. A replacement head is included.
+    /// `Replace` does not use this limit.
     #[must_use]
     pub const fn max_slot_queue(&self) -> usize {
         self.max_slot_queue

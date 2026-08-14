@@ -28,8 +28,8 @@ impl Scope {
     const fn badge(self) -> &'static str {
         match self {
             Self::Lifecycle => "FULL LIFECYCLE",
-            Self::Intake => "INTAKE ONLY",
             Self::Policy => "POLICY DECISION",
+            Self::Intake => "INTAKE ONLY",
             Self::Query => "QUERY",
         }
     }
@@ -37,9 +37,9 @@ impl Scope {
     const fn color(self) -> AnsiColor {
         match self {
             Self::Lifecycle => AnsiColor::BrightGreen,
-            Self::Intake => AnsiColor::BrightBlue,
             Self::Policy => AnsiColor::BrightYellow,
             Self::Query => AnsiColor::BrightMagenta,
+            Self::Intake => AnsiColor::BrightBlue,
         }
     }
 }
@@ -307,6 +307,11 @@ struct Observation {
     time: Estimate,
 }
 
+struct ObservationGroup<'a> {
+    family: CaseFamily,
+    observations: Vec<&'a Observation>,
+}
+
 #[derive(PartialEq, Eq)]
 struct SavedEstimateState {
     modified: SystemTime,
@@ -359,14 +364,17 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     if observations.is_empty() {
         return;
     }
+    let groups = group_observations(&observations);
 
     let cyan = style(AnsiColor::BrightCyan, true);
+    let red = style(AnsiColor::BrightRed, true);
     let dim = Style::new().dimmed();
     let mut out = output();
     let title = format!("TASKVISOR PERFORMANCE SNAPSHOT · {}", suite.to_uppercase());
     writeln!(out).ok();
     write_header_top(&mut out, &title, cyan);
-    write_header_row(&mut out, "Cases", &observations.len().to_string(), cyan);
+    write_header_row(&mut out, "Results", &observations.len().to_string(), cyan);
+    write_header_row(&mut out, "Groups", &groups.len().to_string(), cyan);
     write_header_row(
         &mut out,
         "Source",
@@ -376,9 +384,12 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     write_header_bottom(&mut out, cyan);
     writeln!(out).ok();
 
+    for group in &groups {
+        print_observation_group(&mut out, group);
+    }
+
     let mut lifecycle_rates = Vec::new();
     for observation in &observations {
-        print_observation(&mut out, observation);
         if observation.case.family.interpretation == Interpretation::ManagedTaskLifecycle {
             lifecycle_rates.push((
                 rate(observation.units, observation.time.point_estimate),
@@ -420,23 +431,13 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
         let reading = if let [(_, low, high)] = lifecycle_rates.as_slice() {
             lifecycle_grade(*low, *high).label.to_ascii_lowercase()
         } else {
-            "see the CI-aware label on each lifecycle case".to_owned()
+            "see the CI-aware summary in each lifecycle group".to_owned()
         };
         writeln!(out, "  Project reading     {reading}").ok();
     }
     writeln!(
         out,
-        "  Other measurements  reported separately; never mixed into managed-task throughput"
-    )
-    .ok();
-    writeln!(
-        out,
         "  Validation          every reported case completed without assertion failure"
-    )
-    .ok();
-    writeln!(
-        out,
-        "  Host conditions     {dim}background load and power mode are not verified by this reporter{dim:#}"
     )
     .ok();
     if noplot_requested() {
@@ -445,7 +446,7 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
         let report_path = report_path_for_display(&root);
         writeln!(
             out,
-            "  HTML report         {}",
+            "{red}  HTML report         {}{red:#}",
             report_path.display()
         )
         .ok();
@@ -456,6 +457,24 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     )
     .ok();
     writeln!(out).ok();
+}
+
+fn group_observations(observations: &[Observation]) -> Vec<ObservationGroup<'_>> {
+    let mut groups: Vec<ObservationGroup<'_>> = Vec::new();
+    for observation in observations {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.family.group_id == observation.case.family.group_id)
+        {
+            group.observations.push(observation);
+        } else {
+            groups.push(ObservationGroup {
+                family: observation.case.family,
+                observations: vec![observation],
+            });
+        }
+    }
+    groups
 }
 
 fn load_observation(
@@ -554,10 +573,122 @@ fn collect_benchmark_files(root: &Path, files: &mut Vec<PathBuf>) -> std::io::Re
     Ok(())
 }
 
-fn print_observation(out: &mut AutoStream<std::io::Stdout>, observation: &Observation) {
-    let family = observation.case.family;
+fn print_observation_group(out: &mut AutoStream<std::io::Stdout>, group: &ObservationGroup<'_>) {
+    let family = group.family;
     let accent = style(family.scope.color(), true);
     let dim = Style::new().dimmed();
+
+    writeln!(
+        out,
+        "{accent}┌─ ● MEASURED · {} · {}{accent:#}",
+        family.scope.badge(),
+        family.title,
+    )
+    .ok();
+    writeln!(out, "{accent}│{accent:#}").ok();
+
+    for (index, observation) in group.observations.iter().enumerate() {
+        let is_last = index + 1 == group.observations.len();
+        print_observation_result(out, observation, is_last);
+        if !is_last {
+            writeln!(out, "{accent}│{accent:#} {accent}│{accent:#}").ok();
+        }
+    }
+
+    writeln!(out, "{accent}│{accent:#}").ok();
+    write_wrapped_field(out, accent, "Boundary: ", family.boundary, None);
+    write_wrapped_field(out, accent, "Outside:  ", family.outside, Some(dim));
+
+    print_group_interpretation(out, group, accent, dim);
+    writeln!(out, "{accent}└{}{accent:#}", "─".repeat(REPORT_WIDTH - 1),).ok();
+    writeln!(out).ok();
+}
+
+fn print_group_interpretation(
+    out: &mut AutoStream<std::io::Stdout>,
+    group: &ObservationGroup<'_>,
+    accent: Style,
+    dim: Style,
+) {
+    let family = group.family;
+    writeln!(out, "{accent}│{accent:#}").ok();
+    if family.interpretation == Interpretation::ManagedTaskLifecycle {
+        let grades: Vec<_> = group
+            .observations
+            .iter()
+            .map(|observation| {
+                let low_rate = rate(
+                    observation.units,
+                    observation.time.confidence_interval.upper_bound,
+                );
+                let high_rate = rate(
+                    observation.units,
+                    observation.time.confidence_interval.lower_bound,
+                );
+                (*observation, lifecycle_grade(low_rate, high_rate))
+            })
+            .collect();
+        let first = &grades[0].1;
+        let all_equal = grades
+            .iter()
+            .all(|(_, grade)| grade.label == first.label && grade.reference == first.reference);
+
+        if all_equal {
+            let grade_style = style(first.color, true);
+            writeln!(
+                out,
+                "{accent}│{accent:#} {grade_style}◆ PROJECT HEURISTIC · {}{grade_style:#}",
+                first.label,
+            )
+            .ok();
+            writeln!(out, "{accent}│{accent:#} Project band: {}", first.reference).ok();
+        } else {
+            let yellow = style(AnsiColor::BrightYellow, true);
+            writeln!(
+                out,
+                "{accent}│{accent:#} {yellow}◆ PROJECT HEURISTIC · VARIES BY RESULT{yellow:#}"
+            )
+            .ok();
+            for (observation, grade) in grades {
+                let grade_style = style(grade.color, true);
+                write_wrapped_field(
+                    out,
+                    accent,
+                    "  ",
+                    &format!("{}: {}", observation_details(observation), grade.label),
+                    Some(grade_style),
+                );
+            }
+        }
+        writeln!(
+            out,
+            "{accent}│{accent:#} Reference uses complete managed-task lifecycles only."
+        )
+        .ok();
+    } else if family.scope == Scope::Lifecycle {
+        writeln!(
+            out,
+            "{accent}│{accent:#} {dim}No project band: this lifecycle uses a different semantic unit.{dim:#}"
+        )
+        .ok();
+    } else {
+        writeln!(
+            out,
+            "{accent}│{accent:#} {dim}No lifecycle grade: this is not completed-task throughput.{dim:#}"
+        )
+        .ok();
+    }
+}
+
+fn print_observation_result(
+    out: &mut AutoStream<std::io::Stdout>,
+    observation: &Observation,
+    is_last: bool,
+) {
+    let family = observation.case.family;
+    let accent = style(family.scope.color(), true);
+    let branch = if is_last { "└─" } else { "├─" };
+    let connector = if is_last { " " } else { "│" };
     let point_rate = rate(observation.units, observation.time.point_estimate);
     let low_rate = rate(
         observation.units,
@@ -568,33 +699,16 @@ fn print_observation(out: &mut AutoStream<std::io::Stdout>, observation: &Observ
         observation.time.confidence_interval.lower_bound,
     );
     let unit_ns = observation.time.point_estimate / observation.units as f64;
-    let details = observation.value_str.as_deref().map_or_else(
-        || display_runtime(&observation.function_id),
-        |value| {
-            format!(
-                "{} · {}",
-                display_runtime(&observation.function_id),
-                humanize(value)
-            )
-        },
-    );
+    let details = observation_details(observation);
 
-    writeln!(
+    writeln!(out, "{accent}│ {branch} {details}{accent:#}").ok();
+    write_observation_line(
         out,
-        "{accent}┌─ ● MEASURED · {} · {}{accent:#}",
-        family.scope.badge(),
-        family.title,
-    )
-    .ok();
-    writeln!(out, "{accent}│{accent:#} {details}").ok();
-    writeln!(out, "{accent}│{accent:#}").ok();
-    writeln!(
-        out,
-        "{accent}│ {} {}/s{accent:#}",
-        format_rate(point_rate),
-        family.unit_plural,
-    )
-    .ok();
+        accent,
+        connector,
+        &format!("{} {}/s", format_rate(point_rate), family.unit_plural),
+        Some(accent),
+    );
     let readable_rate = if family.scope == Scope::Lifecycle {
         format!(
             "{} {} each second across this measured lifecycle",
@@ -608,76 +722,83 @@ fn print_observation(out: &mut AutoStream<std::io::Stdout>, observation: &Observ
             family.unit_plural,
         )
     };
-    write_wrapped_field(out, accent, "≈ ", &readable_rate, None);
+    write_observation_line(out, accent, connector, &format!("≈ {readable_rate}"), None);
     let cost_label = if observation.units > 1 {
         "amortized per"
     } else {
         "per"
     };
-    writeln!(
+    write_observation_line(
         out,
-        "{accent}│{accent:#} {} {cost_label} {}",
-        format_duration(unit_ns),
-        family.unit_singular,
-    )
-    .ok();
+        accent,
+        connector,
+        &format!(
+            "{} {cost_label} {}",
+            format_duration(unit_ns),
+            family.unit_singular,
+        ),
+        None,
+    );
     if observation.units > 1 {
         let unit_label =
             pluralize_for_count(family.unit_singular, family.unit_plural, observation.units);
-        writeln!(
+        write_observation_line(
             out,
-            "{accent}│{accent:#} {} for the complete batch of {} {}",
-            format_duration(observation.time.point_estimate),
-            observation.units,
-            unit_label,
-        )
-        .ok();
+            accent,
+            connector,
+            &format!(
+                "{} for the complete batch of {} {}",
+                format_duration(observation.time.point_estimate),
+                observation.units,
+                unit_label,
+            ),
+            None,
+        );
     }
-    writeln!(
+    write_observation_line(
         out,
-        "{accent}│{accent:#} {:.0}% CI: {}–{} {}/s",
-        observation.time.confidence_interval.confidence_level * 100.0,
-        format_rate(low_rate),
-        format_rate(high_rate),
-        family.unit_plural,
-    )
-    .ok();
-    write_wrapped_field(out, accent, "Boundary: ", family.boundary, None);
-    write_wrapped_field(out, accent, "Outside:  ", family.outside, Some(dim));
+        accent,
+        connector,
+        &format!(
+            "{:.0}% CI: {}–{} {}/s",
+            observation.time.confidence_interval.confidence_level * 100.0,
+            format_rate(low_rate),
+            format_rate(high_rate),
+            family.unit_plural,
+        ),
+        None,
+    );
+}
 
-    if family.interpretation == Interpretation::ManagedTaskLifecycle {
-        let grade = lifecycle_grade(low_rate, high_rate);
-        let grade_style = style(grade.color, true);
-        writeln!(out, "{accent}│{accent:#}").ok();
-        writeln!(
-            out,
-            "{accent}│{accent:#} {grade_style}◆ PROJECT HEURISTIC · {}{grade_style:#}",
-            grade.label,
-        )
-        .ok();
-        writeln!(out, "{accent}│{accent:#} Project band: {}", grade.reference).ok();
-        writeln!(
-            out,
-            "{accent}│{accent:#} Reference uses complete managed-task lifecycles only."
-        )
-        .ok();
-    } else if family.scope == Scope::Lifecycle {
-        writeln!(out, "{accent}│{accent:#}").ok();
-        writeln!(
-            out,
-            "{accent}│{accent:#} {dim}No project band: this lifecycle uses a different semantic unit.{dim:#}"
-        )
-        .ok();
-    } else {
-        writeln!(out, "{accent}│{accent:#}").ok();
-        writeln!(
-            out,
-            "{accent}│{accent:#} {dim}No lifecycle grade: this is not completed-task throughput.{dim:#}"
-        )
-        .ok();
+fn observation_details(observation: &Observation) -> String {
+    observation.value_str.as_deref().map_or_else(
+        || display_runtime(&observation.function_id),
+        |value| {
+            format!(
+                "{} · {}",
+                display_runtime(&observation.function_id),
+                humanize(value)
+            )
+        },
+    )
+}
+
+fn write_observation_line(
+    out: &mut AutoStream<std::io::Stdout>,
+    accent: Style,
+    connector: &str,
+    value: &str,
+    value_style: Option<Style>,
+) {
+    let lines = wrap_words(value, REPORT_WIDTH.saturating_sub(6).max(20));
+    for line in lines {
+        let prefix = format!("{accent}│{accent:#} {accent}{connector}{accent:#}  ");
+        if let Some(style) = value_style {
+            writeln!(out, "{prefix}{style}{line}{style:#}").ok();
+        } else {
+            writeln!(out, "{prefix}{line}").ok();
+        }
     }
-    writeln!(out, "{accent}└{}{accent:#}", "─".repeat(REPORT_WIDTH - 1),).ok();
-    writeln!(out).ok();
 }
 
 struct Grade {

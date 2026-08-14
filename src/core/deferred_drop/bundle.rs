@@ -233,8 +233,8 @@ impl Drop for DropBundle {
 
 /// Moves task data together with its reserved cleanup ownership.
 ///
-/// `value` is declared first. Defensive field destruction releases
-/// its task reference while `cleanup` still retains the final reference.
+/// `value` is declared first.
+/// Defensive field destruction releases its task reference while `cleanup` still retains the final reference.
 pub(crate) struct OwnedTask<T> {
     /// Task or controller data carried through the internal hand-off.
     pub(crate) value: T,

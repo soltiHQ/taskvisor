@@ -1,8 +1,8 @@
 //! Builds one keyed admission request for the controller.
 //!
 //! [`ControllerSpec`] combines the work described by [`TaskSpec`] with a slot and a busy-slot [`AdmissionPolicy`].
-//! Controller `submit*` methods consume this value.
-//! Direct runtime `add*` methods accept `TaskSpec` instead and bypass keyed admission.
+//! Controller `submit*` methods consume this value. Direct runtime `add*` methods accept `TaskSpec`
+//! instead and bypass keyed admission.
 //!
 //! See the [`controller`](crate::controller) module for the complete user flow.
 

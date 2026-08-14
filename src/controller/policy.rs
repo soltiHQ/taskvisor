@@ -21,7 +21,8 @@
 
 /// The conflict policy for one controller submission.
 ///
-/// The policy does not change task execution settings in [`TaskSpec`](crate::TaskSpec). It only controls admission to the slot.
+/// The policy does not change task execution settings in [`TaskSpec`](crate::TaskSpec).
+/// It only controls admission to the slot.
 ///
 /// Choose [`Queue`](Self::Queue) when every item should be considered in FIFO order.
 /// Choose [`Replace`](Self::Replace) when the next item should contain the newest value.
@@ -34,8 +35,8 @@ pub enum AdmissionPolicy {
     /// Rejects new work while the slot has an owner.
     ///
     /// The task body does not start. The current owner and existing queue stay unchanged.
-    /// A watched submission resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) with
-    /// [`RejectionKind::SlotBusy`](crate::RejectionKind::SlotBusy).
+    /// A watched submission resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
+    /// with [`RejectionKind::SlotBusy`](crate::RejectionKind::SlotBusy).
     DropIfRunning,
 
     /// Makes this submission the next candidate and retires the current owner.
@@ -43,15 +44,16 @@ pub enum AdmissionPolicy {
     /// On a busy slot, this submission creates or replaces the queue head. Repeated replacements retain only the newest head.
     /// FIFO items behind the head keep their order; `Replace` does not clear the entire queue.
     ///
-    /// A registered owner receives a removal request. When registry admission is still pending, the controller waits for
-    /// that decision and orders removal only after acceptance. The replacement starts after registry cleanup and physical release of the owner.
+    /// A registered owner receives a removal request. When registry admission is still pending,
+    /// the controller waits for that decision and orders removal only after acceptance.
+    /// The replacement starts after registry cleanup and physical release of the owner.
     ///
     /// Replacement has no separate wait timeout. While physical release is pending, snapshots report the slot as
     /// [`SlotStatusKind::Terminating`](crate::SlotStatusKind::Terminating).
     ///
     /// This policy does not use [`ControllerConfig::max_slot_queue`](crate::ControllerConfig::max_slot_queue).
-    /// Creating a new queue head can still hit the aggregate pending limit. A displaced watched head resolves with
-    /// [`RejectionKind::SupersededByReplace`](crate::RejectionKind::SupersededByReplace).
+    /// Creating a new queue head can still hit the aggregate pending limit.
+    /// A displaced watched head resolves with [`RejectionKind::SupersededByReplace`](crate::RejectionKind::SupersededByReplace).
     Replace,
 
     /// Appends new work to the slot's FIFO queue.
