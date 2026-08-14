@@ -1,8 +1,7 @@
 //! # Taskvisor
 //!
-//! Taskvisor supervises in-process Tokio tasks that need retries, cancellation, final outcomes,
-//! or coordinated shutdown. Its optional controller resolves competing work independently per
-//! application key: queue it, replace older work, or reject it.
+//! Taskvisor supervises in-process Tokio tasks that need retries, cancellation, final outcomes, or coordinated shutdown.
+//! Its optional controller applies queue, replace, or reject policy per application key. Supervisor-wide limits still apply.
 //!
 //! ## Check the fit
 //!
@@ -45,6 +44,7 @@
 //!
 //! ## Continue with a runnable example
 //!
+//! The [user guide] explains the application workflow from task definition through production boundaries.
 //! The [examples guide] includes the learning path, commands, feature flags, and stop behavior.
 //!
 //! - Foundations: [basic], [task type], [graceful worker], [application shutdown], [periodic],
@@ -53,6 +53,7 @@
 //! - Observability: [custom subscriber], [logging], [tracing], and [metrics].
 //! - Keyed admission: [controller slots], [controller admission], and [tenant sync].
 //!
+//! [user guide]: https://github.com/soltiHQ/taskvisor/blob/main/guide.md
 //! [examples guide]: https://github.com/soltiHQ/taskvisor/blob/main/examples/README.md
 //! [basic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs
 //! [task type]: https://github.com/soltiHQ/taskvisor/blob/main/examples/task_type.rs
@@ -135,7 +136,7 @@ ControllerSpec ──► controller slot
                         └── busy ──► queue, replace, or reject
 ```
 
-A task name is the registry uniqueness key. A controller slot is the key used to coordinate competing submissions.
+A task name is the registry uniqueness key inside one supervisor. A controller slot is the key used to coordinate competing submissions.
 Different task names can share a slot. Direct `add*` methods bypass this layer; `submit*` methods use it.
 See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 "#
@@ -203,6 +204,11 @@ See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+/// Compiles runnable Rust code blocks in `guide.md` as doctests.
+#[cfg(all(doctest, feature = "controller"))]
+#[doc = include_str!("../guide.md")]
+struct GuideDoctests;
 
 pub mod core;
 pub use core::{

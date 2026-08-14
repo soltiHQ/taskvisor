@@ -1,14 +1,14 @@
 # Taskvisor contributor map
 
-This document is the entry point for contributors and reviewers. 
+This document is the entry point for contributors and reviewers.
 It explains what each part of the project owns, how the parts connect, and where to begin a change.
 
-For application usage, start with the [crate documentation](https://docs.rs/taskvisor), the [README](../README.md), and the [examples guide](../examples/README.md).
+For application usage, start with the [README](../README.md), the [user guide](../guide.md), the [crate documentation](https://docs.rs/taskvisor), and the [examples guide](../examples/README.md).
 Exact contracts live in the Rust source and its module-level documentation.
 
 ## Architecture at a glance
 
-All registry-admitted tasks share the same execution path. 
+All registry-admitted tasks share the same execution path.
 The optional controller adds one admission step before the registry and can reject work without handing it off.
 
 ```text
@@ -27,8 +27,8 @@ terminal user values ──► deferred cleanup domain
 ```
 
 `run*` means `run`, `run_until`, or `run_with_os_signals`. These methods manage an initial batch.
-`serve` returns a `SupervisorHandle` for dynamic management. 
-The handle exposes `add*`, `submit*`, and `prepare_submission`. 
+`serve` returns a `SupervisorHandle` for dynamic management.
+The handle exposes `add*`, `submit*`, and `prepare_submission`.
 A `PreparedSubmission` exposes its own `submit*` methods for the reserved `TaskId`.
 
 `SupervisorCore` connects the runtime components. The registry owns task membership.
@@ -84,7 +84,7 @@ Files outside `src/` provide executable context:
 
 ### 1. Build and start
 
-`SupervisorBuilder` combines `SupervisorConfig`, `TaskDefaults`, subscribers, the cleanup ownership domain, and an optional controller. 
+`SupervisorBuilder` combines `SupervisorConfig`, `TaskDefaults`, subscribers, the cleanup ownership domain, and an optional controller.
 It returns a `Supervisor` around the shared runtime core.
 
 `Supervisor::run`, `Supervisor::run_until`, and `Supervisor::run_with_os_signals` supply an initial task batch.
@@ -102,8 +102,8 @@ attempt result ──► actor policy ────────► stop, retry, o
 actor exit ──────► registry removal ────► optional watched TaskOutcome
 ```
 
-Registry admission resolves inherited `TaskDefaults` and indexes the task ID and name. 
-The actor owns restart policy, retry counting, and delays between attempts. 
+Registry admission resolves inherited `TaskDefaults` and indexes the task ID and name.
+The actor owns restart policy, retry counting, and delays between attempts.
 The runner owns one attempt, including timeout and panic capture.
 
 When the actor ends, registry removal owns terminal classification and watched outcome delivery.
@@ -130,7 +130,7 @@ The controller owns ordered commands and pending payloads. Registry decisions an
 Events do not. Start with [`controller/mod.rs`](controller/mod.rs) for the public contract and [`controller/engine/mod.rs`](controller/engine/mod.rs) for implementation.
 
 With a controller configured, cancel and remove operations by `TaskId` pass through the controller before the registry.
-This lets them reach queued submissions and preserves controller command order. 
+This lets them reach queued submissions and preserves controller command order.
 `cancel_by_name` and `remove_by_name` target registered work because queued submissions do not own a registered name.
 
 ### 4. Return results or publish observations
@@ -168,9 +168,9 @@ shared coordinator ──► close intake ────────────�
 `run_with_os_signals` is the only entry point that installs Taskvisor's operating-system signal listeners.
 The shared coordinator caches one result for all callers.
 
-The grace verdict reports whether registry actors and pending removals drained in time. 
-It does not promise that every physical callback or destructor has finished. 
-Taskvisor may keep owning a force-aborted actor until its physical attempt exits. 
+The grace verdict reports whether registry actors and pending removals drained in time.
+It does not promise that every physical callback or destructor has finished.
+Taskvisor may keep owning a force-aborted actor until its physical attempt exits.
 Remaining retained task and subscriber values move to [`core/deferred_drop/`](core/deferred_drop), where blocking or panicking destructors are isolated from runtime paths.
 
 ## Find the code for a change
@@ -190,7 +190,7 @@ Remaining retained task and subscriber values move to [`core/deferred_drop/`](co
 | Shared shutdown order or grace behavior          | [`core/runtime/shutdown_workflow/`](core/runtime/shutdown_workflow), [`core/runtime/lifecycle/`](core/runtime/lifecycle), [`core/registry/removal/`](core/registry/removal), [`controller/engine/lifecycle/shutdown.rs`](controller/engine/lifecycle/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |
 | Operating-system signal handling                 | [`core/shutdown.rs`](core/shutdown.rs), [`core/supervisor.rs`](core/supervisor.rs)                                                                                                                                                                                | [`tests/signal_ownership.rs`](../tests/signal_ownership.rs)                                                                           |
 | Ownership limits or deferred cleanup             | [`core/config.rs`](core/config.rs), [`core/builder.rs`](core/builder.rs), [`core/deferred_drop/`](core/deferred_drop), [`core/registry/removal/`](core/registry/removal)                                                                                          | [`tests/ownership.rs`](../tests/ownership.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                            |
-| User-facing documentation or workflows           | [`README.md`](../README.md), [`examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                                                                                                       | Example compilation and crate docs                                                                                                    |
+| User-facing documentation or workflows           | [`README.md`](../README.md), [`guide.md`](../guide.md), [`examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                                                                            | Example compilation and crate docs                                                                                                    |
 
 ## Read and validate a change
 
@@ -200,5 +200,5 @@ Remaining retained task and subscriber values move to [`core/deferred_drop/`](co
 4. Keep cross-component behavior in `tests/` and local state-machine cases beside their module.
 5. Use `examples/` to verify the application-facing story. Use `benches/` only for measured performance boundaries.
 
-The repository tasks for formatting, checking, linting, tests, and docs are listed in the [development section](../README.md#development)
+The repository tasks for formatting, checking, linting, tests, and docs are listed in the [contributing section](../README.md#contributing)
 and implemented in [`Taskfile.yml`](../Taskfile.yml), [source](https://taskfile.dev/).

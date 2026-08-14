@@ -205,12 +205,7 @@ pub fn print_suite_header(suite: &str) {
         write_header_bottom(&mut out, cyan);
         writeln!(
             out,
-            "{dim}MEASURED = statistical estimate from this run · PROJECT HEURISTIC = orientation, not an SLA{dim:#}"
-        )
-        .ok();
-        writeln!(
-            out,
-            "{dim}Tip: add --quiet for a clean product snapshot; --color always forces color.{dim:#}"
+            "{dim}MEASURED = Criterion estimates from this run{dim:#}"
         )
         .ok();
         writeln!(out).ok();
@@ -391,55 +386,13 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     let mut lifecycle_rates = Vec::new();
     for observation in &observations {
         if observation.case.family.interpretation == Interpretation::ManagedTaskLifecycle {
-            lifecycle_rates.push((
-                rate(observation.units, observation.time.point_estimate),
-                rate(
-                    observation.units,
-                    observation.time.confidence_interval.upper_bound,
-                ),
-                rate(
-                    observation.units,
-                    observation.time.confidence_interval.lower_bound,
-                ),
-            ));
+            lifecycle_rates.push(rate(observation.units, observation.time.point_estimate));
         }
     }
 
-    writeln!(out, "{cyan}BOTTOM LINE{cyan:#}").ok();
-    if lifecycle_rates.is_empty() {
-        writeln!(
-            out,
-            "  Managed-task range  not measured in this filtered run"
-        )
-        .ok();
-    } else {
-        let min = lifecycle_rates
-            .iter()
-            .map(|rates| rates.0)
-            .fold(f64::INFINITY, f64::min);
-        let max = lifecycle_rates
-            .iter()
-            .map(|rates| rates.0)
-            .fold(f64::NEG_INFINITY, f64::max);
-        writeln!(
-            out,
-            "  Managed-task range  {}–{} completed task lifecycles/s",
-            format_rate(min),
-            format_rate(max),
-        )
-        .ok();
-        let reading = if let [(_, low, high)] = lifecycle_rates.as_slice() {
-            lifecycle_grade(*low, *high).label.to_ascii_lowercase()
-        } else {
-            "see the CI-aware summary in each lifecycle group".to_owned()
-        };
-        writeln!(out, "  Project reading     {reading}").ok();
-    }
-    writeln!(
-        out,
-        "  Validation          every reported case completed without assertion failure"
-    )
-    .ok();
+    writeln!(out, "{cyan}RUN SUMMARY{cyan:#}").ok();
+    writeln!(out, "  {}", managed_lifecycle_summary(&lifecycle_rates)).ok();
+    writeln!(out, "  Run status          all reported cases completed").ok();
     if noplot_requested() {
         writeln!(out, "  HTML report         disabled by --noplot").ok();
     } else {
@@ -453,7 +406,12 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     }
     writeln!(
         out,
-        "{dim}Project reading aid only; not an SLO, certification, or production capacity promise.{dim:#}"
+        "{dim}Compare results only after checking Boundary, Outside, Scope, runtime, and case parameters.{dim:#}"
+    )
+    .ok();
+    writeln!(
+        out,
+        "{dim}Results describe this run on this host; they do not predict application capacity.{dim:#}"
     )
     .ok();
     writeln!(out).ok();
@@ -599,85 +557,24 @@ fn print_observation_group(out: &mut AutoStream<std::io::Stdout>, group: &Observ
     write_wrapped_field(out, accent, "Boundary: ", family.boundary, None);
     write_wrapped_field(out, accent, "Outside:  ", family.outside, Some(dim));
 
-    print_group_interpretation(out, group, accent, dim);
+    print_group_scope(out, family, accent, dim);
     writeln!(out, "{accent}└{}{accent:#}", "─".repeat(REPORT_WIDTH - 1),).ok();
     writeln!(out).ok();
 }
 
-fn print_group_interpretation(
+fn print_group_scope(
     out: &mut AutoStream<std::io::Stdout>,
-    group: &ObservationGroup<'_>,
+    family: CaseFamily,
     accent: Style,
     dim: Style,
 ) {
-    let family = group.family;
     writeln!(out, "{accent}│{accent:#}").ok();
-    if family.interpretation == Interpretation::ManagedTaskLifecycle {
-        let grades: Vec<_> = group
-            .observations
-            .iter()
-            .map(|observation| {
-                let low_rate = rate(
-                    observation.units,
-                    observation.time.confidence_interval.upper_bound,
-                );
-                let high_rate = rate(
-                    observation.units,
-                    observation.time.confidence_interval.lower_bound,
-                );
-                (*observation, lifecycle_grade(low_rate, high_rate))
-            })
-            .collect();
-        let first = &grades[0].1;
-        let all_equal = grades
-            .iter()
-            .all(|(_, grade)| grade.label == first.label && grade.reference == first.reference);
-
-        if all_equal {
-            let grade_style = style(first.color, true);
-            writeln!(
-                out,
-                "{accent}│{accent:#} {grade_style}◆ PROJECT HEURISTIC · {}{grade_style:#}",
-                first.label,
-            )
-            .ok();
-            writeln!(out, "{accent}│{accent:#} Project band: {}", first.reference).ok();
-        } else {
-            let yellow = style(AnsiColor::BrightYellow, true);
-            writeln!(
-                out,
-                "{accent}│{accent:#} {yellow}◆ PROJECT HEURISTIC · VARIES BY RESULT{yellow:#}"
-            )
-            .ok();
-            for (observation, grade) in grades {
-                let grade_style = style(grade.color, true);
-                write_wrapped_field(
-                    out,
-                    accent,
-                    "  ",
-                    &format!("{}: {}", observation_details(observation), grade.label),
-                    Some(grade_style),
-                );
-            }
-        }
-        writeln!(
-            out,
-            "{accent}│{accent:#} Reference uses complete managed-task lifecycles only."
-        )
-        .ok();
-    } else if family.scope == Scope::Lifecycle {
-        writeln!(
-            out,
-            "{accent}│{accent:#} {dim}No project band: this lifecycle uses a different semantic unit.{dim:#}"
-        )
-        .ok();
-    } else {
-        writeln!(
-            out,
-            "{accent}│{accent:#} {dim}No lifecycle grade: this is not completed-task throughput.{dim:#}"
-        )
-        .ok();
-    }
+    writeln!(
+        out,
+        "{accent}│{accent:#} {dim}◆ SCOPE · {}{dim:#}",
+        scope_description(family),
+    )
+    .ok();
 }
 
 fn print_observation_result(
@@ -801,54 +698,30 @@ fn write_observation_line(
     }
 }
 
-struct Grade {
-    label: &'static str,
-    reference: &'static str,
-    color: AnsiColor,
+fn scope_description(family: CaseFamily) -> String {
+    if family.interpretation == Interpretation::ManagedTaskLifecycle {
+        "COMPLETE MANAGED-TASK LIFECYCLE".to_owned()
+    } else if family.scope == Scope::Lifecycle {
+        format!(
+            "COMPLETE LIFECYCLE · {}",
+            family.unit_plural.to_ascii_uppercase()
+        )
+    } else {
+        "OPERATION RATE, NOT COMPLETED-TASK THROUGHPUT".to_owned()
+    }
 }
 
-fn lifecycle_grade(low: f64, high: f64) -> Grade {
-    let band = |rate: f64| {
-        if rate < 10_000.0 {
-            0
-        } else if rate < 50_000.0 {
-            1
-        } else if rate < 200_000.0 {
-            2
-        } else {
-            3
-        }
-    };
-    let low_band = band(low);
-    let high_band = band(high);
-    if low_band != high_band {
-        return Grade {
-            label: "BAND EDGE; CONFIDENCE INTERVAL CROSSES A REFERENCE",
-            reference: "95% CI crosses 10 K/s, 50 K/s, or 200 K/s",
-            color: AnsiColor::BrightYellow,
-        };
-    }
-    match low_band {
-        0 => Grade {
-            label: "BELOW HIGH-THROUGHPUT RANGE",
-            reference: "below 10 K complete lifecycles/s",
-            color: AnsiColor::BrightYellow,
-        },
-        1 => Grade {
-            label: "SUBSTANTIAL LIFECYCLE THROUGHPUT",
-            reference: "10 K to below 50 K complete lifecycles/s",
-            color: AnsiColor::BrightCyan,
-        },
-        2 => Grade {
-            label: "HIGH-THROUGHPUT RANGE",
-            reference: "50 K to below 200 K complete lifecycles/s",
-            color: AnsiColor::BrightGreen,
-        },
-        _ => Grade {
-            label: "VERY-HIGH-THROUGHPUT RANGE",
-            reference: "200 K or more complete lifecycles/s",
-            color: AnsiColor::BrightGreen,
-        },
+fn managed_lifecycle_summary(rates: &[f64]) -> String {
+    match rates {
+        [] => "Managed lifecycle   not measured in this run".to_owned(),
+        [rate] => format!(
+            "Managed lifecycle   {} completed task lifecycles/s",
+            format_rate(*rate),
+        ),
+        rates => format!(
+            "Managed lifecycle   {} results; exact rates are shown in their groups",
+            rates.len(),
+        ),
     }
 }
 
