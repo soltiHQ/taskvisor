@@ -101,7 +101,8 @@ attempt 3
 
 Every attempt gets a fresh future. A retryable failure follows the configured backoff; a successful `restartable` task stops. `Supervisor::run` returns only after lifecycle cleanup finishes.
 
-For a resident worker that runs until Ctrl+C, see [worker.rs](examples/worker.rs).
+For a resident worker that runs until Ctrl+C, see
+[graceful_worker.rs](examples/graceful_worker.rs).
 
 For a queue consumer that retries a failed broker connection, see [queue_consumer.rs](examples/queue_consumer.rs).
 
@@ -126,9 +127,10 @@ let (_id, waiter) = handle.submit_and_watch(request).await?;
 let outcome = waiter.wait().await?;
 ```
 
-- `DropIfRunning` rejects the conflict without starting it. See [admission.rs](examples/admission.rs);
+- `DropIfRunning` rejects the conflict without starting it. See
+  [controller_admission.rs](examples/controller_admission.rs);
 - `Replace` makes the newest submission the next owner only after the old owner finishes cancellation cleanup. See the runnable [tenant-42 conflict example](examples/tenant_sync.rs);
-- `Queue` preserves FIFO order. See [slots.rs](examples/slots.rs).
+- `Queue` preserves FIFO order. See [controller_slots.rs](examples/controller_slots.rs).
 
 ## Why Taskvisor?
 
@@ -283,7 +285,7 @@ println!("registered={}, stopped={stopped}", registered.len());
 handle.shutdown().await?;
 ```
 
-`add().await?` means the registry accepted the task, not that the task completed. Regular management methods wait for bounded queue capacity; their `try_*` forms fail fast when a queue is full. See [dynamic.rs](examples/dynamic.rs) for a complete program.
+`add().await?` means the registry accepted the task, not that the task completed. Regular management methods wait for bounded queue capacity; their `try_*` forms fail fast when a queue is full. See [dynamic_tasks.rs](examples/dynamic_tasks.rs) for a complete program.
 
 ## Events and outcomes
 
@@ -321,7 +323,8 @@ Events carry a process-local sequence number and, where relevant, task identity,
 
 Each subscriber has its own bounded FIFO queue and serial lane on a supervisor-local elastic callback executor. Startup transactionally creates one seed OS worker. When a lane is ready and every current worker is busy, the executor may add workers lazily, up to the configured subscriber count. Relaying one event still visits every subscriber queue. Fan-out work is `O(S)` in the subscriber count. A slow subscriber cannot block publishers or consume Tokio blocking-pool capacity, but its queue may fill and lose events. A blocked callback does not stop other lanes when an idle worker exists or OS worker expansion succeeds. Queue drops are coalesced into one direct overflow summary after that subscriber catches up; `Event::dropped` contains the count, and the summary does not re-enter the shared event bus. Keep callbacks short and forward async work to another channel.
 
-See [subscriber.rs](examples/subscriber.rs), the `TracingBridge` in [tracing.rs](examples/tracing.rs), and the Prometheus counters in [metrics.rs](examples/metrics.rs).
+See [custom_subscriber.rs](examples/custom_subscriber.rs), the `TracingBridge` in
+[tracing.rs](examples/tracing.rs), and the Prometheus counters in [metrics.rs](examples/metrics.rs).
 
 ## Admission control per key
 
@@ -359,7 +362,9 @@ Queue depth is bounded per slot and across the controller. Registry-capacity wai
 
 Slots govern admission, not lifecycle addressing. Cancellation and removal operate by `TaskId` or registered task name; there is no slot-wide cancel/remove operation. Stopping the current owner does not automatically purge a queued replacement in the same slot.
 
-See [tenant_sync.rs](examples/tenant_sync.rs) for the tenant-42 conflict, [slots.rs](examples/slots.rs) for a policy reference, and [admission.rs](examples/admission.rs) for watched admission and rejection.
+See [tenant_sync.rs](examples/tenant_sync.rs) for the tenant-42 conflict,
+[controller_slots.rs](examples/controller_slots.rs) for a policy reference, and
+[controller_admission.rs](examples/controller_admission.rs) for watched admission and rejection.
 
 ## Configuration
 
@@ -461,51 +466,23 @@ From a cloned repository checkout, run the smallest example with:
 cargo run --example basic
 ```
 
-Choose the shortest path for your use case:
+The [examples guide](examples/README.md) gives a learning path, run commands, feature flags, and
+stop behavior for every program.
 
-- New to supervision: `basic` → `worker` → `outcomes`.
-- Need per-key coordination: `tenant_sync` → `slots` → `admission`.
-
-The full catalog follows.
-
-### Start here
-
-| Example                                   | What it shows                                     |
-|-------------------------------------------|---------------------------------------------------|
-| [basic.rs](examples/basic.rs)             | One task, one run, one exit.                      |
-| [worker.rs](examples/worker.rs)           | A long-running worker with graceful cancellation. |
-| [periodic.rs](examples/periodic.rs)       | Repeated execution after an interval.             |
-| [multiple.rs](examples/multiple.rs)       | Several restart policies in one supervisor.       |
-
-### Real patterns
-
-| Example                                          | What it shows                                             |
-|--------------------------------------------------|-----------------------------------------------------------|
-| [queue_consumer.rs](examples/queue_consumer.rs)  | Retry a failed broker connection.                         |
-| [cpu_job.rs](examples/cpu_job.rs)                | Supervise CPU-heavy work without blocking Tokio workers.  |
-
-### Observability
-
-| Example                                   | What it shows                                      |
-|-------------------------------------------|----------------------------------------------------|
-| [subscriber.rs](examples/subscriber.rs)   | Handle typed lifecycle events.                     |
-| [tracing.rs](examples/tracing.rs)         | Send task and lifecycle events to `tracing`.       |
-| [metrics.rs](examples/metrics.rs)         | Build Prometheus counters from events.             |
-
-### Dynamic work and outcomes
-
-| Example                               | What it shows                                    |
-|---------------------------------------|--------------------------------------------------|
-| [dynamic.rs](examples/dynamic.rs)     | Add, list, cancel, and remove tasks at runtime.  |
-| [outcomes.rs](examples/outcomes.rs)   | Await reliable outcomes, including a timeout.    |
-
-### Keyed admission
-
-| Example                                         | What it shows                                       |
-|-------------------------------------------------|-----------------------------------------------------|
-| [tenant_sync.rs](examples/tenant_sync.rs)       | Keep only the latest sync revision per tenant.      |
-| [slots.rs](examples/slots.rs)                   | Compare queue, replace, and reject policies.        |
-| [admission.rs](examples/admission.rs)           | Observe typed admission and rejection outcomes.     |
+- **Foundations and lifecycle:** [basic](examples/basic.rs), [task type](examples/task_type.rs),
+  [graceful worker](examples/graceful_worker.rs),
+  [application shutdown](examples/application_shutdown.rs), [periodic](examples/periodic.rs),
+  [restart policies](examples/restart_policies.rs), and
+  [configuration](examples/configuration.rs).
+- **Runtime control and service patterns:** [outcomes](examples/outcomes.rs),
+  [dynamic tasks](examples/dynamic_tasks.rs), [queue consumer](examples/queue_consumer.rs), and
+  [CPU job](examples/cpu_job.rs).
+- **Observability:** [custom subscriber](examples/custom_subscriber.rs),
+  [logging](examples/logging.rs),
+  [tracing](examples/tracing.rs), and [metrics](examples/metrics.rs).
+- **Keyed admission:** [controller slots](examples/controller_slots.rs),
+  [controller admission](examples/controller_admission.rs), and
+  [tenant sync](examples/tenant_sync.rs).
 
 ## Development
 
@@ -528,21 +505,14 @@ fan-out, dynamic management, and controller paths. Case names and the final perf
 identify the timed boundary and the meaning of `elem/s`:
 
 ```bash
-cargo bench
+task rust:benchmark
 ```
 
-See the [benchmark reading guide](benches/README.md) for the complete boundary table and absolute
-rate-to-latency scale.
+See the [benchmark reading guide](benches/README.md) for the output fields, grouped cards, and
+project reading guide.
 
-For a quick colorized lifecycle snapshot without Criterion's comparison prose:
-
-```bash
-cargo bench --bench controller --features controller -- \
-  'controller/steady/queue_one_slot/current_thread/20_completed_tasks' \
-  --exact --quiet --color always
-```
-
-Run `cargo bench --all-features -- --quiet --color always` for the comprehensive five-suite report.
+The task runs only the five explicit Criterion targets. It excludes the library test harness and
+prints the colorized absolute-result snapshot for every suite.
 
 ## Contributing
 

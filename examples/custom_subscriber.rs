@@ -1,19 +1,35 @@
 //! # Custom event subscriber
 //!
-//! This example implements `Subscribe` and counts lifecycle events with atomics.
-//! Each subscriber has its own bounded queue:
+//! Implement `Subscribe` to consume typed lifecycle events without blocking their publishers.
+//! This example counts attempt and backoff events with atomics in one synchronous callback.
 //!
 //! ```text
-//! supervisor events
-//!       ├──► bounded FIFO lane ──┐
-//!       └──► bounded FIFO lane ──┴──► local callback executor ──► on_event
+//! runtime publishers
+//!       │
+//!       ▼
+//! shared bounded bus                   full: discard oldest, retain newest
+//!       │ relay and fan-out
+//!       ▼
+//! one bounded subscriber lane          full: drop new event for this subscriber
+//!       │ serial callback executor
+//!       ▼
+//! Subscribe::on_event
 //! ```
 //!
-//! A slow subscriber does not block event producers, but its queue can overflow
-//! and lose events. Keep `on_event` bounded and use outcomes for decisions that
-//! must not depend on best-effort delivery.
+//! The normal delivery path has these two separate loss points.
+//! The relay attempts an overflow diagnostic for bus loss.
+//! After a full subscriber lane catches up, Taskvisor delivers one coalesced overflow callback if that lane remains active.
+//! Loss in one lane does not alter another lane.
+//! Shutdown may also discard queued events when the shared drain deadline expires.
 //!
-//! Run with `cargo run --example subscriber`.
+//! Keep `on_event` short.
+//! Forward async or blocking work to an application-owned queue.
+//! Events are for observation. Use `TaskWaiter` when correctness depends on a final result.
+//!
+//! Expect four starts, three failures, three backoffs, and one success.
+//! The fourth attempt succeeds, subscriber shutdown drains, and the example exits.
+//!
+//! Run with `cargo run --example custom_subscriber`.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

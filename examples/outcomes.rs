@@ -1,18 +1,33 @@
 //! # Outcomes: wait for the final result
 //!
-//! `add_and_watch` returns a `TaskWaiter`.
-//! The waiter resolves after all allowed attempts end, the managed runner is joined, and registry membership is removed.
+//! Use `add_and_watch` when application logic must know how one task ended.
+//! Its `TaskWaiter` uses a dedicated terminal channel, separate from best-effort events.
 //!
-//! Taskvisor has two result paths:
+//! ```text
+//! add_and_watch ──────► TaskId + TaskWaiter
+//! managed lifecycle ──► terminal outcome ────► TaskWaiter
+//! lifecycle events ───► event bus ───────────► subscribers (best-effort)
+//! ```
 //!
-//! | Path             | Use                          | Delivery                   |
-//! |------------------|------------------------------|----------------------------|
-//! | lifecycle events | logs, metrics, live progress | bounded and best-effort    |
-//! | `TaskOutcome`    | final business decision      | dedicated terminal channel |
+//! | Task behavior             | Final outcome |
+//! |---------------------------|---------------|
+//! | succeeds                  | `Completed`   |
+//! | exhausts its retry budget | `Failed`      |
+//! | times out under `once`    | `Failed`      |
+//! | returns a permanent error | `Fatal`       |
+//! | observes cancellation     | `Canceled`    |
 //!
-//! This example handles successful, retry-exhausted, timed-out, and canceled tasks.
-//! Other outcomes cover fatal errors, force-abort, task-runner panic, and controller rejection.
-//! `TaskWaiter::wait` can still return an error if the runtime closes the terminal channel unexpectedly.
+//! A configured timeout is retry-eligible.
+//! The timeout row is final because `once` forbids retry.
+//! `max_retries(2)` allows the first failed attempt and two retries before `Failed`.
+//! An admitted result normally arrives after registry membership is removed.
+//! Except for `ForceAborted`, task execution is physically joined first.
+//! `ForceAborted` is final logically while a physical actor may still be active.
+//! Controller rejection can resolve without starting the task.
+//! `Panicked` covers an actor or protected cleanup panic.
+//!
+//! Expect one printed section for each table row. The example then shuts down and exits.
+//! `TaskWaiter::wait` can return an error if its terminal channel closes unexpectedly.
 //!
 //! Run with `cargo run --example outcomes`.
 
@@ -76,7 +91,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => println!("  slow-report -> {other:?}\n"),
     }
 
-    // 4) A long-running worker we cancel -> Canceled.
+    // 4) A permanent error stops even a restartable task -> Fatal.
+    println!("=== Fatal (not retryable) ===");
+    let permanent: TaskRef = TaskFn::arc(|_ctx| async {
+        Err::<(), TaskError>(TaskError::fatal("credentials rejected").with_exit_code(78))
+    });
+    let fatal = TaskSpec::restartable("credential-check", permanent);
+    match handle.add_and_watch(fatal).await?.1.wait().await? {
+        TaskOutcome::Fatal {
+            reason, exit_code, ..
+        } => {
+            println!("  credential-check -> Fatal: {reason} (exit_code={exit_code:?})\n");
+        }
+        other => println!("  credential-check -> {other:?}\n"),
+    }
+
+    // 5) A long-running worker we cancel -> Canceled.
     println!("=== Canceled ===");
     let started = Arc::new(Notify::new());
     let worker: TaskRef = TaskFn::arc({

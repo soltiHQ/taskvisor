@@ -1,14 +1,24 @@
 //! # Metrics from lifecycle events
 //!
-//! This example implements `Subscribe` and maps each event to a Prometheus counter.
-//! `EventKind::as_label` provides stable, machine-readable values such as `attempt_failed` and `backoff_scheduled`.
+//! This example maps best-effort lifecycle events into one Prometheus counter family.
+//! Stable enum labels provide bounded event and outcome categories.
 //!
-//! A real service would expose the registry on its metrics endpoint.
-//! This example prints the Prometheus text format when it exits.
+//! ```text
+//! Event.kind         ──► event   ──┐
+//! Event.outcome_kind ──► outcome ──┼──► taskvisor_events_total
+//! Event.task         ──► subject ──┘
+//! ```
 //!
-//! The `task` label uses task names. Keep these names bounded and stable.
-//! Do not put request IDs, user IDs, or other unbounded values in metric labels.
-//! Terminal classification comes from `TaskOutcomeKind`; diagnostic `reason` text is deliberately not used as a label.
+//! `Event::task` is a polymorphic subject. It usually contains a task name.
+//! Diagnostics may store a subscriber, relay, or runtime component name in the same field.
+//! Controller events store a slot name. The Prometheus label is therefore named `subject`.
+//!
+//! Keep every possible subject bounded and stable.
+//! Do not use request IDs or user IDs as labels.
+//! Diagnostic `reason` text is not a label because it is free-form and may have high cardinality.
+//!
+//! A service would expose the Prometheus registry on its metrics endpoint.
+//! Expect two failed attempts, one success, printed Prometheus text, and a normal exit.
 //!
 //! Run with `cargo run --example metrics`.
 
@@ -27,13 +37,13 @@ struct PromSubscriber {
 
 impl Subscribe for PromSubscriber {
     fn on_event(&self, event: &Event) {
-        let task = event.task.as_deref().unwrap_or("none");
+        let subject = event.task.as_deref().unwrap_or("none");
         let outcome = event
             .outcome_kind
             .map(TaskOutcomeKind::as_label)
             .unwrap_or("none");
         self.events
-            .with_label_values(&[event.kind.as_label(), outcome, task])
+            .with_label_values(&[event.kind.as_label(), outcome, subject])
             .inc();
     }
 
@@ -51,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = Registry::new();
     let events = IntCounterVec::new(
         Opts::new("taskvisor_events_total", "Supervisor lifecycle events"),
-        &["event", "outcome", "task"],
+        &["event", "outcome", "subject"],
     )?;
     registry.register(Box::new(events.clone()))?;
 

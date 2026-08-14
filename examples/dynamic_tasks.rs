@@ -1,20 +1,30 @@
 //! # Dynamic task management
 //!
-//! Use `Supervisor::serve` when long-lived tasks are discovered at runtime.
-//! Examples include tenant workers, plugins, and connections that own a resident background loop.
-//! Taskvisor is not a per-request job executor.
+//! Use `Supervisor::serve` when tasks are discovered after the runtime starts.
+//! It returns a handle for registration, inspection, stopping, and joined shutdown.
 //!
-//! This example shows how to:
+//! ```text
+//! application ──► serve ──► SupervisorHandle
+//!                                 ├── add ───────► registry ──► task attempts
+//!                                 ├── remove ────► claim a stop and return
+//!                                 ├── cancel ────► wait for cleanup
+//!                                 └── shutdown ──► close admission and wait
+//! ```
 //!
-//! - add a task and receive its `TaskId`;
-//! - inspect the current registry snapshot;
-//! - cancel or remove a task by identity;
-//! - shut down the supervisor explicitly.
+//! `add` confirms registry admission.
+//! It does not confirm that an attempt started or finished.
+//! `list` reads registry membership. `is_alive` reads physical attempt activity directly.
+//! Neither query depends on lifecycle-event delivery.
 //!
-//! `Supervisor::run` is the simpler choice when all tasks are known at startup.
-//! It waits for the supervisor to finish.
+//! `remove` returns after it claims a stop, before registered-task cleanup finishes.
+//! `cancel` waits for bounded logical cleanup. Here, `cancel` follows an earlier `remove`.
+//! It joins that stop or observes completed cleanup.
+//! It returns `false` in either case because it did not create the original claim.
 //!
-//! Run with `cargo run --example dynamic`.
+//! Expect worker ticks, three `Registered:` snapshots, and cancellation messages.
+//! The example requests shutdown itself and exits after a few seconds.
+//!
+//! Run with `cargo run --example dynamic_tasks`.
 
 use std::time::Duration;
 
@@ -46,7 +56,7 @@ fn make_worker(name: &'static str) -> TaskSpec {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
 
-    // serve() starts listeners and returns a handle for dynamic management.
+    // serve() starts the runtime without OS signal handlers and returns its management handle.
     let handle = supervisor.serve()?;
 
     // Add workers dynamically
@@ -56,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demo pacing only: add() has already confirmed registration.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    println!("Active: {:?}", handle.list().await);
+    println!("Registered: {:?}", handle.list().await);
 
     // remove() claims the stop but returns before registered-task cleanup ends.
     println!("\nRemoving worker-a...");
@@ -67,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This returns false because remove() already claimed the stop (or cleanup finished first).
     let second_claim = handle.cancel(id_a).await?;
     println!("worker-a second cancellation claimed: {second_claim}");
-    println!("Active: {:?}", handle.list().await);
+    println!("Registered: {:?}", handle.list().await);
 
     // Add worker-c
     println!("\nAdding worker-c...");
@@ -79,14 +89,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Cancelling worker-b...");
     let cancelled = handle.cancel(id_b).await?;
     println!("worker-b cancelled: {cancelled}");
+    // This direct query reads physical attempt activity. It does not consume lifecycle events.
     println!(
-        "worker-b alive (best-effort event view): {}",
+        "worker-b physically active: {}",
         handle.is_alive("worker-b").await
     );
 
     // Demo pacing only: let worker-c keep ticking before the final snapshot.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    println!("\nActive: {:?}", handle.list().await);
+    println!("\nRegistered: {:?}", handle.list().await);
 
     // Graceful shutdown (consumes the handle)
     println!("\nShutting down...");

@@ -45,20 +45,33 @@
 //!
 //! ## Continue with a runnable example
 //!
-//! - Keyed work: [tenant sync], [slot policies], and [admission outcomes].
-//! - Runtime lifecycle: [basic], [worker], [dynamic], and [outcomes].
-//! - Observability: [subscriber], [tracing], and [metrics].
+//! The [examples guide] includes the learning path, commands, feature flags, and stop behavior.
 //!
+//! - Foundations: [basic], [task type], [graceful worker], [application shutdown], [periodic],
+//!   [restart policies], and [configuration].
+//! - Runtime patterns: [outcomes], [dynamic tasks], [queue consumer], and [CPU job].
+//! - Observability: [custom subscriber], [logging], [tracing], and [metrics].
+//! - Keyed admission: [controller slots], [controller admission], and [tenant sync].
+//!
+//! [examples guide]: https://github.com/soltiHQ/taskvisor/blob/main/examples/README.md
 //! [basic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs
-//! [worker]: https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs
-//! [dynamic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs
+//! [task type]: https://github.com/soltiHQ/taskvisor/blob/main/examples/task_type.rs
+//! [graceful worker]: https://github.com/soltiHQ/taskvisor/blob/main/examples/graceful_worker.rs
+//! [application shutdown]: https://github.com/soltiHQ/taskvisor/blob/main/examples/application_shutdown.rs
+//! [periodic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs
+//! [restart policies]: https://github.com/soltiHQ/taskvisor/blob/main/examples/restart_policies.rs
+//! [configuration]: https://github.com/soltiHQ/taskvisor/blob/main/examples/configuration.rs
 //! [outcomes]: https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs
-//! [tenant sync]: https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs
-//! [slot policies]: https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs
-//! [admission outcomes]: https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs
-//! [subscriber]: https://github.com/soltiHQ/taskvisor/blob/main/examples/subscriber.rs
+//! [dynamic tasks]: https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic_tasks.rs
+//! [queue consumer]: https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs
+//! [CPU job]: https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs
+//! [custom subscriber]: https://github.com/soltiHQ/taskvisor/blob/main/examples/custom_subscriber.rs
+//! [logging]: https://github.com/soltiHQ/taskvisor/blob/main/examples/logging.rs
 //! [tracing]: https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs
 //! [metrics]: https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs
+//! [tenant sync]: https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs
+//! [controller slots]: https://github.com/soltiHQ/taskvisor/blob/main/examples/controller_slots.rs
+//! [controller admission]: https://github.com/soltiHQ/taskvisor/blob/main/examples/controller_admission.rs
 //!
 //! ## Choose the runtime entry point
 //!
@@ -136,7 +149,7 @@
 //! application
 //!      ├── static batch ──► Supervisor::run*
 //!      ├── dynamic task ──► SupervisorHandle::add*
-//!      └── keyed task ────► SupervisorHandle::submit* ──► controller
+//!      └── keyed task ──► SupervisorHandle::submit* ──► controller
 //!
 //! registry ──► TaskActor ──► sequential attempts
 //!

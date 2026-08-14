@@ -54,11 +54,11 @@ tokio              = { version = "1.53.1", features = ["test-util"] }
 libc               = "0.2.186"
 
 [[example]]
-name              = "slots"
+name              = "controller_slots"
 required-features = ["controller"]
 
 [[example]]
-name              = "admission"
+name              = "controller_admission"
 required-features = ["controller"]
 
 [[example]]
@@ -68,6 +68,10 @@ required-features = ["controller"]
 [[example]]
 name              = "tracing"
 required-features = ["tracing"]
+
+[[example]]
+name              = "logging"
+required-features = ["logging"]
 
 [[bench]]
 name    = "lifecycle"

@@ -1,11 +1,23 @@
 //! # Latest-wins synchronization per tenant
 //!
-//! A tenant is the natural admission key:
-//! - syncs for the same tenant never overlap;
-//! - only the newest waiting revision survives replacement;
-//! - another tenant can sync independently.
+//! Use one controller slot per tenant when revisions for that tenant must not overlap.
+//! Task names identify revisions; the shared slot identifies the tenant.
 //!
-//! Reliable `TaskWaiter` outcomes, not lifecycle events, drive the decisions in this example.
+//! ```text
+//! tenant-42 slot: rev-1 running ──► rev-2 waits ──► rev-3 supersedes rev-2
+//!                                                         │ rev-1 cleanup finishes
+//!                                                         ▼
+//!                                                    rev-3 starts
+//!
+//! tenant-17 slot: rev-1 runs independently ──► completes
+//! ```
+//!
+//! `Replace` supersedes only the queue head. Existing FIFO items behind that head remain.
+//! The `Notify` gates make the ordering deterministic for this demonstration;
+//! production work normally waits on real I/O and observes cancellation through `TaskContext`.
+//!
+//! Expected outcomes: tenant-42 rev-1 is canceled, rev-2 is `SupersededByReplace`, and rev-3 completes.
+//! Tenant-17 completes independently. Decisions use reliable waiters, not events.
 //!
 //! Run with `cargo run --example tenant_sync`.
 

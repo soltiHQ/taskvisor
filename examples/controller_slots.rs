@@ -1,8 +1,15 @@
-//! # Slot admission policies
+//! # Compare slot admission policies
 //!
-//! The controller groups tasks by a slot key.
-//! One task can run in a slot at a time.
-//! Different slot keys are independent.
+//! Use controller slots when differently named tasks must coordinate through one application key.
+//! A slot has at most one registered owner.
+//! That owner may be starting, retrying, running, or stopping.
+//! Different slots progress independently.
+//!
+//! ```text
+//! queued-job-1 ──► queue-demo slot
+//! queued-job-2 ──► queue-demo slot ──► one owner plus a bounded waiting queue
+//! queued-job-3 ──► queue-demo slot
+//! ```
 //!
 //! | Policy          | When the slot is busy                       |
 //! |-----------------|---------------------------------------------|
@@ -10,15 +17,19 @@
 //! | `Replace`       | cancel the owner and replace the queue head |
 //! | `DropIfRunning` | reject the new submission                   |
 //!
-//! The slot key defaults to the task name.
-//! `with_slot` can set an explicit key.
-//! Each scenario below uses different task names with one shared slot to make that distinction visible.
-//! `add` bypasses the controller; `submit` uses its admission rules.
-//! An `Ok(id)` from `submit` confirms intake, not final admission.
-//! Use `submit_and_watch` when application logic needs the final result.
-//! `Replace` does not clear the full FIFO queue; items behind the head remain.
+//! The slot defaults to the task name; `with_slot` sets another key.
+//! Direct `add*` methods bypass controller admission.
+//! A successful `submit*` call confirms intake only.
+//! This example uses `submit_and_watch` to verify the final result:
 //!
-//! Run with `cargo run --example slots`.
+//! - `Queue`: all three tasks complete in submission order;
+//! - `Replace`: the long owner is canceled, then the short replacement completes;
+//! - `DropIfRunning`: the second task is rejected while the first completes.
+//!
+//! `Replace` changes only the queue head; FIFO items behind it remain.
+//! See `tenant_sync.rs` for head supersession while the previous owner is still cleaning up.
+//!
+//! Run with `cargo run --example controller_slots`.
 
 use std::sync::Arc;
 use std::time::Duration;

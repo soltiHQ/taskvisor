@@ -1,6 +1,6 @@
 //! # Multiple restart policies
 //!
-//! One supervisor can manage tasks with different lifecycles:
+//! Use one supervisor to manage tasks with different restart lifecycles.
 //!
 //! | Task        | Policy             | Behavior                              |
 //! |-------------|--------------------|---------------------------------------|
@@ -8,14 +8,20 @@
 //! | `resilient` | restart on failure | fail twice, then succeed              |
 //! | `recurring` | periodic           | wait 500 ms after each successful run |
 //!
-//! The resilient task uses exponential backoff and a retry budget.
-//! Only failure-driven restarts consume that budget.
-//! The supervisor also has a five-second grace period for shutdown.
+//! `max_retries(3)` permits the first failed attempt and up to three retries in one failure streak.
+//! The resilient task succeeds on attempt three after two backoffs.
+//! The recurring task works for 300 ms, then waits 500 ms before its next attempt.
 //!
-//! These task bodies are short. They do not use `TaskContext`.
-//! A resident loop should observe cancellation as shown in `worker.rs`.
+//! The one-shot and resilient tasks end naturally.
+//! The recurring task keeps the supervisor alive until Ctrl+C.
+//! These short task bodies do not observe `TaskContext`, but their waits fit inside the configured
+//! five-second shutdown grace.
+//! A resident worker should observe cancellation as shown in `graceful_worker.rs`.
 //!
-//! Run with `cargo run --example multiple`, then press Ctrl+C.
+//! `run_with_os_signals` installs process-wide signal handlers.
+//! Use `run_until` when the surrounding application owns signal handling.
+//!
+//! Run with `cargo run --example restart_policies`, then press Ctrl+C.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -52,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Recurring: repeats every 500ms until Ctrl+C
+    // Recurring: waits 500ms after each successful run, until Ctrl+C
     let cycle = Arc::new(AtomicU32::new(0));
     let recurring: TaskRef = TaskFn::arc(move |_ctx| {
         let cycle = Arc::clone(&cycle);

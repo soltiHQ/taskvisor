@@ -1,13 +1,23 @@
 //! # Periodic task
 //!
-//! `TaskSpec::periodic` runs a short task again after each completion.
-//! Each run is a separate attempt.
-//! It has its own lifecycle events.
-//! Failures use the configured retry and backoff rules.
+//! Use `TaskSpec::periodic` for short work that should repeat after each success.
 //!
-//! The interval starts after the task finishes.
-//! This is a fixed-delay schedule, not a wall-clock or cron schedule.
-//! Work duration adds to the time between starts. Drift is expected.
+//! ```text
+//! attempt
+//! ├── success ────────────► wait `every` ─────► next attempt
+//! ├── retryable failure ──► failure backoff ──► retry
+//! └── fatal or canceled ──► stop
+//! ```
+//!
+//! Every invocation is a separate attempt with its own lifecycle events.
+//! The success interval begins after the task finishes.
+//! Work duration is added to the time between starts.
+//!
+//! This is fixed-delay scheduling, not a wall-clock or cron schedule.
+//!
+//! This heartbeat always succeeds and repeats until Ctrl+C.
+//! `run_with_os_signals` installs process-wide signal handlers.
+//! Use `run_until` when the application owns them.
 //!
 //! Run with `cargo run --example periodic`, then press Ctrl+C.
 

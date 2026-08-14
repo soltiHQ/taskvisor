@@ -1,18 +1,27 @@
-//! # Admission outcomes
+//! # Watched controller admission
 //!
-//! `submit` returning `Ok(id)` means that the controller accepted the request.
-//! It does not mean that the slot admitted the task. The admission decision is asynchronous.
+//! Use this pattern when application logic must know whether submitted work ran or was rejected.
 //!
-//! `submit_and_watch` also returns a `TaskWaiter`:
+//! ```text
+//! prepare_submission ──► known TaskId; no command sent yet
+//!          │ submit_and_watch
+//!          ▼
+//! controller intake ──► slot decision
+//!                           ├── admitted ──► registry ──► task ──► final TaskOutcome
+//!                           └── rejected ──► TaskOutcome::Rejected; task never starts
+//! ```
 //!
-//! - an admitted task resolves to its final runtime outcome;
-//! - a submission rejected before registry admission resolves to `TaskOutcome::Rejected` with a typed `RejectionKind` and diagnostic reason; its task body never starts.
+//! The returned `(TaskId, TaskWaiter)` confirms command intake, not positive admission.
+//! The waiter resolves to the admitted task's final outcome or a typed rejection.
 //!
-//! This example shows both paths and reads a live controller snapshot.
-//! Use the waiter when rejection affects application logic.
-//! Events are best-effort and are better suited to logs and metrics.
+//! This example produces `TaskOutcome::Completed` for `deploy-v1`.
+//! For `deploy-v2`, it produces `TaskOutcome::Rejected` with `RejectionKind::SlotBusy`.
 //!
-//! Run with `cargo run --example admission`.
+//! `controller_snapshot` is a rolling, non-atomic diagnostics view.
+//! Do not use it for decisions that require a reliable result.
+//! Use the waiter instead; events remain best-effort.
+//!
+//! Run with `cargo run --example controller_admission`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,21 +68,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1) submit deploy-v1 (Queue) to the idle slot");
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let (_id, v1) = handle
-        .submit_and_watch(
-            ControllerSpec::queue(gated_job(
-                "deploy-v1",
-                Arc::clone(&started),
-                Arc::clone(&release),
-            ))
-            .with_slot("deploy"),
-        )
-        .await?;
-    // The task body, rather than a timer, confirms that registry admission completed.
+    let prepared = handle.prepare_submission(
+        ControllerSpec::queue(gated_job(
+            "deploy-v1",
+            Arc::clone(&started),
+            Arc::clone(&release),
+        ))
+        .with_slot("deploy"),
+    )?;
+    println!("    reserved task id {} before intake", prepared.id());
+    let (_id, v1) = prepared.submit_and_watch().await?;
     started.notified().await;
     println!("    deploy-v1 admitted, now running\n");
 
-    // Pull the controller's live state directly: no parsing of bus events.
+    // Read the rolling controller diagnostics directly: no parsing of bus events.
     if let Some(snap) = handle.controller_snapshot().await {
         let deploy = snap.slot("deploy");
         println!(
