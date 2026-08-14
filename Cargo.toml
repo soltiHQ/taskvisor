@@ -4,13 +4,13 @@ version      = "0.7.0"
 edition      = "2024"
 rust-version = "1.90.0"
 
-description   = "In-process Tokio task supervisor with retries, reliable outcomes, and per-key queue/replace/reject admission"
+description   = "In-process Tokio task supervisor with retries, graceful shutdown, reliable final outcomes, and per-key admission control"
 repository    = "https://github.com/soltiHQ/taskvisor"
 documentation = "https://docs.rs/taskvisor"
 license       = "Apache-2.0"
 readme        = "README.md"
 
-keywords   = ["tokio", "supervisor", "keyed", "admission-control", "retry"]
+keywords   = ["tokio", "task-supervisor", "retry", "graceful-shutdown", "admission-control"]
 categories = ["asynchronous", "concurrency"]
 
 exclude = [
