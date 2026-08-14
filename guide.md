@@ -55,7 +55,7 @@ Controller `submit*` methods first apply a per-slot admission policy, then hand 
 The default install includes the controller API:
 
 ```toml
-taskvisor = "0.7"
+taskvisor = "0.8"
 ```
 
 The controller has no runtime effect until a supervisor is built with `with_controller`.
@@ -71,13 +71,13 @@ The controller has no runtime effect until a supervisor is built with `with_cont
 Enable an optional integration:
 
 ```toml
-taskvisor = { version = "0.7", features = ["tracing"] }
+taskvisor = { version = "0.8", features = ["tracing"] }
 ```
 
 Build without keyed admission:
 
 ```toml
-taskvisor = { version = "0.7", default-features = false }
+taskvisor = { version = "0.8", default-features = false }
 ```
 
 ## Define a task
