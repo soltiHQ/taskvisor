@@ -13,8 +13,6 @@ It turns ordinary async work into a managed lifecycle with backoff, timeouts, ca
 When work competes for the same application key, the optional controller queues it, replaces older work, or rejects it.
 Conflict policy is evaluated per key; supervisor-wide limits still apply.
 
-Used by [Solti SDK](https://github.com/soltiHQ/sdk) · [18 runnable examples](examples/README.md) · [Criterion benchmarks](benches/README.md) · `unsafe` code forbidden
-
 [Quick start](#quick-start) · [User guide](guide.md) · [API docs](https://docs.rs/taskvisor) · [Examples](examples/README.md) · [Benchmarks](benches/README.md)
 
 ## The retry loop you stop maintaining
