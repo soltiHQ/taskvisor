@@ -219,17 +219,8 @@ Benchmark measurements describe the tested case and machine; they are not an app
 ## Contributing
 
 Issues and pull requests are welcome.
+
 Read the [contributor map](src/ARCHITECTURE.md) before changing runtime flows and the [contributing guide](https://github.com/soltiHQ/.github/blob/main/CONTRIBUTING.md) before a large change.
-
-Run the repository checks with:
-
-```bash
-task ci/fmt
-task ci/clippy
-task ci/test
-task ci/docs
-task ci/publish-dry-run
-```
 
 If Taskvisor earns a place in your stack, a GitHub star helps other Rust developers find it.
 
