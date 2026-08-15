@@ -1,4 +1,11 @@
-//! Create a [`Task`] from an async closure.
+//! Adapts an async closure to the [`Task`] contract.
+//!
+//! [`TaskFn`] is the short path from application code to a [`TaskRef`](crate::TaskRef).
+//! The resulting task is placed in a [`TaskSpec`](crate::TaskSpec) before direct or controller admission.
+//!
+//! ```text
+//! async closure ──► TaskFn ──► TaskRef ──► TaskSpec ──► admission
+//! ```
 
 use std::{future::Future, sync::Arc};
 
@@ -8,19 +15,20 @@ use crate::{
     tasks::task::{BoxTaskFuture, Task},
 };
 
-/// A named task backed by an async closure.
+/// A reusable [`Task`] backed by an async closure.
 ///
-/// This is the simplest way to define a task.
-/// The supervisor calls the closure for every attempt. Each call creates a fresh future.
+/// [`Task::spawn`] invokes the closure once for each attempt. The closure must create a fresh future on every call.
+/// Captured state lives in the reusable closure; clone owned state into each returned future when needed.
 ///
-/// ## Long-Running Worker
+/// One registration runs attempts sequentially. Reusing the same task under several [`TaskSpec`](crate::TaskSpec)
+/// names can invoke the closure from separate actors.
 ///
-/// No type annotations are needed: the constructor bounds drive inference.
+/// # Long-running worker
 ///
 /// ```rust
 /// use taskvisor::{TaskError, TaskFn, TaskRef};
 ///
-/// let worker: TaskRef = TaskFn::arc("worker", |ctx| async move {
+/// let worker: TaskRef = TaskFn::arc(|ctx| async move {
 ///     loop {
 ///         tokio::select! {
 ///             _ = ctx.cancelled() => return Err(TaskError::Canceled),
@@ -32,10 +40,9 @@ use crate::{
 /// });
 /// ```
 ///
-/// ## Task With Shared State
+/// # Task with shared state
 ///
-/// The closure can run more than once.
-/// Clone shared state into the closure, then clone it again into each returned future:
+/// Clone shared state into the closure, then into each attempt future:
 ///
 /// ```rust
 /// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
@@ -44,7 +51,7 @@ use crate::{
 /// use taskvisor::TaskFn;
 ///
 /// let counter = Arc::new(AtomicU64::new(0));
-/// let task = TaskFn::arc("counter", {
+/// let task = TaskFn::arc({
 ///     let counter = counter.clone();
 ///     move |ctx| {
 ///         let counter = counter.clone();
@@ -59,20 +66,17 @@ use crate::{
 /// });
 /// ```
 ///
-/// ## See Also
+/// # See also
 ///
-/// - See the [`Task`] trait documentation.
-/// - To configure restart, backoff, and timeout see [`TaskSpec`](crate::TaskSpec).
+/// - [`Task`] defines the attempt and cancellation contract.
+/// - [`TaskSpec`](crate::TaskSpec) adds registration and execution settings.
 pub struct TaskFn<F> {
-    name: Arc<str>,
     f: F,
 }
 
 impl<F> std::fmt::Debug for TaskFn<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskFn")
-            .field("name", &self.name)
-            .finish_non_exhaustive()
+        f.debug_struct("TaskFn").finish_non_exhaustive()
     }
 }
 
@@ -81,21 +85,20 @@ where
     F: Fn(TaskContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
-    /// Creates a named task from a closure.
+    /// Wraps `f` as a concrete [`TaskFn`].
     ///
-    /// Rust normally infers the context and error types from these bounds.
-    pub fn new(name: impl Into<Arc<str>>, f: F) -> Self {
-        Self {
-            name: name.into(),
-            f,
-        }
+    /// Use this form when code needs the concrete adapter type.
+    /// Use [`arc`](Self::arc) when the task will go directly into a [`TaskSpec`](crate::TaskSpec).
+    pub fn new(f: F) -> Self {
+        Self { f }
     }
 
-    /// Creates a task inside an [`Arc`].
+    /// Wraps `f` in a task shared through [`Arc`].
     ///
-    /// The result converts to [`TaskRef`](crate::TaskRef) where needed.
-    pub fn arc(name: impl Into<Arc<str>>, f: F) -> Arc<Self> {
-        Arc::new(Self::new(name, f))
+    /// This is the shortest path from an async closure to a [`TaskSpec`](crate::TaskSpec).
+    /// The returned `Arc<Self>` can coerce to [`TaskRef`](crate::TaskRef).
+    pub fn arc(f: F) -> Arc<Self> {
+        Arc::new(Self::new(f))
     }
 }
 
@@ -104,10 +107,6 @@ where
     Fnc: Fn(TaskContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture {
         let fut = (self.f)(ctx);
         Box::pin(fut)
@@ -125,24 +124,24 @@ mod tests {
     }
 
     #[test]
-    fn constructors_preserve_names_and_infer_closure_types() {
-        let inferred = TaskFn::arc("infer", |ctx| async move {
+    fn constructors_infer_closure_types() {
+        let inferred = TaskFn::arc(|ctx| async move {
             if ctx.is_cancelled() {
                 return Err(TaskError::Canceled);
             }
             Ok(())
         });
-        let direct = TaskFn::new("worker-7", |_ctx: TaskContext| async { Ok(()) });
+        let direct = TaskFn::new(|_ctx: TaskContext| async { Ok(()) });
 
-        assert_eq!(inferred.name(), "infer");
-        assert_eq!(direct.name(), "worker-7");
+        drop(inferred.spawn(ctx()));
+        drop(direct.spawn(ctx()));
     }
 
     #[test]
     fn spawn_invokes_closure_once_per_call() {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
-        let t = TaskFn::new("counter", move |_ctx: TaskContext| {
+        let t = TaskFn::new(move |_ctx: TaskContext| {
             counter.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         });
@@ -158,16 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn debug_works_for_closure_backed_task_and_shows_name() {
-        let t = TaskFn::new("dbg", |_ctx: TaskContext| async { Ok::<(), TaskError>(()) });
+    fn debug_works_for_closure_backed_task() {
+        let t = TaskFn::new(|_ctx: TaskContext| async { Ok::<(), TaskError>(()) });
         let rendered = format!("{t:?}");
         assert!(
             rendered.contains("TaskFn"),
             "debug must name the type: {rendered}"
-        );
-        assert!(
-            rendered.contains("dbg"),
-            "debug must include the task name: {rendered}"
         );
     }
 }

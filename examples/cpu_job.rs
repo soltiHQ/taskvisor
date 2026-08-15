@@ -1,11 +1,22 @@
 //! # CPU-bound work under supervision
 //!
-//! Heavy CPU work should not run on Tokio worker threads.
-//! This example sends the computation to Rayon and waits for its result through a one-shot channel.
-//! Taskvisor adds retries, backoff, and an awaitable final outcome around that bridge.
+//! Use a separate CPU pool for heavy computation instead of blocking Tokio workers.
+//! This example bridges Taskvisor to Rayon through a one-shot channel.
 //!
-//! There is an important limit: canceling the async task drops the result receiver, but it does not stop a Rayon job already in progress.
-//! That job finishes in the CPU pool and its result is discarded.
+//! ```text
+//! Taskvisor attempt ──► Rayon CPU job ──► one-shot result ──► attempt outcome
+//! cancellation ───────► drop receiver; Rayon job continues
+//! ```
+//!
+//! The first simulated result is a retryable failure.
+//! `TaskSpec::restartable` waits for the configured 200 ms backoff, then starts a new Rayon job.
+//! The second attempt succeeds, its waiter resolves to `Completed`, and the handle shuts down.
+//!
+//! Cancellation drops only the one-shot receiver.
+//! It does not stop Rayon work already in progress.
+//! That computation finishes in the CPU pool and its result is discarded.
+//! The inherited retry limit and default task-attempt concurrency are unlimited.
+//! Configure bounds when an application can submit many CPU jobs.
 //!
 //! Run with `cargo run --example cpu_job`.
 
@@ -26,10 +37,10 @@ fn sum_of_primes(limit: u64) -> u64 {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    let handle = supervisor.serve();
+    let handle = supervisor.serve()?;
 
     let attempts = Arc::new(AtomicU32::new(0));
-    let job: TaskRef = TaskFn::arc("prime-sum", {
+    let job: TaskRef = TaskFn::arc({
         let attempts = Arc::clone(&attempts);
         move |ctx| {
             let attempts = Arc::clone(&attempts);
@@ -37,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The first attempt fails to show restart + backoff.
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed) + 1;
 
-                // The rayon bridge: compute off the runtime, await a oneshot.
+                // The rayon bridge: compute off the runtime, await an oneshot.
                 let (tx, rx) = oneshot::channel();
                 rayon::spawn(move || {
                     let result = if attempt == 1 {
@@ -66,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(job)
+    let spec = TaskSpec::restartable("prime-sum", job)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(200)));
 
     // Await the job's final result: the supervisor retried it for us.

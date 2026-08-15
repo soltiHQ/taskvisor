@@ -1,11 +1,23 @@
 //! # Application and lifecycle events with `tracing`
 //!
-//! The optional `TracingBridge` sends structured supervisor events to the application's existing `tracing` pipeline.
-//! The normal formatter, filters, and output sinks continue to apply.
+//! `TracingBridge` sends Taskvisor lifecycle events to the application's active `tracing` dispatcher.
+//! The application still owns formatting, filtering, and output sinks.
 //!
-//! The task emits application events with target `example_service`.
-//! `TracingBridge` emits lifecycle events with target `taskvisor`.
-//! Set `RUST_LOG=taskvisor=warn,example_service=info` to filter the two targets independently.
+//! ```text
+//! task code ───────────► target=example_service ──► tracing dispatcher
+//! Taskvisor events ────► TracingBridge ───────────► target=taskvisor ───► tracing dispatcher
+//! tracing dispatcher ──► filters and sinks
+//! ```
+//!
+//! The default bridge omits free-form `Event::reason` text. Typed fields remain available.
+//! Use `TracingBridge::with_reasons()` when diagnostic reason text must enter the pipeline.
+//! This program uses the default bridge.
+//!
+//! The default filter shows both targets at `DEBUG` and above. Override it with `RUST_LOG`.
+//!
+//! For example, use `RUST_LOG=taskvisor=debug,example_service=info`.
+//! Expect two failed attempts, two backoffs, a third successful attempt, and a final outcome.
+//! The exact line format belongs to `tracing-subscriber`. The example exits after success.
 //!
 //! Run with `cargo run --example tracing --features tracing`.
 
@@ -31,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A flaky task: fails twice, then succeeds.
     // Watch task work, retry failures, backoff, and the terminal outcome.
     let attempts = Arc::new(AtomicU32::new(0));
-    let flaky: TaskRef = TaskFn::arc("flaky-job", move |_ctx| {
+    let flaky: TaskRef = TaskFn::arc(move |_ctx| {
         let attempts = Arc::clone(&attempts);
         async move {
             let n = attempts.fetch_add(1, Ordering::Relaxed) + 1;
@@ -56,10 +68,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let spec = TaskSpec::restartable(flaky)
+    let spec = TaskSpec::restartable("flaky-job", flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(100)));
 
-    // One line: supervisor events flow into the same tracing pipeline.
+    // This default bridge omits Event::reason. Use with_reasons() to opt in.
     let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(TracingBridge)];
     let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
     supervisor.run(vec![spec]).await?;

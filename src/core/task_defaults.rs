@@ -1,4 +1,17 @@
-//! Supervisor-wide defaults for task execution.
+//! Supplies missing task settings when the registry accepts a [`TaskSpec`](crate::TaskSpec).
+//!
+//! [`SupervisorBuilder`](crate::SupervisorBuilder) stores one [`TaskDefaults`] value for the runtime.
+//! Registry admission resolves every inherited setting once. The task actor then receives a complete
+//! execution policy. Explicit settings on [`TaskSpec`](crate::TaskSpec) always win.
+//!
+//! ```text
+//! SupervisorBuilder ──► TaskDefaults
+//!                           │ inherited TaskSpec settings
+//!                           ▼
+//!                    registry admission
+//!                           ▼
+//!                  complete task policy ──► TaskActor
+//! ```
 
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -12,18 +25,15 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|duration| !duration.is_zero())
 }
 
-/// Default settings applied when a supervisor accepts a [`TaskSpec`](crate::TaskSpec).
+/// Runtime defaults for restart, backoff, timeout, and retry settings.
 ///
-/// An explicit value in `TaskSpec` always wins.
+/// An explicit [`TaskSpec`](crate::TaskSpec) setting always wins. The built-in defaults restart
+/// after retryable failures, use exponential backoff with jitter, set no attempt timeout, and allow unlimited retries.
+/// Install a value with [`SupervisorBuilder::with_task_defaults`](crate::SupervisorBuilder::with_task_defaults).
 ///
-/// For example, [`TaskSpec::restartable`](crate::TaskSpec::restartable) sets the restart policy but inherits backoff, timeout, and retry limit.
-///
-/// ```text
-/// TaskSpec field is inherited  -> use TaskDefaults value
-/// TaskSpec field is explicit   -> use TaskSpec value
-/// ```
-///
-/// The built-in defaults restart after retryable failures, use exponential backoff with jitter, set no attempt timeout, and allow unlimited retries.
+/// [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults) inherits the restart policy.
+/// The `once`, `restartable`, and `periodic` constructors choose restart behavior explicitly,
+/// but still inherit backoff, timeout, and retry limit unless a later `with_*` call overrides them.
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct TaskDefaults {
@@ -62,13 +72,16 @@ impl TaskDefaults {
         self.max_retries
     }
 
-    /// Sets the default restart policy.
+    /// Sets the restart policy for task specs that inherit it.
+    ///
+    /// This affects [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults).
+    /// Named behavior constructors set their own restart policy.
     pub fn with_restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = restart;
         self
     }
 
-    /// Sets the default backoff policy.
+    /// Sets the delay policy inherited by retryable task failures.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
         self.backoff = backoff;
         self
@@ -96,8 +109,10 @@ impl TaskDefaults {
     /// Sets the default retry limit from a raw integer.
     ///
     /// # Errors
+    ///
     /// Returns [`ConfigError::Zero`] when `max_retries` is zero.
     /// Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
+    /// Use [`RestartPolicy::Never`] to disable retries for specs that inherit their restart policy.
     pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
         let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
             field: "max_retries",

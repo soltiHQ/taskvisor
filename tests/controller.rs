@@ -3,13 +3,14 @@
 mod common;
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
 use taskvisor::prelude::*;
 use taskvisor::{ControllerConfig, ControllerError, ControllerSpec, SlotStatusKind};
+use tokio::sync::Notify;
 
 fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventCollector>) {
     let collector = EventCollector::new();
@@ -17,7 +18,7 @@ fn served_controller(cfg: ControllerConfig) -> (SupervisorHandle, Arc<EventColle
         .with_subscribers(collector_subscribers(&collector))
         .with_controller(cfg)
         .build();
-    (sup.serve(), collector)
+    (sup.serve().expect("runtime startup"), collector)
 }
 
 async fn submit_running(handle: &SupervisorHandle, spec: ControllerSpec) -> TaskId {
@@ -44,24 +45,47 @@ async fn expect_rejected(waiter: TaskWaiter) -> RejectionKind {
     }
 }
 
-fn logging_once(name: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
-    let n = name.to_string();
-    TaskFn::arc(name, move |_ctx: TaskContext| {
+fn logging_once(entry: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
+    let entry = entry.to_string();
+    TaskFn::arc(move |_ctx: TaskContext| {
         let log = log.clone();
-        let n = n.clone();
+        let entry = entry.clone();
         async move {
-            log.lock().unwrap().push(n);
+            log.lock().unwrap().push(entry);
             Ok(())
         }
     })
 }
 
+fn synchronously_blocked_task(release: Arc<AtomicBool>, started: Arc<Notify>) -> TaskRef {
+    TaskFn::arc(move |_ctx: TaskContext| {
+        let release = Arc::clone(&release);
+        let started = Arc::clone(&started);
+        async move {
+            started.notify_one();
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    })
+}
+
+struct ReleaseBlockedPoll(Arc<AtomicBool>);
+
+impl Drop for ReleaseBlockedPoll {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 #[test]
 fn controller_spec_components_are_configured_through_accessors() {
-    let spec = ControllerSpec::queue(TaskSpec::once(make_ok_once("original")))
+    let spec = ControllerSpec::queue(TaskSpec::once("original", make_ok_once()))
         .with_slot("shared")
         .with_admission(AdmissionPolicy::Replace)
-        .with_task_spec(TaskSpec::once(make_ok_once("replacement")));
+        .with_task_spec(TaskSpec::once("replacement", make_ok_once()));
 
     assert_eq!(spec.admission(), AdmissionPolicy::Replace);
     assert_eq!(spec.task_spec().name(), "replacement");
@@ -74,14 +98,12 @@ fn controller_spec_components_are_configured_through_accessors() {
     assert_eq!(spec.into_task_spec().name(), "replacement");
 }
 
-// Watched submission contracts.
-
 #[tokio::test(flavor = "current_thread")]
 async fn prepared_submission_exposes_identity_before_events_and_preserves_it() {
     let (handle, collector) = served_controller(ControllerConfig::default());
 
     with_timeout(10, async {
-        let request = ControllerSpec::queue(TaskSpec::once(make_ok_once("prepared-watched")))
+        let request = ControllerSpec::queue(TaskSpec::once("prepared-watched", make_ok_once()))
             .with_slot("prepared-slot");
         let prepared = handle
             .prepare_submission(request)
@@ -128,7 +150,7 @@ async fn dropping_prepared_submission_starts_no_work_and_publishes_no_event() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     let starts = Arc::new(AtomicUsize::new(0));
     let task_starts = Arc::clone(&starts);
-    let task = TaskFn::arc("prepared-dropped", move |_ctx| {
+    let task = TaskFn::arc(move |_ctx| {
         let starts = Arc::clone(&task_starts);
         async move {
             starts.fetch_add(1, Ordering::SeqCst);
@@ -139,16 +161,18 @@ async fn dropping_prepared_submission_starts_no_work_and_publishes_no_event() {
     with_timeout(10, async {
         let prepared = handle
             .prepare_submission(
-                ControllerSpec::queue(TaskSpec::once(task)).with_slot("prepared-dropped"),
+                ControllerSpec::queue(TaskSpec::once("prepared-dropped", task))
+                    .with_slot("prepared-dropped"),
             )
             .expect("controller is configured");
         let dropped_id = prepared.id();
         drop(prepared);
 
         let (barrier_id, barrier) = handle
-            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(
                 "prepared-drop-barrier",
-            ))))
+                make_ok_once(),
+            )))
             .await
             .expect("barrier submission");
         assert!(matches!(barrier.wait().await, Ok(TaskOutcome::Completed)));
@@ -177,7 +201,7 @@ async fn watched_submit_variants_resolve_completed_for_admitted_tasks() {
     with_timeout(10, async {
         let (id, waiter) = handle
             .submit_and_watch(
-                ControllerSpec::queue(TaskSpec::once(make_ok_once("watched-ok"))).with_slot("s"),
+                ControllerSpec::queue(TaskSpec::once("watched-ok", make_ok_once())).with_slot("s"),
             )
             .await
             .expect("submit_and_watch ok");
@@ -190,9 +214,10 @@ async fn watched_submit_variants_resolve_completed_for_admitted_tasks() {
         );
 
         let prepared = handle
-            .prepare_submission(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+            .prepare_submission(ControllerSpec::queue(TaskSpec::once(
                 "try-watched-ok",
-            ))))
+                make_ok_once(),
+            )))
             .expect("controller is configured");
         let reserved_id = prepared.id();
         let (id, waiter) = prepared
@@ -214,13 +239,13 @@ async fn submit_and_watch_resolves_rejected_on_drop_if_running() {
     with_timeout(10, async {
         submit_running(
             &handle,
-            ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-w"))).with_slot("s"),
+            ControllerSpec::queue(TaskSpec::restartable("occupant-w", make_coop())).with_slot("s"),
         )
         .await;
 
         let (id, waiter) = handle
             .submit_and_watch(
-                ControllerSpec::drop_if_running(TaskSpec::restartable(make_coop("dropped-w")))
+                ControllerSpec::drop_if_running(TaskSpec::restartable("dropped-w", make_coop()))
                     .with_slot("s"),
             )
             .await
@@ -271,13 +296,13 @@ async fn cancel_immediately_removes_a_watched_queued_submission() {
     with_timeout(10, async {
         submit_running(
             &handle,
-            ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-rm"))).with_slot("s"),
+            ControllerSpec::queue(TaskSpec::restartable("occupant-rm", make_coop())).with_slot("s"),
         )
         .await;
 
         let (victim_id, waiter) = handle
             .submit_and_watch(
-                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued-victim-w")))
+                ControllerSpec::queue(TaskSpec::restartable("queued-victim-w", make_coop()))
                     .with_slot("s"),
             )
             .await
@@ -304,15 +329,13 @@ async fn cancel_immediately_removes_a_watched_queued_submission() {
     .await;
 }
 
-// Identity routing and event identity.
-
 #[tokio::test(flavor = "current_thread")]
 async fn direct_add_still_cancels_when_controller_is_configured() {
     let (handle, _collector) = served_controller(ControllerConfig::default());
 
     with_timeout(10, async {
         let id = handle
-            .add(TaskSpec::restartable(make_coop("direct-cancel")))
+            .add(TaskSpec::restartable("direct-cancel", make_coop()))
             .await
             .expect("direct add must register");
 
@@ -334,13 +357,13 @@ async fn remove_of_queued_submission_purges_it_before_start() {
     with_timeout(10, async {
         submit_running(
             &handle,
-            ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-q"))).with_slot("s"),
+            ControllerSpec::queue(TaskSpec::restartable("occupant-q", make_coop())).with_slot("s"),
         )
         .await;
 
         let victim_id = handle
             .submit(
-                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued-victim")))
+                ControllerSpec::queue(TaskSpec::restartable("queued-victim", make_coop()))
                     .with_slot("s"),
             )
             .await
@@ -377,7 +400,7 @@ async fn remove_of_queued_submission_purges_it_before_start() {
 
         assert!(
             handle
-                .cancel_by_label("occupant-q")
+                .cancel_by_name("occupant-q")
                 .await
                 .expect("cancel occupant")
         );
@@ -405,8 +428,6 @@ async fn remove_of_queued_submission_purges_it_before_start() {
     .await;
 }
 
-// Shutdown and configuration edges.
-
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_does_not_start_queued_tasks() {
     let (handle, collector) = served_controller(ControllerConfig::default());
@@ -414,13 +435,13 @@ async fn shutdown_does_not_start_queued_tasks() {
     with_timeout(10, async {
         submit_running(
             &handle,
-            ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant"))).with_slot("s"),
+            ControllerSpec::queue(TaskSpec::restartable("occupant", make_coop())).with_slot("s"),
         )
         .await;
 
         handle
             .submit(
-                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued"))).with_slot("s"),
+                ControllerSpec::queue(TaskSpec::restartable("queued", make_coop())).with_slot("s"),
             )
             .await
             .expect("second submit ok");
@@ -445,20 +466,20 @@ async fn submit_without_controller_is_consistent_across_construction_paths() {
         (
             "new",
             Supervisor::new(SupervisorConfig::default(), vec![]),
-            ControllerSpec::queue(TaskSpec::once(make_ok_once("new"))),
+            ControllerSpec::queue(TaskSpec::once("new", make_ok_once())),
         ),
         (
             "builder",
             Supervisor::builder(SupervisorConfig::default())
                 .with_subscribers(vec![])
                 .build(),
-            ControllerSpec::drop_if_running(TaskSpec::once(make_ok_once("builder"))),
+            ControllerSpec::drop_if_running(TaskSpec::once("builder", make_ok_once())),
         ),
     ];
 
     with_timeout(5, async {
         for (constructor, supervisor, spec) in cases {
-            let handle = supervisor.serve();
+            let handle = supervisor.serve().expect("runtime startup");
 
             assert!(
                 matches!(
@@ -485,13 +506,11 @@ async fn submit_without_controller_is_consistent_across_construction_paths() {
     .await;
 }
 
-// Admission policies and slot behavior.
-
 #[tokio::test(flavor = "current_thread")]
 async fn idle_submit_admits_emits_submitted_then_running_transition() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let spec = TaskSpec::restartable(make_coop("runner-7"));
+        let spec = TaskSpec::restartable("runner-7", make_coop());
         let id = submit_running(&handle, ControllerSpec::queue(spec).with_slot("web")).await;
 
         assert!(
@@ -555,7 +574,7 @@ async fn queue_three_drains_in_fifo_order() {
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     with_timeout(10, async {
         for name in ["t1", "t2", "t3"] {
-            let spec = TaskSpec::once(logging_once(name, log.clone()));
+            let spec = TaskSpec::once(name, logging_once(name, log.clone()));
             handle
                 .submit(ControllerSpec::queue(spec).with_slot("q"))
                 .await
@@ -573,14 +592,156 @@ async fn queue_three_drains_in_fifo_order() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slot_waits_for_force_reaped_owner_before_starting_different_label() {
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
+            .with_controller(ControllerConfig::default())
+            .build();
+    let handle = supervisor.serve().expect("runtime startup");
+    let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
+    let started = Arc::new(Notify::new());
+
+    let (owner_id, owner_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::restartable(
+                "physical-owner-a",
+                synchronously_blocked_task(Arc::clone(&release), Arc::clone(&started)),
+            ))
+            .with_slot("physical-slot-a"),
+        )
+        .await
+        .expect("the blocking owner must enter controller intake");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the owner must enter its synchronous poll");
+
+    let next_runs = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::clone(&next_runs);
+    let next = TaskFn::arc(move |_ctx| {
+        let runs = Arc::clone(&runs);
+        async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let (_next_id, next_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once("physical-next-b", next))
+                .with_slot("physical-slot-a"),
+        )
+        .await
+        .expect("the next task must enter the same slot queue");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle
+                .controller_snapshot()
+                .await
+                .and_then(|snapshot| snapshot.slot("physical-slot-a").cloned())
+                .is_some_and(|slot| slot.queue_depth == 1)
+        })
+        .await,
+        "the next task must be queued before owner cancellation"
+    );
+
+    assert!(handle.cancel(owner_id).await.expect("cancel blocked owner"));
+    assert!(matches!(
+        owner_waiter.wait().await,
+        Ok(TaskOutcome::ForceAborted)
+    ));
+    let mut next_outcome = Box::pin(next_waiter.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next_outcome.as_mut())
+            .await
+            .is_err(),
+        "logical force-abort must not release the controller slot"
+    );
+    assert_eq!(next_runs.load(Ordering::SeqCst), 0);
+
+    release.store(true, Ordering::Release);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), next_outcome).await,
+        Ok(Ok(TaskOutcome::Completed))
+    ));
+    assert_eq!(next_runs.load(Ordering::SeqCst), 1);
+    handle.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
+    let supervisor =
+        Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
+            .with_controller(ControllerConfig::default())
+            .build();
+    let handle = supervisor.serve().expect("runtime startup");
+    let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
+    let started = Arc::new(Notify::new());
+    let label = "physical-same-label";
+
+    let (owner_id, owner_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::restartable(
+                label,
+                synchronously_blocked_task(Arc::clone(&release), Arc::clone(&started)),
+            ))
+            .with_slot("physical-slot-same"),
+        )
+        .await
+        .expect("the blocking owner must enter controller intake");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the owner must enter its synchronous poll");
+
+    let replacement_runs = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::clone(&replacement_runs);
+    let replacement = TaskFn::arc(move |_ctx| {
+        let runs = Arc::clone(&runs);
+        async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let (_replacement_id, replacement_waiter) = handle
+        .submit_and_watch(
+            ControllerSpec::queue(TaskSpec::once(label, replacement))
+                .with_slot("physical-slot-same"),
+        )
+        .await
+        .expect("the replacement must enter the same slot queue");
+    assert!(handle.cancel(owner_id).await.expect("cancel blocked owner"));
+    assert!(matches!(
+        owner_waiter.wait().await,
+        Ok(TaskOutcome::ForceAborted)
+    ));
+
+    let mut replacement_outcome = Box::pin(replacement_waiter.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), replacement_outcome.as_mut())
+            .await
+            .is_err(),
+        "the queued same-label task must wait while the reaper reserves its label"
+    );
+    assert_eq!(replacement_runs.load(Ordering::SeqCst), 0);
+
+    release.store(true, Ordering::Release);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), replacement_outcome).await,
+        Ok(Ok(TaskOutcome::Completed))
+    ));
+    assert_eq!(replacement_runs.load(Ordering::SeqCst), 1);
+    handle.shutdown().await.expect("shutdown ok");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn replace_supersedes_running_latest_wins() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let run1 = TaskSpec::restartable(make_coop("run-1"));
+        let run1 = TaskSpec::restartable("run-1", make_coop());
         submit_running(&handle, ControllerSpec::replace(run1).with_slot("s")).await;
 
-        let run2 = TaskSpec::restartable(make_coop("run-2"));
+        let run2 = TaskSpec::restartable("run-2", make_coop());
         handle
             .submit(ControllerSpec::replace(run2).with_slot("s"))
             .await
@@ -615,14 +776,14 @@ async fn replace_supersedes_running_latest_wins() {
 async fn drop_if_running_rejects_busy_submission_without_starting_it() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let first = TaskSpec::restartable(make_coop("first"));
+        let first = TaskSpec::restartable("first", make_coop());
         submit_running(
             &handle,
             ControllerSpec::drop_if_running(first).with_slot("s"),
         )
         .await;
 
-        let second = TaskSpec::restartable(make_coop("second"));
+        let second = TaskSpec::restartable("second", make_coop());
         let rejected_id = handle
             .submit(ControllerSpec::drop_if_running(second).with_slot("s"))
             .await
@@ -655,7 +816,7 @@ async fn drop_if_running_rejects_busy_submission_without_starting_it() {
 async fn drop_if_running_admits_when_slot_idle() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let solo = TaskSpec::restartable(make_coop("solo"));
+        let solo = TaskSpec::restartable("solo", make_coop());
         submit_running(
             &handle,
             ControllerSpec::drop_if_running(solo).with_slot("s"),
@@ -682,8 +843,8 @@ async fn drop_if_running_admits_when_slot_idle() {
 async fn distinct_slots_admit_tasks_independently() {
     let (handle, _c) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let w1 = TaskSpec::restartable(make_coop("w1"));
-        let w2 = TaskSpec::restartable(make_coop("w2"));
+        let w1 = TaskSpec::restartable("w1", make_coop());
+        let w2 = TaskSpec::restartable("w2", make_coop());
         handle
             .submit(ControllerSpec::queue(w1).with_slot("s1"))
             .await
@@ -709,12 +870,12 @@ async fn distinct_slots_admit_tasks_independently() {
 async fn submit_and_watch_duplicate_name_distinct_slots_resolves_rejected() {
     let (handle, _c) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let first = TaskSpec::restartable(make_coop("dup"));
+        let first = TaskSpec::restartable("dup", make_coop());
         submit_running(&handle, ControllerSpec::queue(first).with_slot("s1")).await;
 
         let (_id, waiter) = handle
             .submit_and_watch(
-                ControllerSpec::queue(TaskSpec::restartable(make_coop("dup"))).with_slot("s2"),
+                ControllerSpec::queue(TaskSpec::restartable("dup", make_coop())).with_slot("s2"),
             )
             .await
             .expect("second submit_and_watch accepted into channel");
@@ -730,7 +891,7 @@ async fn submit_and_watch_duplicate_name_distinct_slots_resolves_rejected() {
 async fn replace_into_idle_slot_behaves_as_plain_admit() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
-        let x = TaskSpec::restartable(make_coop("x"));
+        let x = TaskSpec::restartable("x", make_coop());
         submit_running(&handle, ControllerSpec::replace(x).with_slot("s")).await;
 
         assert!(
@@ -759,7 +920,7 @@ async fn slot_freed_and_reusable_after_task_completes() {
     with_timeout(10, async {
         let (_first_id, first) = handle
             .submit_and_watch(
-                ControllerSpec::queue(TaskSpec::once(make_ok_once("first"))).with_slot("s"),
+                ControllerSpec::queue(TaskSpec::once("first", make_ok_once())).with_slot("s"),
             )
             .await
             .expect("first submission accepted");
@@ -767,7 +928,7 @@ async fn slot_freed_and_reusable_after_task_completes() {
 
         submit_running(
             &handle,
-            ControllerSpec::drop_if_running(TaskSpec::restartable(make_coop("second")))
+            ControllerSpec::drop_if_running(TaskSpec::restartable("second", make_coop()))
                 .with_slot("s"),
         )
         .await;
@@ -776,17 +937,15 @@ async fn slot_freed_and_reusable_after_task_completes() {
     .await;
 }
 
-// Capacity, backpressure, and public snapshots.
-
 #[tokio::test(flavor = "current_thread")]
 async fn queue_full_rejects_with_controller_rejected_event() {
     let (handle, collector) = served_controller(ControllerConfig::default().with_max_slot_queue(1));
     with_timeout(10, async {
-        let running = TaskSpec::restartable(make_coop("r"));
+        let running = TaskSpec::restartable("r", make_coop());
         submit_running(&handle, ControllerSpec::queue(running).with_slot("s")).await;
 
-        let p1 = TaskSpec::restartable(make_coop("p1"));
-        let p2 = TaskSpec::restartable(make_coop("p2"));
+        let p1 = TaskSpec::restartable("p1", make_coop());
+        let p2 = TaskSpec::restartable("p2", make_coop());
         handle
             .submit(ControllerSpec::queue(p1).with_slot("s"))
             .await
@@ -820,7 +979,7 @@ async fn try_submit_full_when_queue_capacity_saturated() {
     with_timeout(10, async {
         let mut saw_full = false;
         for _ in 0..256 {
-            let spec = TaskSpec::once(make_ok_once("q"));
+            let spec = TaskSpec::once("q", make_ok_once());
             if let Err(ControllerError::Full) =
                 handle.try_submit(ControllerSpec::queue(spec).with_slot("q"))
             {
@@ -845,14 +1004,14 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
     with_timeout(10, async {
         let occupant_id = handle
             .submit(
-                ControllerSpec::queue(TaskSpec::restartable(make_coop("occupant-snap")))
+                ControllerSpec::queue(TaskSpec::restartable("occupant-snap", make_coop()))
                     .with_slot("s"),
             )
             .await
             .expect("submit occupant ok");
         handle
             .submit(
-                ControllerSpec::queue(TaskSpec::restartable(make_coop("queued-snap")))
+                ControllerSpec::queue(TaskSpec::restartable("queued-snap", make_coop()))
                     .with_slot("s"),
             )
             .await
@@ -883,8 +1042,6 @@ async fn controller_snapshot_reports_running_slot_and_queue_depth() {
     .await;
 }
 
-// Controller lifecycle integration.
-
 #[tokio::test(flavor = "current_thread")]
 async fn natural_run_joins_controller_before_return() {
     let sup = Supervisor::builder(SupervisorConfig::default())
@@ -896,10 +1053,11 @@ async fn natural_run_joins_controller_before_return() {
             .await
             .expect("empty run must finish cleanly");
 
-        let handle = sup.serve();
-        let result = handle.try_submit(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+        let handle = sup.serve().expect("runtime startup");
+        let result = handle.try_submit(ControllerSpec::queue(TaskSpec::once(
             "after-natural-shutdown",
-        ))));
+            make_ok_once(),
+        )));
         assert_eq!(result, Err(ControllerError::Closed));
     })
     .await;
@@ -910,8 +1068,8 @@ async fn rejected_static_batch_keeps_controller_running() {
     let sup = Supervisor::builder(SupervisorConfig::default())
         .with_controller(ControllerConfig::default())
         .build();
-    let first = TaskSpec::once(make_ok_once("duplicate-static"));
-    let second = TaskSpec::once(make_ok_once("duplicate-static"));
+    let first = TaskSpec::once("duplicate-static", make_ok_once());
+    let second = TaskSpec::once("duplicate-static", make_ok_once());
 
     with_timeout(5, async {
         assert!(matches!(
@@ -919,11 +1077,12 @@ async fn rejected_static_batch_keeps_controller_running() {
             Err(RuntimeError::TaskAlreadyExists { .. })
         ));
 
-        let handle = sup.serve();
+        let handle = sup.serve().expect("runtime startup");
         let (_id, waiter) = handle
-            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(make_ok_once(
+            .submit_and_watch(ControllerSpec::queue(TaskSpec::once(
                 "after-rejected-static-batch",
-            ))))
+                make_ok_once(),
+            )))
             .await
             .expect("batch rejection must not stop controller intake");
         assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));

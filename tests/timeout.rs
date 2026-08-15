@@ -25,11 +25,11 @@ async fn run_to_exhaustion(spec: TaskSpec) -> Arc<EventCollector> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn configured_timeout_emits_one_terminal_attempt_event_then_retries() {
-    let task = TaskFn::arc("slow", |_ctx: TaskContext| async move {
+    let task = TaskFn::arc(|_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         Ok(())
     });
-    let spec = TaskSpec::restartable(task)
+    let spec = TaskSpec::restartable("slow", task)
         .with_timeout(Duration::from_millis(50))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(1).unwrap());
@@ -59,7 +59,7 @@ async fn configured_timeout_emits_one_terminal_attempt_event_then_retries() {
 async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
-    let task = TaskFn::arc("slow-then-ok", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let nc = nc.clone();
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);
@@ -69,7 +69,7 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
             Ok(())
         }
     });
-    let spec = TaskSpec::restartable(task)
+    let spec = TaskSpec::restartable("slow-then-ok", task)
         .with_timeout(Duration::from_millis(50))
         .with_backoff(fast_backoff());
     let collector = run_to_exhaustion(spec).await;
@@ -95,11 +95,11 @@ async fn timeout_then_success_unlimited_retries_exhausts_on_success() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
-    let task = TaskFn::arc("zero-to", |_ctx: TaskContext| async move {
+    let task = TaskFn::arc(|_ctx: TaskContext| async move {
         tokio::time::sleep(Duration::from_millis(30)).await;
         Ok(())
     });
-    let spec = TaskSpec::once(task).with_timeout(Duration::ZERO);
+    let spec = TaskSpec::once("zero-to", task).with_timeout(Duration::ZERO);
     let collector = run_to_exhaustion(spec).await;
 
     assert_eq!(collector.count(EventKind::AttemptTimedOut), 0);
@@ -112,10 +112,11 @@ async fn zero_timeout_means_no_timeout_task_runs_to_completion() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn task_returned_timeout_is_an_attempt_failure_not_a_configured_deadline() {
-    let task = TaskFn::arc("reported-timeout", |_ctx: TaskContext| async move {
-        Err(TaskError::timeout(Duration::from_secs(7)))
-    });
-    let collector = run_to_exhaustion(TaskSpec::once(task)).await;
+    let task =
+        TaskFn::arc(
+            |_ctx: TaskContext| async move { Err(TaskError::timeout(Duration::from_secs(7))) },
+        );
+    let collector = run_to_exhaustion(TaskSpec::once("reported-timeout", task)).await;
 
     assert_eq!(collector.count(EventKind::AttemptTimedOut), 0);
     assert_eq!(collector.count(EventKind::AttemptFailed), 1);

@@ -1,36 +1,48 @@
-//! # Event subscribers
+//! Connects best-effort runtime events to application observers.
 //!
-//! A subscriber receives best-effort runtime events for logs, metrics, alerts, or other integrations. Implement [`Subscribe`] to add one.
-//!
-//! ## Threading and backpressure
+//! Register [`Subscribe`] implementations through [`SupervisorBuilder::with_subscribers`](crate::SupervisorBuilder::with_subscribers).
+//! Implement the trait for metrics, alerts, or application-specific output. Enable the `logging` feature for `LogWriter`, or
+//! the `tracing` feature for `TracingBridge`. Every configured subscriber receives its own bounded, serial callback lane.
 //!
 //! ```text
-//! runtime publishers
-//!       ▼
-//! bounded shared event bus          (may drop old events on lag)
-//!       ▼
-//! internal listener
-//!       ├──► bounded queue A ──────► dedicated thread A ──► A.on_event()
-//!       └──► bounded queue B ──────► dedicated thread B ──► B.on_event()
+//! ordinary runtime components
+//!      │ Event
+//!      ▼
+//! bounded event bus
+//!      ▼
+//! runtime event relay
+//!      ▼
+//! SubscriberSet
+//!      ├── queue A ──► serial lane A ──► subscriber A::on_event
+//!      └── queue B ──► serial lane B ──► subscriber B::on_event
+//!
+//! internal diagnostics ──► event relay or subscriber lane ──► callbacks
 //! ```
 //!
-//! Publishing never waits for subscriber code.
-//! Each subscriber has its own bounded queue; one slow subscriber does not fill another subscriber's queue.
+//! Internal subscriber diagnostics can bypass the shared bus. All delivery is for logs, metrics, alerts, and diagnostics.
+//! It does not own registry state or watched task outcomes. Publishing an ordinary event never calls subscriber code.
+//! Events can be lost at the shared bus or at an individual subscriber queue.
+//! A slow subscriber cannot fill another subscriber's queue.
 //!
-//! Its events can still be dropped.
-//! Callbacks run one at a time per subscriber on its dedicated thread, in queue order.
+//! Each lane preserves FIFO callback order. Different lanes may run at the same time on a supervisor-local callback executor.
+//! Shutdown gives all lanes one shared drain deadline. With no configured subscribers, the event bus stays disabled and
+//! no event relay or callback worker starts.
 //!
-//! There are two places where events can be lost:
+//! Shared ingress and subscriber queues have separate capacities.
+//! Use [`SupervisorConfig::with_bus_capacity`](crate::SupervisorConfig::with_bus_capacity) for bursts before fan-out.
+//! Override [`Subscribe::queue_capacity`] for bursts in one observer, and keep its callback short.
+//! Larger queues absorb longer bursts but consume more memory.
 //!
-//! - the shared event bus, if its listener falls behind;
-//! - one subscriber queue, if that subscriber falls behind.
+//! # Choosing an observer
 //!
-//! Queue drops are counted per subscriber and coalesced into one direct overflow summary after that queue catches up.
-//! The summary does not re-enter the shared event bus.
-//! Callback panic diagnostics remain best-effort events.
-//! During shutdown, all subscriber queues share the configured drain deadline.
+//! | Need                                  | Observer                         |
+//! |---------------------------------------|----------------------------------|
+//! | Quick human-readable console output   | `LogWriter` with `logging`       |
+//! | Structured fields in `tracing`        | `TracingBridge` with `tracing`   |
+//! | Metrics, alerts, or another transport | A custom [`Subscribe`] type      |
 //!
-//! See [`Event`](crate::Event) for the data model and [`Subscribe`] for the full callback contract.
+//! Use [`TaskWaiter`](crate::TaskWaiter) instead when application logic needs a watched task's final result.
+//! Subscriber delivery is intentionally lossy.
 
 mod subscriber;
 mod subscriber_set;

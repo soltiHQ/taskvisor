@@ -1,113 +1,76 @@
-//! # Task identity
+//! Explains the identities used to submit, manage, and coordinate tasks.
 //!
-//! [`TaskId`] is the opaque identity reserved for one task submission.
-//!
-//! Direct `add*` methods return it after the registry accepts a task.
-//! Controller `submit*` methods return it after queueing, before slot admission.
-//! Controller `prepare_submission` exposes it earlier, before the submission can
-//! publish any event.
-//! The same ID therefore also identifies a controller submission that is rejected without running.
-//!
-//! ## One identity across the lifecycle
-//!
-//! Every submission accepted into Taskvisor's command path has one `TaskId`.
-//! It is allocated before the first admission decision, then passed unchanged through every stage that the submission reaches:
+//! | Value           | Meaning                                      |
+//! |-----------------|----------------------------------------------|
+//! | [`TaskId`]      | One submission in the current process        |
+//! | Task name       | Registry uniqueness key and diagnostic label |
+//! | Controller slot | Key that coordinates competing submissions   |
 //!
 //! ```text
-//! allocate TaskId A
-//!         │
-//!         ├── direct add ───────────────────────────────────────────────┐
-//!         │                                                             │
-//!         └── optional controller ─► queue[A] ─► slot admission[A] ─────┤
-//!                                      │                                │
-//!                                      └──► rejected[A] (not registered)│
-//!                                                                       ▼
-//!                                                         registry admission[A]
-//!                                                             │        │
-//!                                      rejected[A] ◄──────────┘        └──► registry[A]
-//!                                      (not registered)                     │
-//!                                                                            ▼
-//!                                              task runner[A] ─► attempt 1, 2, ...
-//!                                                                            ▼
-//!                                                                       cleanup[A]
+//! application submission
+//!      ├── direct add ─────────► TaskId + task name ──► registry
+//!      └── controller submit ──► TaskId + slot ───────► controller ──► registry
 //! ```
 //!
-//! No new `TaskId` is allocated at admission or between retry attempts.
-//! Queue management, registry membership, the managed runner, and completion tracking carry the same `A`.
-//! Related lifecycle events expose it so callers can correlate cancellation, logs, and metrics.
+//! Taskvisor allocates the ID before the first admission decision. The same ID follows queued work,
+//! every retry, terminal cleanup, and controller rejection. Several task names may use the same controller slot.
 //!
-//! ## TaskId vs Name vs Slot
-//!
-//! | Concept          | Owned by   | Meaning                                               |
-//! |------------------|------------|-------------------------------------------------------|
-//! | [`TaskId`]       | taskvisor  | identity of one submission across its full lifecycle  |
-//! | task name        | task       | label used for logs, metrics, and registry uniqueness |
-//! | controller slot  | controller | admission key for "one at a time" scheduling          |
-//!
-//! A task name is unique only while its registry entry exists.
-//! After terminal cleanup removes that entry, a later submission may reuse the same name.
-//! Reusing a name does not reuse its identity:
-//!
-//! ```text
-//! first submission:  name = "worker", slot = "jobs", TaskId = A
-//! terminal cleanup:  removes A and releases the name "worker"
-//! later submission:  name = "worker", slot = "jobs", TaskId = B (B != A)
-//! ```
-//!
-//! Each `TaskId` is allocated from a process-local `u64` counter.
-//!
-//! The counter is not stored across process restarts, and a `TaskId` is not a UUID.
-//! If external systems need a persistent identity, store their own ID next to this one.
-//!
-//! With the `controller` feature, a submitted task also has a slot key (`ControllerSpec::slot_name`).
-//! The slot controls admission only; it is not the same thing as the submission identity.
+//! A name can be reused after registry membership ends and Taskvisor has observed the physical
+//! exit of any force-aborted actor with that name. Reuse allocates a new [`TaskId`].
+//! IDs come from a process-local `u64` sequence, are not persisted, and cannot be reconstructed
+//! through the public API. Returned IDs are never zero and never wrap. The next allocation after
+//! exhaustion panics. Store a separate application ID when identity must survive a process restart.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Process-local allocation counter for task identities.
+/// Process-local sequence used for every task identity.
 ///
-/// Starts at `1`.
-/// Like all `AtomicU64::fetch_add` counters, it wraps after `2^64` allocations;
-/// reaching that limit is outside normal operation.
+/// Starts at `1`; zero is the exhausted sentinel and is never returned.
 static TASK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Opaque process-local identity of one task submission.
+#[inline]
+fn advance(current: u64) -> Option<u64> {
+    match current {
+        0 => None,
+        u64::MAX => Some(0),
+        value => Some(value + 1),
+    }
+}
+
+/// Opaque identity of one task submission within the current process.
 ///
-/// Taskvisor allocates it once. With the `controller` feature, this happens before admission so queued work can already be addressed and correlated.
-/// A prepared controller submission exposes the allocated value before controller intake and before any event for that value can be published.
-/// If admitted, the same value becomes the registry key and remains unchanged through all attempts and terminal cleanup.
+/// Use it for cancellation, removal, watched outcomes, and event correlation.
+/// An admitted task keeps the same value through every attempt and terminal cleanup.
+/// Controller rejection also keeps the submitted value even though no task body runs.
 ///
-/// Rejected work keeps its id even though no task body ran.
-///
-/// Pass the returned value to cancellation and removal operations.
-/// The same value correlates the submission's lifecycle [`Event`](crate::Event)s, completion, logs, and metrics within the current process.
-///
-/// Do not parse its display output.
-/// Use [`get`](Self::get) when you need the numeric value.
-/// Numeric order is allocation order, not a causal or time order.
+/// `Display` writes `#` followed by the numeric value. Do not parse that output;
+/// use [`get`](Self::get). Numeric order records allocation order only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskId(u64);
 
 impl TaskId {
     /// Allocates the next submission identity.
     ///
-    /// Internal only: Taskvisor owns identity allocation across direct runtime registration and controller pre-admission.
+    /// Taskvisor owns the single sequence used by direct, static-run, and controller paths.
     #[inline]
     pub(crate) fn next() -> Self {
-        TaskId(TASK_ID_SEQ.fetch_add(1, Ordering::Relaxed))
+        let id = TASK_ID_SEQ
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, advance)
+            .unwrap_or_else(|_| panic!("TaskId space exhausted; identities cannot wrap safely"));
+        TaskId(id)
     }
 
     /// Returns the process-local numeric value.
     ///
-    /// This is useful for logs, metrics, and correlation within one process run.
-    /// The value is not persistent across restarts and cannot reconstruct a `TaskId` through the public API.
+    /// The number is useful for logs and metrics in the current process.
+    /// It is not persistent and cannot reconstruct a `TaskId` through the public API.
     #[inline]
     #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
 
-    /// Creates a fresh id for tests.
+    /// Creates a fresh ID for tests.
     ///
     /// ```rust
     /// use taskvisor::TaskId;
@@ -142,6 +105,14 @@ mod tests {
         assert!(a.get() >= 1, "zero is reserved and must never be minted");
         assert!(b.get() > a.get(), "ids must increase: {a} then {b}");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sequence_uses_zero_as_an_exhausted_sentinel() {
+        assert_eq!(advance(1), Some(2));
+        assert_eq!(advance(u64::MAX - 1), Some(u64::MAX));
+        assert_eq!(advance(u64::MAX), Some(0));
+        assert_eq!(advance(0), None);
     }
 
     #[cfg(feature = "test-util")]

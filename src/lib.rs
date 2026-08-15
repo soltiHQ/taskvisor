@@ -1,84 +1,24 @@
-//! # taskvisor
+//! # Taskvisor
 //!
-//! Taskvisor is an in-process Tokio task supervisor with retries, reliable outcomes, and keyed queue/replace/reject admission.
-//! It can time out attempts, stop tasks during shutdown, and dynamically manage work.
+//! Taskvisor supervises in-process Tokio tasks that need retries, cancellation, final outcomes, or coordinated shutdown.
+//! Its optional controller applies queue, replace, or reject policy per application key. Supervisor-wide limits still apply.
 //!
-//! Use it for dynamic or keyed background work that needs conflict handling and a clear lifecycle.
+//! ## Check the fit
 //!
-//! ## Start Here
+//! Taskvisor is useful when an application needs one or more of these:
 //!
-//! 1. Create a [`Task`] with [`TaskFn`] or your own type.
-//! 2. Wrap it in a [`TaskSpec`] to choose restart rules.
-//! 3. Start a [`Supervisor`] in static or dynamic mode.
-//! 4. Make long-running tasks listen to [`TaskContext`] cancellation.
+//! - tasks are added, removed, or watched while the service is running;
+//! - task attempts need timeouts, retry limits, or backoff;
+//! - application logic needs the final outcome of one submitted task;
+//! - competing work for the same key must queue, replace older work, or be rejected.
 //!
-//! ```text
-//! TaskFn or impl Task
-//!          ▼
-//!       TaskSpec  ── fills missing values from ──► TaskDefaults
-//!          ▼
-//!      Supervisor
-//!       │       │
-//!       │       └── best-effort events ──► Subscribe
-//!       │
-//!       └── watched final result ────────► TaskWaiter
-//! ```
+//! Taskvisor is not a persistent job queue. Runtime state, queued submissions, and task IDs
+//! do not survive process exit. Use durable external storage when work must resume after a restart.
 //!
-//! ## Choose a Mode
+//! ## Quick start
 //!
-//! - **Static:** call [`Supervisor::run`] with a known task set.
-//!   It waits for all tasks to finish without installing process signal handlers.
-//!   Use [`Supervisor::run_until`] with an application-owned shutdown future, or explicitly opt into signal handling with [`Supervisor::run_with_os_signals`].
-//! - **Dynamic:** call [`Supervisor::serve`].
-//!   It returns a [`SupervisorHandle`] that can add, remove, cancel, and list tasks while the service is running.
-//!
-//! `run` registers its initial task list as one batch.
-//! If a name is repeated or already in use, no task from that batch starts.
-//!
-//! ## One Task, Many Attempts
-//!
-//! A registered task has one [`TaskId`], but it may run several attempts:
-//!
-//! ```text
-//! register
-//!    ▼
-//! attempt 1 ── failure ──► backoff ──► attempt 2 ── success ──► finish
-//!                                                       ▼
-//!                                                 TaskOutcome
-//! ```
-//!
-//! Attempts for one task never overlap.
-//! [`RestartPolicy`] decides whether a new attempt is allowed.
-//! [`BackoffPolicy`] sets the delay after a retryable failure.
-//! A timeout applies to one attempt, not to the full task lifetime.
-//!
-//! ## Cancellation and Shutdown
-//!
-//! Cancellation is cooperative first.
-//! A long-running task should await [`TaskContext::cancelled`] or use [`TaskContext::run_until_cancelled`], then return [`TaskError::Canceled`].
-//! During shutdown, taskvisor waits for the configured grace period.
-//! It aborts tasks that still have not stopped.
-//!
-//! Dropping one supervisor or handle clone does not stop the runtime.
-//! Dropping the last public owner sends best-effort cancellation, but cannot wait for cleanup.
-//! Call [`SupervisorHandle::shutdown`] when cleanup must be complete before your code continues.
-//!
-//! ## Events or Final Outcomes?
-//!
-//! Lifecycle [`Event`] values are **best-effort**.
-//! They are suitable for logs, metrics, and live status.
-//! A slow subscriber can miss events.
-//!
-//! A [`TaskWaiter`] uses a direct completion channel.
-//! Event-bus lag does not affect it.
-//!
-//! It normally returns the final [`TaskOutcome`] after retries and registry cleanup;
-//! it returns a runtime error if the completion channel closes first.
-//!
-//! Create one with [`SupervisorHandle::add_and_watch`] or its fail-fast `try_*` form.
-//! With a configured controller, use `submit_and_watch` or `try_submit_and_watch`.
-//!
-//! ## Quick Start
+//! A [`TaskFn`] turns an async closure into supervised work.
+//! A [`TaskSpec`] gives that work a name and selects its lifecycle.
 //!
 //! ```rust
 //! use taskvisor::prelude::*;
@@ -86,94 +26,175 @@
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-//!
-//!     let hello: TaskRef = TaskFn::arc("hello", |_ctx| async move {
-//!         println!("hello from taskvisor");
+//!     let hello = TaskFn::arc(|_ctx| async {
+//!         println!("hello from Taskvisor");
 //!         Ok(())
 //!     });
 //!
-//!     supervisor.run(vec![TaskSpec::once(hello)]).await?;
+//!     supervisor
+//!         .run(vec![TaskSpec::once("hello", hello)])
+//!         .await?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ## Main Types
+//! [`Supervisor::run`] accepts the complete static batch or rejects it.
+//! The method returns after the shared cleanup workflow, not with each task's outcome.
+//! Use a watched dynamic add when application logic needs that result.
 //!
-//! | Need             | Types                                                          |
-//! |------------------|----------------------------------------------------------------|
-//! | Define work      | [`Task`], [`TaskFn`], [`TaskContext`], [`TaskSpec`]            |
-//! | Run work         | [`Supervisor`], [`SupervisorHandle`]                           |
-//! | Set defaults     | [`SupervisorConfig`], [`TaskDefaults`]                         |
-//! | Control retries  | [`RestartPolicy`], [`BackoffPolicy`], [`JitterPolicy`]         |
-//! | Observe progress | [`Event`], [`EventKind`], [`Subscribe`]                        |
-//! | Wait for the end | [`TaskWaiter`], [`TaskOutcome`], [`TaskOutcomeKind`]           |
-//! | Admit keyed work | [`ControllerSpec`], [`PreparedSubmission`], [`AdmissionPolicy`], [`ControllerConfig`] |
-//! | Handle errors    | [`Error`], [`TaskError`], [`RuntimeError`]                     |
+//! ## Continue with a runnable example
 //!
-//! Main types are re-exported at the crate root.
-//! The module pages explain each area in more detail:
-//! [`tasks`], [`policies`], [`events`], [`subscribers`], [`core`], and [`identity`].
+//! The [user guide] explains the application workflow from task definition through production boundaries.
+//! The [examples guide] includes the learning path, commands, feature flags, and stop behavior.
 //!
-//! ## Keyed Admission
+//! - Foundations: [basic], [task type], [graceful worker], [application shutdown], [periodic],
+//!   [restart policies], and [configuration].
+//! - Runtime patterns: [outcomes], [dynamic tasks], [queue consumer], and [CPU job].
+//! - Observability: [custom subscriber], [logging], [tracing], and [metrics].
+//! - Keyed admission: [controller slots], [controller admission], and [tenant sync].
 //!
-//! The default `controller` feature provides per-slot admission. Configure it with
-//! [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`] that
-//! queues, replaces, or rejects work when the slot already has an owner.
-//! Different slots are independent, subject to the supervisor's global limits.
+//! [user guide]: https://github.com/soltiHQ/taskvisor/blob/main/guide.md
+//! [examples guide]: https://github.com/soltiHQ/taskvisor/blob/main/examples/README.md
+//! [basic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs
+//! [task type]: https://github.com/soltiHQ/taskvisor/blob/main/examples/task_type.rs
+//! [graceful worker]: https://github.com/soltiHQ/taskvisor/blob/main/examples/graceful_worker.rs
+//! [application shutdown]: https://github.com/soltiHQ/taskvisor/blob/main/examples/application_shutdown.rs
+//! [periodic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs
+//! [restart policies]: https://github.com/soltiHQ/taskvisor/blob/main/examples/restart_policies.rs
+//! [configuration]: https://github.com/soltiHQ/taskvisor/blob/main/examples/configuration.rs
+//! [outcomes]: https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs
+//! [dynamic tasks]: https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic_tasks.rs
+//! [queue consumer]: https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs
+//! [CPU job]: https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs
+//! [custom subscriber]: https://github.com/soltiHQ/taskvisor/blob/main/examples/custom_subscriber.rs
+//! [logging]: https://github.com/soltiHQ/taskvisor/blob/main/examples/logging.rs
+//! [tracing]: https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs
+//! [metrics]: https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs
+//! [tenant sync]: https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs
+//! [controller slots]: https://github.com/soltiHQ/taskvisor/blob/main/examples/controller_slots.rs
+//! [controller admission]: https://github.com/soltiHQ/taskvisor/blob/main/examples/controller_admission.rs
 //!
-//! ## Feature Flags
+//! ## Choose the runtime entry point
 //!
-//! - `tracing`: forwards lifecycle events to `tracing`.
-//! - `logging`: simple event logging for examples and development.
-//! - `tokio-util-interop`: exposes the underlying Tokio cancellation token.
-//! - `controller` (default): slot-based admission with queue, replace, and reject rules.
-//! - `test-util`: constructors for task contexts, identities, and outcomes in tests.
+//! | Entry point                         | Use it when                                  |
+//! |-------------------------------------|----------------------------------------------|
+//! | [`Supervisor::run`]                 | A fixed batch finishes naturally             |
+//! | [`Supervisor::run_until`]           | A fixed batch stops on an application future |
+//! | [`Supervisor::run_with_os_signals`] | Taskvisor should install signal handlers     |
+//! | [`Supervisor::serve`]               | Work is added and managed at runtime         |
 //!
-//! ## Examples
+//! `run` and `run_until` do not install operating-system signal handlers.
+//! `run_with_os_signals` is the explicit process-wide opt-in. Dynamic mode
+//! returns a [`SupervisorHandle`] with add, query, cancel, remove, and shutdown methods.
 //!
-//! Choose a short path, or [browse all examples on GitHub](https://github.com/soltiHQ/taskvisor/tree/main/examples):
+//! [`Supervisor::new`] accepts runtime configuration and subscribers with default task settings.
+//! Use [`Supervisor::builder`] when you need custom [`TaskDefaults`], controller admission,
+//! or typed construction errors through [`SupervisorBuilder::try_build`].
 //!
-//! - New to supervision: `basic` → `worker` → `outcomes`.
-//! - Need per-key coordination: `tenant_sync` → `slots` → `admission`.
+//! ## Choose task behavior
 //!
-//! ### Start here
+//! | Constructor               | After success                  | After a retry-eligible failure |
+//! |---------------------------|--------------------------------|--------------------------------|
+//! | [`TaskSpec::once`]        | Stop                           | Stop                           |
+//! | [`TaskSpec::restartable`] | Stop                           | Retry if the limit allows      |
+//! | [`TaskSpec::periodic`]    | Wait its interval, then repeat | Retry if the limit allows      |
 //!
-//! | Example                                                                                   | What it shows                                                   |
-//! |-------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-//! | [basic](https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs)                 | Run one task and exit — the minimal wiring                      |
-//! | [worker](https://github.com/soltiHQ/taskvisor/blob/main/examples/worker.rs)               | A long-running worker that stops cleanly on Ctrl+C              |
-//! | [periodic](https://github.com/soltiHQ/taskvisor/blob/main/examples/periodic.rs)           | Repeat a job after each successful cycle                        |
-//! | [multiple](https://github.com/soltiHQ/taskvisor/blob/main/examples/multiple.rs)           | Several restart rules under one supervisor                      |
+//! Each registration has one [`TaskId`] and one internal actor. Attempts for that ID never overlap.
+//! [`RestartPolicy`] decides whether success repeats and whether a retryable failure may run again.
+//! The retry limit restricts only repeats after failure. [`BackoffPolicy`] and [`JitterPolicy`]
+//! control failure delays. A timeout applies to one attempt. The default retry limit is unlimited;
+//! set [`TaskSpec::with_max_retries`] or a [`TaskDefaults`] limit when repeated failure must eventually stop the task.
 //!
-//! ### Real patterns
+//! [`Task::spawn`] should return its future promptly. Put the task's work inside that future, and move
+//! blocking or CPU-heavy work off Tokio worker threads. Long-running work must observe [`TaskContext::cancelled`]
+//! or use [`TaskContext::run_until_cancelled`]. Return [`TaskError::Canceled`] after a cooperative stop.
+//! Return [`TaskError::Fail`] for a retry-eligible failure or [`TaskError::Fatal`] when the actor must stop.
 //!
-//! | Example                                                                                     | What it shows                                                   |
-//! |---------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-//! | [queue_consumer](https://github.com/soltiHQ/taskvisor/blob/main/examples/queue_consumer.rs) | Retry a failed broker connection                                |
-//! | [cpu_job](https://github.com/soltiHQ/taskvisor/blob/main/examples/cpu_job.rs)               | Run CPU-heavy work on rayon without blocking Tokio              |
+//! ## Get results or observe events
 //!
-//! ### Observability
+//! [`SupervisorHandle::add_and_watch`] returns a [`TaskWaiter`] for a direct final [`TaskOutcome`].
+//! A watched result does not depend on the lossy event path, but it is still in-memory and is not
+//! durable across process termination.
+#![cfg_attr(
+    feature = "controller",
+    doc = "Controller users can also choose [`SupervisorHandle::submit_and_watch`]."
+)]
 //!
-//! | Example                                                                                 | What it shows                                             |
-//! |-----------------------------------------------------------------------------------------|-----------------------------------------------------------|
-//! | [subscriber](https://github.com/soltiHQ/taskvisor/blob/main/examples/subscriber.rs)     | React to lifecycle events with your own handler           |
-//! | [tracing](https://github.com/soltiHQ/taskvisor/blob/main/examples/tracing.rs)           | Send events into `tracing` (feature `tracing`)            |
-//! | [metrics](https://github.com/soltiHQ/taskvisor/blob/main/examples/metrics.rs)           | Build Prometheus counters from lifecycle events           |
+//! [`Event`] and [`Subscribe`] are for logs, metrics, tracing, and live diagnostics. The shared event bus
+//! and each subscriber queue are bounded. Event delivery is best-effort and must not drive application correctness.
+#![cfg_attr(
+    feature = "controller",
+    doc = r#"
+## Coordinate work by key
+
+The default `controller` feature adds keyed admission before registry entry.
+Enable the controller for a supervisor with [`SupervisorBuilder::with_controller`], then submit a [`ControllerSpec`].
+
+```text
+ControllerSpec ──► controller slot
+                        ├── idle ──► registry admission
+                        └── busy ──► queue, replace, or reject
+```
+
+A task name is the registry uniqueness key inside one supervisor. A controller slot is the key used to coordinate competing submissions.
+Different task names can share a slot. Direct `add*` methods bypass this layer; `submit*` methods use it.
+See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
+"#
+)]
 //!
-//! ### Dynamic work and outcomes
+//! ## Cancellation and shutdown boundary
 //!
-//! | Example                                                                                 | What it shows                                            |
-//! |-----------------------------------------------------------------------------------------|----------------------------------------------------------|
-//! | [dynamic](https://github.com/soltiHQ/taskvisor/blob/main/examples/dynamic.rs)           | Add, list, cancel, and remove tasks at runtime           |
-//! | [outcomes](https://github.com/soltiHQ/taskvisor/blob/main/examples/outcomes.rs)         | Wait for reliable outcomes, including a timeout          |
+//! Cancellation starts cooperatively. At the configured grace deadline, Taskvisor may report [`TaskOutcome::ForceAborted`]
+//! while it keeps owning the unfinished actor until physical exit. While that actor remains active, its synchronous
+//! task code or attempt-future destructor may keep its task name and capacity reservation owned.
+//! Later isolated destruction of terminal task values keeps capacity reserved but does not keep the task name reserved.
 //!
-//! ### Keyed admission
+//! Dropping a non-final public owner leaves the runtime running. Dropping the final owner can request cancellation but
+//! cannot wait for cleanup. Call [`SupervisorHandle::shutdown`] when the cleanup result matters.
 //!
-//! | Example                                                                                       | What it shows                                         |
-//! |-----------------------------------------------------------------------------------------------|-------------------------------------------------------|
-//! | [tenant_sync](https://github.com/soltiHQ/taskvisor/blob/main/examples/tenant_sync.rs)         | Keep only the latest sync revision per tenant         |
-//! | [slots](https://github.com/soltiHQ/taskvisor/blob/main/examples/slots.rs)                     | Compare queue, replace, and reject policies           |
-//! | [admission](https://github.com/soltiHQ/taskvisor/blob/main/examples/admission.rs)             | Observe typed admission and rejection outcomes       |
+//! ## Architecture at a glance
+//!
+//! ```text
+//! application
+//!      ├── static batch ──► Supervisor::run*
+//!      ├── dynamic task ──► SupervisorHandle::add*
+//!      └── keyed task ──► SupervisorHandle::submit* ──► controller
+//!
+//! registry ──► TaskActor ──► sequential attempts
+//!
+//! runtime components ──► bounded event bus ──► subscriber queues
+//!
+//! registry cleanup or watched rejection ──► TaskWaiter
+//! ```
+//!
+//! The registry is the source of truth for registered task membership. The controller owns
+//! submissions that have not reached the registry. Events only observe the lifecycle.
+//! Watched outcomes use a separate one-shot path.
+//!
+//! ## Crate layout
+//!
+//! - [`tasks`] defines work, cancellation context, and task specifications.
+//! - [`policies`] defines restart and retry timing.
+//! - [`core`] exposes construction, runtime control, outcomes, and configuration.
+#![cfg_attr(
+    feature = "controller",
+    doc = "- [`controller`] defines optional keyed admission."
+)]
+//! - [`events`] and [`subscribers`] define best-effort observability.
+//! - [`error`] maps the public error types to their API boundaries.
+//! - [`identity`] explains task IDs, names, and controller slots.
+//! - [`prelude`] re-exports the common application-facing types.
+//!
+//! Contributors can follow the [source guide](https://github.com/soltiHQ/taskvisor/blob/main/src/ARCHITECTURE.md)
+//! for runtime ownership, data flow, and test entry points.
+//!
+//! ## Feature flags
+//!
+//! - `controller` enables keyed admission and is enabled by default.
+//! - `logging` enables the built-in standard-output subscriber.
+//! - `tracing` enables the built-in `tracing` bridge.
+//! - `tokio-util-interop` exposes Tokio's cancellation token type.
+//! - `test-util` exposes constructors intended for external tests.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -183,6 +204,11 @@
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+/// Compiles runnable Rust code blocks in `guide.md` as doctests.
+#[cfg(all(doctest, feature = "controller"))]
+#[doc = include_str!("../guide.md")]
+struct GuideDoctests;
 
 pub mod core;
 pub use core::{
@@ -197,7 +223,7 @@ pub mod policies;
 pub use policies::{BackoffError, BackoffPolicy, JitterPolicy, RestartPolicy};
 
 pub mod error;
-pub use error::{BoxError, Error, RuntimeError, SharedError, TaskError};
+pub use error::{BoxError, BuildError, Error, RuntimeError, SharedError, TaskError};
 
 pub mod events;
 pub use events::{BackoffSource, Event, EventKind, RejectionKind};

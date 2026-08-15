@@ -1,356 +1,204 @@
-# Taskvisor source guide
+# Taskvisor contributor map
 
-This document is a reading map for contributors. 
+This document is the entry point for contributors and reviewers.
+It explains what each part of the project owns, how the parts connect, and where to begin a change.
 
-It shows which module owns each decision and how data moves through the runtime. The Rust source and its module-level documentation remain the source of truth.
+For application usage, start with the [README](../README.md), the [user guide](../guide.md), the [crate documentation](https://docs.rs/taskvisor), and the [examples guide](../examples/README.md).
+Exact contracts live in the Rust source and its module-level documentation.
 
-## Recommended reading order
+## Architecture at a glance
 
-Read the code in this order if you are new to the repository:
+All registry-admitted tasks share the same execution path.
+The optional controller adds one admission step before the registry and can reject work without handing it off.
 
-| Step | Files                                                                                                                                                                           | Question answered                                               |
-|------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| 1    | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                                                                                  | What is public                                                  |
-| 2    | [`tasks/`](tasks), [`policies/`](policies), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                    | What describes a task and its retry rules                       |
-| 3    | [`core/builder.rs`](core/builder.rs), [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)                          | How is the runtime built, owned, and exposed                    |
-| 4    | [`core/runtime.rs`](core/runtime.rs), [`core/runtime/management.rs`](core/runtime/management.rs), [`core/runtime/lifecycle.rs`](core/runtime/lifecycle.rs)                      | How do public calls enter the runtime                           |
-| 5    | [`core/registry.rs`](core/registry.rs), [`core/registry/`](core/registry)                                                                                                       | Which task state is authoritative, and how is it cleaned up     |
-| 6    | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                            | How does one task run, retry, time out, and stop                |
-| 7    | [`core/outcome.rs`](core/outcome.rs), [`events/`](events), [`subscribers/`](subscribers)                                                                                        | Which results are reliable, and which signals are observability |
-| 8    | [`controller/mod.rs`](controller/mod.rs), [`controller/prepared.rs`](controller/prepared.rs), [`controller/slot.rs`](controller/slot.rs), [`controller/core/`](controller/core) | How does per-slot queue/replace/reject admission work           |
-| 9    | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/shutdown.rs`](core/shutdown.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs)  | How is one shared shutdown coordinated                          |
+```text
+application
+├── run* ───► registry
+├── serve ──► SupervisorHandle ──► add* ─────► registry
+└── serve ──► SupervisorHandle ──► submit* ──► controller ──► registry
 
-After the module documentation, read the integration tests by behavior: [`tests/watch.rs`](../tests/watch.rs), [`tests/identity.rs`](../tests/identity.rs), [`tests/controller.rs`](../tests/controller.rs), and [`tests/shutdown.rs`](../tests/shutdown.rs).
+registry
+├── admitted task ───────────► TaskActor ──► run_once ──► Task
+└── membership and removal ──► terminal classification
 
-## Runtime map
-
-`SupervisorBuilder` wires the runtime but does not start its background tasks. 
-
-`Supervisor::run` and `Supervisor::serve` call the idempotent runtime start path.
-
-The same component may appear in more than one path below. Repetition is only for layout; each label refers to the same runtime component.
-
-### Construction and task execution
-
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart TB
-    App["Application"]
-    Builder["SupervisorBuilder"]
-    Supervisor["Supervisor / SupervisorHandle"]
-    Core["SupervisorCore"]
-    Registry["Registry: authoritative task membership"]
-    Scheduler["Bounded actor scheduler"]
-    Actor["TaskActor: one registered task"]
-    Runner["run_once: one attempt"]
-    Task["Task + TaskSpec + policies"]
-    Shutdown["ShutdownCoordinator"]
-    Waiter["TaskWaiter / TaskOutcome"]
-
-    App --> Supervisor
-    Builder -->|returns| Supervisor
-    Supervisor --> Core
-    Builder -->|constructs| Core
-    Core -->|bounded command channel| Registry
-    Registry -->|bounded handoff| Scheduler
-    Scheduler -->|polls actor futures| Actor
-    Actor -->|spawns active attempt| Runner
-    Runner --> Task
-    Core --> Shutdown
-    Registry -->|direct one-shot| Waiter
+watched final outcome or watched submission rejection ──► TaskWaiter
+runtime components ────► bounded event bus ──► subscriber lanes
+terminal user values ──► deferred cleanup domain
 ```
 
-### Controller admission
+`run*` means `run`, `run_until`, or `run_with_os_signals`. These methods manage an initial batch.
+`serve` returns a `SupervisorHandle` for dynamic management.
+The handle exposes `add*`, `submit*`, and `prepare_submission`.
+A `PreparedSubmission` exposes its own `submit*` methods for the reserved `TaskId`.
 
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart TB
-    Builder["SupervisorBuilder"]
-    Supervisor["Supervisor / SupervisorHandle"]
-    Prepared["PreparedSubmission: reserved TaskId + ControllerSpec"]
-    Controller["Controller: per-slot admission + queued ID index"]
-    Core["SupervisorCore"]
-    Waiter["TaskWaiter / TaskOutcome"]
+`SupervisorCore` connects the runtime components. The registry owns task membership.
+A `TaskActor` owns the lifecycle of one registered task. `run_once` executes one physical attempt.
 
-    Builder -->|constructs when configured| Controller
-    Supervisor -->|prepare_submission| Prepared
-    Supervisor -->|submit shortcuts| Controller
-    Prepared -->|single-use submit| Controller
-    Controller -->|accepted work| Core
-    Controller -->|direct rejection outcome| Waiter
+## Boundaries to preserve
+
+These rules define the main architecture:
+
+- The registry is the source of truth for registered membership, removal, and terminal classification.
+- The controller owns pending submission payloads until registry hand-off. The registry then owns the admitted task, while the controller keeps slot coordination until physical release.
+- Each registry-admitted task has one actor and keeps its existing `TaskId`. Attempts for that ID never overlap.
+- Task names, controller slots, and task IDs have separate roles.
+- Management replies and `TaskWaiter` use direct in-process paths. Events are best-effort observability and never drive runtime state.
+- Shutdown is one shared operation. Logical force-abort does not prove that a physical attempt has stopped.
+- Shutdown deadlines do not guarantee that a subscriber callback or destructor has finished.
+- Retained task and subscriber values use the deferred cleanup domain for final destruction.
+
+## Source map
+
+Use this table before following internal calls.
+
+| Area                 | Responsibility                                                        | Start here                                                                                                                 |
+|----------------------|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| Crate surface        | Public modules, re-exports, and feature gates                         | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                             |
+| Task model           | `Task`, `TaskFn`, `TaskSpec`, and cancellation context                | [`tasks/mod.rs`](tasks/mod.rs)                                                                                             |
+| Retry policy         | Restart, backoff, jitter, and retry timing                            | [`policies/mod.rs`](policies/mod.rs)                                                                                       |
+| Runtime package      | Internal composition and public runtime re-exports                    | [`core/mod.rs`](core/mod.rs)                                                                                               |
+| Construction         | Runtime limits, task defaults, and component wiring                   | [`core/builder.rs`](core/builder.rs), [`core/config.rs`](core/config.rs), [`core/task_defaults.rs`](core/task_defaults.rs) |
+| Public lifecycle     | Static run methods, dynamic handle methods, and public ownership      | [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)           |
+| Runtime coordination | Startup, management routing, event relay, and shared shutdown         | [`core/runtime/mod.rs`](core/runtime/mod.rs)                                                                               |
+| Registry             | Authoritative admission, membership, scheduling, removal, and cleanup | [`core/registry/mod.rs`](core/registry/mod.rs)                                                                             |
+| Task execution       | Restart loop and one physical attempt                                 | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                       |
+| Watched results      | Final `TaskOutcome` delivery                                          | [`core/outcome.rs`](core/outcome.rs)                                                                                       |
+| Deferred cleanup     | Ownership capacity and off-runtime destruction                        | [`core/deferred_drop/mod.rs`](core/deferred_drop/mod.rs)                                                                   |
+| Controller API       | Slots, policies, configuration, submissions, snapshots, and errors    | [`controller/mod.rs`](controller/mod.rs)                                                                                   |
+| Controller engine    | Ordered commands, slot state, admission, identity, and shutdown       | [`controller/engine/mod.rs`](controller/engine/mod.rs)                                                                     |
+| Event model          | Event values and bounded ingress                                      | [`events/mod.rs`](events/mod.rs)                                                                                           |
+| Event delivery       | Per-subscriber queues, callback lanes, and built-in observers         | [`subscribers/mod.rs`](subscribers/mod.rs), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs)                   |
+| Shared contracts     | Public errors, identities, and internal diagnostic text               | [`error.rs`](error.rs), [`identity.rs`](identity.rs), [`reasons.rs`](reasons.rs)                                           |
+
+Files outside `src/` provide executable context:
+
+| Path                              | Purpose                                                 |
+|-----------------------------------|---------------------------------------------------------|
+| [`examples/`](../examples)        | Runnable public workflows and expected behavior         |
+| [`tests/`](../tests)              | Cross-component contracts and regressions               |
+| [`benches/`](../benches)          | Measured performance boundaries                         |
+| [`Cargo.toml`](../Cargo.toml)     | Features, dependencies, examples, and benchmark targets |
+| [`Taskfile.yml`](../Taskfile.yml) | Repository validation commands                          |
+
+## Follow the main flows
+
+### 1. Build and start
+
+`SupervisorBuilder` combines `SupervisorConfig`, `TaskDefaults`, subscribers, the cleanup ownership domain, and an optional controller.
+It returns a `Supervisor` around the shared runtime core.
+
+`Supervisor::run`, `Supervisor::run_until`, and `Supervisor::run_with_os_signals` supply an initial task batch.
+`Supervisor::serve` starts the same runtime and returns a `SupervisorHandle`.
+Startup and direct runtime management enter through [`core/runtime/`](core/runtime).
+
+### 2. Register and run a task
+
+Direct adds and static batches reach the registry. A controller submission reaches the same registry after slot admission.
+
+```text
+TaskSpec ────────► registry admission ──► TaskActor
+TaskActor ───────► run_once ────────────► attempt future
+attempt result ──► actor policy ────────► stop, retry, or repeat
+actor exit ──────► registry removal ────► optional watched TaskOutcome
 ```
 
-### Best-effort observability
+Registry admission resolves inherited `TaskDefaults` and indexes the task ID and name.
+The actor owns restart policy, retry counting, and delays between attempts.
+The runner owns one attempt, including timeout and panic capture.
 
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart TB
-    Registry["Registry: authoritative task membership"]
-    Actor["TaskActor: one registered task"]
-    Controller["Controller: per-slot admission"]
-    Shutdown["ShutdownCoordinator"]
-    Bus["Bus: best-effort broadcast"]
-    Observability["Event relay: alive view + subscriber queues"]
+When the actor ends, registry removal owns terminal classification and watched outcome delivery.
+Module docs under [`core/registry/`](core/registry) describe the admission and removal protocols.
 
-    Registry -. lifecycle events .-> Bus
-    Actor -. attempt events .-> Bus
-    Controller -. admission events .-> Bus
-    Shutdown -. shutdown events .-> Bus
-    Bus -. best-effort broadcast .-> Observability
+### 3. Coordinate work through the controller
+
+The `controller` feature is enabled by default, but controller admission is a runtime opt-in through `SupervisorBuilder::with_controller`.
+Direct `add*` methods bypass it. `SupervisorHandle::submit*` methods use it.
+
+```text
+ControllerSpec ──► controller slot
+                         ├── idle ──► registry admission
+                         └── busy ──► queue, replace, or reject
 ```
 
-The controller is compiled by the default `controller` feature, but it is a runtime opt-in: it exists only when a builder receives a `ControllerConfig`. Direct `add*` methods bypass slot admission; `submit*` methods use it.
+| Value           | Role                                                                                                         |
+|-----------------|--------------------------------------------------------------------------------------------------------------|
+| `TaskId`        | Identity allocated for one task request, including a prepared request; it does not prove intake or admission |
+| Task name       | Uniqueness key within one supervisor registry and diagnostic label                                           |
+| Controller slot | Application key that serializes competing work                                                               |
 
-Controller admission does not turn transient registry queue saturation into a rejection. The slot remains `Admitting`, the controller retains the task payload and watcher, and a worker waits only for an owned registry queue permit. The controller loop remains available for later submissions, replacement, identity removal, and shutdown.
+The controller owns ordered commands and pending payloads. Registry decisions and physical completion signals drive slot transitions.
+Events do not. Start with [`controller/mod.rs`](controller/mod.rs) for the public contract and [`controller/engine/mod.rs`](controller/engine/mod.rs) for implementation.
 
-`PreparedSubmission` is only a command-side hand-off. It allocates the controller submission's `TaskId` and holds its `ControllerSpec`, but it does not publish or enqueue anything. Consuming it sends the same ordered controller command as the ordinary `submit*` shortcuts. This lets an integrating application install `application ID -> TaskId` correlation before events for that `TaskId` can begin.
+With a controller configured, cancel and remove operations by `TaskId` pass through the controller before the registry.
+This lets them reach queued submissions and preserves controller command order.
+`cancel_by_name` and `remove_by_name` target registered work because queued submissions do not own a registered name.
 
-## Direct task lifecycle
+### 4. Return results or publish observations
 
-The registry, not the event stream, owns task identity and cleanup. A watched add uses direct replies in both directions: one reply for admission and one final outcome after the actor join and membership removal.
+Choose the source that answers the question:
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant Handle as SupervisorHandle
-    participant Core as SupervisorCore
-    participant Queue as Registry command channel
-    participant Registry
-    participant TaskActor
-    participant Waiter as TaskWaiter
+| Question                                                       | Source                                               |
+|----------------------------------------------------------------|------------------------------------------------------|
+| Did a management command commit or claim the requested action? | The method's direct return value                     |
+| How did watched work end?                                      | `TaskWaiter` through a direct in-process channel     |
+| Is a task registered or being removed?                         | `SupervisorHandle::list`                             |
+| Does a task still have a physical attempt?                     | `alive_snapshot` or `is_alive`                       |
+| What is the current controller view?                           | `controller_snapshot`, a rolling diagnostic snapshot |
+| What happened for logs, metrics, or tracing?                   | Best-effort events and subscribers                   |
 
-    Caller->>Handle: add_and_watch(TaskSpec)
-    Handle->>Core: add watched task
-    Core->>Queue: Add command + reply + outcome sender
-    Queue->>Registry: listener receives command
-    Registry->>Registry: prepare actor outside lock; index ID + name
-    Registry->>TaskActor: bounded scheduler handoff behind start gate
-    Registry-->>Core: direct Add decision
-    Registry->>TaskActor: open start gate
-    Core-->>Caller: TaskId + TaskWaiter
+A management reply is not a final task result. A `TaskWaiter` is direct but not durable across process termination.
+Event loss does not change runtime state or watched outcomes. A controller `submit*` reply confirms command intake,
+not positive slot admission.
 
-    loop Sequential attempts
-        TaskActor->>TaskActor: permit, run_once, policy decision
-    end
+### 5. Shut down and release ownership
 
-    TaskActor-->>Registry: reliable completion ID
-    Registry->>TaskActor: claim and join actor
-    Registry->>Registry: remove ID + name indexes
-    Registry-->>Waiter: direct TaskOutcome
-    Waiter-->>Caller: final outcome
+Several triggers join the same shutdown operation:
+
+```text
+shutdown trigger
+├── explicit handle request ────────────────────► shared coordinator
+├── run_until future ───────────────────────────► shared coordinator
+├── Taskvisor-owned OS listener ────────────────► shared coordinator
+└── registry becomes empty during static run* ──► shared coordinator
+
+shared coordinator ──► close intake ─────────────────► finish commands already accepted
+                   ──► drain registry within grace ──► stop runtime workers
 ```
 
-For a static `run(tasks)` batch, the registry indexes every accepted entry, attempts all `TaskAdded` publications, and attempts the direct batch reply before one shared start gate releases any task body.
+`run_with_os_signals` is the only entry point that installs Taskvisor's operating-system signal listeners.
+The shared coordinator caches one result for all callers.
 
-## One actor and its attempts
+The grace verdict reports whether registry actors and pending removals drained in time.
+It does not promise that every physical callback or destructor has finished.
+Taskvisor may keep owning a force-aborted actor until its physical attempt exits.
+Remaining retained task and subscriber values move to [`core/deferred_drop/`](core/deferred_drop), where blocking or panicking destructors are isolated from runtime paths.
 
-`run_once` owns one attempt: task invocation, panic capture, the attempt timeout, and the attempt terminal event. 
+## Find the code for a change
 
-`TaskActor` owns the surrounding loop: the concurrency permit, restart policy, backoff, retry budget, and cancellation between attempts. Registered actor futures are data inside one central scheduler task. After a permit is acquired, the active attempt runs in its own Tokio task; an actor waiting for a permit or backoff does not consume another Tokio task.
+| Change                                           | Start here                                                                                                                                                                                                                                                        | Verify with                                                                                                                           |
+|--------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| Public exports, features, errors, or identity    | [`Cargo.toml`](../Cargo.toml), [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs), [`error.rs`](error.rs), [`identity.rs`](identity.rs)                                                                                                                               | Crate docs and affected examples                                                                                                      |
+| Task contract, cancellation, or task settings    | [`tasks/`](tasks), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                                                                                                                               | [`tests/defaults.rs`](../tests/defaults.rs), relevant examples                                                                        |
+| Restart, retry, backoff, or delay behavior       | [`policies/`](policies), [`core/actor.rs`](core/actor.rs)                                                                                                                                                                                                         | [`tests/failure.rs`](../tests/failure.rs), [`tests/lifecycle.rs`](../tests/lifecycle.rs)                                              |
+| One attempt, timeout, or panic capture           | [`core/runner.rs`](core/runner.rs)                                                                                                                                                                                                                                | [`tests/timeout.rs`](../tests/timeout.rs), [`tests/failure.rs`](../tests/failure.rs)                                                  |
+| Static or dynamic runtime API                    | [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/runtime/lifecycle/static_run.rs`](core/runtime/lifecycle/static_run.rs), [`core/runtime/management/`](core/runtime/management)                                             | [`tests/lifecycle.rs`](../tests/lifecycle.rs), [`tests/concurrency.rs`](../tests/concurrency.rs)                                      |
+| Admission, names, removal, or actor ownership    | [`core/registry/`](core/registry)                                                                                                                                                                                                                                 | [`tests/identity.rs`](../tests/identity.rs), [`tests/watch.rs`](../tests/watch.rs), [`tests/concurrency.rs`](../tests/concurrency.rs) |
+| Watched outcomes                                 | [`core/outcome.rs`](core/outcome.rs), [`core/registry/removal/`](core/registry/removal)                                                                                                                                                                           | [`tests/watch.rs`](../tests/watch.rs)                                                                                                 |
+| Events or subscriber delivery                    | [`events/`](events), [`subscribers/`](subscribers), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs)                                                                                                                                                  | [`tests/lifecycle.rs`](../tests/lifecycle.rs), module unit tests                                                                      |
+| Controller public behavior                       | Public files in [`controller/`](controller)                                                                                                                                                                                                                       | [`tests/controller.rs`](../tests/controller.rs)                                                                                       |
+| Controller queue, replace, reject, or slot state | [`controller/engine/admission/`](controller/engine/admission), [`controller/engine/state/`](controller/engine/state)                                                                                                                                              | Controller engine unit tests, [`tests/controller.rs`](../tests/controller.rs)                                                         |
+| Shared shutdown order or grace behavior          | [`core/runtime/shutdown_workflow/`](core/runtime/shutdown_workflow), [`core/runtime/lifecycle/`](core/runtime/lifecycle), [`core/registry/removal/`](core/registry/removal), [`controller/engine/lifecycle/shutdown.rs`](controller/engine/lifecycle/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |
+| Operating-system signal handling                 | [`core/shutdown.rs`](core/shutdown.rs), [`core/supervisor.rs`](core/supervisor.rs)                                                                                                                                                                                | [`tests/signal_ownership.rs`](../tests/signal_ownership.rs)                                                                           |
+| Ownership limits or deferred cleanup             | [`core/config.rs`](core/config.rs), [`core/builder.rs`](core/builder.rs), [`core/deferred_drop/`](core/deferred_drop), [`core/registry/removal/`](core/registry/removal)                                                                                          | [`tests/ownership.rs`](../tests/ownership.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                            |
+| User-facing documentation or workflows           | [`README.md`](../README.md), [`guide.md`](../guide.md), [`examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                                                                            | Example compilation and crate docs                                                                                                    |
 
-The retry loop and actor exits are shown separately below. Repeated phase names refer to the same actor phases.
+## Read and validate a change
 
-### Retry loop
+1. Start with this map and the module-level docs for the affected area.
+2. Read the public entry point and the component that owns the decision.
+3. Read the matching integration test before following deeper internal modules.
+4. Keep cross-component behavior in `tests/` and local state-machine cases beside their module.
+5. Use `examples/` to verify the application-facing story. Use `benches/` only for measured performance boundaries.
 
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart TB
-    Start(( ))
-    Permit("Wait for concurrency permit")
-    Attempt("Run one attempt")
-    SuccessDelay("Success interval or restart floor")
-    FailureDelay("Failure backoff")
-
-    Start --> Permit
-    Permit -->|permit acquired| Attempt
-    Attempt -->|success, Always restarts| SuccessDelay
-    Attempt -->|retryable, retry allowed| FailureDelay
-    SuccessDelay -->|delay complete| Permit
-    FailureDelay -->|delay complete| Permit
-```
-
-### Exit paths
-
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart TB
-    Permit("Wait for concurrency permit")
-    Attempt("Run one attempt")
-    SuccessDelay("Success interval or restart floor")
-    FailureDelay("Failure backoff")
-    Completed("ActorExitReason::Completed")
-    Exhausted("ActorExitReason::Exhausted")
-    Fatal("ActorExitReason::Fatal")
-    Canceled("ActorExitReason::Canceled")
-    End(( ))
-
-    Permit -->|runtime canceled| Canceled
-    Attempt -->|success, policy stops| Completed
-    Attempt -->|retry not allowed| Exhausted
-    Attempt -->|fatal error| Fatal
-    Attempt -->|cooperative cancellation| Canceled
-    SuccessDelay -->|runtime canceled| Canceled
-    FailureDelay -->|runtime canceled| Canceled
-
-    Completed --> End
-    Exhausted --> End
-    Fatal --> End
-    Canceled --> End
-```
-
-Important boundaries:
-
-- Attempt numbers start at `1`.
-- `max_retries` counts retries after the first failed attempt, not total attempts.
-- A success resets the failure retry counter.
-- A concurrency permit is held only while `run_once` is active.
-- Task panics caught by `run_once` become retryable `TaskError::Fail` values.
-- The actor returns an internal `ActorExitReason`; the registry maps it to `TaskOutcome` after joining the actor and removing its ID and name indexes.
-- Force-abort and an outer scheduler failure are cleanup results, not normal actor exits.
-
-## Events and reliable outcomes are separate paths
-
-Events support diagnostics, metrics, and best-effort liveness views. They do not drive cleanup, watched outcomes, or controller slot ownership.
-
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart LR
-    Runtime["Runtime components"]
-    Bus["Broadcast Bus"]
-    Relay["Event relay"]
-    Alive["AliveTracker"]
-    Queues["Per-subscriber bounded queues"]
-    Subscribers["Subscriber callbacks"]
-
-    Cleanup["Registry terminal cleanup"]
-    Reject["Controller rejection"]
-    Outcome["Outcome one-shot"]
-    Waiter["TaskWaiter"]
-
-    Runtime -. best-effort events .-> Bus
-    Bus -. best-effort broadcast .-> Relay
-    Relay -. event-derived update .-> Alive
-    Relay -. bounded enqueue .-> Queues
-    Queues -. dedicated worker thread .-> Subscribers
-
-    Cleanup -->|direct final result| Outcome
-    Reject -->|direct rejected result| Outcome
-    Outcome --> Waiter
-```
-
-Use the following source according to the question being asked:
-
-| Question | Source |
-|----------|--------|
-| Is a task still registered or being removed? | `SupervisorHandle::list`, backed by the registry |
-| What final result did this watched task produce? | `TaskWaiter`, backed by a direct one-shot |
-| What happened for logging or metrics? | Events and subscribers |
-| Which tasks look alive from observed lifecycle events? | `alive_snapshot` / `is_alive`; these views may lag |
-| What is the current controller view? | `controller_snapshot`; it is a rolling diagnostic snapshot, not a transaction |
-
-"Reliable" here means that a watched result does not depend on the lossy event path. It does not add persistence across process termination.
-
-## Controller admission
-
-The controller is a serialized admission layer before the registry. One loop owns slot transitions and processes ordered commands, direct registry Add decisions, terminal `RemovalCompletion` signals, and the reliable runtime shutdown token.
-
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart LR
-    Commands["Ordered submit and identity commands"]
-    AddDecision["Direct registry Add decision"]
-    Completion["Terminal RemovalCompletion"]
-    Shutdown["Runtime shutdown token"]
-    Loop["Single controller loop"]
-    Slots["Per-slot state + queue"]
-    Registry["SupervisorCore / Registry"]
-    Rejected["TaskOutcome::Rejected"]
-    Events["Best-effort controller events"]
-
-    Commands --> Loop
-    AddDecision --> Loop
-    Completion --> Loop
-    Shutdown --> Loop
-    Loop --> Slots
-    Loop -->|admit or remove owner| Registry
-    Loop -->|resolve watched rejection| Rejected
-    Loop -. observability only .-> Events
-```
-
-The internal slot phases are:
-
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart LR
-    Start(( ))
-    Idle("Idle")
-    Admitting("Admitting")
-    Running("Running")
-    CancelPending("CancelPendingAdmission")
-    Terminating("Terminating")
-
-    Start --> Idle
-    Idle -->|submit or advance queued head| Admitting
-    Admitting -->|registry accepts Add| Running
-    Admitting -->|registry rejects Add| Idle
-    Admitting -->|Replace arrives before Add decision| CancelPending
-    CancelPending -->|registry accepts Add, then removal starts| Terminating
-    CancelPending -->|registry rejects Add| Idle
-    Running -->|Replace requests removal| Terminating
-    Running -->|terminal registry completion| Idle
-    Terminating -->|terminal registry completion| Idle
-```
-
-Policy behavior around those phases:
-
-- `Queue` appends work in FIFO order until `ControllerConfig::max_slot_queue` is reached.
-- `Replace` replaces the queued head and rejects the displaced head as `SupersededByReplace`. Existing FIFO work behind the head remains queued.
-- `DropIfRunning` rejects new work while the slot has an owner.
-- A successful removal request does not free the slot. Only terminal `RemovalCompletion`, after the registry has joined the actor and removed both identity indexes, frees it.
-- A task name and a controller slot are different keys. The registry still enforces global task-name uniqueness.
-
-## Shared shutdown
-
-Explicit shutdown, an application-owned `run_until` future, an OS signal explicitly enabled through `run_with_os_signals`, and natural completion join one cancellation-safe shutdown operation. The first trigger installs the operation; all callers wait for its cached result. Plain `run` does not install process signal handlers.
-
-```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
-flowchart LR
-    Explicit["Explicit request"]
-    External["Application shutdown future"]
-    Signal["Explicitly configured OS signal"]
-    Natural["Registry becomes empty"]
-    Coordinator["ShutdownCoordinator: first trigger wins"]
-    Close["Close management admission,<br/>fence committed registry commands"]
-    Drain["Cancel and join tasks<br/>within grace"]
-    Verdict{"All task cleanup<br/>finished?"}
-    Tail["Cleanup tail: join controller,<br/>cancel runtime token,<br/>join registry listener and event relay,<br/>close subscriber workers"]
-    Result["Cache and return<br/>one shared result"]
-
-    Explicit --> Coordinator
-    External --> Coordinator
-    Signal --> Coordinator
-    Natural --> Coordinator
-    Coordinator --> Close
-    Close --> Drain
-    Drain --> Verdict
-    Verdict -->|AllStoppedWithinGrace| Tail
-    Verdict -->|GraceExceeded + stuck task names| Tail
-    Tail --> Result
-```
-
-Subscriber shutdown has its own timeout and happens after the task grace phase. Every common cleanup phase is attempted even if an earlier phase reports an internal failure. If explicitly requested OS signal setup fails, shutdown still closes admission and runs the common cleanup tail, but it does not run the normal task-drain branch. On Unix, Tokio's process-global handlers are not restored when listeners are dropped; this side effect exists only after the application calls `run_with_os_signals`. Dropping the last runtime owner is only a synchronous fallback: it closes admission and cancels tokens, but cannot await or report graceful cleanup.
-
-## Where to make a change
-
-| Change                                                      | Start here                                                                                                                                                                                     | Verify here                                                                                                                           |
-|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
-| Public task contract or task configuration                  | [`tasks/`](tasks), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                                                            | [`tests/defaults.rs`](../tests/defaults.rs), rustdoc examples                                                                         |
-| Attempt timeout, panic, or terminal event                   | [`core/runner.rs`](core/runner.rs)                                                                                                                                                             | unit tests in that module, [`tests/timeout.rs`](../tests/timeout.rs), [`tests/failure.rs`](../tests/failure.rs)                       |
-| Restart, retry, backoff, or cancellation between attempts   | [`core/actor.rs`](core/actor.rs), [`policies/`](policies)                                                                                                                                      | actor unit tests, [`tests/failure.rs`](../tests/failure.rs), [`tests/lifecycle.rs`](../tests/lifecycle.rs)                            |
-| Task identity, duplicate names, add/remove/cancel semantics | [`core/registry/`](core/registry), [`core/runtime/management.rs`](core/runtime/management.rs)                                                                                                  | [`tests/identity.rs`](../tests/identity.rs), [`tests/watch.rs`](../tests/watch.rs), [`tests/concurrency.rs`](../tests/concurrency.rs) |
-| Final watched outcomes                                      | [`core/outcome.rs`](core/outcome.rs), [`core/registry/removal.rs`](core/registry/removal.rs)                                                                                                   | [`tests/watch.rs`](../tests/watch.rs)                                                                                                 |
-| Event fields or delivery                                    | [`events/`](events), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs), [`subscribers/`](subscribers)                                                                               | [`tests/lifecycle.rs`](../tests/lifecycle.rs), subscriber unit tests                                                                  |
-| Per-slot queue/replace/reject behavior                      | [`controller/slot.rs`](controller/slot.rs), [`controller/core/admission.rs`](controller/core/admission.rs), [`controller/core/queue.rs`](controller/core/queue.rs)                             | [`tests/controller.rs`](../tests/controller.rs), controller unit tests                                                                |
-| Shutdown order or grace behavior                            | [`core/runtime/shutdown_workflow.rs`](core/runtime/shutdown_workflow.rs), [`core/registry/removal.rs`](core/registry/removal.rs), [`controller/core/shutdown.rs`](controller/core/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |
-| User-facing story                                           | [`../README.md`](../README.md), [`../examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                              | `cargo test --all-features`, `cargo test --doc --all-features`                                                                        |
+The repository tasks for formatting, checking, linting, tests, and docs are listed in the [contributing section](../README.md#contributing)
+and implemented in [`Taskfile.yml`](../Taskfile.yml), [source](https://taskfile.dev/).

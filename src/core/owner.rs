@@ -1,34 +1,25 @@
-//! # Public runtime ownership
+//! Tracks public ownership of one supervisor runtime.
 //!
-//! [`RuntimeOwner`] is the shared lease held by [`Supervisor`](crate::Supervisor) and every [`SupervisorHandle`](crate::SupervisorHandle).
+//! [`Supervisor`](crate::Supervisor) and every [`SupervisorHandle`](crate::SupervisorHandle) share one [`RuntimeOwner`].
+//! Internal workers hold [`SupervisorCore`] directly and do not extend the public ownership lease.
 //!
 //! ```text
-//! Supervisor ────────────┐
-//! SupervisorHandle ──────┼── Arc<RuntimeOwner> ── Arc<SupervisorCore>
-//! cloned handles ────────┘
-//!
-//! internal workers ────────────────────────────── Arc<SupervisorCore>
+//! Supervisor ──► RuntimeOwner ──► SupervisorCore
+//! handles ─────► RuntimeOwner
+//! workers ─────► SupervisorCore
 //! ```
 //!
-//! Internal workers retain the runtime core directly, but they do not retain `RuntimeOwner`.
-//! The last public owner can therefore disappear while cleanup work still holds the core alive.
-//!
-//! Dropping that last owner cannot wait for graceful cleanup.
-//! It invokes [`SupervisorCore::abandon`] to close runtime intake and propagate cancellation.
-//! If an explicit shared shutdown operation already exists, that operation keeps ownership of cleanup and the fallback does not replace it.
+//! Dropping the last public owner calls [`SupervisorCore::abandon`].
+//! This closes admission and propagates cancellation when no shutdown operation exists.
+//! If a shared shutdown operation already exists, `Drop` leaves it unchanged.
 
 use std::sync::Arc;
 
 use super::SupervisorCore;
 
-/// Shared ownership held by `Supervisor` and every management handle.
-///
-/// Internal workers do not hold this value.
-/// Its destructor therefore runs when the last public owner disappears and starts best-effort runtime cancellation.
+/// Public ownership lease for one runtime core.
 pub(crate) struct RuntimeOwner {
     /// Runtime state shared with public owners and internal workers.
-    ///
-    /// Keeping the core behind a separate `Arc` lets detached shutdown and cleanup work outlive the public ownership lease when necessary.
     core: Arc<SupervisorCore>,
 }
 
@@ -46,7 +37,7 @@ impl RuntimeOwner {
     }
 }
 
-/// Omits runtime internals from the ownership lease's debug representation.
+/// Omits runtime internals from the debug representation.
 impl std::fmt::Debug for RuntimeOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeOwner").finish_non_exhaustive()

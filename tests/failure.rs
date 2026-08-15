@@ -20,7 +20,7 @@ async fn run_to_completion(spec: TaskSpec) -> Arc<EventCollector> {
 #[tokio::test(flavor = "current_thread")]
 async fn task_failure_exit_code_propagates_to_attempt_and_task_events() {
     for (name, expected_code) in [("fail-code", Some(7)), ("logical", None)] {
-        let collector = run_to_completion(TaskSpec::once(make_fail(name, expected_code))).await;
+        let collector = run_to_completion(TaskSpec::once(name, make_fail(expected_code))).await;
         let finished = collector
             .wait_for(EventKind::TaskFinished, Duration::from_secs(2))
             .await
@@ -42,7 +42,7 @@ async fn task_failure_exit_code_propagates_to_attempt_and_task_events() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn panicking_task_is_reaped_and_run_returns() {
-    let collector = run_to_completion(TaskSpec::once(make_panic("boom"))).await;
+    let collector = run_to_completion(TaskSpec::once("boom", make_panic())).await;
 
     assert!(
         collector
@@ -66,7 +66,7 @@ async fn panicking_task_restarts_per_policy_then_succeeds() {
 
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts2 = Arc::clone(&attempts);
-    let flaky: TaskRef = TaskFn::arc("flaky-panic", move |_ctx: TaskContext| {
+    let flaky: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
         let attempts = Arc::clone(&attempts2);
         async move {
             if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
@@ -76,7 +76,7 @@ async fn panicking_task_restarts_per_policy_then_succeeds() {
         }
     });
 
-    let spec = TaskSpec::restartable(flaky).with_backoff(fast_backoff());
+    let spec = TaskSpec::restartable("flaky-panic", flaky).with_backoff(fast_backoff());
     let collector = run_to_completion(spec).await;
 
     assert_eq!(
@@ -100,12 +100,9 @@ async fn panicking_task_restarts_per_policy_then_succeeds() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn task_returning_canceled_without_cancellation_is_reaped() {
-    // The task lies: returns Canceled while its token was never cancelled.
-    // Worst case is Always, which would otherwise restart on any other return.
-    let liar: TaskRef = TaskFn::arc("liar", |_ctx: TaskContext| async move {
-        Err(TaskError::Canceled)
-    });
-    let spec = TaskSpec::restartable(liar).with_restart(RestartPolicy::Always { interval: None });
+    let liar: TaskRef = TaskFn::arc(|_ctx: TaskContext| async move { Err(TaskError::Canceled) });
+    let spec =
+        TaskSpec::restartable("liar", liar).with_restart(RestartPolicy::Always { interval: None });
 
     let collector = run_to_completion(spec).await;
 
@@ -124,7 +121,7 @@ async fn cooperative_cancellation_returning_ok_yields_succeeded_attempt_and_canc
 
     with_timeout(10, async {
         let id = handle
-            .add(TaskSpec::restartable(make_coop("coop-ok")))
+            .add(TaskSpec::restartable("coop-ok", make_coop()))
             .await
             .expect("add ok");
 
@@ -158,14 +155,14 @@ async fn cancellation_returning_canceled_error_yields_canceled_attempt_and_task(
     let (handle, collector) =
         served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(5)));
 
-    let task = TaskFn::arc("cancel-err", |ctx: TaskContext| async move {
+    let task = TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Err(TaskError::Canceled)
     });
 
     with_timeout(10, async {
         let id = handle
-            .add(TaskSpec::restartable(task))
+            .add(TaskSpec::restartable("cancel-err", task))
             .await
             .expect("add ok");
 
@@ -208,7 +205,7 @@ async fn cancellation_while_waiting_for_a_permit_finishes_without_an_attempt() {
     );
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let permit_owner: TaskRef = TaskFn::arc("permit-owner", {
+    let permit_owner: TaskRef = TaskFn::arc({
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
         move |_ctx: TaskContext| {
@@ -222,11 +219,14 @@ async fn cancellation_while_waiting_for_a_permit_finishes_without_an_attempt() {
         }
     });
 
-    handle.add(TaskSpec::once(permit_owner)).await.unwrap();
+    handle
+        .add(TaskSpec::once("permit-owner", permit_owner))
+        .await
+        .unwrap();
     started.notified().await;
 
     let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once(make_ok_once("permit-waiter")))
+        .add_and_watch(TaskSpec::once("permit-waiter", make_ok_once()))
         .await
         .unwrap();
     assert!(handle.cancel(id).await.unwrap());

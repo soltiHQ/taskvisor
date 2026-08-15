@@ -1,53 +1,38 @@
-//! # Restart loop for one task
+//! Runs the restart loop for one registered task.
 //!
-//! [`TaskActor`] runs attempts in order and applies restart, backoff, timeout, retry-limit, and cancellation rules.
-//! One actor belongs to one registered [`TaskId`].
-//!
-//! ## Flow
+//! Registry admission creates one [`TaskActor`] for a [`TaskId`]. The actor runs attempts sequentially,
+//! applies restart and backoff policy, and returns one [`ActorExitReason`] to registry cleanup.
 //!
 //! ```text
-//! wait for permit -> AttemptStarting -> run attempt -> release permit -> apply policy
+//! registry admission ──► TaskActor
+//!                            ▼
+//!                   wait for attempt permit
+//!                            ▼
+//!                        run_once
+//!                            ├── success ──► stop or repeat
+//!                            ├── retryable failure ──► backoff or stop
+//!                            └── fatal or canceled ──► stop
 //! ```
 //!
-//! | Attempt result              | Actor decision                                         |
-//! |-----------------------------|--------------------------------------------------------|
-//! | Success                     | Stop, or repeat under `RestartPolicy::Always`          |
-//! | Retryable failure           | Back off and retry, or stop at a policy or retry limit |
-//! | Fatal error or cancellation | Stop                                                   |
-//!
-//! [`run_once`] handles one attempt, including timeout, panic capture, and attempt events.
-//! The actor then decides whether to stop, wait, or start another attempt.
-//!
-//! ## Events and Final State
-//!
-//! `AttemptSucceeded`, `AttemptCanceled`, and `AttemptFailed` describe one attempt.
-//! `BackoffScheduled` describes the decision to start another attempt.
-//! After this actor returns, the registry publishes one typed `TaskFinished` event from the resulting [`TaskOutcome`](crate::TaskOutcome).
-//!
-//! > An `AttemptFailed` event is not a final outcome; another attempt may follow it.
-//!
-//! ## Rules
-//!
-//! - Attempts are sequential inside one actor.
-//! - Attempt numbers start at 1.
-//! - `max_retries` counts retries in one failure streak. A success resets it.
-//! - A concurrency permit is held only while an attempt runs, not during delays.
-//! - Cancellation can stop permit waits and retry delays.
-//! - During an attempt, cancellation only cancels its [`TaskContext`](crate::TaskContext). The task must observe it and return. Registry cleanup can force-abort an actor that misses its grace deadline.
-//! - Instant successful repeats have a small delay to prevent a hot loop.
-//! - Panics while calling `Task::spawn` or polling its future become retryable `TaskError::Fail` values.
+//! [`run_once`] owns timeout, panic capture, and terminal events for one attempt. The actor owns
+//! the retry counter and delays between attempts. A concurrency permit and activity flag remain
+//! held until the physical attempt exits. A success resets the failure retry counter.
 
 use std::{
     num::NonZeroU32,
-    sync::Arc,
+    panic::AssertUnwindSafe,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     TaskError,
-    core::runner::run_once,
+    core::runner::{AttemptFailure, AttemptRun, dispose_panic_payload, run_once},
     error::SharedError,
     events::{Bus, Event, EventKind},
     identity::TaskId,
@@ -55,13 +40,7 @@ use crate::{
     tasks::Task,
 };
 
-/// Small delay used to prevent hot restart loops.
-///
-/// This applies to `RestartPolicy::Always` when a task finishes very quickly.
-/// Without it, a task that returns `Ok(())` at once could restart as fast as the scheduler allows and flood the event bus.
-///
-/// The delay is only added when the task ran for less than this value.
-/// If the task already spent enough time doing work, no extra delay is added.
+/// Minimum interval between immediate successful `Always` attempts.
 const IMMEDIATE_RESTART_FLOOR: Duration = Duration::from_millis(1);
 
 /// Returns the delay after a successful `Always` attempt.
@@ -71,24 +50,13 @@ fn floored_interval(interval: Duration, elapsed: Duration) -> Duration {
     interval.max(IMMEDIATE_RESTART_FLOOR.saturating_sub(elapsed))
 }
 
-/// Final reason returned by [`TaskActor::run`].
-///
-/// After joining the actor, the registry maps this value to the matching [`TaskOutcome`](crate::TaskOutcome).
-#[derive(Debug, Clone)]
+/// Final actor result passed to registry outcome classification.
+#[derive(Debug)]
 pub(crate) enum ActorExitReason {
-    /// Final attempt succeeded and the restart policy stopped the actor.
-    ///
-    /// Occurs when:
-    /// - `RestartPolicy::Never` and the task completed successfully
-    /// - `RestartPolicy::OnFailure` and the task completed successfully
+    /// A successful attempt stopped under its restart policy.
     Completed,
 
-    /// Final attempt failed and the actor stopped without a fatal error.
-    ///
-    /// Occurs when:
-    /// - `RestartPolicy::Never` does not allow a retry
-    /// - the error is not retryable
-    /// - the retry budget (`max_retries`) is used up
+    /// A non-fatal failure stopped under policy or retry limits.
     Exhausted {
         /// Diagnostic final failure message.
         reason: Arc<str>,
@@ -98,18 +66,16 @@ pub(crate) enum ActorExitReason {
         source: Option<SharedError>,
     },
 
-    /// Actor stopped because of runtime shutdown, explicit removal, or `TaskError::Canceled`.
-    ///
-    /// This maps to [`TaskOutcome::Canceled`](crate::TaskOutcome).
-    /// Depending on where cancellation happened, there may be no attempt-level terminal event.
+    /// Cancellation stopped the current attempt or prevented another from beginning.
     Canceled,
 
-    /// The internal attempt runner panicked outside the user-future panic boundary.
-    Panicked,
+    /// User-value cleanup panicked inside the physical actor boundary.
+    Panicked {
+        /// A nested panic payload destructor had to be retained permanently.
+        cleanup_poisoned: bool,
+    },
 
-    /// Actor stopped because the task returned a fatal error.
-    ///
-    /// Fatal errors are not retried.
+    /// The task returned a fatal error, which is never retried.
     Fatal {
         /// Diagnostic fatal error message.
         reason: Arc<str>,
@@ -120,34 +86,68 @@ pub(crate) enum ActorExitReason {
     },
 }
 
-/// Aborts one spawned attempt when its owning actor future is force-dropped by the scheduler.
-struct AttemptJoin<T> {
-    handle: Option<JoinHandle<T>>,
+/// Result classified while the actor still owns its attempt permit and activity guard.
+enum AttemptDecision {
+    /// The actor must return this attempt result.
+    Finished(Result<(), AttemptFailure>),
+    /// The actor may wait and start another attempt.
+    Retry { reason: Arc<str> },
+    /// User-value cleanup panicked before guards could be released normally.
+    CleanupPanicked,
 }
 
-impl<T> AttemptJoin<T> {
-    fn new(handle: JoinHandle<T>) -> Self {
-        Self {
-            handle: Some(handle),
+/// Applies restart and retry rules to one attempt result.
+fn classify_attempt(
+    result: Result<(), AttemptFailure>,
+    restart: RestartPolicy,
+    max_retries: Option<NonZeroU32>,
+    backoff_attempt: u32,
+    cleanup_poisoned: &AtomicBool,
+) -> AttemptDecision {
+    let Err(failure) = result else {
+        return AttemptDecision::Finished(Ok(()));
+    };
+    if failure.cleanup_panicked {
+        let AttemptFailure { error, .. } = failure;
+        if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(error))) {
+            dispose_panic_payload(payload, cleanup_poisoned);
+        }
+        return AttemptDecision::CleanupPanicked;
+    }
+    let policy_allows_retry = matches!(
+        restart,
+        RestartPolicy::OnFailure | RestartPolicy::Always { .. }
+    );
+    let retries_exhausted = max_retries.is_some_and(|max| backoff_attempt >= max.get());
+    if !(policy_allows_retry && failure.error.is_retryable()) || retries_exhausted {
+        return AttemptDecision::Finished(Err(failure));
+    }
+
+    let AttemptFailure { error, reason, .. } = failure;
+    match std::panic::catch_unwind(AssertUnwindSafe(|| drop(error))) {
+        Ok(()) => AttemptDecision::Retry { reason },
+        Err(payload) => {
+            dispose_panic_payload(payload, cleanup_poisoned);
+            AttemptDecision::CleanupPanicked
         }
     }
+}
 
-    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
-        let result = self
-            .handle
-            .as_mut()
-            .expect("attempt join handle is present until join")
-            .await;
-        self.handle.take();
-        result
+/// Marks the exact physical lifetime of one attempt, including the interval
+/// between Tokio abort being requested and a blocked poll actually returning.
+struct AttemptActivity(Arc<AtomicBool>);
+
+impl AttemptActivity {
+    /// Marks an attempt active until the returned guard is dropped.
+    fn begin(activity: Arc<AtomicBool>) -> Self {
+        activity.store(true, Ordering::Release);
+        Self(activity)
     }
 }
 
-impl<T> Drop for AttemptJoin<T> {
+impl Drop for AttemptActivity {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -164,10 +164,17 @@ pub(crate) struct TaskActorParams {
     pub(crate) max_retries: Option<NonZeroU32>,
 }
 
-/// Internal supervisor for one registered task.
-///
-/// The registry schedules one actor future per accepted task.
-/// One central scheduler polls those futures; the actor runs attempts sequentially and returns one [`ActorExitReason`] when the retry loop ends.
+/// Registry-owned execution resources shared with one actor.
+pub(crate) struct TaskActorResources {
+    /// Optional supervisor-wide attempt concurrency limit.
+    pub(crate) semaphore: Option<Arc<Semaphore>>,
+    /// Registry activity flag for this task entry.
+    pub(crate) activity: Arc<AtomicBool>,
+    /// Records an unrecoverable nested cleanup panic.
+    pub(crate) cleanup_poisoned: Arc<AtomicBool>,
+}
+
+/// Owns the sequential attempt loop for one registered task.
 pub(crate) struct TaskActor {
     /// Runtime identity stamped on lifecycle events for this task run.
     id: TaskId,
@@ -183,6 +190,10 @@ pub(crate) struct TaskActor {
     ///
     /// Held only while `run_once` is executing. Retry/backoff sleeps do not hold it.
     semaphore: Option<Arc<Semaphore>>,
+    /// Authoritative per-entry attempt activity bit.
+    activity: Arc<AtomicBool>,
+    /// Records a nested cleanup panic whose payload had to be retained.
+    cleanup_poisoned: Arc<AtomicBool>,
 }
 
 impl TaskActor {
@@ -192,9 +203,14 @@ impl TaskActor {
         name: Arc<str>,
         task: Arc<dyn Task>,
         params: TaskActorParams,
-        semaphore: Option<Arc<Semaphore>>,
+        resources: TaskActorResources,
         id: TaskId,
     ) -> Self {
+        let TaskActorResources {
+            semaphore,
+            activity,
+            cleanup_poisoned,
+        } = resources;
         Self {
             id,
             name,
@@ -202,13 +218,12 @@ impl TaskActor {
             params,
             bus,
             semaphore,
+            activity,
+            cleanup_poisoned,
         }
     }
 
-    /// Runs the actor until completion, retry exhaustion, fatal failure, or cancellation.
-    ///
-    /// `run_once` derives a child token for the current attempt.
-    /// The runtime token lets shutdown interrupt permit waits and retry delays.
+    /// Runs attempts until policy, failure, or cancellation selects an exit.
     pub(crate) async fn run(self, runtime_token: CancellationToken) -> ActorExitReason {
         let task_name: Arc<str> = self.name.clone();
         let id = self.id;
@@ -242,53 +257,78 @@ impl TaskActor {
             }
 
             attempt = attempt.saturating_add(1);
+            let activity = AttemptActivity::begin(Arc::clone(&self.activity));
 
-            self.bus.publish(
+            self.bus.publish_lazy(|| {
                 Event::new(EventKind::AttemptStarting)
                     .with_task(task_name.clone())
                     .with_id(id)
-                    .with_attempt(attempt),
-            );
+                    .with_attempt(attempt)
+            });
             let attempt_start = Instant::now();
-            let task = Arc::clone(&self.task);
-            let attempt_token = runtime_token.clone();
-            let timeout = self.params.timeout;
-            let bus = self.bus.clone();
-            let res = AttemptJoin::new(tokio::spawn(async move {
-                run_once(task.as_ref(), &attempt_token, timeout, attempt, id, &bus).await
-            }))
-            .join()
+            let permit_guard = permit;
+            let activity_guard = activity;
+            let result = run_once(
+                self.task.as_ref(),
+                &task_name,
+                AttemptRun {
+                    parent: &runtime_token,
+                    timeout: self.params.timeout,
+                    attempt,
+                    id,
+                    bus: &self.bus,
+                    cleanup_poisoned: Arc::clone(&self.cleanup_poisoned),
+                },
+            )
             .await;
+            let decision = classify_attempt(
+                result,
+                self.params.restart,
+                self.params.max_retries,
+                backoff_attempt,
+                self.cleanup_poisoned.as_ref(),
+            );
+            drop(activity_guard);
+            drop(permit_guard);
 
-            let res = match res {
-                Ok(result) => result,
-                Err(error) if error.is_panic() => {
-                    drop(permit);
-                    return ActorExitReason::Panicked;
+            match decision {
+                AttemptDecision::CleanupPanicked => {
+                    return ActorExitReason::Panicked {
+                        cleanup_poisoned: self.cleanup_poisoned.load(Ordering::Acquire),
+                    };
                 }
-                Err(_cancelled) => {
-                    drop(permit);
-                    return ActorExitReason::Canceled;
-                }
-            };
+                AttemptDecision::Retry { reason } => {
+                    let delay = self.params.backoff.delay_for_retry(backoff_attempt);
+                    backoff_attempt = backoff_attempt.saturating_add(1);
 
-            drop(permit);
-            match res {
-                Ok(()) => {
+                    self.bus.publish_lazy(|| {
+                        Event::new(EventKind::BackoffScheduled)
+                            .with_backoff_failure()
+                            .with_task(task_name.clone())
+                            .with_id(id)
+                            .with_delay(delay)
+                            .with_attempt(attempt)
+                            .with_reason(reason)
+                    });
+                    if !Self::sleep_cancellable(delay, &runtime_token).await {
+                        return ActorExitReason::Canceled;
+                    }
+                }
+                AttemptDecision::Finished(Ok(())) => {
                     backoff_attempt = 0;
 
                     match self.params.restart {
                         RestartPolicy::Always { interval } => {
                             if let Some(d) = interval {
                                 let delay = floored_interval(d, attempt_start.elapsed());
-                                self.bus.publish(
+                                self.bus.publish_lazy(|| {
                                     Event::new(EventKind::BackoffScheduled)
                                         .with_backoff_success()
                                         .with_task(task_name.clone())
                                         .with_id(id)
                                         .with_attempt(attempt)
-                                        .with_delay(delay),
-                                );
+                                        .with_delay(delay)
+                                });
                                 if !Self::sleep_cancellable(delay, &runtime_token).await {
                                     return ActorExitReason::Canceled;
                                 }
@@ -317,10 +357,14 @@ impl TaskActor {
                         }
                     }
                 }
-                Err(e) if e.is_fatal() => {
-                    let reason: Arc<str> = Arc::from(e.to_string());
-                    let exit_code = e.exit_code();
-                    let source: Option<SharedError> = e.into_source().map(Arc::from);
+                AttemptDecision::Finished(Err(failure)) if failure.error.is_fatal() => {
+                    let AttemptFailure {
+                        error,
+                        reason,
+                        exit_code,
+                        ..
+                    } = failure;
+                    let source: Option<SharedError> = error.into_source().map(Arc::from);
 
                     return ActorExitReason::Fatal {
                         reason,
@@ -328,66 +372,55 @@ impl TaskActor {
                         source,
                     };
                 }
-                Err(TaskError::Canceled) => {
+                AttemptDecision::Finished(Err(failure))
+                    if matches!(&failure.error, TaskError::Canceled) =>
+                {
                     return ActorExitReason::Canceled;
                 }
-                Err(e) => {
-                    let policy_allows_retry = matches!(
-                        self.params.restart,
-                        RestartPolicy::OnFailure | RestartPolicy::Always { .. }
-                    );
-                    let error_is_retryable = e.is_retryable();
+                AttemptDecision::Finished(Err(failure)) => {
                     let retries_exhausted = self
                         .params
                         .max_retries
                         .is_some_and(|max| backoff_attempt >= max.get());
 
-                    if !(policy_allows_retry && error_is_retryable) || retries_exhausted {
-                        let reason: Arc<str> = if let Some(limit) =
-                            self.params.max_retries.filter(|_| retries_exhausted)
-                        {
-                            Arc::from(format!(
-                                "retry limit reached after {backoff_attempt} of {} retries: {e}",
-                                limit.get()
-                            ))
-                        } else {
-                            Arc::from(e.to_string())
-                        };
-                        let exit_code = e.exit_code();
-                        let source: Option<SharedError> = e.into_source().map(Arc::from);
+                    let AttemptFailure {
+                        error,
+                        reason: attempt_reason,
+                        exit_code,
+                        ..
+                    } = failure;
+                    let reason: Arc<str> = if let Some(limit) =
+                        self.params.max_retries.filter(|_| retries_exhausted)
+                    {
+                        Arc::from(format!(
+                            "retry limit reached after {backoff_attempt} of {} retries: {attempt_reason}",
+                            limit.get()
+                        ))
+                    } else {
+                        attempt_reason
+                    };
+                    let source: Option<SharedError> = error.into_source().map(Arc::from);
 
-                        return ActorExitReason::Exhausted {
-                            reason,
-                            exit_code,
-                            source,
-                        };
-                    }
-
-                    let delay = self.params.backoff.delay_for_retry(backoff_attempt);
-                    backoff_attempt = backoff_attempt.saturating_add(1);
-
-                    self.bus.publish(
-                        Event::new(EventKind::BackoffScheduled)
-                            .with_backoff_failure()
-                            .with_task(task_name.clone())
-                            .with_id(id)
-                            .with_delay(delay)
-                            .with_attempt(attempt)
-                            .with_reason(e.to_string()),
-                    );
-                    if !Self::sleep_cancellable(delay, &runtime_token).await {
-                        return ActorExitReason::Canceled;
-                    }
+                    return ActorExitReason::Exhausted {
+                        reason,
+                        exit_code,
+                        source,
+                    };
                 }
             }
         }
     }
 
-    /// Sleeps until `duration` elapses or `token` is cancelled.
-    ///
-    /// Returns `true` if the sleep finished, or `false` if it was cancelled.
+    /// Returns whether a delay completed before cancellation.
     #[inline]
     async fn sleep_cancellable(duration: Duration, token: &CancellationToken) -> bool {
+        if token.is_cancelled() {
+            return false;
+        }
+        if duration.is_zero() {
+            tokio::task::yield_now().await;
+            return !token.is_cancelled();
+        }
         let sleep = tokio::time::sleep(duration);
         tokio::pin!(sleep);
 
@@ -427,23 +460,28 @@ mod tests {
         }
     }
 
-    fn actor(task: Arc<dyn Task>, restart: RestartPolicy, max_retries: u32) -> TaskActor {
-        let name: Arc<str> = Arc::from(task.name());
+    fn actor(
+        name: &'static str,
+        task: Arc<dyn Task>,
+        restart: RestartPolicy,
+        max_retries: u32,
+    ) -> TaskActor {
         TaskActor::new(
             Bus::new(16),
-            name,
+            Arc::from(name),
             Arc::clone(&task),
             params(restart, max_retries),
-            None,
+            TaskActorResources {
+                semaphore: None,
+                activity: Arc::new(AtomicBool::new(false)),
+                cleanup_poisoned: Arc::new(AtomicBool::new(false)),
+            },
             TaskId::next(),
         )
     }
 
     struct OkTask;
     impl Task for OkTask {
-        fn name(&self) -> &str {
-            "ok"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Ok(()) })
         }
@@ -451,9 +489,6 @@ mod tests {
 
     struct FailTask;
     impl Task for FailTask {
-        fn name(&self) -> &str {
-            "fail"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Err(TaskError::fail("boom")) })
         }
@@ -461,11 +496,70 @@ mod tests {
 
     struct FatalTask;
     impl Task for FatalTask {
-        fn name(&self) -> &str {
-            "fatal"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             Box::pin(async { Err(TaskError::fatal("fatal")) })
+        }
+    }
+
+    struct PanickingDropFuture;
+
+    impl Future for PanickingDropFuture {
+        type Output = Result<(), TaskError>;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PanickingDropFuture {
+        fn drop(&mut self) {
+            panic!("future cleanup panic");
+        }
+    }
+
+    struct TimeoutCleanupPanicTask {
+        attempts: AtomicU32,
+    }
+
+    struct NestedPanicPayload;
+
+    impl Drop for NestedPanicPayload {
+        fn drop(&mut self) {
+            panic!("nested payload destructor panic");
+        }
+    }
+
+    struct NestedPayloadFuture;
+
+    impl Future for NestedPayloadFuture {
+        type Output = Result<(), TaskError>;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::panic::panic_any(NestedPanicPayload)
+        }
+    }
+
+    struct NestedPayloadTask {
+        attempts: AtomicU32,
+    }
+
+    impl Task for NestedPayloadTask {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            Box::pin(NestedPayloadFuture)
+        }
+    }
+
+    impl Task for TimeoutCleanupPanicTask {
+        fn spawn(&self, _ctx: TaskContext) -> BoxFut {
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            Box::pin(PanickingDropFuture)
         }
     }
 
@@ -480,9 +574,6 @@ mod tests {
         }
     }
     impl Task for CountedTask {
-        fn name(&self) -> &str {
-            "counted"
-        }
         fn spawn(&self, _ctx: TaskContext) -> BoxFut {
             let prev = self.remaining.fetch_sub(1, Ordering::SeqCst);
             if prev > 0 {
@@ -496,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn ok_task_returns_completed_under_non_restarting_policies() {
         for restart in [RestartPolicy::Never, RestartPolicy::OnFailure] {
-            let a = actor(Arc::new(OkTask), restart, 0);
+            let a = actor("ok", Arc::new(OkTask), restart, 0);
             let reason = a.run(CancellationToken::new()).await;
             assert!(
                 matches!(reason, ActorExitReason::Completed),
@@ -507,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn fatal_error_returns_fatal_with_reason() {
-        let a = actor(Arc::new(FatalTask), RestartPolicy::OnFailure, 0);
+        let a = actor("fatal", Arc::new(FatalTask), RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
         match reason {
             ActorExitReason::Fatal {
@@ -525,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_retries_exhausted_returns_exhausted_with_reason() {
-        let a = actor(Arc::new(FailTask), RestartPolicy::OnFailure, 3);
+        let a = actor("fail", Arc::new(FailTask), RestartPolicy::OnFailure, 3);
         let reason = a.run(CancellationToken::new()).await;
         match reason {
             ActorExitReason::Exhausted { reason, .. } => {
@@ -540,6 +631,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let a = actor(
+            "ok",
             Arc::new(OkTask),
             RestartPolicy::Always { interval: None },
             0,
@@ -548,10 +640,80 @@ mod tests {
         assert!(matches!(reason, ActorExitReason::Canceled));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn timeout_cleanup_panic_is_terminal_even_with_unlimited_retries() {
+        let task = Arc::new(TimeoutCleanupPanicTask {
+            attempts: AtomicU32::new(0),
+        });
+        let actor = TaskActor::new(
+            Bus::new(16),
+            Arc::from("timeout-cleanup-panic"),
+            Arc::clone(&task) as Arc<dyn Task>,
+            TaskActorParams {
+                restart: RestartPolicy::OnFailure,
+                backoff: fast_backoff(),
+                timeout: Some(Duration::from_millis(10)),
+                max_retries: None,
+            },
+            TaskActorResources {
+                semaphore: None,
+                activity: Arc::new(AtomicBool::new(false)),
+                cleanup_poisoned: Arc::new(AtomicBool::new(false)),
+            },
+            TaskId::next(),
+        );
+
+        let reason = actor.run(CancellationToken::new()).await;
+        assert!(matches!(
+            reason,
+            ActorExitReason::Panicked {
+                cleanup_poisoned: false
+            }
+        ));
+        assert_eq!(
+            task.attempts.load(Ordering::Acquire),
+            1,
+            "a panicking future destructor must terminalize the actor, not retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_panic_payload_destructor_poison_is_propagated() {
+        let task = Arc::new(NestedPayloadTask {
+            attempts: AtomicU32::new(0),
+        });
+        let actor = TaskActor::new(
+            Bus::new(16),
+            Arc::from("nested-payload"),
+            Arc::clone(&task) as Arc<dyn Task>,
+            TaskActorParams {
+                restart: RestartPolicy::OnFailure,
+                backoff: fast_backoff(),
+                timeout: None,
+                max_retries: None,
+            },
+            TaskActorResources {
+                semaphore: None,
+                activity: Arc::new(AtomicBool::new(false)),
+                cleanup_poisoned: Arc::new(AtomicBool::new(false)),
+            },
+            TaskId::next(),
+        );
+
+        let reason = actor.run(CancellationToken::new()).await;
+        assert!(matches!(
+            reason,
+            ActorExitReason::Panicked {
+                cleanup_poisoned: true
+            }
+        ));
+        assert_eq!(task.attempts.load(Ordering::Acquire), 1);
+    }
+
     #[tokio::test]
     async fn on_failure_retries_then_succeeds() {
         let task = Arc::new(CountedTask::new(2));
-        let a = actor(task, RestartPolicy::OnFailure, 0);
+        let a = actor("counted", task, RestartPolicy::OnFailure, 0);
         let reason = a.run(CancellationToken::new()).await;
         assert!(matches!(reason, ActorExitReason::Completed));
     }
@@ -562,9 +724,6 @@ mod tests {
 
         struct Counting(Arc<AtomicU32>);
         impl Task for Counting {
-            fn name(&self) -> &str {
-                "spin"
-            }
             fn spawn(&self, _ctx: TaskContext) -> BoxFut {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Box::pin(async { Ok(()) })
@@ -573,7 +732,7 @@ mod tests {
 
         let counter = Arc::new(AtomicU32::new(0));
         let task = Arc::new(Counting(Arc::clone(&counter)));
-        let a = actor(task, RestartPolicy::Always { interval: None }, 0);
+        let a = actor("spin", task, RestartPolicy::Always { interval: None }, 0);
 
         let token = CancellationToken::new();
         let child = token.clone();

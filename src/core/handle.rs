@@ -1,40 +1,25 @@
-//! # Manage a running supervisor
+//! Sends management operations to one running supervisor.
 //!
-//! [`Supervisor::serve`](crate::Supervisor::serve) returns a [`SupervisorHandle`].
+//! [`Supervisor::serve`](crate::Supervisor::serve) starts the runtime and returns a [`SupervisorHandle`].
+//! Direct task operations enter the registry management queue. With controller support,
+//! submissions enter the controller queue first.
 //!
-//! Direct state-changing `add*`, `remove*`, and `cancel*` commands use one bounded management queue.
-//! A regular method waits for capacity; its `try_*` form fails fast when that queue is full.
+//! ```text
+//! application ──► SupervisorHandle
+//!                       ├── task management ──► registry queue ──► Registry
+//!                       ├── submit ──► controller queue ──► slot admission
+//!                       │                                      ▼
+//!                       │                                  Registry
+//!                       └── shutdown ──► shared shutdown workflow
+//! ```
 //!
-//! With a controller, identity-based remove and cancel methods may use both the controller queue and the registry queue.
-//! Regular forms wait at both boundaries, while `try_*` forms fail fast at either one.
-//! Controller `submit*` methods confirm queue acceptance only; they do not wait for slot admission.
+//! Regular state-changing methods wait for bounded queue capacity. Their `try_*` forms fail immediately
+//! when capacity is unavailable. Direct replies carry registry and controller decisions outside the event path.
 //!
-//! Dropping a management future before its command is accepted may stop the operation.
-//! After acceptance, the runtime owns the command and does not roll it back when the caller is dropped.
-//!
-//! With a controller, identity-based remove and cancel operations are ordered after earlier submissions.
-//! This lets them find work that is still queued and has not reached the registry.
-//! Queued IDs are routed through the controller's reverse slot index; IDs absent from that index go directly to the registry path.
-//!
-//! ## Confirmation Boundaries
-//!
-//! | Method family                              | A successful return confirms                                                                          | It does not confirm                                                     |
-//! |--------------------------------------------|-------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
-//! | `add`, `try_add`                           | Registry admission and runner creation                                                                | First attempt started                                                   |
-//! | `add_and_watch`, `try_add_and_watch`       | Registry admission; the returned waiter later confirms terminal cleanup                               | Task success at method return                                           |
-//! | `prepare_submission`                       | A controller `TaskId` is reserved and visible to the caller                                            | Queue intake; preparation publishes no event                            |
-//! | `submit`, `try_submit`                     | Controller command-queue acceptance                                                                   | Slot admission, registry admission, or task start                       |
-//! | `submit_and_watch`, `try_submit_and_watch` | Controller command-queue acceptance; the returned waiter later confirms rejection or terminal cleanup | Slot or registry admission at method return                             |
-//! | `remove`, `try_remove`                     | The stop claim was decided; queued controller work is removed before return                           | Terminal cleanup of registered work                                     |
-//! | `remove_by_label`, `try_remove_by_label`   | The registry name lookup and stop claim were decided                                                  | Terminal cleanup                                                        |
-//! | `cancel`, `try_cancel`                     | Terminal cleanup for known registered work; queued controller removal is complete                     | That this caller was the first stop claimant when the result is `false` |
-//! | `cancel_by_label*`, `try_cancel_by_label*` | Terminal cleanup when the call returns `Ok`; timeout variants bound only the cleanup wait             | Cleanup after `TaskTerminationTimeout`                                  |
-//! | `list`                                     | One authoritative registry snapshot                                                                   | That entries are currently executing an attempt                         |
-//! | `alive_snapshot`, `is_alive`               | One best-effort event-derived cache read                                                              | Authoritative registry membership                                       |
-//! | `controller_snapshot`                      | One best-effort rolling slot snapshot                                                                 | An atomic view across every slot                                        |
-//! | `shutdown`                                 | Shared runtime cleanup completed with the returned result                                             | -                                                                       |
-//!
-//! A `try_*` method changes queue admission only: it fails immediately when the relevant bounded queue is full.
+//! Identity-based remove and cancel operations pass through the controller when configured. This orders
+//! them after earlier submissions and lets them find work that has not reached the registry yet.
+//! Methods ending in `_by_name` use the task name from [`TaskSpec`].
+//! The older `_by_label` methods are compatibility aliases for the same registry key.
 
 use std::{sync::Arc, time::Duration};
 
@@ -45,17 +30,22 @@ use crate::tasks::TaskSpec;
 
 use super::outcome::TaskWaiter;
 
-/// Cloneable handle for one running supervisor.
+/// Cloneable API for managing one running supervisor.
 ///
-/// Clones share the same runtime.
-/// Dropping one clone does not stop it.
-/// Dropping the last public `Supervisor` or handle sends best-effort cancellation, but cannot wait for cleanup.
-/// Call [`shutdown`](Self::shutdown) for a confirmed shutdown result.
+/// Choose an operation from the result the application needs:
 ///
-/// > Use [`remove`](Self::remove) to request a stop and return after the request is accepted.
-/// > Use [`cancel`](Self::cancel) to wait until the task is joined and its name and identity are released.
+/// - [`add`](Self::add) confirms registration; [`add_and_watch`](Self::add_and_watch) also returns the final outcome;
+/// - [`remove`](Self::remove) starts a stop without waiting; [`cancel`](Self::cancel) waits for logical cleanup;
+/// - [`list`](Self::list) reports membership; [`alive_snapshot`](Self::alive_snapshot) reports active attempts;
+/// - controller `submit*` methods apply slot policy; direct `add*` methods do not.
 ///
-/// ## Example
+/// Once a state-changing method commits its queue command, the runtime owns that command even if the caller drops its future.
+///
+/// Every clone keeps the runtime publicly owned. Dropping the last public owner requests best-effort cancellation but cannot wait.
+/// Call [`shutdown`](Self::shutdown) to wait for the bounded shutdown workflow.
+/// Starting shutdown closes admission for every clone.
+///
+/// # Examples
 ///
 /// ```rust,no_run
 /// use std::time::Duration;
@@ -64,9 +54,9 @@ use super::outcome::TaskWaiter;
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-///     let handle = supervisor.serve();
+///     let handle = supervisor.serve()?;
 ///
-///     let task = TaskFn::arc("worker", |ctx| async move {
+///     let task = TaskFn::arc(|ctx| async move {
 ///         loop {
 ///             ctx.run_until_cancelled(tokio::time::sleep(Duration::from_secs(1)))
 ///                 .await?;
@@ -74,7 +64,7 @@ use super::outcome::TaskWaiter;
 ///         }
 ///     });
 ///
-///     let id = handle.add(TaskSpec::restartable(task)).await?;
+///     let id = handle.add(TaskSpec::restartable("worker", task)).await?;
 ///     let _claimed = handle.cancel(id).await?;
 ///     handle.shutdown().await?;
 ///     Ok(())
@@ -120,65 +110,45 @@ impl SupervisorHandle {
         self
     }
 
-    /// Adds a task and waits until the registry accepts or rejects it.
+    /// Registers a task and waits for the registry's decision.
     ///
     /// `Ok(id)` confirms registration.
-    /// It does not mean that the first attempt has started.
-    /// This confirmation is direct and does not use the event bus.
+    /// It does not mean that the first attempt has started. This confirmation is direct and does not use the event bus.
+    /// The task name must not already identify registry membership or a force-aborted task whose physical actor has not exited.
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::ThreadStartFailed`] when background cleanup workers cannot start for the first ownership admission.
+    /// - [`RuntimeError::ResourceLimitReached`] when the task exceeds a configured ownership or registered-task limit.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
     pub async fn add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         self.core().add_task(spec).await
     }
 
-    /// Adds a task only if the management queue has capacity now.
+    /// Registers a task without waiting for ownership admission.
     ///
-    /// After queue admission, it still waits for registry acceptance.
+    /// This is useful when the caller must apply its own overload policy instead of waiting for a configured ownership limit.
+    /// After ownership admission, it still waits for the registry decision.
     /// `Ok(id)` has the same meaning as [`add`](Self::add).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
+    /// Returns the errors from [`add`](Self::add).
+    /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
     pub async fn try_add(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         self.core().try_add_task(spec).await
     }
 
-    /// Adds a task and returns a waiter for its final outcome.
+    /// Registers a task and returns a waiter for its final outcome.
     ///
-    /// Registration is the same as [`add`](Self::add).
-    /// The [`TaskWaiter`] resolves after all retries end, the registry joins the managed runner, and registry membership is removed.
-    ///
-    /// > It uses a direct completion channel, not best-effort lifecycle events.
+    /// The return confirms the same registry admission as [`add`](Self::add).
+    /// [`TaskWaiter`] uses a direct completion channel outside lifecycle events.
+    /// Use this method when application behavior depends on how the task ends.
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
-    ///
-    /// ## Example
-    ///
-    /// ```rust,no_run
-    /// # use taskvisor::prelude::*;
-    /// # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let sup = Supervisor::new(SupervisorConfig::default(), vec![]);
-    /// # let handle = sup.serve();
-    /// let job: TaskRef = TaskFn::arc("job", |_ctx| async {
-    ///     Ok(())
-    /// });
-    ///
-    /// let (_id, waiter) = handle
-    ///     .add_and_watch(TaskSpec::once(job))
-    ///     .await?;
-    ///
-    /// let outcome = waiter.wait().await?;
-    /// assert!(outcome.is_success());
-    /// # Ok(()) }
-    /// ```
+    /// Returns the same admission errors as [`add`](Self::add).
     pub async fn add_and_watch(
         &self,
         spec: TaskSpec,
@@ -187,15 +157,14 @@ impl SupervisorHandle {
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
-    /// Adds a watched task only if the management queue has capacity now.
+    /// Registers watched work without waiting for ownership admission.
     ///
-    /// After queue admission, registration and outcome behavior are the same as [`add_and_watch`](Self::add_and_watch).
+    /// After queue admission, registration and outcome behavior match [`add_and_watch`](Self::add_and_watch).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already in use.
+    /// Returns the errors from [`add_and_watch`](Self::add_and_watch).
+    /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
     pub async fn try_add_and_watch(
         &self,
         spec: TaskSpec,
@@ -211,10 +180,11 @@ impl SupervisorHandle {
     ///
     /// For a registered task, the method returns before final cleanup.
     /// Removing queued controller work is complete when this method returns.
-    /// > Use [`cancel`](Self::cancel) when you need to wait until termination.
+    /// Use [`cancel`](Self::cancel) when the caller needs terminal confirmation.
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::ResourceLimitReached`] when a configured controller's identity-operation budget is full.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
         #[cfg(feature = "controller")]
@@ -230,8 +200,8 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when a bounded controller or registry management queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    /// Returns the errors from [`remove`](Self::remove). It also returns [`RuntimeError::CommandQueueFull`]
+    /// when a required management queue has no capacity.
     pub async fn try_remove(&self, id: TaskId) -> Result<bool, RuntimeError> {
         #[cfg(feature = "controller")]
         if let Some(controller) = &self.controller {
@@ -243,7 +213,8 @@ impl SupervisorHandle {
     /// Requests removal of the registered task with `name`.
     ///
     /// Name lookup and the removal claim are one registry operation.
-    /// The boolean has the same meaning as [`remove`](Self::remove), and this method also returns before final cleanup.
+    /// The boolean has the same meaning as [`remove`](Self::remove).
+    /// This method also returns before final cleanup.
     ///
     /// Controller submissions that are still queued do not own a registered name.
     /// Remove them with the [`TaskId`] returned by `submit`.
@@ -251,47 +222,68 @@ impl SupervisorHandle {
     /// # Errors
     ///
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    pub async fn remove_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().remove_by_label(Arc::from(name)).await
     }
 
     /// Requests removal by name only if the registry queue has capacity now.
     ///
-    /// After queue admission, behavior is the same as [`remove_by_label`](Self::remove_by_label).
+    /// After queue admission, behavior is the same as [`remove_by_name`](Self::remove_by_name).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn try_remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    /// Returns the errors from [`remove_by_name`](Self::remove_by_name). It also returns
+    /// [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
+    pub async fn try_remove_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().try_remove_by_label(Arc::from(name)).await
+    }
+
+    /// Compatibility alias for [`remove_by_name`](Self::remove_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`remove_by_name`](Self::remove_by_name).
+    pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.remove_by_name(name).await
+    }
+
+    /// Compatibility alias for [`try_remove_by_name`](Self::try_remove_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`try_remove_by_name`](Self::try_remove_by_name).
+    pub async fn try_remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.try_remove_by_name(name).await
     }
 
     /// Returns the authoritative registry view as `(id, name)` pairs.
     ///
-    /// The list comes from the registry and is sorted by [`TaskId`].
-    /// It includes every registry entry, whether its managed task is running, waiting for a permit, in backoff or a restart interval, already finished but not cleaned up, or being removed.
+    /// The list comes from the registry and is sorted by [`TaskId`]. It includes every registry
+    /// entry: running, waiting for a permit, between attempts, awaiting cleanup, or being removed.
     ///
-    /// See [`alive_snapshot`](Self::alive_snapshot) for the best-effort list of task names currently marked alive.
+    /// See [`alive_snapshot`](Self::alive_snapshot) for tasks currently executing an attempt.
+    /// Concurrent lifecycle changes can make the returned snapshot stale immediately.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.core().list_tasks().await
     }
 
-    /// Returns task names currently marked alive by lifecycle events.
+    /// Returns task names that still have a physical attempt in progress.
     ///
-    /// This is a best-effort event-derived cache.
-    /// It can lag or miss state after event loss.
-    /// The result is sorted and deduplicated by name.
+    /// This combines activity from registry entries and force-aborted attempts that have not physically exited.
+    /// A name remains in the result until its physical attempt exits. Event loss does not affect this result.
+    /// Results are sorted by name.
     ///
-    /// See [`list`](Self::list) for the authoritative registry view of registered tasks.
+    /// See [`list`](Self::list) for registry membership.
+    /// Concurrent attempt changes can make the returned snapshot stale immediately.
     pub async fn alive_snapshot(&self) -> Vec<Arc<str>> {
         self.core().snapshot().await
     }
 
-    /// Returns whether the cache currently marks any run with this name as alive.
+    /// Returns whether this name still has a physical attempt in progress.
     ///
-    /// This best-effort query does not check a specific [`TaskId`] and can miss state after event loss.
-    /// > Use [`list`](Self::list) for registry membership.
+    /// Waiting for a permit, retry backoff, or terminal cleanup is not active.
+    /// A force-aborted attempt can remain active after registry membership ends.
+    /// Use [`list`](Self::list) when registry membership is the desired state.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
     }
@@ -308,19 +300,20 @@ impl SupervisorHandle {
         self.core().task_defaults()
     }
 
-    /// Cancels work by identity and waits for terminal cleanup.
+    /// Cancels work by identity and waits for bounded logical terminal cleanup.
     ///
-    /// For registered work, this returns after the managed runner is joined and its name and identity are released.
-    /// For queued controller work, removal is already complete when this method returns.
+    /// For registered work, this returns after registry membership is removed and the final outcome is committed.
+    /// Except for [`TaskOutcome::ForceAborted`](crate::TaskOutcome::ForceAborted), the actor is physically joined first.
+    /// A force-aborted actor can remain physically active until it exits.
     ///
-    /// `Ok(true)` is returned only to the call that claimed the stop.
-    /// A call that joins an existing removal waits for the same cleanup, then returns `Ok(false)`.
-    ///
-    /// An unknown or already-cleaned identity returns `Ok(false)` without waiting for task cleanup.
-    /// A watched submission removed from a controller queue resolves as [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) because its body did not run.
+    /// `Ok(true)` means this call created the stop claim. A call that joins an existing removal waits for
+    /// the same cleanup and returns `Ok(false)`.
+    /// Unknown or already-cleaned work also returns `Ok(false)`.
+    /// Queued controller work is fully removed before return.
     ///
     /// # Errors
     ///
+    /// - [`RuntimeError::ResourceLimitReached`] when a configured controller's identity-operation budget is full.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         #[cfg(feature = "controller")]
@@ -332,12 +325,12 @@ impl SupervisorHandle {
 
     /// Cancels work only if the management queue has capacity now.
     ///
-    /// After queue admission, it has the same result and cleanup guarantees as [`cancel`](Self::cancel).
+    /// After queue admission, its result and cleanup guarantees match [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when a bounded controller or registry management queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    /// Returns the errors from [`cancel`](Self::cancel).
+    /// It also returns [`RuntimeError::CommandQueueFull`] when a required management queue has no capacity.
     pub async fn try_cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         #[cfg(feature = "controller")]
         if let Some(controller) = &self.controller {
@@ -350,41 +343,42 @@ impl SupervisorHandle {
     ///
     /// Name lookup and the cancellation claim are one registry operation.
     /// The result and terminal guarantees match [`cancel`](Self::cancel).
+    /// Controller work that is still queued has no registered name;
+    /// cancel it by its returned [`TaskId`].
     ///
     /// # Errors
     ///
-    /// Same as [`cancel`](Self::cancel).
-    /// A controller submission that is still queued has no registered name; cancel it by its returned [`TaskId`].
-    pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    /// Returns [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    pub async fn cancel_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().cancel_by_label(Arc::from(name)).await
     }
 
     /// Cancels by name only if the registry queue has capacity now.
     ///
-    /// After queue admission, behavior is the same as [`cancel_by_label`](Self::cancel_by_label).
+    /// After queue admission, behavior is the same as [`cancel_by_name`](Self::cancel_by_name).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn try_cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+    /// Returns the errors from [`cancel_by_name`](Self::cancel_by_name).
+    /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
+    pub async fn try_cancel_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
         self.core().try_cancel_by_label(Arc::from(name)).await
     }
 
     /// Cancels by name and limits how long this caller waits for cleanup.
     ///
     /// Queue admission and the registry claim are outside `wait_for`.
-    /// The timer covers only the final wait for task cleanup.
-    /// A timeout stops waiting but does not undo cancellation or change the supervisor grace period.
+    /// The timer covers only the final wait for task cleanup. A timeout stops waiting.
+    /// It does not undo cancellation or change the supervisor grace period.
     ///
-    /// The boolean follows [`cancel_by_label`](Self::cancel_by_label).
+    /// The boolean follows [`cancel_by_name`](Self::cancel_by_name).
     /// Queued controller work has no registered name; cancel it by [`TaskId`].
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn cancel_by_label_with_timeout(
+    pub async fn cancel_by_name_with_timeout(
         &self,
         name: &str,
         wait_for: Duration,
@@ -397,14 +391,13 @@ impl SupervisorHandle {
     /// Cancels by name with a wait limit and fail-fast queue admission.
     ///
     /// Fail-fast behavior applies only to queue admission.
-    /// The timeout and boolean semantics match [`cancel_by_label_with_timeout`](Self::cancel_by_label_with_timeout).
+    /// Timeout and result behavior match [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
-    /// - [`RuntimeError::CommandQueueFull`] when the bounded registry queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
-    pub async fn try_cancel_by_label_with_timeout(
+    /// Returns the errors from [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
+    /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
+    pub async fn try_cancel_by_name_with_timeout(
         &self,
         name: &str,
         wait_for: Duration,
@@ -414,19 +407,66 @@ impl SupervisorHandle {
             .await
     }
 
+    /// Compatibility alias for [`cancel_by_name`](Self::cancel_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`cancel_by_name`](Self::cancel_by_name).
+    pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.cancel_by_name(name).await
+    }
+
+    /// Compatibility alias for [`try_cancel_by_name`](Self::try_cancel_by_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`try_cancel_by_name`](Self::try_cancel_by_name).
+    pub async fn try_cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
+        self.try_cancel_by_name(name).await
+    }
+
+    /// Compatibility alias for [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from
+    /// [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
+    pub async fn cancel_by_label_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.cancel_by_name_with_timeout(name, wait_for).await
+    }
+
+    /// Compatibility alias for
+    /// [`try_cancel_by_name_with_timeout`](Self::try_cancel_by_name_with_timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from
+    /// [`try_cancel_by_name_with_timeout`](Self::try_cancel_by_name_with_timeout).
+    pub async fn try_cancel_by_label_with_timeout(
+        &self,
+        name: &str,
+        wait_for: Duration,
+    ) -> Result<bool, RuntimeError> {
+        self.try_cancel_by_name_with_timeout(name, wait_for).await
+    }
+
     /// Cancels by identity and limits how long this caller waits for cleanup.
     ///
     /// Controller ordering, queue admission, and the registry claim are outside `wait_for`.
-    /// The timer covers only the final wait for registered task cleanup.
-    /// Queued controller work is removed directly. This timer does not apply to that path.
+    /// The timer covers only the final wait for registered task cleanup. Queued controller work
+    /// is removed directly. This timer does not apply to that path.
     ///
-    /// A timeout stops this caller's wait.
-    /// It does not undo cancellation or change the supervisor grace period.
-    /// The boolean follows [`cancel`](Self::cancel).
+    /// A timeout stops this caller's wait. It does not undo cancellation or change the
+    /// supervisor grace period. The boolean follows [`cancel`](Self::cancel).
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
+    /// - [`RuntimeError::ResourceLimitReached`] when a configured controller's identity-operation budget is full.
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel_with_timeout(
         &self,
@@ -446,9 +486,8 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::TaskTerminationTimeout`] when confirmation does not arrive in time.
-    /// - [`RuntimeError::CommandQueueFull`] when a bounded controller or registry management queue has no capacity.
-    /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
+    /// Returns the errors from [`cancel_with_timeout`](Self::cancel_with_timeout).
+    /// It also returns [`RuntimeError::CommandQueueFull`] when a required management queue has no capacity.
     pub async fn try_cancel_with_timeout(
         &self,
         id: TaskId,
@@ -464,32 +503,37 @@ impl SupervisorHandle {
         self.core().try_cancel_with_timeout(id, wait_for).await
     }
 
-    /// Shuts down the runtime and waits for cleanup.
+    /// Closes runtime admission and waits for the shared bounded cleanup workflow.
     ///
-    /// This closes admission, cancels registered tasks, waits for the configured grace period, and joins internal workers.
-    /// Subscriber queues are drained up to their configured deadline.
-    /// With a controller, pending submissions are also resolved and the controller worker is joined.
+    /// Shutdown closes admission, drains accepted controller work when configured, cancels registered tasks,
+    /// waits through the grace window, joins runtime management workers, and drains subscriber queues up to their deadline.
     ///
-    /// Shutdown is shared.
+    /// A force-aborted synchronous task, detached subscriber callback, or isolated user destructor may still be active after return.
+    /// Its ownership remains charged until physical release.
+    ///
+    /// This consumes only the current handle value. Shutdown affects the shared runtime and every clone.
     /// Concurrent or later shutdown calls on other handles receive the same cached result.
     ///
     /// # Errors
     ///
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
+    /// - [`RuntimeError::SignalSetupFailed`] when this call joins a shutdown started by failed operating-system signal setup.
     /// - [`RuntimeError::ShuttingDown`] when shared runtime cleanup cannot finish normally.
-    /// - [`RuntimeError::SignalSetupFailed`]
+    ///
+    /// # Cancel safety
+    ///
+    /// On its first poll, this method creates or joins a detached shared shutdown operation.
+    /// Dropping this caller's future after that point does not stop cleanup.
     #[doc(alias = "graceful shutdown")]
     #[doc(alias = "graceful stop")]
     pub async fn shutdown(self) -> Result<(), RuntimeError> {
         self.core().shutdown().await
     }
 
-    /// Prepares a controller submission and exposes its identity before intake.
+    /// Prepares a controller submission and exposes its identity before queue admission.
     ///
-    /// This allocates the [`TaskId`] but does not enqueue work or publish an event.
-    /// Install any application-level correlation for [`PreparedSubmission::id`](crate::PreparedSubmission::id), then consume the prepared value with one of its submit methods.
-    ///
-    /// Use the ordinary [`submit`](Self::submit) and [`submit_and_watch`](Self::submit_and_watch) shortcuts when correlation does not need to exist before lifecycle events can start.
+    /// This allocates the [`TaskId`] but does not enqueue work or publish an event. The caller can install correlation for
+    /// [`PreparedSubmission::id`](crate::PreparedSubmission::id) before consuming the prepared value with a submit method.
     ///
     /// Requires the `controller` feature.
     ///
@@ -512,19 +556,18 @@ impl SupervisorHandle {
         }
     }
 
-    /// Sends a task to the controller and returns its reserved [`TaskId`].
+    /// Queues work for controller slot admission and returns its reserved [`TaskId`].
     ///
     /// `Ok(id)` confirms only that the controller queue accepted the submission.
     /// Slot admission and runtime registration happen later.
-    ///
-    /// > Use [`try_submit`](Self::try_submit) to fail fast when the controller queue is full.
-    /// > Use [`submit_and_watch`](Self::submit_and_watch) to observe the final outcome, including admission rejection.
     ///
     /// Requires the `controller` feature.
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
+    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor has no controller.
+    /// - [`ControllerError::ThreadStartFailed`](crate::ControllerError::ThreadStartFailed) when background cleanup workers cannot start.
+    /// - [`ControllerError::ResourceLimit`](crate::ControllerError::ResourceLimit) when the configured ownership limit is exhausted.
     /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
@@ -543,9 +586,8 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
-    /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
-    /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
+    /// Returns the errors from [`submit`](Self::submit).
+    /// It also returns [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn try_submit(
@@ -555,19 +597,17 @@ impl SupervisorHandle {
         self.prepare_submission(spec)?.try_submit()
     }
 
-    /// Sends a task to the controller and returns a final-outcome waiter.
+    /// Queues work for controller slot admission and returns a final-outcome waiter.
     ///
-    /// The waiter uses the direct completion channel, not the best-effort event bus.
-    /// It normally resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) when controller or registry admission rejects the submission.
-    /// If the completion sender closes first, [`TaskWaiter::wait`] returns [`RuntimeError::ShuttingDown`].
-    /// If admitted, the waiter resolves after the task finishes and its managed runner is joined.
+    /// The return confirms only controller queue admission.
+    /// The waiter receives [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) if controller or
+    /// registry admission later rejects the work. Admitted work follows the normal [`TaskWaiter`] contract.
     ///
     /// Requires the `controller` feature.
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
-    /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
+    /// Returns the same queue-admission errors as [`submit`](Self::submit).
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub async fn submit_and_watch(
@@ -586,9 +626,8 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
-    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when the supervisor was built without a controller.
-    /// - [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
-    /// - [`ControllerError::Closed`](crate::ControllerError::Closed) when the controller has stopped.
+    /// Returns the errors from [`submit_and_watch`](Self::submit_and_watch).
+    /// It also returns [`ControllerError::Full`](crate::ControllerError::Full) when the controller queue has no capacity.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn try_submit_and_watch(
@@ -603,25 +642,6 @@ impl SupervisorHandle {
     /// Slots are copied one at a time. Concurrent changes can appear in only part of one snapshot.
     /// The value can also become stale as soon as this method returns.
     /// It is `None` when this supervisor was built without a controller.
-    ///
-    /// ## Example
-    ///
-    /// ```rust,no_run
-    /// # use taskvisor::prelude::*;
-    /// # #[tokio::main] async fn main() {
-    /// # let sup = Supervisor::builder(SupervisorConfig::default())
-    /// #     .with_controller(ControllerConfig::default())
-    /// #     .build();
-    /// # let handle = sup.serve();
-    /// if let Some(snap) = handle.controller_snapshot().await {
-    ///     println!("{} running, {} queued", snap.running_count(), snap.total_queued());
-    ///
-    ///     if let Some(web) = snap.slot("web") {
-    ///         println!("web: {:?}, depth {}", web.status, web.queue_depth);
-    ///     }
-    /// }
-    /// # }
-    /// ```
     ///
     /// Requires the `controller` feature.
     #[cfg(feature = "controller")]

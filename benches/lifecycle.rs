@@ -1,34 +1,41 @@
-//! # Lifecycle: per-task overhead
+//! # Cold single-task lifecycle benchmarks
 //!
-//! Measures the cost of one full task lifecycle through the supervisor pipeline:
-//! ```text
-//! add → spawn actor → run closure → complete → cleanup → TaskRemoved
-//! ```
+//! Measures one fresh supervisor from construction through one final task outcome and shared cleanup.
+//! Task construction and Tokio runtime construction stay outside the stopwatch.
 //!
-//! ## What is measured
-//!
-//! | Benchmark          | Description                                                  |
-//! |--------------------|--------------------------------------------------------------|
-//! | `instant`          | Task completes immediately (`Ok(())`). Pure framework cost.  |
-//! | `with_work/N`      | Task does N iterations of light CPU work before completing.  |
-//!
-//! Each benchmark runs on both `current_thread` and `multi_thread` runtimes to show scheduling overhead differences.
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo bench --bench lifecycle
-//! ```
+//! Run with `cargo bench --bench lifecycle`.
+
+mod support;
 
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use taskvisor::TaskContext;
 use tokio::runtime::Runtime;
 
 use taskvisor::{
     BackoffPolicy, RestartPolicy, Supervisor, SupervisorConfig, TaskFn, TaskRef, TaskSpec,
 };
+
+use support::{CaseFamily, print_suite_header, record_case};
+
+const INSTANT: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/cold/full_run/instant",
+    "COLD SINGLE TASK · INSTANT",
+    "completed task",
+    "completed tasks",
+    "fresh Supervisor construction through one final task outcome and shared cleanup",
+    "TaskSpec and Tokio runtime construction",
+);
+
+const CPU_WORK: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/cold/full_run/cpu_work",
+    "COLD SINGLE TASK · CPU WORK",
+    "completed task",
+    "completed tasks",
+    "fresh Supervisor construction through one CPU task outcome and shared cleanup",
+    "TaskSpec and Tokio runtime construction",
+);
 
 fn rt_current_thread() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -59,39 +66,53 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn work_task(name: &str, iterations: u64) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, move |_ctx: TaskContext| async move {
+    let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| async move {
         let mut x = 0u64;
         for i in 0..iterations {
-            x = x.wrapping_add(i);
+            x = std::hint::black_box(x.wrapping_add(i));
         }
         std::hint::black_box(x);
         Ok(())
     });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn bench_instant(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lifecycle/instant");
+    print_suite_header("lifecycle");
+    let mut group = c.benchmark_group(INSTANT.group_id);
     group.sample_size(50);
     group.measurement_time(Duration::from_secs(10));
     group.throughput(Throughput::Elements(1));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
         group.bench_function(rt_name, |b| {
+            record_case(INSTANT, rt_name, None);
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for i in 0..iters {
                     let rt = rt_fn();
                     total += rt.block_on(async {
                         let task = instant_task(&format!("lc-{i}"));
-                        let sup = Supervisor::new(bench_config(), vec![]);
                         let start = std::time::Instant::now();
-                        sup.run(vec![task]).await.unwrap();
+                        let sup = Supervisor::new(bench_config(), vec![]);
+                        sup.run(vec![task]).await.expect("cold lifecycle failed");
                         start.elapsed()
                     });
                 }
@@ -103,7 +124,7 @@ fn bench_instant(c: &mut Criterion) {
 }
 
 fn bench_with_work(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lifecycle/with_work");
+    let mut group = c.benchmark_group(CPU_WORK.group_id);
     group.sample_size(30);
     group.measurement_time(Duration::from_secs(10));
 
@@ -111,18 +132,19 @@ fn bench_with_work(c: &mut Criterion) {
         for n in [100, 1_000, 10_000] {
             group.throughput(Throughput::Elements(1));
             group.bench_with_input(
-                BenchmarkId::new(rt_name, format!("{n}_iters")),
+                BenchmarkId::new(rt_name, format!("{n}_iterations")),
                 &n,
                 |b, &iterations| {
+                    record_case(CPU_WORK, rt_name, Some(format!("{iterations}_iterations")));
                     b.iter_custom(|iters| {
                         let mut total = Duration::ZERO;
                         for i in 0..iters {
                             let rt = rt_fn();
                             total += rt.block_on(async {
                                 let task = work_task(&format!("w-{i}"), iterations);
-                                let sup = Supervisor::new(bench_config(), vec![]);
                                 let start = std::time::Instant::now();
-                                sup.run(vec![task]).await.unwrap();
+                                let sup = Supervisor::new(bench_config(), vec![]);
+                                sup.run(vec![task]).await.expect("CPU lifecycle failed");
                                 start.elapsed()
                             });
                         }
@@ -136,4 +158,7 @@ fn bench_with_work(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_instant, bench_with_work);
-criterion_main!(benches);
+
+fn main() {
+    support::benchmark_main("lifecycle", benches);
+}

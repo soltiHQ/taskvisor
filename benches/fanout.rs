@@ -1,26 +1,18 @@
-//! # Fan-out: subscriber overhead
+//! # Cold subscriber fan-out benchmarks
 //!
-//! Measures how adding subscribers affects total throughput.
+//! Measures complete batches of 100 instant tasks on fresh supervisors with 0, 1, 4, or 8 minimal counting subscribers.
+//! Supervisor construction is inside the stopwatch for every count.
 //!
-//! ## What is measured
-//!
-//! | Benchmark       | Description                                          |
-//! |-----------------|------------------------------------------------------|
-//! | `subs/N`        | 100 instant tasks with N no-op subscribers attached. |
-//!
-//! Subscriber counts: 0, 1, 4, 8.
-//!
-//! ## Run
-//!
-//! ```bash
-//! cargo bench --bench fanout
-//! ```
+//! Run with `cargo bench --bench fanout`.
+
+mod support;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use taskvisor::TaskContext;
 use tokio::runtime::Runtime;
 
@@ -28,6 +20,17 @@ use taskvisor::{
     BackoffPolicy, Event, RestartPolicy, Subscribe, Supervisor, SupervisorConfig, TaskFn, TaskRef,
     TaskSpec,
 };
+
+use support::{CaseFamily, print_suite_header, record_case};
+
+const FANOUT: CaseFamily = CaseFamily::lifecycle(
+    "fanout/cold/full_batch/instant",
+    "COLD BATCH · SUBSCRIBER FAN-OUT",
+    "completed task",
+    "completed tasks",
+    "fresh Supervisor through 100 task completions, counting callbacks, drain, and cleanup",
+    "TaskSpec values, subscriber values, and Tokio runtime construction",
+);
 
 fn rt_current_thread() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -51,18 +54,24 @@ const RUNTIMES: [(&str, RtFactory); 2] = [
     ("multi_thread", rt_multi_thread as RtFactory),
 ];
 
-struct NoopSubscriber {
+struct CountingSubscriber {
     id: &'static str,
+    seen: AtomicUsize,
 }
 
-impl NoopSubscriber {
+impl CountingSubscriber {
     fn arc(id: &'static str) -> Arc<Self> {
-        Arc::new(Self { id })
+        Arc::new(Self {
+            id,
+            seen: AtomicUsize::new(0),
+        })
     }
 }
 
-impl Subscribe for NoopSubscriber {
-    fn on_event(&self, _ev: &Event) {}
+impl Subscribe for CountingSubscriber {
+    fn on_event(&self, _ev: &Event) {
+        self.seen.fetch_add(1, Ordering::Relaxed);
+    }
     fn name(&self) -> &'static str {
         self.id
     }
@@ -81,12 +90,19 @@ fn bench_config() -> SupervisorConfig {
 }
 
 fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(name, |_ctx: TaskContext| async { Ok(()) });
-    TaskSpec::new(task, RestartPolicy::Never, BackoffPolicy::default(), None)
+    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+    TaskSpec::new(
+        name,
+        task,
+        RestartPolicy::Never,
+        BackoffPolicy::default(),
+        None,
+    )
 }
 
 fn bench_fanout(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fanout/subs");
+    print_suite_header("fanout");
+    let mut group = c.benchmark_group(FANOUT.group_id);
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(10));
     group.throughput(Throughput::Elements(N_TASKS as u64));
@@ -94,25 +110,44 @@ fn bench_fanout(c: &mut Criterion) {
     for &(rt_name, rt_fn) in &RUNTIMES {
         for n_subs in [0usize, 1, 4, 8] {
             group.bench_function(
-                BenchmarkId::new(rt_name, format!("{N_TASKS}t_{n_subs}s")),
+                BenchmarkId::new(
+                    rt_name,
+                    format!("{N_TASKS}_completed_tasks_{n_subs}_subscribers"),
+                ),
                 |b| {
+                    record_case(
+                        FANOUT,
+                        rt_name,
+                        Some(format!("{N_TASKS}_completed_tasks_{n_subs}_subscribers")),
+                    );
                     b.iter_custom(|iters| {
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let rt = rt_fn();
                             total += rt.block_on(async {
-                                let subs: Vec<Arc<dyn Subscribe>> = (0..n_subs)
-                                    .map(|i| {
-                                        NoopSubscriber::arc(SUB_NAMES[i]) as Arc<dyn Subscribe>
-                                    })
+                                let subscribers: Vec<_> = (0..n_subs)
+                                    .map(|i| CountingSubscriber::arc(SUB_NAMES[i]))
+                                    .collect();
+                                let subs: Vec<Arc<dyn Subscribe>> = subscribers
+                                    .iter()
+                                    .cloned()
+                                    .map(|subscriber| subscriber as Arc<dyn Subscribe>)
                                     .collect();
                                 let tasks: Vec<TaskSpec> = (0..N_TASKS)
                                     .map(|i| instant_task(&format!("fo-{i}")))
                                     .collect();
-                                let sup = Supervisor::new(bench_config(), subs);
                                 let start = std::time::Instant::now();
-                                sup.run(tasks).await.unwrap();
-                                start.elapsed()
+                                let sup = Supervisor::new(bench_config(), subs);
+                                sup.run(tasks).await.expect("fan-out batch failed");
+                                let elapsed = start.elapsed();
+                                for subscriber in subscribers {
+                                    assert!(
+                                        subscriber.seen.load(Ordering::Relaxed) > 0,
+                                        "subscriber {} received no lifecycle events",
+                                        subscriber.id
+                                    );
+                                }
+                                elapsed
                             });
                         }
                         total
@@ -125,4 +160,7 @@ fn bench_fanout(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_fanout);
-criterion_main!(benches);
+
+fn main() {
+    support::benchmark_main("fanout", benches);
+}

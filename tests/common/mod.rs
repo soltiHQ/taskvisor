@@ -13,7 +13,6 @@ use taskvisor::{
     SupervisorHandle, TaskError, TaskFn, TaskId, TaskRef,
 };
 
-/// A [`Subscribe`] implementation that records every event it receives.
 pub struct EventCollector {
     events: Mutex<Vec<Event>>,
     changes: tokio::sync::watch::Sender<u64>,
@@ -88,10 +87,6 @@ impl EventCollector {
             .any(|e| e.kind == kind && e.reason.as_deref().is_some_and(|r| r.contains(needle)))
     }
 
-    /// Waits for an event-only predicate without timer-based polling.
-    ///
-    /// The watch version closes the check/notification race: an event published
-    /// between the predicate check and `changed()` is retained by the channel.
     pub async fn wait_until<F>(&self, within: Duration, predicate: F) -> bool
     where
         F: Fn(&[Event]) -> bool,
@@ -152,7 +147,7 @@ pub fn supervisor_with_collector(
 
 pub fn served_with_collector(config: SupervisorConfig) -> (SupervisorHandle, Arc<EventCollector>) {
     let (supervisor, collector) = supervisor_with_collector(config);
-    (supervisor.serve(), collector)
+    (supervisor.serve().expect("runtime startup"), collector)
 }
 
 pub async fn poll_until<F, Fut>(within: Duration, mut cond: F) -> bool
@@ -178,18 +173,17 @@ pub async fn with_timeout<F: Future>(secs: u64, fut: F) -> F::Output {
         .expect("operation timed out — possible deadlock/hang regression")
 }
 
-pub fn make_coop(name: &str) -> TaskRef {
-    TaskFn::arc(name, |ctx: TaskContext| async move {
+pub fn make_coop() -> TaskRef {
+    TaskFn::arc(|ctx: TaskContext| async move {
         ctx.cancelled().await;
         Ok(())
     })
 }
 
-/// A task that starts observably and then ignores cancellation forever.
-pub fn make_stubborn(name: &str) -> (TaskRef, Arc<tokio::sync::Notify>) {
+pub fn make_stubborn() -> (TaskRef, Arc<tokio::sync::Notify>) {
     let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
-    let task = TaskFn::arc(name, move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let started = Arc::clone(&task_started);
         async move {
             started.notify_one();
@@ -206,24 +200,24 @@ pub async fn wait_for_start(name: &str, started: &tokio::sync::Notify) {
         .unwrap_or_else(|_| panic!("{name} did not start"));
 }
 
-pub fn make_ok_once(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: TaskContext| async move { Ok(()) })
+pub fn make_ok_once() -> TaskRef {
+    TaskFn::arc(|_ctx: TaskContext| async move { Ok(()) })
 }
 
-pub fn make_fail(name: &str, exit_code: Option<i32>) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: TaskContext| async move {
+pub fn make_fail(exit_code: Option<i32>) -> TaskRef {
+    TaskFn::arc(move |_ctx: TaskContext| async move {
         Err(TaskError::fail("boom").with_exit_code(exit_code))
     })
 }
 
-pub fn make_fatal(name: &str, exit_code: Option<i32>) -> TaskRef {
-    TaskFn::arc(name, move |_ctx: TaskContext| async move {
+pub fn make_fatal(exit_code: Option<i32>) -> TaskRef {
+    TaskFn::arc(move |_ctx: TaskContext| async move {
         Err(TaskError::fatal("unrecoverable").with_exit_code(exit_code))
     })
 }
 
-pub fn make_panic(name: &str) -> TaskRef {
-    TaskFn::arc(name, |_ctx: TaskContext| async move {
+pub fn make_panic() -> TaskRef {
+    TaskFn::arc(|_ctx: TaskContext| async move {
         panic!("kaboom");
     })
 }

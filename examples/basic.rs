@@ -1,14 +1,17 @@
 //! # Basic: run one task
 //!
-//! This example shows the smallest static setup: create a task, run it once, and wait for the supervisor to finish.
+//! Use this pattern when all tasks are known at startup and finish on their own.
 //!
-//! It uses:
-//! - `TaskFn::arc` to turn an async closure into a `TaskRef`;
-//! - `TaskSpec::once` to disable restarts;
-//! - `Supervisor::run` to start the task and wait for completion.
+//! `TaskFn::arc` adapts an async closure into a shared task.
+//! `TaskSpec::once` permits one attempt.
+//! `Supervisor::run` admits the initial batch and returns after registry membership is empty and bounded cleanup finishes.
 //!
-//! The task finishes at once. It does not use its `TaskContext`.
-//! A long-running task should observe cancellation; see `worker.rs`.
+//! `run` reports the supervisor lifecycle.
+//! Its `Ok(())` does not prove that every task succeeded.
+//! Use a watched task when application logic needs its final outcome; see `outcomes.rs`.
+//!
+//! This task prints once and completes immediately. It does not use `TaskContext`.
+//! See `graceful_worker.rs` for a long-running task that observes cancellation.
 //!
 //! Run with `cargo run --example basic`.
 
@@ -16,13 +19,13 @@ use taskvisor::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let task: TaskRef = TaskFn::arc("hello", |_ctx| async move {
+    let task: TaskRef = TaskFn::arc(|_ctx| async move {
         println!("Hello from taskvisor!");
         Ok(())
     });
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
-    supervisor.run(vec![TaskSpec::once(task)]).await?;
+    supervisor.run(vec![TaskSpec::once("hello", task)]).await?;
 
     Ok(())
 }

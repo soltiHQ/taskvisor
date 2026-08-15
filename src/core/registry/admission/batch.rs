@@ -1,0 +1,214 @@
+//! Commits a static task batch as one registry decision.
+//!
+//! Static run sends one [`RegistryCommand::AddBatch`](crate::core::registry::RegistryCommand::AddBatch)
+//! to the listener. This module rejects duplicate labels inside the batch and conflicts with
+//! registry ownership or force-aborted attempts that have not physically exited.
+//! It also checks the registration limit for the complete batch.
+//!
+//! Validation runs before actor preparation and again under the state write lock. Rejection inserts no entries
+//! and starts no task bodies. Acceptance indexes every item first. It then attempts every `TaskAdded` event and
+//! the direct batch reply before spawning the actors and opening their shared gate.
+
+use std::{collections::HashSet, sync::Arc};
+
+use tokio::sync::{oneshot, watch};
+
+use super::PreparedRegistration;
+use crate::{
+    core::registry::{
+        Registry,
+        protocol::{AddBatchItem, AddReply},
+        state::{Entry, EntryState, Handle, HandleCleanup},
+    },
+    error::RuntimeError,
+    events::{Event, EventKind, RejectionKind},
+    reasons,
+};
+
+impl Registry {
+    /// Applies the all-or-nothing decision for one batch command.
+    pub(in crate::core::registry) async fn spawn_and_register_batch(
+        &self,
+        items: Vec<AddBatchItem>,
+        reply: oneshot::Sender<AddReply>,
+    ) {
+        let reaper = self.actors.attempt_reaper();
+        let mut seen = HashSet::with_capacity(items.len());
+        let mut conflicting_ids = HashSet::new();
+        let mut first_conflict = None;
+        let current = {
+            let st = self.state.read().await;
+            let reaper_conflicts =
+                reaper.reserves_labels(items.iter().map(|item| item.label.as_ref()));
+            for (item, reaper_conflict) in items.iter().zip(reaper_conflicts) {
+                let conflicts_with_registry =
+                    st.by_label.contains_key(&item.label) || reaper_conflict;
+                let repeats_in_batch = !seen.insert(item.label.as_ref());
+                if conflicts_with_registry || repeats_in_batch {
+                    first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
+                    conflicting_ids.insert(item.id);
+                }
+            }
+            st.tasks.len()
+        };
+
+        if let Some(label) = first_conflict {
+            for item in &items {
+                let conflict = conflicting_ids.contains(&item.id);
+                let (kind, reason) = if conflict {
+                    (RejectionKind::AlreadyExists, reasons::ALREADY_EXISTS)
+                } else {
+                    (RejectionKind::BatchRejected, reasons::BATCH_REJECTED)
+                };
+                self.bus.publish_lazy(|| {
+                    Event::new(EventKind::TaskAddFailed)
+                        .with_task(Arc::clone(&item.label))
+                        .with_id(item.id)
+                        .with_rejection_kind(kind)
+                        .with_reason(reason)
+                });
+            }
+            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name: label }));
+            drop(items);
+            return;
+        }
+
+        if let Some(limit) = self.registered_limit_exceeded(current, items.len()) {
+            let reason = format!("{}: {current}/{limit}", reasons::REGISTERED_TASK_LIMIT);
+            for item in &items {
+                self.bus.publish_lazy(|| {
+                    Event::new(EventKind::TaskAddFailed)
+                        .with_task(Arc::clone(&item.label))
+                        .with_id(item.id)
+                        .with_rejection_kind(RejectionKind::ResourceLimit)
+                        .with_reason(reason.clone())
+                });
+            }
+            let _ = reply.send(Err(RuntimeError::ResourceLimitReached {
+                resource: "registered_tasks",
+                limit,
+            }));
+            drop(items);
+            return;
+        }
+
+        let (start_tx, start_rx) = watch::channel(false);
+        let prepared: Vec<_> = items
+            .into_iter()
+            .map(|item| {
+                self.prepare_registration(
+                    item.id,
+                    item.label,
+                    item.owned,
+                    None,
+                    None,
+                    start_rx.clone(),
+                )
+            })
+            .collect();
+
+        let mut st = self.state.write().await;
+        let mut seen = HashSet::with_capacity(prepared.len());
+        let mut conflicting_ids = HashSet::new();
+        let mut first_conflict = None;
+
+        let reaper_conflicts =
+            reaper.reserves_labels(prepared.iter().map(|item| item.label.as_ref()));
+        for (item, reaper_conflict) in prepared.iter().zip(reaper_conflicts) {
+            let conflicts_with_registry = st.by_label.contains_key(&item.label) || reaper_conflict;
+            let repeats_in_batch = !seen.insert(item.label.as_ref());
+            if conflicts_with_registry || repeats_in_batch {
+                first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
+                conflicting_ids.insert(item.id);
+            }
+        }
+
+        if let Some(label) = first_conflict {
+            drop(st);
+            for item in prepared {
+                let reason = if conflicting_ids.contains(&item.id) {
+                    reasons::ALREADY_EXISTS
+                } else {
+                    reasons::BATCH_REJECTED
+                };
+                let rejection_kind = if conflicting_ids.contains(&item.id) {
+                    RejectionKind::AlreadyExists
+                } else {
+                    RejectionKind::BatchRejected
+                };
+                self.bus.publish_lazy(|| {
+                    Event::new(EventKind::TaskAddFailed)
+                        .with_task(Arc::clone(&item.label))
+                        .with_id(item.id)
+                        .with_rejection_kind(rejection_kind)
+                        .with_reason(reason)
+                });
+            }
+            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name: label }));
+            return;
+        }
+
+        if let Some(limit) = self.registered_limit_exceeded(st.tasks.len(), prepared.len()) {
+            let current = st.tasks.len();
+            drop(st);
+            let reason = format!("{}: {current}/{limit}", reasons::REGISTERED_TASK_LIMIT);
+            for item in &prepared {
+                self.bus.publish_lazy(|| {
+                    Event::new(EventKind::TaskAddFailed)
+                        .with_task(Arc::clone(&item.label))
+                        .with_id(item.id)
+                        .with_rejection_kind(RejectionKind::ResourceLimit)
+                        .with_reason(reason.clone())
+                });
+            }
+            let _ = reply.send(Err(RuntimeError::ResourceLimitReached {
+                resource: "registered_tasks",
+                limit,
+            }));
+            drop(prepared);
+            return;
+        }
+
+        let mut accepted = Vec::with_capacity(prepared.len());
+        for item in prepared {
+            let PreparedRegistration {
+                id,
+                label,
+                join,
+                cancel,
+                done,
+                completion,
+                scheduled,
+                cleanup,
+                activity,
+            } = item;
+            let entry = Entry {
+                label: Arc::clone(&label),
+                activity,
+                state: EntryState::Registered(Box::new(Handle::new(
+                    join,
+                    cancel,
+                    done,
+                    completion.clone(),
+                    HandleCleanup::new(id, self.actors.attempt_reaper(), completion, cleanup),
+                ))),
+            };
+            st.tasks.insert(id, entry);
+            st.by_label.insert(Arc::clone(&label), id);
+            accepted.push((id, label, scheduled));
+        }
+        drop(st);
+
+        for (id, label, _) in &accepted {
+            self.bus.publish_lazy(|| {
+                Event::new(EventKind::TaskAdded)
+                    .with_task(Arc::clone(label))
+                    .with_id(*id)
+            });
+        }
+        let _ = reply.send(Ok(()));
+        self.actors
+            .schedule_batch(accepted.into_iter().map(|(_, _, scheduled)| scheduled));
+        start_tx.send_replace(true);
+    }
+}

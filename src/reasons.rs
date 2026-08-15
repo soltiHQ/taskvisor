@@ -1,35 +1,53 @@
-//! Internal fragments used to compose readable diagnostics.
+//! Supplies shared readable text for admission diagnostics.
 //!
-//! These strings are deliberately not public API and carry no compatibility guarantee.
-//! Runtime consumers must branch on typed fields such as `TaskOutcomeKind` and `RejectionKind`, never parse `reason`.
+//! ```text
+//! registry or controller decision
+//!      ├── category ──► RejectionKind
+//!      └── detail ────► reason text built from these fragments
+//! ```
+//!
+//! Registry and controller paths reuse these strings when they build event and
+//! watched-outcome payloads. The text is diagnostic only and has no stability
+//! guarantee. Consumers must branch on typed categories instead of parsing it.
 
-/// Registration/rejection reason: another registered task already uses this name.
+/// Name conflict detected during registry admission.
 pub(crate) const ALREADY_EXISTS: &str = "a registered task already uses this name";
 
-/// Registration reason: another item caused an all-or-nothing static batch to be rejected.
+/// Static batch item rejected because another item failed admission.
 pub(crate) const BATCH_REJECTED: &str = "another item rejected the all-or-nothing batch";
 
-/// Rejection reason: a queued task was removed before it started.
+/// Queued controller submission removed before it started.
 #[cfg(feature = "controller")]
 pub(crate) const REMOVED_FROM_QUEUE: &str = "removed from controller queue before start";
 
-/// Rejection reason: a newer `Replace` task took this task's place.
+/// Queued submission displaced by a newer replacement.
 #[cfg(feature = "controller")]
 pub(crate) const SUPERSEDED_BY_REPLACE: &str = "superseded by a newer replacement";
 
-/// Rejection reason: the controller is shutting down.
+/// Submission rejected during controller shutdown.
 #[cfg(feature = "controller")]
 pub(crate) const CONTROLLER_SHUTTING_DOWN: &str = "controller is shutting down";
 
-/// Rejection reason: controller admission unwound before it could commit ownership.
+/// Controller admission ended before ownership transfer committed.
 #[cfg(feature = "controller")]
 pub(crate) const CONTROLLER_ADMISSION_INTERRUPTED: &str =
     "controller admission was interrupted before ownership transfer";
 
-/// Diagnostic text used when `DropIfRunning` rejects a busy slot.
+/// Busy-slot rejection under `DropIfRunning`.
 #[cfg(feature = "controller")]
 pub(crate) const DROP_IF_RUNNING: &str = "slot is busy; DropIfRunning rejected the submission";
 
-/// Diagnostic text used when a controller slot queue is full.
+/// Controller slot queue capacity rejection.
 #[cfg(feature = "controller")]
 pub(crate) const QUEUE_FULL: &str = "slot queue is full";
+
+/// Registry membership limit rejection.
+pub(crate) const REGISTERED_TASK_LIMIT: &str = "registered task limit reached";
+
+/// Controller slot-count limit rejection.
+#[cfg(feature = "controller")]
+pub(crate) const CONTROLLER_SLOT_LIMIT: &str = "controller slot limit reached";
+
+/// Aggregate controller pending-work limit rejection.
+#[cfg(feature = "controller")]
+pub(crate) const CONTROLLER_PENDING_LIMIT: &str = "controller pending limit reached";

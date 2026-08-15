@@ -44,7 +44,7 @@ fn supervisor_builder_is_nameable_from_public_api() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn never_oneshot_success_emits_attempt_and_typed_task_finish_once() {
-    let collector = run_static(vec![TaskSpec::once(make_ok_once("oneshot"))]).await;
+    let collector = run_static(vec![TaskSpec::once("oneshot", make_ok_once())]).await;
 
     assert_eq!(collector.count(EventKind::AttemptStarting), 1);
     assert_eq!(collector.count(EventKind::AttemptSucceeded), 1);
@@ -73,10 +73,9 @@ async fn never_oneshot_success_emits_attempt_and_typed_task_finish_once() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn never_oneshot_failure_emits_failed_attempt_then_failed_task() {
-    let task = TaskFn::arc("fail-once", |_ctx: TaskContext| async move {
-        Err(TaskError::fail("boom".to_string()))
-    });
-    let collector = run_static(vec![TaskSpec::once(task)]).await;
+    let task =
+        TaskFn::arc(|_ctx: TaskContext| async move { Err(TaskError::fail("boom".to_string())) });
+    let collector = run_static(vec![TaskSpec::once("fail-once", task)]).await;
 
     assert_eq!(collector.count(EventKind::AttemptStarting), 1);
     assert_eq!(collector.count(EventKind::AttemptFailed), 1);
@@ -95,7 +94,7 @@ async fn never_oneshot_failure_emits_failed_attempt_then_failed_task() {
 async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
     let remaining = Arc::new(AtomicU32::new(2));
     let r = remaining.clone();
-    let task = TaskFn::arc("flaky", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let r = r.clone();
         async move {
             let prev = r.fetch_sub(1, Ordering::SeqCst);
@@ -106,7 +105,7 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
             }
         }
     });
-    let spec = TaskSpec::restartable(task).with_backoff(fast_backoff());
+    let spec = TaskSpec::restartable("flaky", task).with_backoff(fast_backoff());
     let collector = run_static(vec![spec]).await;
 
     assert_eq!(collector.count(EventKind::AttemptStarting), 3);
@@ -127,7 +126,7 @@ async fn on_failure_flaky_retries_then_succeeds_failure_source_backoff() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn on_failure_fatal_emits_fatal_task_finish_with_exit_code_no_retry() {
-    let spec = TaskSpec::restartable(make_fatal("fatal-task", Some(7)));
+    let spec = TaskSpec::restartable("fatal-task", make_fatal(Some(7)));
     let collector = run_static(vec![spec]).await;
 
     assert_eq!(collector.count(EventKind::AttemptStarting), 1);
@@ -154,7 +153,7 @@ async fn on_failure_fatal_emits_fatal_task_finish_with_exit_code_no_retry() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fatal_no_restart_under_always_interval_none() {
-    let spec = TaskSpec::restartable(make_fatal("always-fatal", None))
+    let spec = TaskSpec::restartable("always-fatal", make_fatal(None))
         .with_restart(RestartPolicy::Always { interval: None });
     let collector = run_static(vec![spec]).await;
 
@@ -174,7 +173,7 @@ async fn fatal_no_restart_under_always_interval_none() {
 async fn max_retries_allows_initial_attempt_plus_configured_retries() {
     for retries in [1, 3] {
         let name = format!("fail-{retries}");
-        let spec = TaskSpec::restartable(make_fail(&name, Some(42)))
+        let spec = TaskSpec::restartable(name, make_fail(Some(42)))
             .with_backoff(fast_backoff())
             .with_max_retries(NonZeroU32::new(retries).unwrap());
         let collector = run_static(vec![spec]).await;
@@ -221,14 +220,15 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let cc = counter.clone();
-    let task = TaskFn::arc("rerun", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let cc = cc.clone();
         async move {
             cc.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     });
-    let spec = TaskSpec::restartable(task).with_restart(RestartPolicy::Always { interval: None });
+    let spec =
+        TaskSpec::restartable("rerun", task).with_restart(RestartPolicy::Always { interval: None });
 
     with_timeout(15, async {
         handle.add(spec).await.expect("add ok");
@@ -259,14 +259,14 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let cc = counter.clone();
-    let task = TaskFn::arc("periodic", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let cc = cc.clone();
         async move {
             cc.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     });
-    let spec = TaskSpec::restartable(task).with_restart(RestartPolicy::Always {
+    let spec = TaskSpec::restartable("periodic", task).with_restart(RestartPolicy::Always {
         interval: Some(Duration::from_millis(5)),
     });
 
@@ -305,7 +305,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
 
     let n = Arc::new(AtomicU32::new(0));
     let nc = n.clone();
-    let task = TaskFn::arc("recover", move |_ctx: TaskContext| {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
         let nc = nc.clone();
         async move {
             let c = nc.fetch_add(1, Ordering::SeqCst);
@@ -316,7 +316,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
             }
         }
     });
-    let spec = TaskSpec::restartable(task)
+    let spec = TaskSpec::restartable("recover", task)
         .with_restart(RestartPolicy::Always { interval: None })
         .with_max_retries(NonZeroU32::new(1).unwrap())
         .with_backoff(fast_backoff());
@@ -351,9 +351,9 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
 #[tokio::test(flavor = "current_thread")]
 async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
     let specs = vec![
-        TaskSpec::once(make_ok_once("a")),
-        TaskSpec::once(make_ok_once("b")),
-        TaskSpec::once(make_ok_once("c")),
+        TaskSpec::once("a", make_ok_once()),
+        TaskSpec::once("b", make_ok_once()),
+        TaskSpec::once("c", make_ok_once()),
     ];
     let collector = run_static(specs).await;
 
@@ -386,11 +386,11 @@ async fn duplicate_static_batch_starts_no_task_body() {
         .into_iter()
         .map(|label| {
             let runs = Arc::clone(&runs);
-            let task = TaskFn::arc(label, move |_ctx: TaskContext| {
+            let task = TaskFn::arc(move |_ctx: TaskContext| {
                 runs.fetch_add(1, Ordering::SeqCst);
                 async { Ok(()) }
             });
-            TaskSpec::once(task)
+            TaskSpec::once(label, task)
         })
         .collect();
 
@@ -409,9 +409,9 @@ async fn duplicate_static_batch_starts_no_task_body() {
         Err(RuntimeError::AlreadyRunning)
     ));
 
-    let handle = supervisor.serve();
+    let handle = supervisor.serve().expect("runtime startup");
     handle
-        .add(TaskSpec::restartable(make_coop("after-batch-error")))
+        .add(TaskSpec::restartable("after-batch-error", make_coop()))
         .await
         .expect("a rejected batch must leave the runtime open");
     handle

@@ -85,6 +85,9 @@ tasks:
           PUBLISH_ARGS: '--all-features --locked'
 
   rust:benchmark:
-    desc: Run 'cargo bench'.
+    desc: Run all Taskvisor benchmarks with the colorized performance report.
     cmds:
       - task: rust:bench
+        vars:
+          BENCH_ARGS: >-
+            --bench '*' --features controller --locked -- --quiet --color always

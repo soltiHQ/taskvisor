@@ -1,62 +1,73 @@
-//! Lossy event-bus relay, alive tracking, and subscriber listener lifecycle.
+//! Forwards best-effort runtime events from the bus into subscriber queues.
+//!
+//! Runtime components publish to [`Bus`](crate::events::Bus). When that bus is enabled, lifecycle
+//! startup takes its single receiver and starts this relay, which feeds [`SubscriberSet`] queues.
+//! Shutdown cancels the relay and later joins it from the common cleanup tail.
+//!
+//! ```text
+//! runtime components ──► Bus ──► event relay ──► subscriber queues
+//! ```
+//!
+//! Delivery is intentionally lossy. Lag becomes a subscriber-overflow diagnostic. Shutdown forwards
+//! only a bounded retained tail before it closes publication. It then detaches and drops every
+//! remaining event outside the event-ring lock.
 
 use std::sync::Arc;
 
-use tokio::sync::broadcast;
-
 use super::SupervisorCore;
 use crate::{
-    core::alive::AliveTracker, events::Event, identity::TaskId, subscribers::SubscriberSet,
+    events::{BusMessage, BusReceiver, Event, TryRecvError},
+    subscribers::SubscriberSet,
 };
 
+/// Caps retained events forwarded after runtime cancellation.
+///
+/// Remaining retained events are detached and dropped instead of forwarded.
+pub(super) const SHUTDOWN_RELAY_DRAIN_LIMIT: usize = 1024;
+
 impl SupervisorCore {
-    /// Returns a best-effort sorted list of task names currently marked alive.
+    /// Forwards one bounded retained tail and closes the event receiver.
     ///
-    /// This is an event-derived activity view, not registry membership.
-    /// A registered actor can be marked not alive while it waits to retry.
-    pub(crate) async fn snapshot(&self) -> Vec<Arc<str>> {
-        self.alive.snapshot().await
-    }
-
-    /// Returns true if any task with this name is currently marked alive.
-    ///
-    /// This is a best-effort activity query from the alive tracker, not a registry membership check.
-    pub(crate) async fn is_alive(&self, name: &str) -> bool {
-        self.alive.is_alive(name).await
-    }
-
-    /// Applies one event to alive tracking and subscriber fan-out.
-    async fn distribute(alive: &AliveTracker, set: &SubscriberSet, ev: Arc<Event>) {
-        alive.update(&ev).await;
-        set.emit_arc(ev);
-    }
-
-    /// Drains retained events from a bus receiver.
-    ///
-    /// Used when the subscriber listener is shutting down.
-    /// Broadcast lag gaps are skipped so the retained tail can still be delivered to alive tracking and subscribers.
-    pub(super) async fn drain_pending(
-        rx: &mut broadcast::Receiver<Arc<Event>>,
-        alive: &AliveTracker,
-        set: &SubscriberSet,
-    ) {
-        loop {
+    /// Pending events beyond the limit are detached under the ring lock and dropped after the lock
+    /// is released. One overflow diagnostic reports the combined lag and discarded count.
+    pub(super) fn drain_pending(rx: &mut BusReceiver, set: &SubscriberSet) {
+        let mut dropped = 0_u64;
+        for _ in 0..rx.retained_capacity().min(SHUTDOWN_RELAY_DRAIN_LIMIT) {
             match rx.try_recv() {
-                Ok(ev) => Self::distribute(alive, set, ev).await,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(_) => break,
+                Ok(BusMessage::Event(event)) => set.emit_arc(Arc::new(event)),
+                Ok(BusMessage::Lagged {
+                    dropped: skipped,
+                    event,
+                }) => {
+                    set.emit_arc(Arc::new(event));
+                    dropped = dropped.saturating_add(skipped);
+                }
+                Err(TryRecvError::Empty) => break,
             }
+        }
+        let (pending, skipped) = rx.close_and_take_pending();
+        let discarded = u64::try_from(pending.len()).unwrap_or(u64::MAX);
+        dropped = dropped.saturating_add(skipped).saturating_add(discarded);
+        drop(pending);
+        if dropped != 0 {
+            set.emit_arc(Arc::new(
+                Event::subscriber_overflow("subscriber_listener", format!("lagged({dropped})"))
+                    .with_dropped(dropped),
+            ));
         }
     }
 
-    /// Starts the subscriber listener task.
+    /// Takes the bus receiver and starts the relay task.
     ///
-    /// The listener relays bus events to the alive tracker and subscriber queues.
+    /// After a lag gap, the retained event enters subscriber queues before its overflow diagnostic.
+    /// Runtime cancellation runs the bounded tail drain.
+    ///
+    /// # Panics
+    ///
+    /// Panics outside an active Tokio runtime or after the bus receiver was taken.
     pub(super) fn subscriber_listener(&self) {
-        let mut rx = self.bus.subscribe();
+        let mut rx = self.bus.take_receiver();
         let set = Arc::clone(&self.subs);
-        let alive = Arc::clone(&self.alive);
-        let registry = Arc::clone(&self.registry);
         let rt = self.runtime_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -64,20 +75,18 @@ impl SupervisorCore {
                 tokio::select! {
                     biased;
 
+                    _ = rt.cancelled() => {
+                        Self::drain_pending(&mut rx, &set);
+                        break;
+                    }
+
                     msg = rx.recv() => match msg {
-                        Ok(arc_ev) => {
-                            if let Err(panic) = crate::core::panic_guard::guarded(
-                                Self::distribute(&alive, &set, arc_ev),
-                            )
-                            .await
-                            {
-                                set.emit_arc(Arc::new(Event::runtime_failure(
-                                    "subscriber_listener",
-                                    format!("listener panic: {panic}"),
-                                )));
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        BusMessage::Event(ev) => set.emit_arc(Arc::new(ev)),
+                        BusMessage::Lagged {
+                            dropped: skipped,
+                            event,
+                        } => {
+                            set.emit_arc(Arc::new(event));
                             let arc_e = Arc::new(
                                 Event::subscriber_overflow(
                                     "subscriber_listener",
@@ -85,23 +94,8 @@ impl SupervisorCore {
                                 )
                                 .with_dropped(skipped),
                             );
-                            alive.update(&arc_e).await;
                             set.emit_arc(arc_e);
-
-                            let live: std::collections::HashSet<TaskId> = registry
-                                .list()
-                                .await
-                                .into_iter()
-                                .map(|(id, _)| id)
-                                .collect();
-                            alive.reconcile(&live).await;
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    },
-
-                    _ = rt.cancelled() => {
-                        Self::drain_pending(&mut rx, &alive, &set).await;
-                        break;
                     }
                 }
             }
@@ -110,9 +104,10 @@ impl SupervisorCore {
         *self.subscriber_handle.lock().unwrap() = Some(handle);
     }
 
-    /// Awaits the subscriber listener.
+    /// Joins the relay and reports a runtime event when the join fails.
     ///
-    /// Returns `false` when Tokio reports that the listener did not join cleanly.
+    /// Returns whether the relay joined cleanly.
+    /// A disabled or unstarted relay counts as clean.
     pub(super) async fn join_subscriber_listener(&self) -> bool {
         let handle = self
             .subscriber_handle
@@ -135,7 +130,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Aborts the subscriber listener so shutdown join-failure handling can be tested.
+    /// Forces the relay join-failure path in shutdown tests.
     #[cfg(test)]
     pub(super) fn abort_subscriber_listener_for_test(&self) {
         if let Some(handle) = self

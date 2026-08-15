@@ -1,15 +1,17 @@
-//! # Registry completion signals
+//! Signals registry cleanup and physical actor release for one removal.
 //!
-//! Natural completion, an explicit remove or cancel, and shutdown can all start
-//! terminal removal. One path claims the actor and becomes its join owner.
-//! [`RemovalCompletion`] connects callers waiting for cleanup with that owner.
+//! Natural actor exit, remove, cancel, and shutdown all enter the same removal path.
+//! [`RemovalCompletion`] lets other components observe that path without owning the actor join.
+//! Public cancellation waits for logical completion. The controller also waits for physical completion before it reuses a slot.
 //!
 //! ```text
-//! Registered ──► Removing ──► join or force-abort ──► remove registry membership
-//!                                                       │
-//!                                                       ▼
-//!                                             RemovalCompletion complete
+//! registered ───────────► removing ──────────────────────────► membership and reporting ──► logical
+//! force-aborted actor ──► physical exit and terminal match ──► physical
 //! ```
+//!
+//! Logical completion means membership was removed and terminal reporting was attempted.
+//! Physical completion means the actor has exited and force-abort tracking has ended.
+//! These latches do not request cancellation.
 
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -19,48 +21,59 @@ use crate::core::outcome::TaskOutcome;
 /// Sender used to resolve a watched task with its final [`TaskOutcome`].
 pub(crate) type OutcomeTx = oneshot::Sender<TaskOutcome>;
 
-/// Shared one-shot signal for committed terminal registry cleanup.
-///
-/// Every clone observes the same completion. The signal becomes complete only
-/// after the actor has been joined or force-aborted and its identity and label
-/// have been removed from the registry. Watched-outcome delivery and final event
-/// publication are attempted before waiters are released.
-///
-/// This is not the actor's cancellation token. Creating or waiting on this value
-/// does not request task cancellation.
+/// Shared two-phase completion for one registry removal.
 #[derive(Clone, Debug)]
 pub(crate) struct RemovalCompletion {
-    /// One-shot latch shared by cleanup owners and waiters.
-    ///
-    /// The token's cancelled state represents completed registry cleanup.
-    token: CancellationToken,
+    /// Wakes public cancellation waiters after terminal commit.
+    logical: CancellationToken,
+    /// Wakes controller replacement after the physical attempt is fully released.
+    physical: CancellationToken,
 }
 
 impl RemovalCompletion {
     /// Creates a new incomplete terminal-cleanup signal.
     pub(crate) fn new() -> Self {
         Self {
-            token: CancellationToken::new(),
+            logical: CancellationToken::new(),
+            physical: CancellationToken::new(),
         }
     }
 
-    /// Waits until terminal registry cleanup has been committed.
-    ///
-    /// If cleanup is already complete, this returns immediately. Dropping this
-    /// wait does not affect other waiters or the cleanup owner.
+    /// Waits for logical completion without owning the removal operation.
     pub(crate) async fn wait(&self) {
-        self.token.cancelled().await;
+        self.logical.cancelled().await;
+    }
+
+    /// Waits for both logical and physical completion.
+    #[cfg(feature = "controller")]
+    pub(crate) async fn wait_physical(&self) {
+        self.logical.cancelled().await;
+        self.physical.cancelled().await;
     }
 
     /// Returns `true` when terminal registry cleanup has been committed.
     pub(super) fn is_complete(&self) -> bool {
-        self.token.is_cancelled()
+        self.logical.is_cancelled()
     }
 
-    /// Marks terminal registry cleanup complete and releases all waiters.
-    ///
-    /// Repeated calls leave the signal complete.
-    pub(super) fn complete(&self) {
-        self.token.cancel();
+    #[cfg(test)]
+    /// Returns whether the physical attempt has been fully released.
+    pub(super) fn is_physical_complete(&self) -> bool {
+        self.physical.is_cancelled()
+    }
+
+    /// Marks the bounded logical terminal transition complete.
+    pub(super) fn complete_logical(&self) {
+        self.logical.cancel();
+    }
+
+    /// Marks the physical attempt as fully released.
+    pub(super) fn complete_physical(&self) {
+        self.physical.cancel();
+    }
+
+    /// Returns whether both values observe the same physical-release latch.
+    pub(super) fn shares_physical_latch(&self, other: &Self) -> bool {
+        self.physical == other.physical
     }
 }
