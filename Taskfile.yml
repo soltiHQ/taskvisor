@@ -1,6 +1,8 @@
 version: '3'
 
 includes:
+  docs:
+    taskfile: ./taskfiles/docs/Taskfile.yml
   rust:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/v1/taskfiles/rust/Taskfile.yml
 
@@ -38,12 +40,10 @@ tasks:
         vars: { TEST_ARGS: '--all-features --locked' }
 
   ci/test-unit:
-    desc: Run unit tests ('cargo test --lib') and doctests ('cargo test --doc').
+    desc: Run unit tests ('cargo test --lib').
     cmds:
       - task: rust:test
         vars: { TEST_ARGS: '--lib --all-features --locked' }
-      - task: rust:test
-        vars: { TEST_ARGS: '--doc --all-features --locked' }
 
   ci/test-integration:
     desc: Run integration tests ('cargo test --test "*"').
@@ -57,14 +57,9 @@ tasks:
       - task: rust:audit
 
   ci/docs:
-    desc: Run 'rustdoc' for the taskvisor crate. Fails on broken doc links in any feature config.
+    desc: Validate Taskvisor API documentation and the versioned user guide.
     cmds:
-      - task: rust:doc
-        vars: { DOC_ARGS: '--locked --no-deps' }
-      - task: rust:doc
-        vars: { DOC_ARGS: '--locked --no-deps --all-features' }
-      - task: rust:docs
-        vars: { DOCS_ARGS: '--all-features --locked' }
+      - task: docs:ci
 
   ci/build:
     desc: Build all examples for a package. Pass CRATE.
