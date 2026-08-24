@@ -2,9 +2,13 @@ version: '3'
 
 includes:
   docs:
-    taskfile: ./taskfiles/docs/Taskfile.yml
+    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/v1/taskfiles/docs/Taskfile.yml
   rust:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/v1/taskfiles/rust/Taskfile.yml
+
+vars:
+  docs_version:
+    sh: sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' Cargo.toml | head -n 1
 
 tasks:
   ci/fmt:
@@ -57,9 +61,31 @@ tasks:
       - task: rust:audit
 
   ci/docs:
-    desc: Validate Taskvisor API documentation and the versioned user guide.
+    desc: Validate API documentation and the versioned user guide.
     cmds:
-      - task: docs:ci
+      - task: rust:doc
+        vars: { DOC_ARGS: '--locked --no-deps' }
+      - task: rust:doc
+        vars: { DOC_ARGS: '--locked --no-deps --all-features' }
+      - task: rust:docs
+        vars: { DOCS_ARGS: '--all-features --locked' }
+      - task: docs:validate
+        vars:
+          VERSION: '{{.docs_version}}'
+          PRODUCT: taskvisor
+          TITLE: Taskvisor
+          REPOSITORY: https://github.com/soltiHQ/taskvisor
+          VERSION_PROVIDER: cargo
+          VERSION_PACKAGE: taskvisor
+          REFERENCE_LABEL: API reference
+          REFERENCE_URL: https://docs.rs/taskvisor/{version}/taskvisor/
+          CARGO_SNIPPET_SOURCES: README.md docs/installation.md
+          LINK_SOURCES: docs README.md guide.md src/lib.rs
+      - task: docs:links/external
+        vars:
+          LINK_SOURCES: docs README.md guide.md src/lib.rs
+      - task: rust:test
+        vars: { TEST_ARGS: '--doc --all-features --locked' }
 
   ci/build:
     desc: Build all examples for a package. Pass CRATE.

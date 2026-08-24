@@ -1,0 +1,38 @@
+schema: 1
+product: taskvisor
+title: Taskvisor
+compatibility_line: "0.8"
+repository: https://github.com/soltiHQ/taskvisor
+
+version:
+  provider: cargo
+  package: taskvisor
+
+reference:
+  label: API reference
+  url: https://docs.rs/taskvisor/{version}/taskvisor/
+
+navigation:
+  - title: Start
+    pages:
+      - index
+      - mental-model
+      - installation
+      - defining-tasks
+      - lifecycle-policies
+
+  - title: Run
+    pages:
+      - running-and-managing
+      - cancellation-and-shutdown
+
+  - title: Extend
+    pages:
+      - outcomes-and-events
+      - keyed-admission
+      - configuration
+
+  - title: Deploy
+    pages:
+      - production-boundaries
+      - common-mistakes

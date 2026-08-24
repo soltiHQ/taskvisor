@@ -15,3 +15,7 @@ jobs:
   ci:
     name: ci
     uses: soltiHQ/actions/.github/workflows/rust-ci.yml@v1
+
+  docs:
+    name: docs
+    uses: soltiHQ/actions/.github/workflows/docs-ci.yml@v1
