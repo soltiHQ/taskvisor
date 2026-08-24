@@ -7,10 +7,9 @@
 //! ```
 //!
 //! Each line starts with the event sequence and the stable [`EventKind::as_label`] value.
-//! Event-specific fields follow as `key=value`. Free-form text is quoted, escaped, and
-//! truncated after 4096 characters. The complete line format is intended for people and
-//! is not a stable data format. It is not a complete serialization of [`Event`];
-//! use a custom subscriber or `TracingBridge` when every typed field is needed.
+//! Event-specific fields follow as `key=value`. Free-form text is quoted, escaped, and truncated after 4096 characters.
+//! The complete line format is intended for people and is not a stable data format.
+//! It is not a complete serialization of [`Event`]; use a custom subscriber or `TracingBridge` when every typed field is needed.
 
 use crate::events::{Event, EventKind};
 use crate::subscribers::Subscribe;

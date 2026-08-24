@@ -12,14 +12,15 @@
 //!      └── controller submit ──► TaskId + slot ───────► controller ──► registry
 //! ```
 //!
-//! Taskvisor allocates the ID before the first admission decision. The same ID follows queued work,
-//! every retry, terminal cleanup, and controller rejection. Several task names may use the same controller slot.
+//! Taskvisor allocates the ID before the first admission decision.
+//! The same ID follows queued work, every retry, terminal cleanup, and controller rejection.
+//! Several task names may use the same controller slot.
 //!
 //! A name can be reused after registry membership ends and Taskvisor has observed the physical
 //! exit of any force-aborted actor with that name. Reuse allocates a new [`TaskId`].
-//! IDs come from a process-local `u64` sequence, are not persisted, and cannot be reconstructed
-//! through the public API. Returned IDs are never zero and never wrap. The next allocation after
-//! exhaustion panics. Store a separate application ID when identity must survive a process restart.
+//! IDs come from a process-local `u64` sequence, are not persisted, and cannot be reconstructed through the public API.
+//! Returned IDs are never zero and never wrap. The next allocation after exhaustion panics.
+//! Store a separate application ID when identity must survive a process restart.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

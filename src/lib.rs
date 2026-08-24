@@ -53,7 +53,7 @@
 //! - Observability: [custom subscriber], [logging], [tracing], and [metrics].
 //! - Keyed admission: [controller slots], [controller admission], and [tenant sync].
 //!
-//! [user guide]: https://github.com/soltiHQ/taskvisor/blob/main/guide.md
+//! [user guide]: https://github.com/soltiHQ/taskvisor/blob/main/docs/index.md
 //! [examples guide]: https://github.com/soltiHQ/taskvisor/blob/main/examples/README.md
 //! [basic]: https://github.com/soltiHQ/taskvisor/blob/main/examples/basic.rs
 //! [task type]: https://github.com/soltiHQ/taskvisor/blob/main/examples/task_type.rs
@@ -205,10 +205,65 @@ See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
-/// Compiles runnable Rust code blocks in `guide.md` as doctests.
+/// Compiles runnable Rust code blocks in the guide index as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/index.md")]
+struct GuideIndexDoctests;
+
+/// Compiles runnable Rust code blocks in the mental-model guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/mental-model.md")]
+struct MentalModelGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the installation guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/installation.md")]
+struct InstallationGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the task-definition guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/defining-tasks.md")]
+struct DefiningTasksGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the lifecycle-policy guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/lifecycle-policies.md")]
+struct LifecyclePoliciesGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the runtime-management guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/running-and-managing.md")]
+struct RunningAndManagingGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the cancellation guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/cancellation-and-shutdown.md")]
+struct CancellationAndShutdownGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the outcome and event guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/outcomes-and-events.md")]
+struct OutcomesAndEventsGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the keyed-admission guide as doctests.
 #[cfg(all(doctest, feature = "controller"))]
-#[doc = include_str!("../guide.md")]
-struct GuideDoctests;
+#[doc = include_str!("../docs/keyed-admission.md")]
+struct KeyedAdmissionGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the configuration guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/configuration.md")]
+struct ConfigurationGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the production-boundaries guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/production-boundaries.md")]
+struct ProductionBoundariesGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the common-mistakes guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/common-mistakes.md")]
+struct CommonMistakesGuideDoctests;
 
 pub mod core;
 pub use core::{

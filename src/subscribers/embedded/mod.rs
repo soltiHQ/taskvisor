@@ -11,8 +11,9 @@
 //!      └── tracing ──► TracingBridge ──► tracing event
 //! ```
 //!
-//! Enable `logging` for readable standard output. Enable `tracing` to emit structured fields into
-//! the application's active tracing dispatcher. The parent module re-exports each type when its feature is enabled.
+//! Enable `logging` for readable standard output.
+//! Enable `tracing` to emit structured fields into the application's active tracing dispatcher.
+//! The parent module re-exports each type when its feature is enabled.
 #[cfg(feature = "logging")]
 mod log;
 #[cfg(feature = "logging")]

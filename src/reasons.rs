@@ -6,9 +6,9 @@
 //!      └── detail ────► reason text built from these fragments
 //! ```
 //!
-//! Registry and controller paths reuse these strings when they build event and
-//! watched-outcome payloads. The text is diagnostic only and has no stability
-//! guarantee. Consumers must branch on typed categories instead of parsing it.
+//! Registry and controller paths reuse these strings when they build event and watched-outcome payloads.
+//! The text is diagnostic only and has no stability guarantee.
+//! Consumers must branch on typed categories instead of parsing it.
 
 /// Name conflict detected during registry admission.
 pub(crate) const ALREADY_EXISTS: &str = "a registered task already uses this name";

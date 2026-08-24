@@ -3,7 +3,7 @@
 This document is the entry point for contributors and reviewers.
 It explains what each part of the project owns, how the parts connect, and where to begin a change.
 
-For application usage, start with the [README](../README.md), the [user guide](../guide.md), the [crate documentation](https://docs.rs/taskvisor), and the [examples guide](../examples/README.md).
+For application usage, start with the [README](../README.md), the [user guide](../docs/index.md), the [crate documentation](https://docs.rs/taskvisor), and the [examples guide](../examples/README.md).
 Exact contracts live in the Rust source and its module-level documentation.
 
 ## Architecture at a glance
@@ -190,7 +190,7 @@ Remaining retained task and subscriber values move to [`core/deferred_drop/`](co
 | Shared shutdown order or grace behavior          | [`core/runtime/shutdown_workflow/`](core/runtime/shutdown_workflow), [`core/runtime/lifecycle/`](core/runtime/lifecycle), [`core/registry/removal/`](core/registry/removal), [`controller/engine/lifecycle/shutdown.rs`](controller/engine/lifecycle/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |
 | Operating-system signal handling                 | [`core/shutdown.rs`](core/shutdown.rs), [`core/supervisor.rs`](core/supervisor.rs)                                                                                                                                                                                | [`tests/signal_ownership.rs`](../tests/signal_ownership.rs)                                                                           |
 | Ownership limits or deferred cleanup             | [`core/config.rs`](core/config.rs), [`core/builder.rs`](core/builder.rs), [`core/deferred_drop/`](core/deferred_drop), [`core/registry/removal/`](core/registry/removal)                                                                                          | [`tests/ownership.rs`](../tests/ownership.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                            |
-| User-facing documentation or workflows           | [`README.md`](../README.md), [`guide.md`](../guide.md), [`examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                                                                            | Example compilation and crate docs                                                                                                    |
+| User-facing documentation or workflows           | [`README.md`](../README.md), [`docs/`](../docs/index.md), [`examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                                                                          | Example compilation and crate docs                                                                                                    |
 
 ## Read and validate a change
 
