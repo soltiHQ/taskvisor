@@ -5,6 +5,8 @@ description: Configure runtime limits, inherited task behavior, per-task overrid
 
 # Configure Taskvisor
 
+## Configure each concern
+
 Configuration is split by concern:
 
 ```text
@@ -14,6 +16,8 @@ TaskSpec ──────────► per-task overrides
 ControllerConfig ──► keyed-admission limits
 Subscribe ─────────► per-subscriber event queue capacity
 ```
+
+## Set runtime and task defaults
 
 ```rust
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -38,6 +42,8 @@ fn configured_supervisor() -> Arc<Supervisor> {
 }
 ```
 
+## Know the defaults
+
 Main defaults:
 
 | Setting                   | Default                                                                                |
@@ -54,6 +60,8 @@ Main defaults:
 | Failure backoff           | 200 ms initial base, capped at 30 s, with equal jitter; the first delay is 100–200 ms. |
 | Attempt timeout           | None.                                                                                  |
 | Failure retry limit       | Unlimited.                                                                             |
+
+## Bound different resources
 
 Three limits answer different questions:
 

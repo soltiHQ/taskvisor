@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let spec = TaskSpec::restartable("refresh-cache", refresh)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(50)))
-        .try_with_max_retries(3)?;
+        .try_with_max_retries(2)?;
 
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve()?;

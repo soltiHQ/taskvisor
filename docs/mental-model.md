@@ -8,6 +8,8 @@ description: Understand Taskvisor tasks, specifications, identities, supervision
 A task defines executable work. A task specification gives that work a name and lifecycle policy.
 The supervisor owns registration, attempts, cancellation, and cleanup.
 
+## Follow work through the runtime
+
 ```text
 Task / TaskFn ──► TaskSpec
                       ├── add* ──► registry
@@ -20,6 +22,8 @@ registry ──► supervised attempts
                  ├── watched ──► TaskWaiter
                  └── observed ─► Event subscribers
 ```
+
+## Know each identity and result path
 
 | Value              | Role                                                                |
 |--------------------|---------------------------------------------------------------------|
@@ -35,4 +39,3 @@ registry ──► supervised attempts
 
 Direct `add*` methods send a `TaskSpec` to the runtime registry.
 Controller `submit*` methods first apply a per-slot admission policy, then hand admitted work to the same registry.
-

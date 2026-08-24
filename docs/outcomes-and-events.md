@@ -5,6 +5,8 @@ description: Use reliable in-process final outcomes for decisions and best-effor
 
 # Final outcomes and lifecycle events
 
+## Choose the result path
+
 Taskvisor has two result paths with different contracts:
 
 | Path                           | Contract                                        | Use it for                              |
@@ -15,6 +17,8 @@ Taskvisor has two result paths with different contracts:
 A watched outcome is independent of event loss while the process and runtime remain alive.
 It is not durable storage.
 `TaskWaiter::wait` can return `OutcomeUnavailable` if its completion channel closes unexpectedly.
+
+## Handle final outcomes
 
 Final outcomes distinguish:
 
@@ -33,9 +37,13 @@ Treat reason strings as diagnostic text.
 A panic while polling task code becomes a retryable task failure instead of `Panicked`.
 Removing watched controller work before it runs produces `Rejected` with `RejectionKind::RemovedFromQueue`, not `Canceled`.
 
+## Understand ForceAborted
+
 `ForceAborted` normally follows the configured grace period.
 Last-owner fallback and signal-setup failure cleanup cannot wait for that period.
 The physical attempt can remain active until synchronous task code returns control to Tokio.
+
+## Treat events as observability
 
 The shared event bus and every subscriber queue are bounded.
 Events can be lost at the shared bus or in an individual subscriber queue.

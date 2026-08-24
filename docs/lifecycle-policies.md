@@ -5,6 +5,8 @@ description: Configure success repetition, retryable failures, backoff, attempt 
 
 # Choose task behavior
 
+## Choose behavior after each attempt
+
 `TaskSpec` selects what follows success or a retryable failure:
 
 | Constructor               | After success                         | After a retryable failure                                |
@@ -15,6 +17,8 @@ description: Configure success repetition, retryable failures, backoff, attempt 
 | `TaskSpec::from_defaults` | Use `TaskDefaults`.                   | Use `TaskDefaults`.                                      |
 
 One task ID runs attempts sequentially. Two attempts for that ID never overlap.
+
+## Interpret attempt results
 
 | Attempt result        | Meaning                                                                  |
 |-----------------------|--------------------------------------------------------------------------|
@@ -35,9 +39,13 @@ With panic unwinding enabled, a panic while creating or polling the attempt futu
 A panic during protected cleanup can instead produce a final `Panicked` outcome.
 `panic = "abort"` cannot be caught.
 
+## Bound failure retries
+
 A retry limit counts retries after the first failed attempt.
 A limit of three therefore allows at most four consecutive failed attempts.
 A successful attempt resets the failure streak.
+
+## Configure retry timing
 
 ```rust
 use std::num::NonZeroU32;
@@ -59,6 +67,8 @@ fn supervised(name: &str, task: TaskRef) -> TaskSpec {
 Equal jitter chooses a delay between half of the current base delay and the full base delay.
 This spreads retries that would otherwise happen together.
 Per-task settings override values inherited from `TaskDefaults`.
+
+## Understand periodic timing
 
 A non-zero periodic interval starts after a successful attempt completes.
 It is fixed-delay scheduling, not a wall-clock or cron schedule.

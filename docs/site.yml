@@ -12,10 +12,24 @@ reference:
   label: API reference
   url: https://docs.rs/taskvisor/{version}/taskvisor/
 
+api:
+  provider: rustdoc
+  source: .cache/docs/api.json
+  title: Public API
+  description: Browse Taskvisor public modules, types, and traits, then open docs.rs for exact contracts.
+
+examples:
+  provider: rust
+  catalog: examples/README.md
+  directory: examples
+  title: Taskvisor examples
+  description: Choose a complete runnable Taskvisor program.
+
 navigation:
   - title: Start
     pages:
       - index
+      - quick-start
       - mental-model
       - installation
       - defining-tasks
@@ -24,6 +38,7 @@ navigation:
   - title: Run
     pages:
       - running-and-managing
+      - managing-tasks
       - cancellation-and-shutdown
 
   - title: Extend
@@ -36,3 +51,8 @@ navigation:
     pages:
       - production-boundaries
       - common-mistakes
+
+  - title: Reference
+    pages:
+      - examples
+      - api
