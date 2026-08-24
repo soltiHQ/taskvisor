@@ -10,13 +10,13 @@
 //!           ▼
 //!        task actor
 //!           ├── success ──► RestartPolicy ──► stop or repeat
-//!           ├── retryable failure ──► RestartPolicy + retry limit
-//!           │                                      │ retry allowed
-//!           │                                      ▼
-//!           │                                BackoffPolicy
-//!           │                                      │ base delay
-//!           │                                      ▼
-//!           │                                JitterPolicy ──► retry delay
+//!           ├── retryable failure ──────────► RestartPolicy + retry limit
+//!           │                                          │ retry allowed
+//!           │                                          ▼
+//!           │                                    BackoffPolicy
+//!           │                                          │ base delay
+//!           │                                          ▼
+//!           │                                    JitterPolicy ──► retry delay
 //!           └── fatal or canceled ──► stop
 //! ```
 //!
@@ -36,8 +36,8 @@
 //! A periodic success uses its configured interval instead.
 //!
 //! The built-in defaults use [`RestartPolicy::OnFailure`], exponential backoff from `200ms` to `30s`,
-//! equal jitter, no attempt timeout, and no retry-count limit. Named backoff constructors have no
-//! jitter unless it is added explicitly.
+//! equal jitter, no attempt timeout, and no retry-count limit.
+//! Named backoff constructors have no jitter unless it is added explicitly.
 //!
 //! The retry limit counts retries after the first failed attempt in one failure streak.
 //! Success resets the count. Fatal errors and cancellation always stop.

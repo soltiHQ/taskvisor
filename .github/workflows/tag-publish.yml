@@ -19,6 +19,20 @@ jobs:
     name: release
     uses: soltiHQ/actions/.github/workflows/rust-release.yml@v1
     with:
-      crate: taskvisor
+      crates-file: .github/crates.txt
     secrets:
       crates-io-token: ${{ secrets.CRATES_IO_TOKEN }}
+
+  docs:
+    name: docs
+    needs: release
+    uses: soltiHQ/actions/.github/workflows/docs-notify.yml@v1
+    with:
+      site-repository: soltiHQ/site
+      site-workflow: docs-release.yml
+      site-ref: main
+      source-repository: ${{ github.repository }}
+      source-ref: ${{ github.ref_name }}
+      client-id: ${{ vars.DOCS_SITE_APP_CLIENT_ID }}
+    secrets:
+      private-key: ${{ secrets.DOCS_SITE_APP_PRIVATE_KEY }}

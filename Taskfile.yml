@@ -1,8 +1,14 @@
 version: '3'
 
 includes:
+  docs:
+    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/v1/taskfiles/docs/Taskfile.yml
   rust:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/v1/taskfiles/rust/Taskfile.yml
+
+vars:
+  docs_version:
+    sh: sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' Cargo.toml | head -n 1
 
 tasks:
   ci/fmt:
@@ -38,12 +44,10 @@ tasks:
         vars: { TEST_ARGS: '--all-features --locked' }
 
   ci/test-unit:
-    desc: Run unit tests ('cargo test --lib') and doctests ('cargo test --doc').
+    desc: Run unit tests ('cargo test --lib').
     cmds:
       - task: rust:test
         vars: { TEST_ARGS: '--lib --all-features --locked' }
-      - task: rust:test
-        vars: { TEST_ARGS: '--doc --all-features --locked' }
 
   ci/test-integration:
     desc: Run integration tests ('cargo test --test "*"').
@@ -57,7 +61,7 @@ tasks:
       - task: rust:audit
 
   ci/docs:
-    desc: Run 'rustdoc' for the taskvisor crate. Fails on broken doc links in any feature config.
+    desc: Validate API documentation and the versioned user guide.
     cmds:
       - task: rust:doc
         vars: { DOC_ARGS: '--locked --no-deps' }
@@ -65,6 +69,23 @@ tasks:
         vars: { DOC_ARGS: '--locked --no-deps --all-features' }
       - task: rust:docs
         vars: { DOCS_ARGS: '--all-features --locked' }
+      - task: docs:validate
+        vars:
+          VERSION: '{{.docs_version}}'
+          PRODUCT: taskvisor
+          TITLE: Taskvisor
+          REPOSITORY: https://github.com/soltiHQ/taskvisor
+          VERSION_PROVIDER: cargo
+          VERSION_PACKAGE: taskvisor
+          REFERENCE_LABEL: API reference
+          REFERENCE_URL: https://docs.rs/taskvisor/{version}/taskvisor/
+          CARGO_SNIPPET_SOURCES: README.md docs/installation.md
+          LINK_SOURCES: docs README.md guide.md src/lib.rs
+      - task: docs:links/external
+        vars:
+          LINK_SOURCES: docs README.md guide.md src/lib.rs
+      - task: rust:test
+        vars: { TEST_ARGS: '--doc --all-features --locked' }
 
   ci/build:
     desc: Build all examples for a package. Pass CRATE.

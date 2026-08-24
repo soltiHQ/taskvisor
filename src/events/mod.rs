@@ -1,9 +1,8 @@
 //! Exposes Taskvisor's best-effort lifecycle stream for observability.
 //!
-//! The registry, task actors, controller, and shutdown workflow publish ordinary [`Event`] values to
-//! an internal bounded bus. The runtime relay forwards retained events to the bounded queue of each
-//! [`Subscribe`](crate::Subscribe) implementation. Internal subscriber diagnostics can start
-//! at the relay or a subscriber lane and bypass the shared bus.
+//! The registry, task actors, controller, and shutdown workflow publish ordinary [`Event`] values to an internal bounded bus.
+//! The runtime relay forwards retained events to the bounded queue of each [`Subscribe`](crate::Subscribe) implementation.
+//! Internal subscriber diagnostics can start at the relay or a subscriber lane and bypass the shared bus.
 //!
 //! ```text
 //! runtime components
@@ -25,9 +24,9 @@
 //! | Final outcome for watched work        | [`TaskWaiter`](crate::TaskWaiter)        |
 //! | Result of a management command        | The management method's returned result  |
 //!
-//! The stream is observational, not a reliable confirmation channel. Bus overflow and subscriber
-//! queue pressure can drop events. Missing an event does not mean the action did not happen,
-//! and runtime state never depends on delivery.
+//! The stream is observational, not a reliable confirmation channel.
+//! Bus overflow and subscriber queue pressure can drop events.
+//! Missing an event does not mean the action did not happen, and runtime state never depends on delivery.
 //!
 //! [`EventKind`] identifies what happened. [`Event`] carries its metadata.
 //! [`TaskOutcomeKind`](crate::TaskOutcomeKind), [`BackoffSource`], and [`RejectionKind`] provide

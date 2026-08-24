@@ -1,0 +1,3 @@
+remap = [
+  'https://github\.com/soltiHQ/taskvisor/blob/main/(.*) file:///workspace/$1',
+]

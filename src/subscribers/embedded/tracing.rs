@@ -7,8 +7,8 @@
 //! event relay ──► subscriber queue ──► TracingBridge ──► tracing dispatcher
 //! ```
 //!
-//! Each callback emits one `tracing` event with target `taskvisor`. The `event` field
-//! contains [`EventKind::as_label`], and `event_seq` preserves the Taskvisor sequence.
+//! Each callback emits one `tracing` event with target `taskvisor`.
+//! The `event` field contains [`EventKind::as_label`], and `event_seq` preserves the Taskvisor sequence.
 //! `event_unix_ms` is set when the timestamp is at or after the Unix epoch.
 //! Set payload fields use these names:
 //!

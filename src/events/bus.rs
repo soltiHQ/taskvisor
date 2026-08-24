@@ -17,8 +17,9 @@
 //! The receiver gets that count with the next retained event. This lets the relay emit one overflow
 //! diagnostic before it continues normal delivery.
 //!
-//! The bus stays disabled when the runtime has no event consumer. When the relay shuts down, it closes
-//! publication and transfers retained values out of the ring lock. Events never control runtime state.
+//! The bus stays disabled when the runtime has no event consumer.
+//! When the relay shuts down, it closes publication and transfers retained values out of the ring lock.
+//! Events never control runtime state.
 
 use std::{
     collections::VecDeque,

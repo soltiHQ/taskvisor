@@ -13,7 +13,7 @@ It turns ordinary async work into a managed lifecycle with backoff, timeouts, ca
 When work competes for the same application key, the optional controller queues it, replaces older work, or rejects it.
 Conflict policy is evaluated per key; supervisor-wide limits still apply.
 
-[Quick start](#quick-start) · [User guide](guide.md) · [API docs](https://docs.rs/taskvisor) · [Examples](examples/README.md) · [Benchmarks](benches/README.md)
+[Quick start](#quick-start) · [User guide](docs/index.md) · [API docs](https://docs.rs/taskvisor) · [Examples](examples/README.md) · [Benchmarks](benches/README.md)
 
 ## The retry loop you stop maintaining
 
@@ -146,7 +146,7 @@ The `controller` feature is enabled by default.
 A supervisor uses controller admission only when it is built with `SupervisorBuilder::with_controller`.
 
 See [tenant_sync.rs](examples/tenant_sync.rs) for a complete latest-wins workflow across separate tenant slots.
-The [user guide](guide.md#coordinate-work-by-key) explains queue ordering, replacement, rejection, slot identity, and controller limits.
+The [user guide](docs/keyed-admission.md) explains queue ordering, replacement, rejection, slot identity, and controller limits.
 
 ## When Taskvisor fits
 
@@ -183,7 +183,7 @@ Taskvisor makes its process boundary explicit:
 - periodic tasks use a delay after completion, not a calendar or cron schedule;
 - controller slots coordinate work inside one supervisor.
 
-Read the [full production boundaries](guide.md#production-boundaries) before deploying a service.
+Read the [full production boundaries](docs/production-boundaries.md) before deploying a service.
 
 ## Examples and documentation
 
@@ -199,8 +199,8 @@ The repository contains 18 complete runnable programs.
 
 The [examples guide](examples/README.md) provides the complete learning path, run commands, feature flags, and stop behavior.
 
-Use the [user guide](guide.md) for application workflows and production boundaries, then open the [API documentation](https://docs.rs/taskvisor) for exact contracts.
-Optional `tracing`, `logging`, `tokio-util-interop`, and `test-util` integrations are covered in the [installation guide](guide.md#install-taskvisor).
+Use the [user guide](docs/index.md) for application workflows and production boundaries, then open the [API documentation](https://docs.rs/taskvisor) for exact contracts.
+The [installation guide](docs/installation.md) lists the optional `tracing`, `logging`, `tokio-util-interop`, and `test-util` features. Use the [API documentation](https://docs.rs/taskvisor) for each integration's exact public contract.
 
 ## Benchmarks
 

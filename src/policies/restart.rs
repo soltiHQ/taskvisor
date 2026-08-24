@@ -11,9 +11,9 @@
 //! | `OnFailure` | Stop                        | Retry if budget allows  |
 //! | `Always`    | Repeat; use interval if set | Retry if budget allows  |
 //!
-//! Failure timing belongs to [`BackoffPolicy`](crate::BackoffPolicy). The retry limit can stop an otherwise
-//! eligible failure retry. It does not limit successful repeats under `Always`. Fatal errors, task cancellation,
-//! and runtime cancellation always stop the task.
+//! Failure timing belongs to [`BackoffPolicy`](crate::BackoffPolicy).
+//! The retry limit can stop an otherwise eligible failure retry.
+//! It does not limit successful repeats under `Always`. Fatal errors, task cancellation, and runtime cancellation always stop the task.
 
 /// Restart eligibility applied after one task attempt.
 ///

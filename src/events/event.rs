@@ -1,9 +1,9 @@
 //! Defines the event values delivered to subscribers.
 //!
-//! Runtime components create an [`Event`] to describe a lifecycle action. Ordinary events enter the bounded
-//! bus and may reach subscriber callbacks. Internal overflow and relay-failure diagnostics can enter subscriber
-//! lanes directly. No event feeds back into task management or registry cleanup. Applications normally read
-//! events through [`Subscribe`](crate::Subscribe), not construct them.
+//! Runtime components create an [`Event`] to describe a lifecycle action. Ordinary events enter the bounded bus and may reach
+//! subscriber callbacks. Internal overflow and relay-failure diagnostics can enter subscriber lanes directly.
+//! No event feeds back into task management or registry cleanup.
+//! Applications normally read events through [`Subscribe`](crate::Subscribe), not construct them.
 //!
 //! ```text
 //! runtime action
@@ -20,11 +20,12 @@
 //! provide typed categories where free-form text would be unsafe for machine decisions.
 //!
 //! Every event contains `kind`, `at`, and `seq`. Other fields depend on the event kind.
-//! Read the variant documentation before using an optional field. Duration builders store whole
-//! milliseconds and clamp values above `u32::MAX` milliseconds.
+//! Read the variant documentation before using an optional field.
+//! Duration builders store whole milliseconds and clamp values above `u32::MAX` milliseconds.
 //!
-//! `seq` is an increasing process-local construction sequence. Concurrent effects and callbacks may
-//! occur in another order. The sequence is not persisted and panics on exhaustion instead of wrapping.
+//! `seq` is an increasing process-local construction sequence.
+//! Concurrent effects and callbacks may occur in another order.
+//! The sequence is not persisted and panics on exhaustion instead of wrapping.
 //!
 //! # Interpreting an event
 //!
