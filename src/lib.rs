@@ -210,6 +210,11 @@ struct ReadmeDoctests;
 #[doc = include_str!("../docs/index.md")]
 struct GuideIndexDoctests;
 
+/// Compiles runnable Rust code blocks in the quick-start guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/quick-start.md")]
+struct QuickStartGuideDoctests;
+
 /// Compiles runnable Rust code blocks in the mental-model guide as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../docs/mental-model.md")]
@@ -230,10 +235,15 @@ struct DefiningTasksGuideDoctests;
 #[doc = include_str!("../docs/lifecycle-policies.md")]
 struct LifecyclePoliciesGuideDoctests;
 
-/// Compiles runnable Rust code blocks in the runtime-management guide as doctests.
+/// Compiles runnable Rust code blocks in the supervisor entry-point guide as doctests.
 #[cfg(doctest)]
 #[doc = include_str!("../docs/running-and-managing.md")]
-struct RunningAndManagingGuideDoctests;
+struct RunTaskvisorGuideDoctests;
+
+/// Compiles runnable Rust code blocks in the dynamic task-management guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/managing-tasks.md")]
+struct ManagingTasksGuideDoctests;
 
 /// Compiles runnable Rust code blocks in the cancellation guide as doctests.
 #[cfg(doctest)]

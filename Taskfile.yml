@@ -67,6 +67,13 @@ tasks:
         vars: { DOC_ARGS: '--locked --no-deps' }
       - task: rust:doc
         vars: { DOC_ARGS: '--locked --no-deps --all-features' }
+      - task: docs:api/generate
+        vars:
+          RUSTDOC_DIR: .cache/target/doc/taskvisor
+          API_OUTPUT: .cache/docs/api.json
+          PRODUCT: taskvisor
+          PACKAGE: taskvisor
+          VERSION: '{{.docs_version}}'
       - task: rust:docs
         vars: { DOCS_ARGS: '--all-features --locked' }
       - task: docs:validate
@@ -79,11 +86,11 @@ tasks:
           VERSION_PACKAGE: taskvisor
           REFERENCE_LABEL: API reference
           REFERENCE_URL: https://docs.rs/taskvisor/{version}/taskvisor/
-          CARGO_SNIPPET_SOURCES: README.md docs/installation.md
-          LINK_SOURCES: docs README.md guide.md src/lib.rs
+          CARGO_SNIPPET_SOURCES: README.md docs/installation.md docs/quick-start.md
+          LINK_SOURCES: docs README.md guide.md src/lib.rs examples/README.md
       - task: docs:links/external
         vars:
-          LINK_SOURCES: docs README.md guide.md src/lib.rs
+          LINK_SOURCES: docs README.md guide.md src/lib.rs examples/README.md
       - task: rust:test
         vars: { TEST_ARGS: '--doc --all-features --locked' }
 

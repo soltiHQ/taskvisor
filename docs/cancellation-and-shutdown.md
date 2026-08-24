@@ -5,6 +5,8 @@ description: Make task operations cancellation-aware and join Taskvisor's bounde
 
 # Cancellation and shutdown
 
+## Make operations cancellation-aware
+
 Cancellation starts cooperatively. A resident task must observe `TaskContext`:
 
 ```rust
@@ -33,9 +35,13 @@ Use it only when dropping that future is a safe way to cancel the exact operatio
 Check the operation's cancellation-safety contract; an external commit, acknowledgement, or partially consumed input may need an explicit protocol.
 The Tokio sleep in [graceful_worker.rs](../examples/graceful_worker.rs) is a simple drop-safe example.
 
+## Understand attempt timeouts
+
 An attempt timeout also drops the attempt future.
 It does not undo side effects that already happened.
 A blocking future destructor can delay attempt release beyond the configured timeout.
+
+## Cancel work with a caller deadline
 
 `cancel_with_timeout` and `cancel_by_name_with_timeout` limit how long the caller waits for registered task cleanup.
 Controller ordering, command-queue admission, and the registry claim happen outside that timer.
@@ -44,6 +50,8 @@ If task completion is observed at the timeout boundary, completion wins.
 Queued controller work is removed directly, and `cancel_with_timeout` does not apply its wait timer to that path.
 A watched queued submission then resolves to `Rejected` with `RejectionKind::RemovedFromQueue`, not to `Canceled`.
 The matching `try_*` methods make command-queue admission fail fast; their remaining behavior is unchanged.
+
+## Join shutdown
 
 The joined shutdown workflow has concurrent parts:
 

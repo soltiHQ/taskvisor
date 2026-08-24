@@ -5,6 +5,8 @@ description: Queue, replace, or reject competing work through Taskvisor controll
 
 # Coordinate work by key
 
+## Enable the controller
+
 This section requires the `controller` feature.
 It is enabled by default, but each supervisor must install a controller explicitly:
 
@@ -15,6 +17,8 @@ let _supervisor = Supervisor::builder(SupervisorConfig::default())
     .with_controller(ControllerConfig::default())
     .build();
 ```
+
+## Separate IDs, names, and slots
 
 Direct `add*` methods bypass controller admission.
 `submit*` methods accept a `ControllerSpec`, apply its slot policy, and hand admitted work to the runtime registry.
@@ -31,6 +35,8 @@ A queued submission owns its task ID but does not own a registered task name yet
 
 A controller slot can remain occupied while admission, task execution, or physical release is pending.
 An occupied slot does not always mean that a task body is currently polling.
+
+## Choose a busy-slot policy
 
 | Policy          | Busy-slot behavior                                                                     |
 |-----------------|----------------------------------------------------------------------------------------|
@@ -54,15 +60,21 @@ assert_eq!(request.task_spec().name(), "customer-42-job");
 assert_eq!(request.slot_name(), "customer-42");
 ```
 
+## Watch admission and completion
+
 `submit().await?` confirms command intake only. `submit_and_watch` returns a task ID and waiter.
 The waiter resolves to `Rejected` if admission fails or to the registered task's final outcome if admission succeeds.
 
 `prepare_submission` allocates a task ID before intake.
 It does not reserve a name, slot, queue position, or runtime capacity.
 
+## Read diagnostic state
+
 `controller_snapshot` is a rolling diagnostic view.
 It reads slots independently and can already be stale when returned.
 Do not treat it as a transaction boundary.
+
+## Know timeout and cancellation scope
 
 Attempt timeout starts only after registry admission and after `Task::spawn` returns the attempt future.
 It does not limit time spent in a controller queue. Controller submission has no built-in end-to-end deadline.
@@ -72,6 +84,8 @@ There is no slot-wide cancel or remove operation.
 Stop queued work by task ID and registered work by task ID or task name.
 Removing or canceling controller work that is still queued or waiting for registry-command capacity removes it directly before it runs.
 Its watcher resolves to `Rejected` with `RejectionKind::RemovedFromQueue`, not to `Canceled`.
+
+## Bound controller resources
 
 `ControllerConfig` bounds command intake, per-slot queues, total pending work, tracked slots, registry-capacity waits, and concurrent identity operations.
 See its [API documentation](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html) for the exact defaults and rejection mapping.

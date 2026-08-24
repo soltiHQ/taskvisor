@@ -15,11 +15,11 @@ The controller has no runtime effect until a supervisor is built with `with_cont
 
 | Feature              | Default | Adds                                                   |
 |----------------------|---------|--------------------------------------------------------|
-| `controller`         | Yes.    | Slot-based admission control.                          |
-| `tracing`            | No.     | `TracingBridge` for the `tracing` ecosystem.           |
-| `logging`            | No.     | `LogWriter` for simple readable lifecycle output.      |
-| `tokio-util-interop` | No.     | Access to the raw cancellation token in `TaskContext`. |
-| `test-util`          | No.     | Constructors intended for external integration tests.  |
+| `controller`         | Yes     | Slot-based admission control.                          |
+| `tracing`            | No      | `TracingBridge` for the `tracing` ecosystem.           |
+| `logging`            | No      | `LogWriter` for simple readable lifecycle output.      |
+| `tokio-util-interop` | No      | Access to the raw cancellation token in `TaskContext`. |
+| `test-util`          | No      | Constructors intended for external integration tests.  |
 
 Enable an optional integration:
 
