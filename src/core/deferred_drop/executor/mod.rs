@@ -23,7 +23,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use super::{
     bundle::DropReservation,
-    capacity::{CapacityBroker, OwnershipPermit},
+    capacity::{CapacityBroker, CapacitySnapshot, OwnershipPermit},
     error::{DropCapacityError, DropStartError},
 };
 
@@ -32,9 +32,17 @@ mod worker;
 
 pub(super) use batch::DropBatch;
 pub(super) use worker::{CORE_WORKER_COUNT, WorkerSpawner, system_spawner};
+use worker::{CleanupSnapshot, WorkerQueue, max_worker_count};
 #[cfg(test)]
 pub(super) use worker::{ELASTIC_IDLE_TIMEOUT, MAX_WORKER_COUNT, worker_loop};
-use worker::{WorkerQueue, max_worker_count};
+
+/// Combined broker and cleanup-worker state for one started executor.
+pub(super) struct ExecutorSnapshot {
+    /// Ownership admission accounting.
+    pub(super) capacity: CapacitySnapshot,
+    /// Deferred-cleanup queue accounting.
+    pub(super) cleanup: CleanupSnapshot,
+}
 
 /// Started cleanup runtime shared by one domain and its outstanding reservations.
 pub(super) struct DropExecutor {
@@ -141,6 +149,14 @@ impl DropExecutor {
         if let Err(batch) = self.workers.submit(batch) {
             self.capacity.close();
             std::mem::forget(batch);
+        }
+    }
+
+    /// Copies ownership-admission and cleanup-worker state.
+    pub(super) fn snapshot(&self) -> ExecutorSnapshot {
+        ExecutorSnapshot {
+            capacity: self.capacity.snapshot(),
+            cleanup: self.workers.snapshot(),
         }
     }
 }

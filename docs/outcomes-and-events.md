@@ -22,20 +22,24 @@ It is not durable storage.
 
 Final outcomes distinguish:
 
-| Outcome        | Meaning                                                              |
-|----------------|----------------------------------------------------------------------|
-| `Completed`    | The final attempt succeeded and the restart policy stopped the task. |
-| `Failed`       | Retryable failure stopped under policy or retry limit.               |
-| `Fatal`        | The task reported a permanent failure.                               |
-| `Canceled`     | Cancellation was requested or reported.                              |
-| `ForceAborted` | Taskvisor stopped waiting before cooperative termination completed.  |
-| `Panicked`     | The actor or a protected user-value cleanup boundary panicked.       |
-| `Rejected`     | Admission rejected the work, or queued controller work was removed.  |
+| Outcome        | Meaning                                                                                 |
+|----------------|-----------------------------------------------------------------------------------------|
+| `Completed`    | The final attempt succeeded and the restart policy stopped the task.                    |
+| `Failed`       | Retryable failure stopped under policy or retry limit.                                  |
+| `Fatal`        | The task reported a permanent failure.                                                  |
+| `Canceled`     | Cancellation was requested or reported.                                                 |
+| `ForceAborted` | Taskvisor stopped waiting before cooperative termination completed.                     |
+| `Panicked`     | The actor or protected attempt-owned cleanup panicked before terminal outcome delivery. |
+| `Rejected`     | Admission rejected the work, or queued controller work was removed.                     |
 
 Use stable outcome and rejection kinds for branching, metrics, and alerts.
 Treat reason strings as diagnostic text.
 A panic while polling task code becomes a retryable task failure instead of `Panicked`.
 Removing watched controller work before it runs produces `Rejected` with `RejectionKind::RemovedFromQueue`, not `Canceled`.
+
+Taskvisor delivers the terminal outcome before deferred cleanup destroys the retained task object and physical result.
+That later destruction can block or panic, but it cannot revise an outcome already delivered through `TaskWaiter`.
+Destructor failures on that later path are runtime diagnostics rather than `TaskOutcome::Panicked`.
 
 ## Understand ForceAborted
 

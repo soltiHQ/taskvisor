@@ -73,6 +73,8 @@ Three limits answer different questions:
 
 `SupervisorConfig::with_ownership_capacity(None)` removes the ownership count bound.
 Cleanup still uses a bounded worker set, but retained values and cleanup backlog can then grow without a count limit.
+Use `Supervisor::ownership_snapshot` or `SupervisorHandle::ownership_snapshot` to inspect the
+configured and effective limits, available units, parked requests, and deferred-cleanup activity.
 
 During cleanup handoff, one task can temporarily consume two `max_registered_tasks` units.
 

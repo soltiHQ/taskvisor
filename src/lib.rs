@@ -148,6 +148,7 @@ See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 //! while it keeps owning the unfinished actor until physical exit. While that actor remains active, its synchronous
 //! task code or attempt-future destructor may keep its task name and capacity reservation owned.
 //! Later isolated destruction of terminal task values keeps capacity reserved but does not keep the task name reserved.
+//! Use [`Supervisor::ownership_snapshot`] or [`SupervisorHandle::ownership_snapshot`] to inspect that separate boundary.
 //!
 //! Dropping a non-final public owner leaves the runtime running. Dropping the final owner can request cancellation but
 //! cannot wait for cleanup. Call [`SupervisorHandle::shutdown`] when the cleanup result matters.
@@ -277,8 +278,8 @@ struct CommonMistakesGuideDoctests;
 
 pub mod core;
 pub use core::{
-    ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
-    TaskOutcome, TaskOutcomeKind, TaskWaiter,
+    ConfigError, OwnershipSnapshot, Supervisor, SupervisorBuilder, SupervisorConfig,
+    SupervisorHandle, TaskDefaults, TaskOutcome, TaskOutcomeKind, TaskWaiter,
 };
 
 pub mod tasks;

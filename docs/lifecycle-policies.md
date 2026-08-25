@@ -36,7 +36,8 @@ These two timeout failures remain subject to the restart policy and retry limit.
 If dropping the attempt future panics, Taskvisor instead produces `AttemptFailed` and ends with a final `Panicked` outcome without retrying.
 
 With panic unwinding enabled, a panic while creating or polling the attempt future becomes a retryable failure.
-A panic during protected cleanup can instead produce a final `Panicked` outcome.
+A panic while Taskvisor destroys attempt-owned data inside the physical actor boundary can instead produce a final `Panicked` outcome.
+This does not include later deferred destruction of the retained task object after terminal outcome delivery.
 `panic = "abort"` cannot be caught.
 
 ## Bound failure retries

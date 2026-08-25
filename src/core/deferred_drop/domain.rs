@@ -13,8 +13,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::core::OwnershipSnapshot;
+
 use super::{
     bundle::DropReservation,
+    capacity::{CapacityRetirement, RetirementReporter},
     error::{DropAdmissionError, DropCapacityError, DropStartError},
     executor::{CORE_WORKER_COUNT, DropExecutor, WorkerSpawner, system_spawner},
 };
@@ -29,6 +32,8 @@ struct DropDomainInner {
     spawner: Arc<WorkerSpawner>,
     /// Executor published only after transactional startup succeeds.
     executor: Mutex<Option<Arc<DropExecutor>>>,
+    /// Callback installed on the current or next executor capacity broker.
+    retirement_reporter: Mutex<Option<RetirementReporter>>,
 }
 
 /// Cloneable handle to one supervisor-local cleanup budget.
@@ -111,6 +116,7 @@ impl DropDomain {
             capacity,
             spawner,
             executor: Mutex::new(None),
+            retirement_reporter: Mutex::new(None),
         })))
     }
 
@@ -134,6 +140,15 @@ impl DropDomain {
             self.0.capacity,
             Arc::clone(&self.0.spawner),
         )?;
+        if let Some(reporter) = self
+            .0
+            .retirement_reporter
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+        {
+            started.capacity.set_retirement_reporter(reporter);
+        }
         *executor = Some(Arc::clone(&started));
         Ok(started)
     }
@@ -141,6 +156,71 @@ impl DropDomain {
     /// Returns the supervisor-local ownership limit.
     pub(crate) fn capacity(&self) -> Option<NonZeroUsize> {
         self.0.capacity
+    }
+
+    /// Installs the best-effort callback for committed finite-capacity retirement.
+    pub(crate) fn set_retirement_reporter<F>(&self, report: F)
+    where
+        F: Fn(usize, usize, usize) + Send + Sync + 'static,
+    {
+        let reporter: RetirementReporter = Arc::new(move |retirement: CapacityRetirement| {
+            report(
+                retirement.configured_capacity,
+                retirement.effective_capacity,
+                retirement.retired_units,
+            );
+        });
+        *self
+            .0
+            .retirement_reporter
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::clone(&reporter));
+
+        let executor = self
+            .0
+            .executor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(executor) = executor {
+            executor.capacity.set_retirement_reporter(reporter);
+        }
+    }
+
+    /// Returns current ownership and deferred-cleanup state without starting workers.
+    pub(crate) fn snapshot(&self, runtime_open: bool) -> OwnershipSnapshot {
+        let executor = self
+            .0
+            .executor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(Arc::clone);
+
+        let Some(executor) = executor else {
+            let configured = self.0.capacity.map(NonZeroUsize::get);
+            return OwnershipSnapshot::new(
+                configured,
+                configured,
+                configured,
+                0,
+                runtime_open,
+                0,
+                0,
+            );
+        };
+
+        let snapshot = executor.snapshot();
+        OwnershipSnapshot::new(
+            snapshot.capacity.configured_limit,
+            snapshot.capacity.effective_limit,
+            snapshot.capacity.available,
+            snapshot.capacity.waiters,
+            runtime_open && snapshot.capacity.open,
+            snapshot.cleanup.queued,
+            snapshot.cleanup.running,
+        )
     }
 
     /// Starts the domain when needed and waits for one ownership unit.

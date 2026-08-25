@@ -9,6 +9,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     task::Poll,
     time::Duration,
@@ -32,6 +33,14 @@ struct GateState {
 }
 
 struct BlockingDrop(Arc<(Mutex<GateState>, Condvar)>);
+
+struct ReleaseGate(Arc<(Mutex<GateState>, Condvar)>);
+
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        release_gate(&self.0);
+    }
+}
 
 impl Drop for BlockingDrop {
     fn drop(&mut self) {
@@ -357,6 +366,141 @@ fn dormant_domain_zero_batch_and_drop_spawn_no_workers() {
     assert!(!domain.is_started());
     drop(domain);
     assert_eq!(calls.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn dormant_finite_and_unlimited_snapshots_do_not_start_workers() {
+    let finite = DropDomain::unstarted(NonZeroUsize::new(4));
+    let finite_snapshot = finite.snapshot(true);
+    assert_eq!(finite_snapshot.configured_limit, Some(4));
+    assert_eq!(finite_snapshot.effective_limit, Some(4));
+    assert_eq!(finite_snapshot.available, Some(4));
+    assert_eq!(finite_snapshot.retired(), Some(0));
+    assert_eq!(finite_snapshot.in_use(), Some(0));
+    assert_eq!(finite_snapshot.waiters, 0);
+    assert!(finite_snapshot.admission_open);
+    assert_eq!(finite_snapshot.cleanup_queued, 0);
+    assert_eq!(finite_snapshot.cleanup_running, 0);
+    assert!(!finite.is_started());
+
+    let unlimited = DropDomain::unstarted(None);
+    let unlimited_snapshot = unlimited.snapshot(false);
+    assert_eq!(unlimited_snapshot.configured_limit, None);
+    assert_eq!(unlimited_snapshot.effective_limit, None);
+    assert_eq!(unlimited_snapshot.available, None);
+    assert_eq!(unlimited_snapshot.retired(), None);
+    assert_eq!(unlimited_snapshot.in_use(), None);
+    assert_eq!(unlimited_snapshot.waiters, 0);
+    assert!(!unlimited_snapshot.admission_open);
+    assert_eq!(unlimited_snapshot.cleanup_queued, 0);
+    assert_eq!(unlimited_snapshot.cleanup_running, 0);
+    assert!(!unlimited.is_started());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn broker_snapshot_tracks_parked_and_unobserved_grants() {
+    let executor = test_executor(1, 1);
+    let held = executor.try_reserve().expect("the initial ownership unit");
+    let mut waiter = Box::pin(executor.reserve());
+    assert_pending_once(waiter.as_mut()).await;
+
+    let parked = executor.snapshot().capacity;
+    assert_eq!(parked.available, Some(0));
+    assert_eq!(parked.waiters, 1);
+    assert!(parked.open);
+
+    drop(held);
+    let granted = executor.snapshot().capacity;
+    assert_eq!(granted.available, Some(0));
+    assert_eq!(granted.waiters, 0);
+
+    drop(waiter);
+    let canceled = executor.snapshot().capacity;
+    assert_eq!(canceled.available, Some(1));
+    assert_eq!(canceled.waiters, 0);
+}
+
+#[test]
+fn cleanup_snapshot_tracks_claimed_and_queued_batches() {
+    let spawner: Arc<WorkerSpawner> = Arc::new(move |worker, launcher| {
+        if worker > 0 {
+            return Err(io::Error::other("keep the second cleanup batch queued"));
+        }
+        std::thread::Builder::new().spawn(move || {
+            if let Ok(launch) = launcher.recv() {
+                worker_loop(launch);
+            }
+        })
+    });
+    let domain = DropDomain::try_start_with(1, 3, spawner)
+        .expect("the single core cleanup worker must start");
+    let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+    let _release_on_failure = ReleaseGate(Arc::clone(&gate));
+    domain
+        .try_reserve()
+        .expect("blocking cleanup reservation")
+        .bundle(BlockingDrop(Arc::clone(&gate)))
+        .submit();
+    wait_gate_entered(&gate);
+
+    let completed = Arc::new(AtomicBool::new(false));
+    domain
+        .try_reserve()
+        .expect("queued cleanup reservation")
+        .bundle(ObservedDrop(Arc::clone(&completed)))
+        .submit();
+
+    let blocked = domain.snapshot(true);
+    assert_eq!(blocked.in_use(), Some(2));
+    assert_eq!(blocked.cleanup_running, 1);
+    assert_eq!(blocked.cleanup_queued, 1);
+
+    release_gate(&gate);
+    wait_observed(&completed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let drained = domain.snapshot(true);
+        if drained.cleanup_running == 0 && drained.cleanup_queued == 0 {
+            assert_eq!(drained.in_use(), Some(0));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cleanup accounting must drain after both destructors return"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn unlimited_snapshot_keeps_real_cleanup_counts() {
+    let domain = DropDomain::unstarted(None);
+    let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+    let _release_on_failure = ReleaseGate(Arc::clone(&gate));
+    domain
+        .try_reserve()
+        .expect("unlimited admission must reserve immediately")
+        .bundle(BlockingDrop(Arc::clone(&gate)))
+        .submit();
+    wait_gate_entered(&gate);
+
+    let blocked = domain.snapshot(true);
+    assert_eq!(blocked.configured_limit, None);
+    assert_eq!(blocked.effective_limit, None);
+    assert_eq!(blocked.available, None);
+    assert_eq!(blocked.in_use(), None);
+    assert_eq!(blocked.waiters, 0);
+    assert_eq!(blocked.cleanup_running, 1);
+
+    release_gate(&gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while domain.snapshot(true).cleanup_running != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "unlimited cleanup accounting must drain"
+        );
+        std::thread::yield_now();
+    }
 }
 
 #[test]
@@ -821,6 +965,32 @@ async fn panicking_destructor_permanently_consumes_only_its_charged_slot() {
     drop(remaining);
     assert_eq!(executor.capacity.available(), 1);
     assert_eq!(executor.capacity.effective_capacity(), 1);
+}
+
+#[test]
+fn poisoned_cleanup_reports_retirement_after_capacity_commits() {
+    let domain = DropDomain::try_start(1).expect("the test domain must start");
+    let (reported, report_rx) = mpsc::channel();
+    domain.set_retirement_reporter(move |configured, effective, retired| {
+        let _ = reported.send((configured, effective, retired));
+    });
+    let mut bundle = domain
+        .try_reserve()
+        .expect("the ownership unit to retire")
+        .bundle(());
+    bundle.poison();
+    bundle.submit();
+
+    assert_eq!(
+        report_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("committed retirement must invoke its reporter"),
+        (1, 0, 1)
+    );
+    let snapshot = domain.snapshot(true);
+    assert_eq!(snapshot.effective_limit, Some(0));
+    assert_eq!(snapshot.retired(), Some(1));
+    assert!(!snapshot.admission_open);
 }
 
 #[tokio::test(flavor = "current_thread")]

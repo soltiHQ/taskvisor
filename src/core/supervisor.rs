@@ -23,7 +23,9 @@
 
 use std::{future::Future, sync::Arc};
 
-use crate::core::{RuntimeOwner, SupervisorConfig, SupervisorCore, builder::SupervisorBuilder};
+use crate::core::{
+    OwnershipSnapshot, RuntimeOwner, SupervisorConfig, SupervisorCore, builder::SupervisorBuilder,
+};
 use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 
 /// Public owner and startup entry point for one runtime.
@@ -269,6 +271,16 @@ impl Supervisor {
     #[must_use = "use the returned runtime configuration"]
     pub fn runtime_config(&self) -> &SupervisorConfig {
         self.owner.core().runtime_config()
+    }
+
+    /// Returns ownership-admission and deferred-cleanup state.
+    ///
+    /// Calling this on a stopped supervisor does not start destructor workers.
+    /// Configured subscribers are already reflected because their ownership is reserved during construction.
+    /// The returned point-in-time view can become stale immediately.
+    #[must_use = "inspect the returned ownership state"]
+    pub fn ownership_snapshot(&self) -> OwnershipSnapshot {
+        self.owner.core().ownership_snapshot()
     }
 
     /// Returns the immutable task defaults applied during registry admission.

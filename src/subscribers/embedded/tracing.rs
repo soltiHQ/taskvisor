@@ -13,7 +13,8 @@
 //! Set payload fields use these names:
 //!
 //! - identity and context: `taskvisor_id`, `task_name`, `subscriber`, `component`, and `slot`;
-//! - lifecycle data: `attempt`, `backoff_source`, `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, and `exit_code`.
+//! - lifecycle data: `attempt`, `backoff_source`, `outcome_kind`, `rejection_kind`, `delay_ms`, `timeout_ms`, `duration_ms`, `dropped`, and `exit_code`;
+//! - ownership retirement: `configured_capacity`, `effective_capacity`, and `retired_units`.
 //!
 //! Free-form [`Event::reason`] text is excluded by default.
 //! Applications can opt in through [`TracingBridge::with_reasons`].
@@ -50,7 +51,7 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 ///
 /// Event kinds map to tracing levels as follows:
 ///
-/// - `ERROR`: runtime failures, subscriber panics, and fatal or panicked final outcomes.
+/// - `ERROR`: runtime failures, ownership-capacity retirement, subscriber panics, and fatal or panicked final outcomes.
 /// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry; overflow; and `AdmissionFailed` or unclassified rejections.
 /// - `INFO`: completed or canceled outcomes and shutdown milestones.
 /// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, controller submissions, and all other typed rejections.
@@ -98,7 +99,9 @@ fn rejection_level(kind: Option<RejectionKind>) -> Level {
 /// Returns the tracing level assigned to an event.
 fn level_for(e: &Event) -> Level {
     match e.kind {
-        EventKind::SubscriberPanicked | EventKind::RuntimeFailure => Level::ERROR,
+        EventKind::SubscriberPanicked
+        | EventKind::RuntimeFailure
+        | EventKind::OwnershipCapacityRetired => Level::ERROR,
 
         EventKind::GraceExceeded | EventKind::SubscriberOverflow => Level::WARN,
 
@@ -138,7 +141,9 @@ fn semantic_names(e: &Event) -> (Option<&str>, Option<&str>, Option<&str>, Optio
     let value = e.task.as_deref();
     match e.kind {
         EventKind::SubscriberPanicked | EventKind::SubscriberOverflow => (None, value, None, None),
-        EventKind::RuntimeFailure => (None, None, value, None),
+        EventKind::RuntimeFailure | EventKind::OwnershipCapacityRetired => {
+            (None, None, value, None)
+        }
         #[cfg(feature = "controller")]
         EventKind::ControllerRejected
         | EventKind::ControllerSubmitted
@@ -151,6 +156,10 @@ fn event_unix_ms(e: &Event) -> Option<u64> {
     e.at.duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+fn capacity_value(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn emit_event(e: &Event, include_reason: bool) {
@@ -183,6 +192,9 @@ fn emit_event(e: &Event, include_reason: bool) {
                 timeout_ms = e.timeout_ms.map(u64::from),
                 duration_ms = e.duration_ms.map(u64::from),
                 dropped = e.dropped,
+                configured_capacity = e.configured_capacity.map(capacity_value),
+                effective_capacity = e.effective_capacity.map(capacity_value),
+                retired_units = e.retired_units.map(capacity_value),
                 exit_code = e.exit_code.map(i64::from),
                 backoff_source = e.backoff_source.map(|source| source.as_label()),
                 rejection_kind = e.rejection_kind.map(|kind| kind.as_label()),
@@ -334,6 +346,7 @@ mod tests {
             (EventKind::TaskAdded, Level::DEBUG),
             (EventKind::ShutdownRequested, Level::INFO),
             (EventKind::SubscriberPanicked, Level::ERROR),
+            (EventKind::OwnershipCapacityRetired, Level::ERROR),
         ];
         for (kind, expected) in cases {
             let (level, _) = capture_one(&Event::new(kind));
@@ -387,6 +400,7 @@ mod tests {
             (EventKind::AttemptStarting, "task_name"),
             (EventKind::SubscriberOverflow, "subscriber"),
             (EventKind::RuntimeFailure, "component"),
+            (EventKind::OwnershipCapacityRetired, "component"),
         ];
         for (kind, expected_field) in cases {
             let (_, fields) = capture_one(&Event::new(kind).with_task("value"));
@@ -437,6 +451,33 @@ mod tests {
     }
 
     #[test]
+    fn ownership_retirement_is_an_error_with_typed_capacity_fields() {
+        let event = Event::ownership_capacity_retired(16, 14, 2).with_task("destructor_isolation");
+
+        let (level, fields) = capture_one(&event);
+
+        assert_eq!(level, Level::ERROR);
+        assert_eq!(
+            fields.get("event").map(String::as_str),
+            Some("ownership_capacity_retired")
+        );
+        assert_eq!(
+            fields.get("component").map(String::as_str),
+            Some("destructor_isolation")
+        );
+        assert_eq!(
+            fields.get("configured_capacity").map(String::as_str),
+            Some("16")
+        );
+        assert_eq!(
+            fields.get("effective_capacity").map(String::as_str),
+            Some("14")
+        );
+        assert_eq!(fields.get("retired_units").map(String::as_str), Some("2"));
+        assert!(!fields.contains_key("task_name"));
+    }
+
+    #[test]
     fn absent_optional_fields_are_skipped() {
         let (_, fields) = capture_one(&Event::new(EventKind::ShutdownRequested));
 
@@ -463,6 +504,9 @@ mod tests {
             "delay_ms",
             "timeout_ms",
             "duration_ms",
+            "configured_capacity",
+            "effective_capacity",
+            "retired_units",
             "exit_code",
             "backoff_source",
             "rejection_kind",

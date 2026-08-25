@@ -154,6 +154,9 @@ impl LogWriter {
                     format_value(or(e.reason.as_deref(), "unknown"))
                 );
             }
+            EventKind::OwnershipCapacityRetired => {
+                println!("{}", ownership_capacity_retired_line(e));
+            }
 
             // Registered-task terminal outcome.
             EventKind::TaskFinished => {
@@ -209,6 +212,17 @@ fn event_head(e: &Event) -> String {
     format!("[{:03}] [{}]", e.seq, e.kind.as_label())
 }
 
+fn ownership_capacity_retired_line(e: &Event) -> String {
+    format!(
+        "{} component={} configured_capacity={} effective_capacity={} retired_units={}",
+        event_head(e),
+        format_value(e.task.as_deref().unwrap_or("none")),
+        e.configured_capacity.unwrap_or(0),
+        e.effective_capacity.unwrap_or(0),
+        e.retired_units.unwrap_or(0)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +246,17 @@ mod tests {
         let rendered = format_value(&long);
         assert!(rendered.ends_with("…[truncated]\""));
         assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn ownership_retirement_prints_every_capacity_value() {
+        let mut event =
+            Event::ownership_capacity_retired(16, 14, 2).with_task("destructor_isolation");
+        event.seq = 42;
+
+        assert_eq!(
+            ownership_capacity_retired_line(&event),
+            "[042] [ownership_capacity_retired] component=\"destructor_isolation\" configured_capacity=16 effective_capacity=14 retired_units=2"
+        );
     }
 }

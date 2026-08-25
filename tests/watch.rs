@@ -3,6 +3,10 @@
 mod common;
 
 use std::num::NonZeroU32;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use common::*;
@@ -12,6 +16,42 @@ fn served() -> SupervisorHandle {
     Supervisor::new(SupervisorConfig::default(), vec![])
         .serve()
         .expect("runtime startup")
+}
+
+#[derive(Default)]
+struct FinalDropGate {
+    entered: AtomicBool,
+    released: AtomicBool,
+    panicking: AtomicBool,
+}
+
+struct ReleaseFinalDrop(Arc<FinalDropGate>);
+
+impl Drop for ReleaseFinalDrop {
+    fn drop(&mut self) {
+        self.0.released.store(true, Ordering::Release);
+    }
+}
+
+struct PanickingFinalDropTask {
+    gate: Arc<FinalDropGate>,
+}
+
+impl Task for PanickingFinalDropTask {
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl Drop for PanickingFinalDropTask {
+    fn drop(&mut self) {
+        self.gate.entered.store(true, Ordering::Release);
+        while !self.gate.released.load(Ordering::Acquire) {
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        self.gate.panicking.store(true, Ordering::Release);
+        panic!("final retained task destructor panicked");
+    }
 }
 
 #[tokio::test]
@@ -91,6 +131,53 @@ async fn watched_add_variants_return_the_same_completed_contract() {
         Ok(TaskOutcome::Completed)
     ));
 
+    let _ = handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn completed_outcome_precedes_a_panicking_final_task_destructor() {
+    let handle = served();
+    let gate = Arc::new(FinalDropGate::default());
+    let release_on_failure = ReleaseFinalDrop(Arc::clone(&gate));
+    let task: TaskRef = Arc::new(PanickingFinalDropTask {
+        gate: Arc::clone(&gate),
+    });
+
+    let (_id, waiter) = handle
+        .add_and_watch(TaskSpec::once("panicking-final-task-drop", task))
+        .await
+        .expect("add_and_watch should succeed");
+
+    assert!(
+        poll_until(Duration::from_secs(2), || {
+            let gate = Arc::clone(&gate);
+            async move { gate.entered.load(Ordering::Acquire) }
+        })
+        .await,
+        "final task destruction must reach the deferred-cleanup worker"
+    );
+
+    let outcome = with_timeout(2, waiter.wait())
+        .await
+        .expect("the terminal outcome must not wait for final task destruction");
+    assert!(matches!(outcome, TaskOutcome::Completed));
+    assert!(
+        !gate.panicking.load(Ordering::Acquire),
+        "the outcome must be fixed before the final destructor is released"
+    );
+
+    gate.released.store(true, Ordering::Release);
+    assert!(
+        poll_until(Duration::from_secs(2), || {
+            let gate = Arc::clone(&gate);
+            async move { gate.panicking.load(Ordering::Acquire) }
+        })
+        .await,
+        "the released final task destructor must reach its panic"
+    );
+    assert!(matches!(outcome, TaskOutcome::Completed));
+
+    drop(release_on_failure);
     let _ = handle.shutdown().await;
 }
 

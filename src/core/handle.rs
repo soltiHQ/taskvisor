@@ -23,7 +23,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crate::core::{RuntimeOwner, SupervisorCore};
+use crate::core::{OwnershipSnapshot, RuntimeOwner, SupervisorCore};
 use crate::error::RuntimeError;
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
@@ -286,6 +286,18 @@ impl SupervisorHandle {
     /// Use [`list`](Self::list) when registry membership is the desired state.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
+    }
+
+    /// Returns ownership-admission and deferred-cleanup state.
+    ///
+    /// This view is separate from [`list`](Self::list) and [`alive_snapshot`](Self::alive_snapshot).
+    /// Accepted task or subscriber values remain charged until their final isolated destruction finishes,
+    /// including after registry membership and physical attempts have ended.
+    ///
+    /// The returned point-in-time view can become stale immediately.
+    #[must_use = "inspect the returned ownership state"]
+    pub fn ownership_snapshot(&self) -> OwnershipSnapshot {
+        self.core().ownership_snapshot()
     }
 
     /// Returns the immutable runtime configuration.

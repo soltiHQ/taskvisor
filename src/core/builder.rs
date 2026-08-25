@@ -35,7 +35,7 @@ use super::{
 use crate::{
     BuildError,
     core::{ConfigError, SupervisorConfig, TaskDefaults},
-    events::Bus,
+    events::{Bus, Event},
     subscribers::{Subscribe, SubscriberSet},
 };
 
@@ -378,6 +378,13 @@ impl SupervisorBuilder {
         reservations: Vec<deferred_drop::DropReservation>,
     ) -> Result<Arc<Supervisor>, BuildError> {
         let bus = Bus::new(self.runtime.bus_capacity().get());
+        let retirement_bus = bus.clone();
+        drop_domain.set_retirement_reporter(move |configured, effective, retired| {
+            retirement_bus.publish_lazy(|| {
+                Event::ownership_capacity_retired(configured, effective, retired)
+                    .with_task("destructor_isolation")
+            });
+        });
         let subs = Arc::new(SubscriberSet::from_reserved(
             self.subscribers,
             reservations,

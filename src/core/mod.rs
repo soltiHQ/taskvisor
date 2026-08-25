@@ -31,6 +31,9 @@
 mod outcome;
 pub use outcome::{TaskOutcome, TaskOutcomeKind, TaskWaiter};
 
+mod ownership;
+pub use ownership::OwnershipSnapshot;
+
 mod runtime;
 pub(crate) use runtime::SupervisorCore;
 

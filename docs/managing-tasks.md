@@ -38,6 +38,17 @@ It includes tasks waiting for attempt capacity, in retry backoff, running, or co
 `alive_snapshot` and `is_alive` answer a different question: whether a physical attempt is still active.
 Both are point-in-time snapshots and may be stale as soon as concurrent work changes.
 
+`ownership_snapshot` reports the separate lifetime and deferred-cleanup boundary.
+It shows configured, effective, and available ownership capacity, parked admission requests,
+and cleanup batches that are queued or claimed by destructor workers.
+A completed task can be absent from `list` and `alive_snapshot` while it still appears through
+the ownership snapshot's in-use or cleanup counts.
+
+Capacity fields are `None` when the ownership limit is disabled.
+Configured, effective, available, and waiter values are copied together. `admission_open` also
+includes a separate runtime-state read, and cleanup counts are copied together under their own
+lock. The complete snapshot is rolling rather than atomic across those reads.
+
 ## Choose waiting or fail-fast intake
 
 Regular `add*` calls wait for ownership admission and registry-command capacity.

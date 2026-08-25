@@ -2,12 +2,12 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 #[cfg(feature = "controller")]
 use common::poll_until;
-use common::with_timeout;
+use common::{EventCollector, collector_subscribers, with_timeout};
 use taskvisor::prelude::*;
 
 struct NoopSubscriber;
@@ -20,13 +20,277 @@ impl Subscribe for NoopSubscriber {
     }
 }
 
+struct PanickingDropSubscriber;
+
+impl Subscribe for PanickingDropSubscriber {
+    fn on_event(&self, _event: &Event) {}
+
+    fn name(&self) -> &str {
+        "panicking-drop-subscriber"
+    }
+}
+
+impl Drop for PanickingDropSubscriber {
+    fn drop(&mut self) {
+        panic!("injected final subscriber destructor panic");
+    }
+}
+
+#[derive(Default)]
+struct FinalDropState {
+    entered: bool,
+    released: bool,
+}
+
+type FinalDropGate = Arc<(Mutex<FinalDropState>, Condvar)>;
+
+struct ReleaseFinalDrop(FinalDropGate);
+
+impl Drop for ReleaseFinalDrop {
+    fn drop(&mut self) {
+        release_final_drop(&self.0);
+    }
+}
+
+struct BlockingFinalDropTask {
+    gate: FinalDropGate,
+}
+
+impl Task for BlockingFinalDropTask {
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl Drop for BlockingFinalDropTask {
+    fn drop(&mut self) {
+        let (state, changed) = &*self.gate;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        changed.notify_all();
+        while !state.released {
+            state = changed
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+struct PanickingFinalDropTask;
+
+impl Task for PanickingFinalDropTask {
+    fn spawn(&self, _ctx: TaskContext) -> BoxTaskFuture {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl Drop for PanickingFinalDropTask {
+    fn drop(&mut self) {
+        panic!("injected final Task destructor panic");
+    }
+}
+
+fn wait_for_final_drop(gate: &FinalDropGate) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let (state, changed) = &**gate;
+    let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+    while !state.entered {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!remaining.is_zero(), "the final destructor must start");
+        let (next, timeout) = changed
+            .wait_timeout(state, remaining)
+            .unwrap_or_else(|error| error.into_inner());
+        state = next;
+        assert!(
+            !timeout.timed_out() || state.entered,
+            "the final destructor must start"
+        );
+    }
+}
+
+fn release_final_drop(gate: &FinalDropGate) {
+    let (state, changed) = &**gate;
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .released = true;
+    changed.notify_all();
+}
+
 #[test]
 fn build_with_subscribers_is_safe_outside_tokio() {
     let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(NoopSubscriber)];
     let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
 
     assert_eq!(supervisor.runtime_config().bus_capacity().get(), 1024);
+    let ownership = supervisor.ownership_snapshot();
+    let configured = supervisor
+        .runtime_config()
+        .ownership_capacity()
+        .expect("the default ownership limit is finite")
+        .get();
+    assert_eq!(ownership.configured_limit, Some(configured));
+    assert_eq!(ownership.effective_limit, Some(configured));
+    assert_eq!(ownership.available, Some(configured - 1));
+    assert_eq!(ownership.in_use(), Some(1));
+    assert_eq!(ownership.waiters, 0);
+    assert!(ownership.admission_open);
+    assert_eq!(ownership.cleanup_queued, 0);
+    assert_eq!(ownership.cleanup_running, 0);
     drop(supervisor);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ownership_snapshot_explains_blocked_final_cleanup_and_parked_admission() {
+    let config = SupervisorConfig::default()
+        .try_with_ownership_capacity(1)
+        .expect("the test capacity is valid");
+    let supervisor = Supervisor::new(config, vec![]);
+    let handle = supervisor.serve().expect("runtime startup");
+    let gate = Arc::new((Mutex::new(FinalDropState::default()), Condvar::new()));
+    let _release_on_failure = ReleaseFinalDrop(Arc::clone(&gate));
+    let task: TaskRef = Arc::new(BlockingFinalDropTask {
+        gate: Arc::clone(&gate),
+    });
+    let (_, waiter) = handle
+        .add_and_watch(TaskSpec::once("blocked-final-cleanup", task))
+        .await
+        .expect("the task must be admitted");
+
+    assert!(matches!(
+        with_timeout(2, waiter.wait()).await,
+        Ok(TaskOutcome::Completed)
+    ));
+    wait_for_final_drop(&gate);
+    assert!(handle.list().await.is_empty());
+    assert!(handle.alive_snapshot().await.is_empty());
+
+    let blocked = handle.ownership_snapshot();
+    assert_eq!(blocked.configured_limit, Some(1));
+    assert_eq!(blocked.effective_limit, Some(1));
+    assert_eq!(blocked.available, Some(0));
+    assert_eq!(blocked.in_use(), Some(1));
+    assert_eq!(blocked.cleanup_running, 1);
+    assert_eq!(blocked.cleanup_queued, 0);
+    assert!(blocked.admission_open);
+
+    let waiting_handle = handle.clone();
+    let waiting = tokio::spawn(async move {
+        let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
+        waiting_handle
+            .add(TaskSpec::once("parked-behind-cleanup", task))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while handle.ownership_snapshot().waiters != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the waiting add must become visible");
+
+    waiting.abort();
+    let _ = waiting.await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while handle.ownership_snapshot().waiters != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("canceling the add future must remove its ownership waiter");
+
+    handle
+        .clone()
+        .shutdown()
+        .await
+        .expect("blocked final destruction must not extend public shutdown");
+    let shut_down = supervisor.ownership_snapshot();
+    assert!(!shut_down.admission_open);
+    assert_eq!(shut_down.cleanup_running, 1);
+
+    release_final_drop(&gate);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let drained = handle.ownership_snapshot();
+            if drained.cleanup_running == 0 && drained.available == Some(1) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the snapshot must reflect completed final destruction");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn final_destructor_panic_retires_capacity_and_emits_one_typed_event() {
+    let collector = EventCollector::new();
+    let config = SupervisorConfig::default()
+        .try_with_ownership_capacity(2)
+        .expect("the subscriber and task each need one ownership unit");
+    let supervisor = Supervisor::new(config, collector_subscribers(&collector));
+    let handle = supervisor.serve().expect("runtime startup");
+    let task: TaskRef = Arc::new(PanickingFinalDropTask);
+    let (_, waiter) = handle
+        .add_and_watch(TaskSpec::once("panicking-final-cleanup", task))
+        .await
+        .expect("the task must be admitted");
+
+    assert!(matches!(
+        with_timeout(2, waiter.wait()).await,
+        Ok(TaskOutcome::Completed)
+    ));
+    let event = collector
+        .wait_for(EventKind::OwnershipCapacityRetired, Duration::from_secs(2))
+        .await
+        .expect("retirement must emit a typed diagnostic");
+    assert_eq!(event.task.as_deref(), Some("destructor_isolation"));
+    assert_eq!(event.configured_capacity, Some(2));
+    assert_eq!(event.effective_capacity, Some(1));
+    assert_eq!(event.retired_units, Some(1));
+    let ownership = handle.ownership_snapshot();
+    assert_eq!(ownership.configured_limit, Some(2));
+    assert_eq!(ownership.effective_limit, Some(1));
+    assert_eq!(ownership.retired(), Some(1));
+    assert_eq!(ownership.available, Some(0));
+    assert_eq!(ownership.in_use(), Some(1));
+
+    handle.shutdown().await.expect("runtime shutdown");
+    assert_eq!(
+        collector.count(EventKind::OwnershipCapacityRetired),
+        1,
+        "one failed cleanup batch must emit one retirement transition"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn final_subscriber_destructor_retirement_remains_visible_after_shutdown() {
+    let config = SupervisorConfig::default()
+        .try_with_ownership_capacity(1)
+        .expect("the subscriber needs one ownership unit");
+    let subscribers: Vec<Arc<dyn Subscribe>> = vec![Arc::new(PanickingDropSubscriber)];
+    let supervisor = Supervisor::new(config, subscribers);
+    let handle = supervisor.serve().expect("runtime startup");
+
+    assert_eq!(supervisor.ownership_snapshot().in_use(), Some(1));
+    handle.shutdown().await.expect("runtime shutdown");
+
+    let retired = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = supervisor.ownership_snapshot();
+            if snapshot.effective_limit == Some(0) && snapshot.cleanup_running == 0 {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the final subscriber destructor must retire its ownership unit");
+    assert_eq!(retired.configured_limit, Some(1));
+    assert_eq!(retired.retired(), Some(1));
+    assert_eq!(retired.available, Some(0));
+    assert_eq!(retired.in_use(), Some(0));
+    assert!(!retired.admission_open);
 }
 
 #[cfg(feature = "controller")]

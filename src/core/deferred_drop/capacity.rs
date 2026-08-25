@@ -7,6 +7,7 @@
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU8, Ordering as AtomicOrdering},
@@ -96,6 +97,36 @@ pub(super) struct CapacityBroker {
     limit: Option<NonZeroUsize>,
     /// Admission mode, closure, and any finite-capacity waiters.
     state: Mutex<CapacityState>,
+    /// Best-effort callback invoked after finite capacity is permanently reduced.
+    retirement_reporter: Mutex<Option<RetirementReporter>>,
+}
+
+/// One committed reduction of finite ownership capacity.
+#[derive(Clone, Copy)]
+pub(super) struct CapacityRetirement {
+    /// Original configured finite limit.
+    pub(super) configured_capacity: usize,
+    /// Remaining usable capacity after this transition.
+    pub(super) effective_capacity: usize,
+    /// Units removed by this transition.
+    pub(super) retired_units: usize,
+}
+
+/// Shared diagnostic callback for committed ownership retirement.
+pub(super) type RetirementReporter = Arc<dyn Fn(CapacityRetirement) + Send + Sync + 'static>;
+
+/// Point-in-time finite or unlimited broker accounting.
+pub(super) struct CapacitySnapshot {
+    /// Original finite limit, or `None` for unlimited admission.
+    pub(super) configured_limit: Option<usize>,
+    /// Post-retirement finite limit, or `None` for unlimited admission.
+    pub(super) effective_limit: Option<usize>,
+    /// Currently uncharged finite units, or `None` for unlimited admission.
+    pub(super) available: Option<usize>,
+    /// Requests still parked in the finite-capacity queue.
+    pub(super) waiters: usize,
+    /// Whether the broker accepts new requests.
+    pub(super) open: bool,
 }
 
 /// Result of attempting admission before a future waits.
@@ -181,7 +212,16 @@ impl CapacityBroker {
                 closed: false,
                 mode,
             }),
+            retirement_reporter: Mutex::new(None),
         })
+    }
+
+    /// Installs or replaces the best-effort retirement callback.
+    pub(super) fn set_retirement_reporter(&self, reporter: RetirementReporter) {
+        *self
+            .retirement_reporter
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(reporter);
     }
 
     /// Builds the typed rejection for this broker's admission mode.
@@ -329,12 +369,21 @@ impl CapacityBroker {
             return;
         };
         let mut rejected = Vec::new();
+        let mut retirement = None;
         let close = if let Some(effective_capacity) = limited.effective_capacity.checked_sub(units)
         {
             if limited.available > effective_capacity {
                 true
             } else {
                 limited.effective_capacity = effective_capacity;
+                retirement = Some(CapacityRetirement {
+                    configured_capacity: self
+                        .limit
+                        .expect("limited capacity mode has a configured limit")
+                        .get(),
+                    effective_capacity,
+                    retired_units: units,
+                });
                 limited.waiters.retain(|waiter| {
                     if waiter.units <= effective_capacity {
                         true
@@ -360,6 +409,23 @@ impl CapacityBroker {
         }
         drop(state);
         Self::notify(rejected);
+        if let Some(retirement) = retirement {
+            self.report_retirement(retirement);
+        }
+    }
+
+    /// Invokes the diagnostic callback outside broker accounting locks.
+    fn report_retirement(&self, retirement: CapacityRetirement) {
+        let reporter = self
+            .retirement_reporter
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(reporter) = reporter
+            && let Err(payload) = catch_unwind(AssertUnwindSafe(|| reporter(retirement)))
+        {
+            std::mem::forget(payload);
+        }
     }
 
     /// Removes a waiting request or returns its unobserved grant.
@@ -523,6 +589,27 @@ impl CapacityBroker {
     fn notify(signals: Vec<Arc<CapacitySignal>>) {
         for signal in signals {
             signal.changed.notify_waiters();
+        }
+    }
+
+    /// Copies current admission accounting under the broker mutex.
+    pub(super) fn snapshot(&self) -> CapacitySnapshot {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match &state.mode {
+            CapacityMode::Limited(limited) => CapacitySnapshot {
+                configured_limit: self.limit.map(NonZeroUsize::get),
+                effective_limit: Some(limited.effective_capacity),
+                available: Some(limited.available),
+                waiters: limited.waiters.len(),
+                open: !state.closed,
+            },
+            CapacityMode::Unlimited => CapacitySnapshot {
+                configured_limit: None,
+                effective_limit: None,
+                available: None,
+                waiters: 0,
+                open: !state.closed,
+            },
         }
     }
 

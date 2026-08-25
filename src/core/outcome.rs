@@ -16,8 +16,9 @@
 //!
 //! Except for [`TaskOutcome::ForceAborted`], the registry joins the managed actor before delivering the outcome.
 //! A force-aborted actor can remain physically active after the waiter resolves. Dropping the waiter does not
-//! cancel the work. This path is reliable while the process and runtime are alive;
-//! it is not durable storage across process termination.
+//! cancel the work. Final destruction of the retained task object happens later on deferred-cleanup workers.
+//! A panic during that later destruction is a runtime diagnostic and cannot revise an outcome already delivered.
+//! This path is reliable while the process and runtime are alive; it is not durable storage across process termination.
 
 use std::sync::Arc;
 
@@ -47,7 +48,7 @@ pub enum TaskOutcomeKind {
     Canceled,
     /// Taskvisor requested abort after cooperative cancellation did not complete.
     ForceAborted,
-    /// The task actor or protected cleanup panicked.
+    /// The task actor or protected attempt-owned cleanup panicked before terminal outcome delivery.
     Panicked,
     /// Admission rejected the work before its task body ran.
     Rejected,
@@ -136,9 +137,10 @@ pub enum TaskOutcome {
     /// A synchronous poll can remain physically active until it returns control to Tokio.
     ForceAborted,
 
-    /// The actor or a protected user-value cleanup boundary panicked.
+    /// The actor panicked, or dropping attempt-owned data inside the physical actor boundary panicked.
     ///
     /// A panic from task polling becomes a retryable task failure instead.
+    /// A later panic while deferred cleanup destroys the retained task object does not change the outcome already delivered.
     Panicked,
 
     /// Controller or registry admission rejected the work before its task body ran.
@@ -310,6 +312,7 @@ impl TaskWaiter {
     ///
     /// For admitted work, this normally resolves after registry membership is removed. Controller rejection
     /// can resolve without starting the task. Shutdown does not replace an outcome already owned by terminal cleanup.
+    /// Resolution does not mean that deferred destruction of the retained task object has finished.
     ///
     /// # Errors
     ///

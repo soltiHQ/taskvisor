@@ -180,6 +180,7 @@ Taskvisor makes its process boundary explicit:
 - lifecycle events are best-effort; use `TaskWaiter` when application logic needs a final result;
 - cancellation starts cooperatively; synchronous task code cannot be interrupted at the grace deadline;
 - shutdown stops waiting after configured deadlines, but synchronous callbacks or destructors that already started may still be running;
+- `ownership_snapshot` reports retained ownership and queued or running deferred cleanup separately from task membership;
 - periodic tasks use a delay after completion, not a calendar or cron schedule;
 - controller slots coordinate work inside one supervisor.
 
