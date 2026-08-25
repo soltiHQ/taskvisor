@@ -38,4 +38,35 @@ taskvisor = { version = "0.8", default-features = false }
 With `test-util` enabled, `TaskContext::detached` and `TaskContext::detached_cancelled` create contexts for direct task-code tests.
 `TaskId::for_tests` creates a fresh process-local ID.
 `TaskOutcome::failed_for_tests`, `TaskOutcome::fatal_for_tests`, and `TaskOutcome::rejected_for_tests` construct non-exhaustive outcome variants for assertions.
+
+Add the test-only feature and the Tokio test runtime:
+
+```toml
+[dev-dependencies]
+taskvisor = { version = "0.8", features = ["test-util"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+```
+
+Test cancellation-aware application code without starting a supervisor:
+
+```rust
+use taskvisor::{TaskContext, TaskError};
+
+async fn waits_for_work(ctx: &TaskContext) -> Result<(), TaskError> {
+    ctx.run_until_cancelled(std::future::pending::<()>()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn observes_cancellation() {
+    let ctx = TaskContext::detached_cancelled();
+
+    assert!(matches!(
+        waits_for_work(&ctx).await,
+        Err(TaskError::Canceled)
+    ));
+}
+```
+
+For integration tests, start a supervisor with `serve`, add watched work, assert its `TaskOutcome`, then join `shutdown`.
 Use the [API documentation](https://docs.rs/taskvisor) for their exact contracts.

@@ -4,7 +4,7 @@
 //! Waiting stops if the controller channel closes.
 //! Fail-fast reservation converts capacity and worker-start failures into controller errors.
 
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
 use crate::{
     controller::{ControllerError, ControllerSpec},
@@ -31,6 +31,23 @@ impl ControllerHandle {
         }
     }
 
+    /// Bounds only ownership admission and preserves controller-closure precedence.
+    async fn reserve_or_closed_with_timeout(
+        &self,
+        reservation: impl Future<Output = Result<DropReservation, DropAdmissionError>>,
+        wait_for: Duration,
+    ) -> Result<DropReservation, ControllerError> {
+        tokio::pin!(reservation);
+        tokio::select! {
+            biased;
+            _ = self.tx.closed() => Err(ControllerError::Closed),
+            result = &mut reservation => result.map_err(Self::admission_error),
+            _ = tokio::time::sleep(wait_for) => {
+                Err(ControllerError::OwnershipAdmissionTimeout { timeout: wait_for })
+            }
+        }
+    }
+
     /// Waits for deterministic test capacity or controller closure.
     #[cfg(test)]
     async fn reserve_capacity_or_closed(
@@ -42,6 +59,24 @@ impl ControllerHandle {
             biased;
             _ = self.tx.closed() => Err(ControllerError::Closed),
             result = &mut reservation => result.map_err(Self::capacity_error),
+        }
+    }
+
+    /// Test-source counterpart to [`Self::reserve_or_closed_with_timeout`].
+    #[cfg(test)]
+    async fn reserve_capacity_or_closed_with_timeout(
+        &self,
+        reservation: impl Future<Output = Result<DropReservation, DropCapacityError>>,
+        wait_for: Duration,
+    ) -> Result<DropReservation, ControllerError> {
+        tokio::pin!(reservation);
+        tokio::select! {
+            biased;
+            _ = self.tx.closed() => Err(ControllerError::Closed),
+            result = &mut reservation => result.map_err(Self::capacity_error),
+            _ = tokio::time::sleep(wait_for) => {
+                Err(ControllerError::OwnershipAdmissionTimeout { timeout: wait_for })
+            }
         }
     }
 
@@ -87,15 +122,32 @@ impl ControllerHandle {
         #[cfg(not(test))]
         let reservation = self.reserve_or_closed(self.drop_domain.reserve()).await?;
 
-        let retained = spec.task_spec().task().clone();
-        let mut owned = OwnedTask::new(spec, retained, reservation);
-        let bus = self.bus.clone();
-        owned.cleanup.set_panic_reporter(move |message| {
-            bus.publish_lazy(|| {
-                Event::runtime_failure("controller", format!("task_drop_panicked: {message}"))
-            });
-        });
-        Ok(owned)
+        Ok(self.attach_ownership(spec, reservation))
+    }
+
+    /// Reserves destructor ownership up to a caller-provided deadline.
+    pub(super) async fn own_with_ownership_timeout(
+        &self,
+        spec: ControllerSpec,
+        wait_for: Duration,
+    ) -> Result<OwnedTask<ControllerSpec>, ControllerError> {
+        #[cfg(test)]
+        let reservation = match &self.reservation_source {
+            Some(source) => {
+                self.reserve_capacity_or_closed_with_timeout(source.reserve(), wait_for)
+                    .await?
+            }
+            None => {
+                self.reserve_or_closed_with_timeout(self.drop_domain.reserve(), wait_for)
+                    .await?
+            }
+        };
+        #[cfg(not(test))]
+        let reservation = self
+            .reserve_or_closed_with_timeout(self.drop_domain.reserve(), wait_for)
+            .await?;
+
+        Ok(self.attach_ownership(spec, reservation))
     }
 
     /// Reserves destructor ownership without waiting.
@@ -117,14 +169,23 @@ impl ControllerHandle {
             .try_reserve()
             .map_err(Self::admission_error);
 
+        Ok(self.attach_ownership(spec, reservation?))
+    }
+
+    /// Attaches a completed reservation and the controller cleanup diagnostic.
+    fn attach_ownership(
+        &self,
+        spec: ControllerSpec,
+        reservation: DropReservation,
+    ) -> OwnedTask<ControllerSpec> {
         let retained = spec.task_spec().task().clone();
-        let mut owned = OwnedTask::new(spec, retained, reservation?);
+        let mut owned = OwnedTask::new(spec, retained, reservation);
         let bus = self.bus.clone();
         owned.cleanup.set_panic_reporter(move |message| {
             bus.publish_lazy(|| {
                 Event::runtime_failure("controller", format!("task_drop_panicked: {message}"))
             });
         });
-        Ok(owned)
+        owned
     }
 }

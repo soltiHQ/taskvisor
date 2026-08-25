@@ -323,7 +323,7 @@ impl SubscriberExecutor {
         self.shared.enqueue(lane);
     }
 
-    async fn shutdown(&self, join_all: bool) {
+    async fn shutdown(&self) {
         self.shared.close();
         let coordinator = self
             .coordinator
@@ -347,14 +347,10 @@ impl SubscriberExecutor {
                     .unwrap_or_else(|error| error.into_inner()),
             )
         };
-        let joinable: Vec<_> = workers
-            .into_iter()
-            .filter(|worker| join_all || worker.finished.load(Ordering::Acquire))
-            .map(|worker| worker.thread)
-            .collect();
-        for worker in joinable {
-            if worker.is_finished() {
-                let _ = worker.join();
+        for worker in workers {
+            // Never extend the public deadline by waiting for a live callback worker.
+            if worker.thread.is_finished() {
+                let _ = worker.thread.join();
             }
         }
     }
@@ -907,7 +903,7 @@ impl SubscriberSet {
                 submit_owned_subscriber(owned);
             }
         }
-        executor.shutdown(drained).await;
+        executor.shutdown().await;
     }
 }
 

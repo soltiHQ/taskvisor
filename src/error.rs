@@ -176,6 +176,17 @@ pub enum RuntimeError {
     #[error("management command queue is full")]
     CommandQueueFull,
 
+    /// The caller's bounded wait for cleanup ownership expired before command intake.
+    ///
+    /// No runtime or controller command was committed.
+    /// The timeout covers only ownership admission; it does not bound later command-queue or registry waits.
+    #[error("timeout waiting for ownership admission after {timeout:?}")]
+    #[non_exhaustive]
+    OwnershipAdmissionTimeout {
+        /// Maximum duration allowed for ownership admission.
+        timeout: Duration,
+    },
+
     /// The caller's bounded wait for terminal registry cleanup expired.
     ///
     /// The stop request remains active.
@@ -236,6 +247,7 @@ impl RuntimeError {
             RuntimeError::TaskAlreadyExists { .. } => "runtime_task_already_exists",
             RuntimeError::ResourceLimitReached { .. } => "runtime_resource_limit_reached",
             RuntimeError::CommandQueueFull => "runtime_command_queue_full",
+            RuntimeError::OwnershipAdmissionTimeout { .. } => "runtime_ownership_admission_timeout",
             RuntimeError::TaskTerminationTimeout { .. } => "runtime_task_termination_timeout",
             RuntimeError::OutcomeUnavailable { .. } => "runtime_outcome_unavailable",
             RuntimeError::SignalSetupFailed { .. } => "runtime_signal_setup_failed",
@@ -555,6 +567,12 @@ mod tests {
             ),
             (RuntimeError::CommandQueueFull, "runtime_command_queue_full"),
             (
+                RuntimeError::OwnershipAdmissionTimeout {
+                    timeout: Duration::from_millis(25),
+                },
+                "runtime_ownership_admission_timeout",
+            ),
+            (
                 RuntimeError::TaskTerminationTimeout {
                     id,
                     timeout: Duration::from_secs(1),
@@ -605,6 +623,13 @@ mod tests {
         assert_eq!(
             RuntimeError::CommandQueueFull.to_string(),
             "management command queue is full"
+        );
+        let ownership = RuntimeError::OwnershipAdmissionTimeout {
+            timeout: Duration::from_millis(25),
+        };
+        assert_eq!(
+            ownership.to_string(),
+            "timeout waiting for ownership admission after 25ms"
         );
 
         let id = TaskId::next();

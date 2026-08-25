@@ -36,8 +36,26 @@ These two timeout failures remain subject to the restart policy and retry limit.
 If dropping the attempt future panics, Taskvisor instead produces `AttemptFailed` and ends with a final `Panicked` outcome without retrying.
 
 With panic unwinding enabled, a panic while creating or polling the attempt future becomes a retryable failure.
-A panic during protected cleanup can instead produce a final `Panicked` outcome.
+A panic while Taskvisor destroys attempt-owned data inside the physical actor boundary can instead produce a final `Panicked` outcome.
+This does not include later deferred destruction of the retained task object after terminal outcome delivery.
 `panic = "abort"` cannot be caught.
+
+## Make repeated attempts safe
+
+A restartable task can execute its attempt body again after `TaskError::Fail`, `TaskError::Timeout`, a configured attempt timeout, or a caught panic while creating or polling task code.
+Taskvisor cannot determine whether an external system committed a side effect before that failure.
+Return a retryable result only when running the attempt again is acceptable.
+
+| Application decision                                       | Attempt result        |
+|------------------------------------------------------------|-----------------------|
+| Temporary failure and repeating the operation is safe      | `TaskError::Fail`     |
+| Task-reported deadline and repeating the operation is safe | `TaskError::Timeout`  |
+| The application classifies the failure as permanent        | `TaskError::Fatal`    |
+| Cancellation was observed and cooperative cleanup finished | `TaskError::Canceled` |
+| The attempt completed its required work                    | `Ok(())`              |
+
+For external side effects, use an application-owned idempotency key, transaction, reconciliation read, deduplication record, or acknowledgement protocol as appropriate.
+Taskvisor provides retry lifecycle. It does not provide rollback, durable execution, or exactly-once execution.
 
 ## Bound failure retries
 

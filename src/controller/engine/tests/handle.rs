@@ -68,6 +68,191 @@ async fn ownership_wait_returns_closed_when_controller_receiver_closes() {
     );
 }
 
+#[tokio::test]
+async fn ownership_timeout_removes_waiter_without_controller_intake() {
+    let config = ControllerConfig::default();
+    let queue_capacity = config.queue_capacity().get();
+    let ctrl = make_controller(config, Bus::new(64));
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let held = source
+        .try_reserve()
+        .expect("the isolated ownership slot starts available");
+    let handle = ctrl.handle().with_reservation_source(source.clone());
+    let id = TaskId::next();
+
+    let error = handle
+        .submit_prepared_with_ownership_timeout(
+            id,
+            ControllerSpec::queue(waiting_spec("ownership-timeout"))
+                .with_slot("ownership-timeout-slot"),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("saturated ownership admission must time out");
+
+    assert_eq!(
+        error,
+        ControllerError::OwnershipAdmissionTimeout {
+            timeout: Duration::ZERO,
+        }
+    );
+    let snapshot = source.domain().snapshot(true);
+    assert_eq!(snapshot.waiters, 0);
+    assert_eq!(snapshot.available, Some(0));
+    assert_eq!(ctrl.tx.capacity(), queue_capacity);
+
+    drop(held);
+    assert!(
+        source.try_reserve().is_ok(),
+        "the timed-out waiter must not retain a later ownership grant"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn positive_controller_ownership_deadline_expires_and_release_before_retry_succeeds() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let domain = source.domain();
+    let held = source
+        .try_reserve()
+        .expect("the isolated ownership slot starts available");
+    let handle = ctrl.handle().with_reservation_source(source);
+    let wait_for = Duration::from_secs(5);
+
+    let mut expiring = Box::pin(
+        handle.submit_prepared_with_ownership_timeout(
+            TaskId::next(),
+            ControllerSpec::queue(waiting_spec("positive-controller-ownership-timeout"))
+                .with_slot("positive-controller-ownership-timeout-slot"),
+            wait_for,
+        ),
+    );
+    std::future::poll_fn(|context| match expiring.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("saturated ownership admission must initially wait, got {result:?}")
+        }
+    })
+    .await;
+    assert_eq!(domain.snapshot(true).waiters, 1);
+
+    tokio::time::advance(wait_for).await;
+    assert!(matches!(
+        expiring.await,
+        Err(ControllerError::OwnershipAdmissionTimeout { timeout, .. })
+            if timeout == wait_for
+    ));
+    assert_eq!(domain.snapshot(true).waiters, 0);
+
+    let retry_id = TaskId::next();
+    let mut admitted = Box::pin(
+        handle.submit_prepared_with_ownership_timeout(
+            retry_id,
+            ControllerSpec::queue(waiting_spec("controller-release-before-deadline"))
+                .with_slot("controller-release-before-deadline-slot"),
+            wait_for,
+        ),
+    );
+    std::future::poll_fn(|context| match admitted.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("saturated ownership admission must initially wait, got {result:?}")
+        }
+    })
+    .await;
+    assert_eq!(domain.snapshot(true).waiters, 1);
+
+    drop(held);
+    assert_eq!(
+        admitted
+            .await
+            .expect("releasing ownership before the deadline must admit the submission"),
+        retry_id
+    );
+
+    let mut receiver = ctrl.rx.write().await.take().expect("receiver present");
+    drop(
+        receiver
+            .recv()
+            .await
+            .expect("the admitted command must be queued"),
+    );
+    drop(receiver);
+}
+
+#[tokio::test]
+async fn controller_close_wins_when_ownership_deadline_is_also_ready() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let _held = source
+        .try_reserve()
+        .expect("the isolated ownership slot starts available");
+    let handle = ctrl.handle().with_reservation_source(source);
+    let receiver = ctrl.rx.write().await.take().expect("receiver present");
+    drop(receiver);
+
+    let error = handle
+        .submit_prepared_with_ownership_timeout(
+            TaskId::next(),
+            ControllerSpec::queue(waiting_spec("ownership-timeout-closed"))
+                .with_slot("ownership-timeout-closed-slot"),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a closed controller must reject intake");
+
+    assert_eq!(error, ControllerError::Closed);
+}
+
+#[tokio::test]
+async fn ownership_timeout_stops_before_controller_queue_wait() {
+    let config = ControllerConfig::default().with_queue_capacity(NonZeroUsize::new(1).unwrap());
+    let ctrl = make_controller(config, Bus::new(64));
+    let source = crate::core::deferred_drop::TestReservationSource::new(2);
+    let handle = ctrl.handle().with_reservation_source(source);
+
+    handle
+        .try_submit(
+            ControllerSpec::queue(waiting_spec("ownership-timeout-queue-blocker"))
+                .with_slot("ownership-timeout-queue-blocker-slot"),
+        )
+        .expect("the first submission must fill the controller queue");
+
+    let mut submission = Box::pin(
+        handle.submit_prepared_with_ownership_timeout(
+            TaskId::next(),
+            ControllerSpec::queue(waiting_spec("ownership-timeout-after-permit"))
+                .with_slot("ownership-timeout-after-permit-slot"),
+            Duration::ZERO,
+        ),
+    );
+    std::future::poll_fn(|context| match submission.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("a full controller queue must keep the submission pending, got {result:?}")
+        }
+    })
+    .await;
+
+    let mut receiver = ctrl.rx.write().await.take().expect("receiver present");
+    drop(
+        receiver
+            .recv()
+            .await
+            .expect("the blocking command is queued"),
+    );
+    submission
+        .await
+        .expect("the ownership deadline must not cover controller queue capacity");
+    drop(
+        receiver
+            .recv()
+            .await
+            .expect("the timed submission is queued"),
+    );
+    drop(receiver);
+}
+
 #[test]
 fn try_submit_reports_lazy_start_failure_without_enqueuing_and_exact_retry_succeeds() {
     let config = ControllerConfig::default();

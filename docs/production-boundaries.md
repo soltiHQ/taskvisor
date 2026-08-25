@@ -23,6 +23,8 @@ description: Understand Taskvisor durability, cancellation, observability, sched
 - The shared event bus and subscriber queues can drop events.
 - Subscriber callbacks already running cannot be interrupted at the drain deadline.
 - Use watched outcomes rather than events for application correctness.
+- Use `ownership_snapshot` for current ownership and deferred-cleanup state. `OwnershipCapacityRetired` is a best-effort transition diagnostic.
+- Retirement can happen after event delivery has closed during late shutdown cleanup. The snapshot remains the current-state interface.
 
 ## Scheduling and coordination scope
 
@@ -35,7 +37,22 @@ description: Understand Taskvisor durability, cancellation, observability, sched
 
 - Accepted tasks and configured subscribers consume ownership capacity through physical cleanup.
 - Blocking destructors for retained task or subscriber values occupy cleanup workers until they return.
+- `TaskWaiter` can resolve before final retained-task destruction; a later destructor panic cannot revise that outcome.
 - A panic while those values are destroyed permanently retires one unit from a finite ownership capacity.
+- `ownership_snapshot` exposes configured, effective, available, waiting, and queued or running cleanup state without starting dormant workers.
+- Ownership-specific timeout methods bound only permit admission; later command queues, controller policy, registry admission, and task execution remain outside that deadline.
 - Removing the ownership limit allows retained user values and cleanup backlog to grow without a count bound.
+
+## Check before deployment
+
+- Use durable external state when work must recover after process failure.
+- Review every timeout, cancellation, and force-abort boundary for external side effects.
+- Make retryable operations safe to repeat or protect them with an application-owned idempotency or acknowledgement protocol.
+- Use watched outcomes when application correctness depends on a final task result.
+- Choose retry, concurrency, registration, ownership, command-queue, subscriber-queue, and controller limits deliberately.
+- Decide whether the application or Taskvisor owns operating-system signal handling.
+- Join shutdown from a caller that can report cleanup errors.
+- Test cooperative cancellation, grace expiry, and application shutdown behavior.
+- Monitor event-loss diagnostics and runtime snapshots where operational visibility requires them.
 
 The crate forbids unsafe Rust with `#![forbid(unsafe_code)]`.

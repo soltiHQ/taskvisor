@@ -23,7 +23,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use super::{
     bundle::DropReservation,
-    capacity::{CapacityBroker, OwnershipPermit},
+    capacity::{CapacityBroker, CapacitySnapshot, OwnershipPermit},
     error::{DropCapacityError, DropStartError},
 };
 
@@ -32,9 +32,17 @@ mod worker;
 
 pub(super) use batch::DropBatch;
 pub(super) use worker::{CORE_WORKER_COUNT, WorkerSpawner, system_spawner};
+use worker::{CleanupSnapshot, WorkerQueue, max_worker_count};
 #[cfg(test)]
 pub(super) use worker::{ELASTIC_IDLE_TIMEOUT, MAX_WORKER_COUNT, worker_loop};
-use worker::{WorkerQueue, max_worker_count};
+
+/// Combined broker and cleanup-worker state for one started executor.
+pub(super) struct ExecutorSnapshot {
+    /// Ownership admission accounting.
+    pub(super) capacity: CapacitySnapshot,
+    /// Deferred-cleanup queue accounting.
+    pub(super) cleanup: CleanupSnapshot,
+}
 
 /// Started cleanup runtime shared by one domain and its outstanding reservations.
 pub(super) struct DropExecutor {
@@ -71,7 +79,7 @@ impl DropExecutor {
     ///
     /// Returns an error when admission closes or the unit can no longer be granted.
     pub(super) async fn reserve(self: &Arc<Self>) -> Result<DropReservation, DropCapacityError> {
-        let permit = self.capacity.acquire(1).await?;
+        let permit = self.capacity.acquire_one().await?;
         Ok(DropReservation::new(Arc::clone(self), permit))
     }
 
@@ -83,23 +91,6 @@ impl DropExecutor {
     pub(super) fn try_reserve(self: &Arc<Self>) -> Result<DropReservation, DropCapacityError> {
         let permit = self.capacity.try_acquire(1)?;
         Ok(DropReservation::new(Arc::clone(self), permit))
-    }
-
-    /// Waits for a complete test batch and creates one reservation per unit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the batch is invalid, admission closes, or the complete batch can no longer be granted.
-    #[cfg(test)]
-    pub(super) async fn reserve_many(
-        self: &Arc<Self>,
-        count: usize,
-    ) -> Result<Vec<DropReservation>, DropCapacityError> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let mut combined = self.capacity.acquire(count).await?;
-        Ok(self.split_reservations(&mut combined, count))
     }
 
     /// Creates one reservation per unit only when the complete batch is available.
@@ -141,6 +132,14 @@ impl DropExecutor {
         if let Err(batch) = self.workers.submit(batch) {
             self.capacity.close();
             std::mem::forget(batch);
+        }
+    }
+
+    /// Copies ownership-admission and cleanup-worker state.
+    pub(super) fn snapshot(&self) -> ExecutorSnapshot {
+        ExecutorSnapshot {
+            capacity: self.capacity.snapshot(),
+            cleanup: self.workers.snapshot(),
         }
     }
 }

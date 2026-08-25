@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::shutdown_workflow::ShutdownCoordinator;
 use crate::core::{
-    SupervisorConfig, TaskDefaults, deferred_drop,
+    OwnershipSnapshot, SupervisorConfig, TaskDefaults, deferred_drop,
     registry::{Registry, RegistryCommand},
 };
 use crate::{events::Bus, subscribers::SubscriberSet};
@@ -160,6 +160,12 @@ impl SupervisorCore {
     /// Exposes the defaults used at registry admission.
     pub(crate) fn task_defaults(&self) -> &TaskDefaults {
         &self.settings.task_defaults
+    }
+
+    /// Returns ownership admission and deferred-cleanup state.
+    pub(crate) fn ownership_snapshot(&self) -> OwnershipSnapshot {
+        self.drop_domain
+            .snapshot(!self.is_shutting_down() && !self.cmd_tx.is_closed())
     }
 
     /// Exposes this supervisor's cleanup ownership domain.

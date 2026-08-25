@@ -20,8 +20,8 @@
 
 /// Supervisor construction, control, configuration, and final outcomes.
 pub use crate::core::{
-    ConfigError, Supervisor, SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults,
-    TaskOutcome, TaskOutcomeKind, TaskWaiter,
+    ConfigError, OwnershipSnapshot, Supervisor, SupervisorBuilder, SupervisorConfig,
+    SupervisorHandle, TaskDefaults, TaskOutcome, TaskOutcomeKind, TaskWaiter,
 };
 
 /// Task implementation, context, shared references, and specifications.

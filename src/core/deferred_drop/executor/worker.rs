@@ -52,6 +52,16 @@ struct WorkerState {
     idle_workers: usize,
     /// Spawned workers that have not entered queue accounting.
     starting_workers: usize,
+    /// Batches removed from the queue whose user destructors have not returned.
+    running_batches: usize,
+}
+
+/// Point-in-time deferred-cleanup queue state.
+pub(in crate::core::deferred_drop) struct CleanupSnapshot {
+    /// Charged batches waiting for a worker.
+    pub(in crate::core::deferred_drop) queued: usize,
+    /// Charged batches claimed by workers and not yet completed.
+    pub(in crate::core::deferred_drop) running: usize,
 }
 
 /// Cleanup queue with persistent core and temporary elastic workers.
@@ -84,6 +94,7 @@ impl WorkerQueue {
                 live_workers: 0,
                 idle_workers: 0,
                 starting_workers: 0,
+                running_batches: 0,
             }),
             ready: Condvar::new(),
             spawner,
@@ -253,6 +264,7 @@ impl WorkerQueue {
         }
         loop {
             if let Some(batch) = state.queue.pop_front() {
+                state.running_batches += 1;
                 if !core {
                     let (next, _) = self
                         .ready
@@ -330,6 +342,25 @@ impl WorkerQueue {
         self.ready.notify_all();
     }
 
+    /// Records completion of one batch previously removed by [`take`](Self::take).
+    fn finish_batch(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        debug_assert!(
+            state.running_batches > 0,
+            "a cleanup worker may finish only a batch it previously started"
+        );
+        state.running_batches = state.running_batches.saturating_sub(1);
+    }
+
+    /// Copies queued and running cleanup counts under the worker mutex.
+    pub(super) fn snapshot(&self) -> CleanupSnapshot {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        CleanupSnapshot {
+            queued: state.queue.len(),
+            running: state.running_batches,
+        }
+    }
+
     /// Returns live, idle, and starting counts for focused tests.
     #[cfg(test)]
     pub(in crate::core::deferred_drop) fn worker_counts(&self) -> (usize, usize, usize) {
@@ -365,6 +396,18 @@ enum WorkerTake {
     Exit,
 }
 
+/// Balances the running-batch count even if internal worker code unwinds.
+struct RunningBatchGuard<'a> {
+    /// Queue whose batch count was charged by `take`.
+    queue: &'a WorkerQueue,
+}
+
+impl Drop for RunningBatchGuard<'_> {
+    fn drop(&mut self) {
+        self.queue.finish_batch();
+    }
+}
+
 /// Creates named operating-system threads for the production domain.
 pub(in crate::core::deferred_drop) fn system_spawner() -> Arc<WorkerSpawner> {
     Arc::new(|index, launcher| {
@@ -392,10 +435,12 @@ pub(in crate::core::deferred_drop) fn worker_loop(launch: WorkerLaunch) {
             spawn_elastic,
         } = queue.take(core, &mut active, &mut started)
         {
+            let running = RunningBatchGuard { queue: &queue };
             if spawn_elastic {
                 queue.spawn_elastic();
             }
             batch.run();
+            drop(running);
         }
     }));
     if let Err(payload) = result {

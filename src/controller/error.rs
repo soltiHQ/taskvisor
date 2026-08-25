@@ -1,5 +1,7 @@
 //! Reports failures before a controller submission enters slot admission.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// A failure before controller slot admission.
@@ -13,6 +15,7 @@ use thiserror::Error;
 /// - [`NotConfigured`](Self::NotConfigured) means the builder did not install a controller.
 /// - [`Full`](Self::Full) is fail-fast command-queue backpressure; the async submit form waits for that capacity.
 /// - [`ResourceLimit`](Self::ResourceLimit) and [`ThreadStartFailed`](Self::ThreadStartFailed) describe cleanup ownership that Taskvisor could not reserve before intake.
+/// - [`OwnershipAdmissionTimeout`](Self::OwnershipAdmissionTimeout) means a caller-provided ownership-only deadline expired before intake.
 /// - [`Closed`](Self::Closed) means controller shutdown has closed intake.
 ///
 /// Match the enum with a wildcard arm because it is non-exhaustive.
@@ -43,6 +46,17 @@ pub enum ControllerError {
         resource: &'static str,
         /// Configured hard limit for the resource.
         limit: usize,
+    },
+
+    /// The caller's bounded wait for cleanup ownership expired before command intake.
+    ///
+    /// No controller command was committed.
+    /// The timeout covers only ownership admission; it does not bound a later wait for controller command capacity.
+    #[error("timeout waiting for ownership admission after {timeout:?}")]
+    #[non_exhaustive]
+    OwnershipAdmissionTimeout {
+        /// Maximum duration allowed for ownership admission.
+        timeout: Duration,
     },
 
     /// Taskvisor could not start a cleanup worker required before intake.
@@ -86,6 +100,9 @@ impl ControllerError {
         match self {
             ControllerError::ThreadStartFailed { .. } => "controller_thread_start_failed",
             ControllerError::ResourceLimit { .. } => "controller_resource_limit",
+            ControllerError::OwnershipAdmissionTimeout { .. } => {
+                "controller_ownership_admission_timeout"
+            }
             ControllerError::AlreadyStarted => "controller_already_started",
             ControllerError::NotConfigured => "controller_not_configured",
             ControllerError::Closed => "controller_closed",
@@ -96,6 +113,8 @@ impl ControllerError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::ControllerError;
     use crate::core::deferred_drop::OWNERSHIP_RESOURCE;
 
@@ -110,6 +129,12 @@ mod tests {
                     limit: 1024,
                 },
                 "controller_resource_limit",
+            ),
+            (
+                ControllerError::OwnershipAdmissionTimeout {
+                    timeout: Duration::from_millis(25),
+                },
+                "controller_ownership_admission_timeout",
             ),
             (
                 ControllerError::ThreadStartFailed {
@@ -148,6 +173,21 @@ mod tests {
         };
         assert_eq!(resource, OWNERSHIP_RESOURCE);
         assert_eq!(limit, 1024);
+    }
+
+    #[test]
+    fn ownership_timeout_preserves_duration_and_display() {
+        let error = ControllerError::OwnershipAdmissionTimeout {
+            timeout: Duration::from_millis(25),
+        };
+        assert_eq!(
+            error.to_string(),
+            "timeout waiting for ownership admission after 25ms"
+        );
+        let ControllerError::OwnershipAdmissionTimeout { timeout, .. } = error else {
+            unreachable!("the constructed variant is an ownership admission timeout")
+        };
+        assert_eq!(timeout, Duration::from_millis(25));
     }
 
     #[test]

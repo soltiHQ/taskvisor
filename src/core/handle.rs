@@ -23,7 +23,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crate::core::{RuntimeOwner, SupervisorCore};
+use crate::core::{OwnershipSnapshot, RuntimeOwner, SupervisorCore};
 use crate::error::RuntimeError;
 use crate::identity::TaskId;
 use crate::tasks::TaskSpec;
@@ -126,6 +126,30 @@ impl SupervisorHandle {
         self.core().add_task(spec).await
     }
 
+    /// Registers a task after a bounded wait for ownership admission.
+    ///
+    /// `wait_for` covers only the cleanup-ownership permit. Once Taskvisor acquires that
+    /// permit, command-queue admission and the registry decision follow [`add`](Self::add)
+    /// without this deadline. An immediately available permit can succeed when `wait_for`
+    /// is [`Duration::ZERO`]. The timer cannot interrupt synchronous lazy cleanup-worker startup.
+    ///
+    /// A timeout happens before command commit. It starts no task and publishes no lifecycle
+    /// event for this request.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`add`](Self::add).
+    /// It also returns [`RuntimeError::OwnershipAdmissionTimeout`] when ownership remains unavailable for `wait_for`.
+    pub async fn add_with_ownership_timeout(
+        &self,
+        spec: TaskSpec,
+        wait_for: Duration,
+    ) -> Result<TaskId, RuntimeError> {
+        self.core()
+            .add_task_with_ownership_timeout(spec, wait_for)
+            .await
+    }
+
     /// Registers a task without waiting for ownership admission.
     ///
     /// This is useful when the caller must apply its own overload policy instead of waiting for a configured ownership limit.
@@ -154,6 +178,26 @@ impl SupervisorHandle {
         spec: TaskSpec,
     ) -> Result<(TaskId, TaskWaiter), RuntimeError> {
         let (id, done_rx) = self.core().add_task_watched(spec).await?;
+        Ok((id, TaskWaiter::new(id, done_rx)))
+    }
+
+    /// Registers watched work after a bounded wait for ownership admission.
+    ///
+    /// The ownership-only deadline and post-timeout behavior match [`add_with_ownership_timeout`](Self::add_with_ownership_timeout).
+    /// After ownership admission, registry confirmation and final-outcome behavior match [`add_and_watch`](Self::add_and_watch).
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`add_with_ownership_timeout`](Self::add_with_ownership_timeout).
+    pub async fn add_and_watch_with_ownership_timeout(
+        &self,
+        spec: TaskSpec,
+        wait_for: Duration,
+    ) -> Result<(TaskId, TaskWaiter), RuntimeError> {
+        let (id, done_rx) = self
+            .core()
+            .add_task_watched_with_ownership_timeout(spec, wait_for)
+            .await?;
         Ok((id, TaskWaiter::new(id, done_rx)))
     }
 
@@ -286,6 +330,18 @@ impl SupervisorHandle {
     /// Use [`list`](Self::list) when registry membership is the desired state.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
+    }
+
+    /// Returns ownership-admission and deferred-cleanup state.
+    ///
+    /// This view is separate from [`list`](Self::list) and [`alive_snapshot`](Self::alive_snapshot).
+    /// Accepted task or subscriber values remain charged until their final isolated destruction finishes,
+    /// including after registry membership and physical attempts have ended.
+    ///
+    /// The returned point-in-time view can become stale immediately.
+    #[must_use = "inspect the returned ownership state"]
+    pub fn ownership_snapshot(&self) -> OwnershipSnapshot {
+        self.core().ownership_snapshot()
     }
 
     /// Returns the immutable runtime configuration.
@@ -578,6 +634,35 @@ impl SupervisorHandle {
         self.prepare_submission(spec)?.submit().await
     }
 
+    /// Queues controller work after a bounded wait for cleanup ownership.
+    ///
+    /// `wait_for` covers only the ownership permit. After Taskvisor acquires it, the ordinary
+    /// wait for controller command capacity has no deadline from this method. An immediately
+    /// available permit can succeed when `wait_for` is [`Duration::ZERO`]. The timer cannot
+    /// interrupt synchronous lazy cleanup-worker startup.
+    ///
+    /// A timeout happens before controller command intake and publishes no lifecycle event for
+    /// the request.
+    ///
+    /// Requires the `controller` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`submit`](Self::submit).
+    /// It also returns [`ControllerError::OwnershipAdmissionTimeout`](crate::ControllerError::OwnershipAdmissionTimeout)
+    /// when ownership remains unavailable for `wait_for`.
+    #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
+    pub async fn submit_with_ownership_timeout(
+        &self,
+        spec: crate::controller::ControllerSpec,
+        wait_for: Duration,
+    ) -> Result<TaskId, crate::controller::ControllerError> {
+        self.prepare_submission(spec)?
+            .submit_with_ownership_timeout(wait_for)
+            .await
+    }
+
     /// Submits only if the controller queue has capacity now.
     ///
     /// `Ok(id)` has the same queue-only meaning as [`submit`](Self::submit).
@@ -615,6 +700,28 @@ impl SupervisorHandle {
         spec: crate::controller::ControllerSpec,
     ) -> Result<(TaskId, TaskWaiter), crate::controller::ControllerError> {
         self.prepare_submission(spec)?.submit_and_watch().await
+    }
+
+    /// Queues watched controller work after bounded ownership admission.
+    ///
+    /// Timeout behavior matches [`submit_with_ownership_timeout`](Self::submit_with_ownership_timeout).
+    /// After ownership succeeds, intake and outcome behavior match [`submit_and_watch`](Self::submit_and_watch).
+    ///
+    /// Requires the `controller` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`submit_with_ownership_timeout`](Self::submit_with_ownership_timeout).
+    #[cfg(feature = "controller")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
+    pub async fn submit_and_watch_with_ownership_timeout(
+        &self,
+        spec: crate::controller::ControllerSpec,
+        wait_for: Duration,
+    ) -> Result<(TaskId, TaskWaiter), crate::controller::ControllerError> {
+        self.prepare_submission(spec)?
+            .submit_and_watch_with_ownership_timeout(wait_for)
+            .await
     }
 
     /// Submits watched work only if the controller queue has capacity now.

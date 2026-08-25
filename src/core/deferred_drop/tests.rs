@@ -9,6 +9,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     task::Poll,
     time::Duration,
@@ -32,6 +33,14 @@ struct GateState {
 }
 
 struct BlockingDrop(Arc<(Mutex<GateState>, Condvar)>);
+
+struct ReleaseGate(Arc<(Mutex<GateState>, Condvar)>);
+
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        release_gate(&self.0);
+    }
+}
 
 impl Drop for BlockingDrop {
     fn drop(&mut self) {
@@ -106,35 +115,16 @@ async fn wait_for_effective_capacity(executor: &DropExecutor, expected: usize) {
     .expect("the worker must commit its ownership-capacity update");
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn batch_reservation_is_atomic_and_rejects_domain_limit_overflow() {
-    let executor = test_executor(1, 2);
-    let held = executor.try_reserve().expect("one initial slot");
-    let mut batch = Box::pin(executor.reserve_many(2));
-    assert_pending_once(batch.as_mut()).await;
-    drop(batch);
-    assert_eq!(
-        executor.capacity.available(),
-        1,
-        "canceling an unsatisfied atomic batch must return every internally held permit"
-    );
-
-    let batch = executor.reserve_many(2);
-    drop(held);
-    let reservations = batch.await.expect("both slots become available together");
-    assert_eq!(reservations.len(), 2);
-    drop(reservations);
-    assert_eq!(executor.capacity.available(), 2);
-
-    assert!(
-        executor.reserve_many(3).await.is_err(),
-        "a batch larger than the domain budget must fail without waiting"
-    );
-}
-
 #[test]
 fn try_batch_reservation_is_atomic_and_returns_partial_capacity() {
     let executor = test_executor(1, 2);
+
+    assert!(
+        executor.try_reserve_many(3).is_err(),
+        "a batch larger than the configured budget must fail"
+    );
+    assert_eq!(executor.capacity.available(), 2);
+
     let held = executor.try_reserve().expect("one initial slot");
 
     assert!(
@@ -153,58 +143,76 @@ fn try_batch_reservation_is_atomic_and_returns_partial_capacity() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unsatisfied_atomic_batch_does_not_block_single_slot_admission() {
-    let executor = test_executor(1, 2);
-    let held = executor.try_reserve().expect("one initial slot");
-    let mut batch = Box::pin(executor.reserve_many(2));
-    assert_pending_once(batch.as_mut()).await;
+async fn single_unit_waiters_cross_an_open_gate_in_fifo_order() {
+    let executor = test_executor(1, 3);
+    let mut held = executor
+        .try_reserve_many(3)
+        .expect("the test holds every ownership slot")
+        .into_iter();
+    let held_a = held.next().expect("first held slot");
+    let held_b = held.next().expect("second held slot");
+    let held_c = held.next().expect("third held slot");
 
-    let single = tokio::time::timeout(Duration::from_secs(1), executor.reserve())
-        .await
-        .expect("an unsatisfied batch must not head-of-line block a usable slot")
-        .expect("the ownership executor remains open");
-    assert_pending_once(batch.as_mut()).await;
+    let mut first = Box::pin(executor.reserve());
+    let mut second = Box::pin(executor.reserve());
+    let mut third = Box::pin(executor.reserve());
+    assert_pending_once(first.as_mut()).await;
+    assert_pending_once(second.as_mut()).await;
+    assert_pending_once(third.as_mut()).await;
+    assert_eq!(executor.capacity.waiter_count(), 3);
 
-    drop(single);
-    assert_pending_once(batch.as_mut()).await;
-    drop(held);
-    let reservations = tokio::time::timeout(Duration::from_secs(1), batch)
+    drop(held_a);
+    let first = tokio::time::timeout(Duration::from_secs(1), first)
         .await
-        .expect("the atomic batch must wake when its full capacity becomes available")
+        .expect("the first waiter must observe the first released slot")
         .expect("the ownership executor remains open");
-    assert_eq!(reservations.len(), 2);
+    assert_pending_once(second.as_mut()).await;
+    assert_pending_once(third.as_mut()).await;
+
+    drop(held_b);
+    let second = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("the second waiter must observe the second released slot")
+        .expect("the ownership executor remains open");
+    assert_pending_once(third.as_mut()).await;
+
+    drop(held_c);
+    let third = tokio::time::timeout(Duration::from_secs(1), third)
+        .await
+        .expect("the third waiter must observe the third released slot")
+        .expect("the ownership executor remains open");
+
+    drop((first, second, third));
+    assert_eq!(executor.capacity.available(), 3);
+    assert_eq!(executor.capacity.waiter_count(), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn waiting_atomic_batch_gets_priority_after_bounded_single_bypass() {
+async fn canceling_the_queued_head_preserves_next_waiter_progress() {
     let executor = test_executor(1, 2);
-    let held = executor.try_reserve().expect("one initial slot");
-    let mut batch = Box::pin(executor.reserve_many(2));
-    assert_pending_once(batch.as_mut()).await;
+    let mut held = executor
+        .try_reserve_many(2)
+        .expect("the test holds every ownership slot")
+        .into_iter();
+    let held_a = held.next().expect("first held slot");
+    let held_b = held.next().expect("second held slot");
 
-    for _ in 0..2 {
-        let single = tokio::time::timeout(Duration::from_secs(1), executor.reserve())
-            .await
-            .expect("one capacity turnover may bypass the unsatisfied batch")
-            .expect("the ownership executor remains open");
-        drop(single);
-    }
+    let mut first = Box::pin(executor.reserve());
+    let mut second = Box::pin(executor.reserve());
+    assert_pending_once(first.as_mut()).await;
+    assert_pending_once(second.as_mut()).await;
+    drop(first);
+    assert_eq!(executor.capacity.waiter_count(), 1);
 
-    let mut next_single = Box::pin(executor.reserve());
-    assert_pending_once(next_single.as_mut()).await;
-    drop(held);
-
-    let reservations = tokio::time::timeout(Duration::from_secs(1), batch)
+    drop(held_a);
+    let second = tokio::time::timeout(Duration::from_secs(1), second)
         .await
-        .expect("bounded bypass must let the older atomic batch accumulate capacity")
+        .expect("the surviving waiter must receive the released slot")
         .expect("the ownership executor remains open");
-    assert_pending_once(next_single.as_mut()).await;
 
-    drop(reservations);
-    tokio::time::timeout(Duration::from_secs(1), next_single)
-        .await
-        .expect("single-slot admission resumes after the fair batch grant")
-        .expect("the ownership executor remains open");
+    drop((held_b, second));
+    assert_eq!(executor.capacity.available(), 2);
+    assert_eq!(executor.capacity.waiter_count(), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -224,11 +232,74 @@ async fn pending_admission_metadata_is_bounded_by_broker_capacity() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn closing_a_finite_gate_wakes_all_waiters_and_never_reopens() {
+    let executor = test_executor(1, 2);
+    let held = executor
+        .try_reserve_many(2)
+        .expect("the test holds every ownership slot");
+    let mut first = Box::pin(executor.reserve());
+    let mut second = Box::pin(executor.reserve());
+    assert_pending_once(first.as_mut()).await;
+    assert_pending_once(second.as_mut()).await;
+
+    executor.capacity.close();
+    let snapshot = executor.capacity.snapshot();
+    assert!(!snapshot.open);
+    assert_eq!(snapshot.waiters, 0);
+    assert_eq!(snapshot.available, Some(0));
+
+    for waiter in [first, second] {
+        let error = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("closing the gate must wake every queued waiter")
+            .err()
+            .expect("a closed gate must reject queued admission");
+        assert_eq!(error.limit().map(NonZeroUsize::get), Some(2));
+    }
+
+    drop(held);
+    let snapshot = executor.capacity.snapshot();
+    assert!(!snapshot.open);
+    assert_eq!(snapshot.waiters, 0);
+    assert_eq!(snapshot.available, Some(2));
+    assert!(executor.try_reserve().is_err());
+    assert!(executor.reserve().await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn close_does_not_revoke_an_already_granted_request() {
+    let executor = test_executor(1, 1);
+    let held = executor.try_reserve().expect("the only ownership slot");
+    let mut waiter = Box::pin(executor.reserve());
+    assert_pending_once(waiter.as_mut()).await;
+
+    drop(held);
+    assert_eq!(executor.capacity.waiter_count(), 0);
+    assert_eq!(executor.capacity.available(), 0);
+    executor.capacity.close();
+
+    let granted = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("the pre-close grant must remain observable")
+        .expect("close does not revoke a grant already charged to the request");
+    drop(granted);
+
+    let snapshot = executor.capacity.snapshot();
+    assert!(!snapshot.open);
+    assert_eq!(snapshot.waiters, 0);
+    assert_eq!(snapshot.available, Some(1));
+    assert!(executor.try_reserve().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn unlimited_admission_is_immediate_and_never_queues_waiters() {
     let executor = unlimited_test_executor(1);
-    let reservations = executor
-        .reserve_many(4096)
+    let single = tokio::time::timeout(Duration::from_secs(1), executor.reserve())
         .await
+        .expect("single-unit unlimited admission must not wait")
+        .expect("the unlimited broker remains open");
+    let reservations = executor
+        .try_reserve_many(4096)
         .expect("an unlimited broker admits the complete non-zero batch");
     assert_eq!(reservations.len(), 4096);
     assert_eq!(executor.capacity.waiter_count(), 0);
@@ -238,6 +309,7 @@ async fn unlimited_admission_is_immediate_and_never_queues_waiters() {
         .expect("held unlimited permits do not restrict later admission");
     assert_eq!(executor.capacity.waiter_count(), 0);
     drop(additional);
+    drop(single);
     drop(reservations);
 }
 
@@ -272,20 +344,31 @@ fn closing_unlimited_admission_returns_an_unbounded_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn canceling_a_notified_grant_returns_its_capacity() {
-    let executor = test_executor(1, 1);
-    let held = executor.try_reserve().expect("the only slot");
-    let mut waiter = Box::pin(executor.reserve());
-    assert_pending_once(waiter.as_mut()).await;
+async fn canceling_an_unobserved_grant_dispatches_the_next_waiter() {
+    let executor = test_executor(1, 2);
+    let mut held = executor
+        .try_reserve_many(2)
+        .expect("the test holds every ownership slot")
+        .into_iter();
+    let held_a = held.next().expect("first held slot");
+    let held_b = held.next().expect("second held slot");
+    let mut first = Box::pin(executor.reserve());
+    let mut second = Box::pin(executor.reserve());
+    assert_pending_once(first.as_mut()).await;
+    assert_pending_once(second.as_mut()).await;
 
-    drop(held);
-    drop(waiter);
+    drop(held_a);
+    assert_eq!(executor.capacity.waiter_count(), 1);
+    assert_eq!(executor.capacity.available(), 0);
+    drop(first);
 
-    let recovered = executor
-        .try_reserve()
-        .expect("canceling a granted but unobserved waiter must return its slot");
-    drop(recovered);
-    assert_eq!(executor.capacity.available(), 1);
+    let second = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("canceling the first grant must dispatch its slot to the next waiter")
+        .expect("the ownership executor remains open");
+    drop((held_b, second));
+    assert_eq!(executor.capacity.available(), 2);
+    assert_eq!(executor.capacity.waiter_count(), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -357,6 +440,141 @@ fn dormant_domain_zero_batch_and_drop_spawn_no_workers() {
     assert!(!domain.is_started());
     drop(domain);
     assert_eq!(calls.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn dormant_finite_and_unlimited_snapshots_do_not_start_workers() {
+    let finite = DropDomain::unstarted(NonZeroUsize::new(4));
+    let finite_snapshot = finite.snapshot(true);
+    assert_eq!(finite_snapshot.configured_limit, Some(4));
+    assert_eq!(finite_snapshot.effective_limit, Some(4));
+    assert_eq!(finite_snapshot.available, Some(4));
+    assert_eq!(finite_snapshot.retired(), Some(0));
+    assert_eq!(finite_snapshot.in_use(), Some(0));
+    assert_eq!(finite_snapshot.waiters, 0);
+    assert!(finite_snapshot.admission_open);
+    assert_eq!(finite_snapshot.cleanup_queued, 0);
+    assert_eq!(finite_snapshot.cleanup_running, 0);
+    assert!(!finite.is_started());
+
+    let unlimited = DropDomain::unstarted(None);
+    let unlimited_snapshot = unlimited.snapshot(false);
+    assert_eq!(unlimited_snapshot.configured_limit, None);
+    assert_eq!(unlimited_snapshot.effective_limit, None);
+    assert_eq!(unlimited_snapshot.available, None);
+    assert_eq!(unlimited_snapshot.retired(), None);
+    assert_eq!(unlimited_snapshot.in_use(), None);
+    assert_eq!(unlimited_snapshot.waiters, 0);
+    assert!(!unlimited_snapshot.admission_open);
+    assert_eq!(unlimited_snapshot.cleanup_queued, 0);
+    assert_eq!(unlimited_snapshot.cleanup_running, 0);
+    assert!(!unlimited.is_started());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn broker_snapshot_tracks_parked_and_unobserved_grants() {
+    let executor = test_executor(1, 1);
+    let held = executor.try_reserve().expect("the initial ownership unit");
+    let mut waiter = Box::pin(executor.reserve());
+    assert_pending_once(waiter.as_mut()).await;
+
+    let parked = executor.snapshot().capacity;
+    assert_eq!(parked.available, Some(0));
+    assert_eq!(parked.waiters, 1);
+    assert!(parked.open);
+
+    drop(held);
+    let granted = executor.snapshot().capacity;
+    assert_eq!(granted.available, Some(0));
+    assert_eq!(granted.waiters, 0);
+
+    drop(waiter);
+    let canceled = executor.snapshot().capacity;
+    assert_eq!(canceled.available, Some(1));
+    assert_eq!(canceled.waiters, 0);
+}
+
+#[test]
+fn cleanup_snapshot_tracks_claimed_and_queued_batches() {
+    let spawner: Arc<WorkerSpawner> = Arc::new(move |worker, launcher| {
+        if worker > 0 {
+            return Err(io::Error::other("keep the second cleanup batch queued"));
+        }
+        std::thread::Builder::new().spawn(move || {
+            if let Ok(launch) = launcher.recv() {
+                worker_loop(launch);
+            }
+        })
+    });
+    let domain = DropDomain::try_start_with(1, 3, spawner)
+        .expect("the single core cleanup worker must start");
+    let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+    let _release_on_failure = ReleaseGate(Arc::clone(&gate));
+    domain
+        .try_reserve()
+        .expect("blocking cleanup reservation")
+        .bundle(BlockingDrop(Arc::clone(&gate)))
+        .submit();
+    wait_gate_entered(&gate);
+
+    let completed = Arc::new(AtomicBool::new(false));
+    domain
+        .try_reserve()
+        .expect("queued cleanup reservation")
+        .bundle(ObservedDrop(Arc::clone(&completed)))
+        .submit();
+
+    let blocked = domain.snapshot(true);
+    assert_eq!(blocked.in_use(), Some(2));
+    assert_eq!(blocked.cleanup_running, 1);
+    assert_eq!(blocked.cleanup_queued, 1);
+
+    release_gate(&gate);
+    wait_observed(&completed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let drained = domain.snapshot(true);
+        if drained.cleanup_running == 0 && drained.cleanup_queued == 0 {
+            assert_eq!(drained.in_use(), Some(0));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cleanup accounting must drain after both destructors return"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn unlimited_snapshot_keeps_real_cleanup_counts() {
+    let domain = DropDomain::unstarted(None);
+    let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+    let _release_on_failure = ReleaseGate(Arc::clone(&gate));
+    domain
+        .try_reserve()
+        .expect("unlimited admission must reserve immediately")
+        .bundle(BlockingDrop(Arc::clone(&gate)))
+        .submit();
+    wait_gate_entered(&gate);
+
+    let blocked = domain.snapshot(true);
+    assert_eq!(blocked.configured_limit, None);
+    assert_eq!(blocked.effective_limit, None);
+    assert_eq!(blocked.available, None);
+    assert_eq!(blocked.in_use(), None);
+    assert_eq!(blocked.waiters, 0);
+    assert_eq!(blocked.cleanup_running, 1);
+
+    release_gate(&gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while domain.snapshot(true).cleanup_running != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "unlimited cleanup accounting must drain"
+        );
+        std::thread::yield_now();
+    }
 }
 
 #[test]
@@ -823,6 +1041,32 @@ async fn panicking_destructor_permanently_consumes_only_its_charged_slot() {
     assert_eq!(executor.capacity.effective_capacity(), 1);
 }
 
+#[test]
+fn poisoned_cleanup_reports_retirement_after_capacity_commits() {
+    let domain = DropDomain::try_start(1).expect("the test domain must start");
+    let (reported, report_rx) = mpsc::channel();
+    domain.set_retirement_reporter(move |configured, effective, retired| {
+        let _ = reported.send((configured, effective, retired));
+    });
+    let mut bundle = domain
+        .try_reserve()
+        .expect("the ownership unit to retire")
+        .bundle(());
+    bundle.poison();
+    bundle.submit();
+
+    assert_eq!(
+        report_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("committed retirement must invoke its reporter"),
+        (1, 0, 1)
+    );
+    let snapshot = domain.snapshot(true);
+    assert_eq!(snapshot.effective_limit, Some(0));
+    assert_eq!(snapshot.retired(), Some(1));
+    assert!(!snapshot.admission_open);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn actor_cleanup_poison_consumes_only_its_charged_slot() {
     struct ObservedDrop(Arc<AtomicBool>);
@@ -903,13 +1147,17 @@ async fn retiring_the_last_slot_wakes_waiters_with_a_typed_error() {
         .expect("retiring the last reachable slot must wake its waiter");
     assert!(result.is_err());
     assert!(dropped.load(Ordering::Acquire));
-    assert_eq!(executor.capacity.available(), 0);
-    assert_eq!(executor.capacity.effective_capacity(), 0);
+    let snapshot = executor.capacity.snapshot();
+    assert!(!snapshot.open);
+    assert_eq!(snapshot.effective_limit, Some(0));
+    assert_eq!(snapshot.available, Some(0));
+    assert_eq!(snapshot.waiters, 0);
     assert!(executor.try_reserve().is_err());
+    assert!(executor.reserve().await.is_err());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn retirement_rejects_impossible_batch_but_preserves_healthy_progress() {
+async fn retirement_preserves_unit_progress_and_bounds_fail_fast_batches() {
     let executor = test_executor(1, 3);
     let mut poisoned = executor
         .try_reserve()
@@ -918,18 +1166,17 @@ async fn retirement_rejects_impossible_batch_but_preserves_healthy_progress() {
     let held_a = executor.try_reserve().expect("the first healthy slot");
     let held_b = executor.try_reserve().expect("the second healthy slot");
 
-    let mut impossible = Box::pin(executor.reserve_many(3));
-    assert_pending_once(impossible.as_mut()).await;
     let mut single = Box::pin(executor.reserve());
     assert_pending_once(single.as_mut()).await;
 
     poisoned.poison();
     poisoned.submit();
-    let impossible = tokio::time::timeout(Duration::from_secs(1), impossible)
-        .await
-        .expect("retirement must wake an atomic request above effective capacity");
-    assert!(impossible.is_err());
-    assert_eq!(executor.capacity.effective_capacity(), 2);
+    wait_for_effective_capacity(&executor, 2).await;
+    assert!(
+        executor.try_reserve_many(3).is_err(),
+        "a fail-fast batch above effective capacity must be rejected"
+    );
+    assert_eq!(executor.capacity.available(), 0);
     assert_pending_once(single.as_mut()).await;
 
     drop(held_a);
@@ -937,8 +1184,20 @@ async fn retirement_rejects_impossible_batch_but_preserves_healthy_progress() {
         .await
         .expect("a healthy released slot must still advance a feasible waiter")
         .expect("retirement must not close the healthy remainder");
-    drop(single);
+
     drop(held_b);
+    assert!(
+        executor.try_reserve_many(2).is_err(),
+        "a fail-fast batch must not partially consume the one available slot"
+    );
+    assert_eq!(executor.capacity.available(), 1);
+
+    drop(single);
+    let batch = executor
+        .try_reserve_many(2)
+        .expect("the complete effective capacity remains atomically available");
+    assert_eq!(batch.len(), 2);
+    drop(batch);
     assert_eq!(executor.capacity.available(), 2);
     assert_eq!(executor.capacity.effective_capacity(), 2);
 }

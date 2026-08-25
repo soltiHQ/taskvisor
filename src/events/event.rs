@@ -101,6 +101,13 @@ pub enum EventKind {
     /// Carries the component name in `task` and diagnostic details in `reason`.
     RuntimeFailure,
 
+    /// Cleanup retirement permanently reduced this supervisor's ownership capacity.
+    ///
+    /// Carries the original finite limit in `configured_capacity`, the remaining usable limit in `effective_capacity`,
+    /// and the units retired by this transition in `retired_units`. `task` may identify the runtime component
+    /// that observed the retirement.
+    OwnershipCapacityRetired,
+
     /// An event path fell behind or closed before delivery.
     ///
     /// `task` identifies the subscriber or internal relay.
@@ -230,6 +237,7 @@ impl EventKind {
         match self {
             EventKind::SubscriberPanicked => "subscriber_panicked",
             EventKind::RuntimeFailure => "runtime_failure",
+            EventKind::OwnershipCapacityRetired => "ownership_capacity_retired",
             EventKind::SubscriberOverflow => "subscriber_overflow",
             EventKind::ShutdownRequested => "shutdown_requested",
             EventKind::AllStoppedWithinGrace => "all_stopped_within_grace",
@@ -372,6 +380,12 @@ pub struct Event {
     pub duration_ms: Option<u32>,
     /// Events represented by one coalesced overflow report.
     pub dropped: Option<u64>,
+    /// Original finite ownership capacity for an `OwnershipCapacityRetired` event.
+    pub configured_capacity: Option<usize>,
+    /// Remaining usable ownership capacity after an `OwnershipCapacityRetired` event.
+    pub effective_capacity: Option<usize>,
+    /// Ownership units permanently removed by one `OwnershipCapacityRetired` event.
+    pub retired_units: Option<usize>,
     /// Human-readable diagnostic detail.
     ///
     /// This text is not schema and may change. Use typed fields such as [`outcome_kind`](Self::outcome_kind)
@@ -427,6 +441,9 @@ impl Event {
             delay_ms: None,
             duration_ms: None,
             dropped: None,
+            configured_capacity: None,
+            effective_capacity: None,
+            retired_units: None,
             attempt: None,
             reason: None,
             outcome_kind: None,
@@ -583,6 +600,21 @@ impl Event {
             .with_reason(reason)
     }
 
+    /// Creates an event for one permanent reduction of a finite ownership capacity.
+    #[inline]
+    #[must_use]
+    pub fn ownership_capacity_retired(
+        configured_capacity: usize,
+        effective_capacity: usize,
+        retired_units: usize,
+    ) -> Self {
+        let mut event = Event::new(EventKind::OwnershipCapacityRetired);
+        event.configured_capacity = Some(configured_capacity);
+        event.effective_capacity = Some(effective_capacity);
+        event.retired_units = Some(retired_units);
+        event
+    }
+
     /// Returns whether this is an internal diagnostic event.
     #[inline]
     #[must_use]
@@ -592,6 +624,7 @@ impl Event {
             EventKind::SubscriberOverflow
                 | EventKind::SubscriberPanicked
                 | EventKind::RuntimeFailure
+                | EventKind::OwnershipCapacityRetired
         )
     }
 }
@@ -631,6 +664,15 @@ impl std::fmt::Debug for Event {
         if let Some(dropped) = self.dropped {
             d.field("dropped", &dropped);
         }
+        if let Some(configured_capacity) = self.configured_capacity {
+            d.field("configured_capacity", &configured_capacity);
+        }
+        if let Some(effective_capacity) = self.effective_capacity {
+            d.field("effective_capacity", &effective_capacity);
+        }
+        if let Some(retired_units) = self.retired_units {
+            d.field("retired_units", &retired_units);
+        }
         if let Some(exit_code) = self.exit_code {
             d.field("exit_code", &exit_code);
         }
@@ -665,6 +707,10 @@ mod tests {
         let cases = [
             (EventKind::SubscriberPanicked, "subscriber_panicked"),
             (EventKind::RuntimeFailure, "runtime_failure"),
+            (
+                EventKind::OwnershipCapacityRetired,
+                "ownership_capacity_retired",
+            ),
             (EventKind::SubscriberOverflow, "subscriber_overflow"),
             (EventKind::ShutdownRequested, "shutdown_requested"),
             (EventKind::AllStoppedWithinGrace, "all_stopped_within_grace"),
@@ -704,6 +750,9 @@ mod tests {
         assert_eq!(ev.delay_ms, None);
         assert_eq!(ev.duration_ms, None);
         assert_eq!(ev.dropped, None);
+        assert_eq!(ev.configured_capacity, None);
+        assert_eq!(ev.effective_capacity, None);
+        assert_eq!(ev.retired_units, None);
         assert_eq!(ev.attempt, None);
         assert_eq!(ev.exit_code, None);
         assert_eq!(ev.reason, None);
@@ -785,6 +834,7 @@ mod tests {
             EventKind::SubscriberOverflow,
             EventKind::SubscriberPanicked,
             EventKind::RuntimeFailure,
+            EventKind::OwnershipCapacityRetired,
         ] {
             assert!(Event::new(kind).is_internal_diagnostic(), "{kind:?}");
         }
@@ -819,6 +869,17 @@ mod tests {
             runtime_failure.reason.as_deref(),
             Some("listener join failed")
         );
+    }
+
+    #[test]
+    fn ownership_retirement_factory_sets_typed_capacity_values() {
+        let event = Event::ownership_capacity_retired(16, 14, 2);
+
+        assert_eq!(event.kind, EventKind::OwnershipCapacityRetired);
+        assert_eq!(event.configured_capacity, Some(16));
+        assert_eq!(event.effective_capacity, Some(14));
+        assert_eq!(event.retired_units, Some(2));
+        assert!(event.is_internal_diagnostic());
     }
 
     #[test]

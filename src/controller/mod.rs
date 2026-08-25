@@ -85,18 +85,23 @@
 //! # Choose a submission API
 //!
 //! - Wait for intake capacity with [`SupervisorHandle::submit`](crate::SupervisorHandle::submit).
+//! - Bound only ownership admission with [`SupervisorHandle::submit_with_ownership_timeout`](crate::SupervisorHandle::submit_with_ownership_timeout).
 //! - Use [`SupervisorHandle::try_submit`](crate::SupervisorHandle::try_submit) to fail fast when intake is full.
 //! - Receive rejection or the final task result with [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch).
+//! - Bound ownership admission and receive that result with [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout).
 //! - Fail fast and receive that result with [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch).
 //! - Allocate the `TaskId` before intake or events with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
 //!
 //! `Ok(id)` from a submit method confirms only command intake. Slot admission and runtime registration happen later.
 //! Use a watched method when application logic must know whether work was rejected or how an admitted task ended.
 //! [`TaskWaiter`](crate::TaskWaiter) delivers that result directly; lifecycle events remain a best-effort observability path.
+//! Ownership-timeout methods stop their timer after the permit is acquired. They do not bound controller-command capacity,
+//! slot admission, later registry admission, or task execution. On timeout, no command or lifecycle event is produced.
+//! [`PreparedSubmission`] provides the same waiting, ownership-timeout, and fail-fast choices.
 //!
-//! During shutdown, buffered and controller-owned pending submissions are rejected. A watched pending submission reports
-//! [`RejectionKind::ControllerShuttingDown`](crate::RejectionKind::ControllerShuttingDown). Work already accepted by
-//! the runtime follows the normal runtime shutdown process.
+//! During shutdown, buffered and controller-owned pending submissions are rejected.
+//! A watched pending submission reports [`RejectionKind::ControllerShuttingDown`](crate::RejectionKind::ControllerShuttingDown).
+//! Work already accepted by the runtime follows the normal runtime shutdown process.
 //!
 //! # Operations
 //!
