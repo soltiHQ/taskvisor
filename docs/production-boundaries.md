@@ -40,6 +40,7 @@ description: Understand Taskvisor durability, cancellation, observability, sched
 - `TaskWaiter` can resolve before final retained-task destruction; a later destructor panic cannot revise that outcome.
 - A panic while those values are destroyed permanently retires one unit from a finite ownership capacity.
 - `ownership_snapshot` exposes configured, effective, available, waiting, and queued or running cleanup state without starting dormant workers.
+- Ownership-specific timeout methods bound only permit admission; later command queues, controller policy, registry admission, and task execution remain outside that deadline.
 - Removing the ownership limit allows retained user values and cleanup backlog to grow without a count bound.
 
 The crate forbids unsafe Rust with `#![forbid(unsafe_code)]`.

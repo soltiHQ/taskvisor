@@ -14,6 +14,8 @@
 //! It sends no command and starts no work. A submit method consumes the prepared value and performs
 //! normal controller intake. Use direct controller `submit*` methods when the ID is not needed beforehand.
 
+use std::time::Duration;
+
 use super::{ControllerError, ControllerSpec, engine::ControllerHandle};
 use crate::{TaskId, TaskWaiter};
 
@@ -111,6 +113,34 @@ impl PreparedSubmission {
         controller.submit_prepared(id, spec).await
     }
 
+    /// Submits after a bounded wait for cleanup ownership.
+    ///
+    /// `wait_for` covers only the ownership permit.
+    /// Once acquired, the ordinary wait for controller command capacity has no deadline from this method.
+    /// An immediately available permit can succeed when `wait_for` is [`Duration::ZERO`].
+    /// The timer cannot interrupt synchronous lazy cleanup-worker startup.
+    ///
+    /// A timeout consumes this prepared value but sends no command and publishes no event for its ID.
+    /// A retry requires a newly prepared submission with a new ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`submit`](Self::submit).
+    /// It also returns [`ControllerError::OwnershipAdmissionTimeout`] when ownership remains unavailable for `wait_for`.
+    pub async fn submit_with_ownership_timeout(
+        self,
+        wait_for: Duration,
+    ) -> Result<TaskId, ControllerError> {
+        let Self {
+            controller,
+            id,
+            spec,
+        } = self;
+        controller
+            .submit_prepared_with_ownership_timeout(id, spec, wait_for)
+            .await
+    }
+
     /// Submits without waiting for intake capacity or returning a waiter.
     ///
     /// Success has the same intake-only meaning as [`submit`](Self::submit).
@@ -144,6 +174,29 @@ impl PreparedSubmission {
             spec,
         } = self;
         let (submitted_id, rx) = controller.submit_prepared_and_watch(id, spec).await?;
+        Ok((submitted_id, TaskWaiter::new(submitted_id, rx)))
+    }
+
+    /// Returns a final-outcome waiter after bounded ownership admission.
+    ///
+    /// Timeout and prepared-ID behavior match [`submit_with_ownership_timeout`](Self::submit_with_ownership_timeout).
+    /// After ownership succeeds, intake and outcome behavior match [`submit_and_watch`](Self::submit_and_watch).
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`submit_with_ownership_timeout`](Self::submit_with_ownership_timeout).
+    pub async fn submit_and_watch_with_ownership_timeout(
+        self,
+        wait_for: Duration,
+    ) -> Result<(TaskId, TaskWaiter), ControllerError> {
+        let Self {
+            controller,
+            id,
+            spec,
+        } = self;
+        let (submitted_id, rx) = controller
+            .submit_prepared_and_watch_with_ownership_timeout(id, spec, wait_for)
+            .await?;
         Ok((submitted_id, TaskWaiter::new(submitted_id, rx)))
     }
 

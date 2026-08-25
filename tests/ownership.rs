@@ -5,7 +5,6 @@ mod common;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-#[cfg(feature = "controller")]
 use common::poll_until;
 use common::{EventCollector, collector_subscribers, with_timeout};
 use taskvisor::prelude::*;
@@ -138,6 +137,107 @@ fn build_with_subscribers_is_safe_outside_tokio() {
     assert_eq!(ownership.cleanup_queued, 0);
     assert_eq!(ownership.cleanup_running, 0);
     drop(supervisor);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
+    let collector = EventCollector::new();
+    let config = SupervisorConfig::default()
+        .try_with_ownership_capacity(2)
+        .expect("the subscriber and one task each need one ownership unit");
+    let supervisor = Supervisor::new(config, collector_subscribers(&collector));
+    let handle = supervisor.serve().expect("runtime startup");
+    let (holder_id, holder_waiter) = handle
+        .add_and_watch(TaskSpec::once(
+            "ownership-timeout-holder",
+            common::make_coop(),
+        ))
+        .await
+        .expect("the holder must consume the remaining ownership unit");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle.is_alive("ownership-timeout-holder").await
+        })
+        .await,
+        "the holder must start before saturation is tested"
+    );
+
+    let error = handle
+        .add_with_ownership_timeout(
+            TaskSpec::once("ownership-timeout-add", common::make_ok_once()),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a saturated direct add must time out");
+    assert!(matches!(
+        error,
+        RuntimeError::OwnershipAdmissionTimeout { timeout, .. }
+            if timeout == Duration::ZERO
+    ));
+
+    let error = handle
+        .add_and_watch_with_ownership_timeout(
+            TaskSpec::once("ownership-timeout-add-watched", common::make_ok_once()),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a saturated watched add must time out");
+    assert!(matches!(
+        error,
+        RuntimeError::OwnershipAdmissionTimeout { timeout, .. }
+            if timeout == Duration::ZERO
+    ));
+    let saturated = handle.ownership_snapshot();
+    assert_eq!(saturated.available, Some(0));
+    assert_eq!(saturated.waiters, 0);
+    let listed = handle.list().await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].0, holder_id);
+    assert_eq!(listed[0].1.as_ref(), "ownership-timeout-holder");
+
+    assert!(handle.cancel(holder_id).await.expect("cancel holder"));
+    assert!(matches!(
+        with_timeout(2, holder_waiter.wait()).await,
+        Ok(TaskOutcome::Canceled)
+    ));
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle.ownership_snapshot().available == Some(1)
+        })
+        .await,
+        "the holder cleanup must return its ownership unit"
+    );
+
+    let (_, marker_waiter) = handle
+        .add_and_watch_with_ownership_timeout(
+            TaskSpec::once("ownership-timeout-marker", common::make_ok_once()),
+            Duration::ZERO,
+        )
+        .await
+        .expect("an immediately available ownership unit must beat a zero deadline");
+    assert!(matches!(
+        with_timeout(2, marker_waiter.wait()).await,
+        Ok(TaskOutcome::Completed)
+    ));
+    assert!(
+        collector
+            .wait_until(Duration::from_secs(2), |events| {
+                events.iter().any(|event| {
+                    event.kind == EventKind::TaskRemoved
+                        && event.task.as_deref() == Some("ownership-timeout-marker")
+                })
+            })
+            .await,
+        "the marker event must flush earlier lifecycle events"
+    );
+    assert!(collector.by_label("ownership-timeout-add").is_empty());
+    assert!(
+        collector
+            .by_label("ownership-timeout-add-watched")
+            .is_empty()
+    );
+
+    handle.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test(flavor = "current_thread")]

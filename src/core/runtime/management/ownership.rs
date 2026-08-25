@@ -1,14 +1,14 @@
 //! Reserves cleanup capacity before the runtime accepts a user-owned task.
 //!
-//! Direct adds and static batches use this layer before registry handoff. A reservation is attached
-//! to the [`TaskSpec`] inside an [`OwnedTask`]. It then follows that task through registry membership,
-//! actor execution, physical reaping, and final destruction.
+//! Direct adds and static batches use this layer before registry handoff.
+//! A reservation is attached to the [`TaskSpec`] inside an [`OwnedTask`].
+//! It then follows that task through registry membership, actor execution, physical reaping, and final destruction.
 //!
 //! Waiting admission observes shutdown. Static batches use one immediate atomic reservation for the full batch.
 //! A configured ownership limit can delay or reject admission. With no limit, the reservation still keeps final
 //! user-value destruction off runtime paths. Failures are translated into runtime errors here.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use super::super::SupervisorCore;
 use crate::{
@@ -105,6 +105,26 @@ impl SupervisorCore {
             _ = self.shutdown.started.cancelled() => Err(RuntimeError::ShuttingDown),
             _ = self.cmd_tx.closed() => Err(RuntimeError::ShuttingDown),
             reservation = reserve => reservation.map_err(Self::ownership_admission_error),
+        }
+    }
+
+    /// Bounds only the ownership-admission stage and preserves closure precedence.
+    pub(super) async fn wait_for_ownership_with_timeout<T, F>(
+        &self,
+        reserve: F,
+        wait_for: Duration,
+    ) -> Result<T, RuntimeError>
+    where
+        F: Future<Output = Result<T, deferred_drop::DropAdmissionError>>,
+    {
+        tokio::select! {
+            biased;
+            _ = self.shutdown.started.cancelled() => Err(RuntimeError::ShuttingDown),
+            _ = self.cmd_tx.closed() => Err(RuntimeError::ShuttingDown),
+            reservation = reserve => reservation.map_err(Self::ownership_admission_error),
+            _ = tokio::time::sleep(wait_for) => {
+                Err(RuntimeError::OwnershipAdmissionTimeout { timeout: wait_for })
+            }
         }
     }
 

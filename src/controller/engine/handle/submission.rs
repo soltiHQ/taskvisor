@@ -4,6 +4,8 @@
 //! Watched paths attach an outcome sender. Waiting methods wait for command capacity,
 //! while fail-fast methods reserve command capacity before taking ownership of the task.
 
+use std::time::Duration;
+
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -34,11 +36,32 @@ impl ControllerHandle {
         spec: ControllerSpec,
     ) -> Result<TaskId, ControllerError> {
         let owned = self.own(spec).await?;
+        self.send_owned_prepared(id, owned, None).await
+    }
+
+    /// Bounds ownership admission, then waits normally for controller command capacity.
+    pub(crate) async fn submit_prepared_with_ownership_timeout(
+        &self,
+        id: TaskId,
+        spec: ControllerSpec,
+        wait_for: Duration,
+    ) -> Result<TaskId, ControllerError> {
+        let owned = self.own_with_ownership_timeout(spec, wait_for).await?;
+        self.send_owned_prepared(id, owned, None).await
+    }
+
+    /// Sends a task whose cleanup ownership has already been reserved.
+    async fn send_owned_prepared(
+        &self,
+        id: TaskId,
+        owned: crate::core::deferred_drop::OwnedTask<ControllerSpec>,
+        done: Option<oneshot::Sender<TaskOutcome>>,
+    ) -> Result<TaskId, ControllerError> {
         self.tx
             .send(ControllerCommand::Submit(Box::new(Submission {
                 id,
                 owned,
-                done: None,
+                done,
             })))
             .await
             .map_err(|_| ControllerError::Closed)?;
@@ -92,15 +115,28 @@ impl ControllerHandle {
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
         let owned = self.own(spec).await?;
+        self.send_owned_prepared_and_watch(id, owned).await
+    }
+
+    /// Bounds ownership admission for a watched prepared submission.
+    pub(crate) async fn submit_prepared_and_watch_with_ownership_timeout(
+        &self,
+        id: TaskId,
+        spec: ControllerSpec,
+        wait_for: Duration,
+    ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
+        let owned = self.own_with_ownership_timeout(spec, wait_for).await?;
+        self.send_owned_prepared_and_watch(id, owned).await
+    }
+
+    /// Creates the outcome channel only after cleanup ownership succeeds.
+    async fn send_owned_prepared_and_watch(
+        &self,
+        id: TaskId,
+        owned: crate::core::deferred_drop::OwnedTask<ControllerSpec>,
+    ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(ControllerCommand::Submit(Box::new(Submission {
-                id,
-                owned,
-                done: Some(tx),
-            })))
-            .await
-            .map_err(|_| ControllerError::Closed)?;
+        self.send_owned_prepared(id, owned, Some(tx)).await?;
         Ok((id, rx))
     }
 

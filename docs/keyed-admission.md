@@ -79,6 +79,13 @@ Do not treat it as a transaction boundary.
 Attempt timeout starts only after registry admission and after `Task::spawn` returns the attempt future.
 It does not limit time spent in a controller queue. Controller submission has no built-in end-to-end deadline.
 
+`submit_with_ownership_timeout` and `submit_and_watch_with_ownership_timeout` bound only the wait for
+cleanup ownership before controller command intake. The deadline stops after Taskvisor acquires the ownership
+permit. It does not cover controller-command capacity, a busy-slot queue, slot admission, registry-command
+capacity, task execution, or final outcome delivery. The same boundary applies to the prepared submission methods.
+A prepared value is consumed by a timeout, but its reserved ID remains silent because no command or lifecycle
+event is produced.
+
 Slots govern admission, not cancellation.
 There is no slot-wide cancel or remove operation.
 Stop queued work by task ID and registered work by task ID or task name.

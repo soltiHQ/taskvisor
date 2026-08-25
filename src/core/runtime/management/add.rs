@@ -9,7 +9,7 @@
 //! Controller and static-run workflows receive the same direct reply channel.
 //! Request and result events are observability only. They do not confirm admission.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -37,6 +37,19 @@ impl SupervisorCore {
     pub(in crate::core) async fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         let (id, reply) = self
             .enqueue_add_task_wait(TaskId::next(), spec, None)
+            .await
+            .map_err(|(error, _done)| error)?;
+        Self::await_add_reply(id, reply).await
+    }
+
+    /// Bounds cleanup ownership admission, then preserves the ordinary add path.
+    pub(in crate::core) async fn add_task_with_ownership_timeout(
+        &self,
+        spec: TaskSpec,
+        wait_for: Duration,
+    ) -> Result<TaskId, RuntimeError> {
+        let (id, reply) = self
+            .enqueue_add_task_wait_with_ownership_timeout(TaskId::next(), spec, None, wait_for)
             .await
             .map_err(|(error, _done)| error)?;
         Self::await_add_reply(id, reply).await
@@ -165,6 +178,21 @@ impl SupervisorCore {
         Ok((id, rx))
     }
 
+    /// Bounds cleanup ownership admission for a watched add.
+    pub(in crate::core) async fn add_task_watched_with_ownership_timeout(
+        &self,
+        spec: TaskSpec,
+        wait_for: Duration,
+    ) -> Result<(TaskId, tokio::sync::oneshot::Receiver<crate::TaskOutcome>), RuntimeError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (id, reply) = self
+            .enqueue_add_task_wait_with_ownership_timeout(TaskId::next(), spec, Some(tx), wait_for)
+            .await
+            .map_err(|(error, _done)| error)?;
+        let id = Self::await_add_reply(id, reply).await?;
+        Ok((id, rx))
+    }
+
     /// Maps one registry add reply into the assigned identity or admission error.
     async fn await_add_reply(id: TaskId, reply: AddReplyRx) -> Result<TaskId, RuntimeError> {
         match reply.await {
@@ -236,15 +264,42 @@ impl SupervisorCore {
         &self,
         id: TaskId,
         spec: TaskSpec,
+        done: Option<OutcomeTx>,
+    ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
+        self.enqueue_add_task_wait_inner(id, spec, done, None).await
+    }
+
+    /// Waits up to `wait_for` for cleanup ownership, then follows ordinary queue admission.
+    pub(in crate::core::runtime) async fn enqueue_add_task_wait_with_ownership_timeout(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
+        done: Option<OutcomeTx>,
+        wait_for: Duration,
+    ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
+        self.enqueue_add_task_wait_inner(id, spec, done, Some(wait_for))
+            .await
+    }
+
+    /// Shares the post-ownership queue and commit path between bounded and unbounded waits.
+    async fn enqueue_add_task_wait_inner(
+        &self,
+        id: TaskId,
+        spec: TaskSpec,
         mut done: Option<OutcomeTx>,
+        ownership_timeout: Option<Duration>,
     ) -> Result<(TaskId, AddReplyRx), (RuntimeError, Option<OutcomeTx>)> {
         if self.is_shutting_down() {
             return Err((RuntimeError::ShuttingDown, done));
         }
-        let reservation = self
-            .wait_for_ownership(self.reserve_ownership())
-            .await
-            .map_err(|error| (error, done.take()))?;
+        let reservation = match ownership_timeout {
+            Some(wait_for) => {
+                self.wait_for_ownership_with_timeout(self.reserve_ownership(), wait_for)
+                    .await
+            }
+            None => self.wait_for_ownership(self.reserve_ownership()).await,
+        }
+        .map_err(|error| (error, done.take()))?;
         let owned = self.own_task(spec, reservation);
         let label = owned.value.shared_name();
         let permit = match tokio::select! {

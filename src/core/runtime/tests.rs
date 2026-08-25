@@ -686,6 +686,169 @@ async fn shutdown_cancels_a_saturated_dynamic_ownership_wait() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn ownership_timeout_removes_waiter_commits_nothing_and_capacity_is_reusable() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let domain = source.domain();
+    let held = source.try_reserve().expect("the test source has one slot");
+    let core = core(SupervisorConfig::default());
+    core.set_ownership_source_for_test(source);
+    core.start().expect("runtime startup");
+    let mut events = core.bus.subscribe();
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let timed_runs = Arc::clone(&runs);
+    let timed: TaskRef = TaskFn::arc(move |_ctx| {
+        timed_runs.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    assert!(matches!(
+        core.add_task_with_ownership_timeout(
+            TaskSpec::once("ownership-timeout", timed),
+            Duration::ZERO,
+        )
+        .await,
+        Err(RuntimeError::OwnershipAdmissionTimeout {
+            timeout: Duration::ZERO,
+        })
+    ));
+
+    let timed_out = domain.snapshot(true);
+    assert_eq!(timed_out.waiters, 0);
+    assert_eq!(timed_out.available, Some(0));
+    assert!(core.id_for_label("ownership-timeout").await.is_none());
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            event.kind != EventKind::TaskAddRequested
+                || event.task.as_deref() != Some("ownership-timeout"),
+            "ownership timeout must happen before TaskAddRequested"
+        );
+    }
+
+    drop(held);
+    assert_eq!(domain.snapshot(true).available, Some(1));
+    let retry_runs = Arc::clone(&runs);
+    let retry: TaskRef = TaskFn::arc(move |_ctx| {
+        retry_runs.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    core.add_task_with_ownership_timeout(
+        TaskSpec::once("ownership-timeout-retry", retry),
+        Duration::ZERO,
+    )
+    .await
+    .expect("an immediately ready permit must beat a zero deadline");
+    timeout(Duration::from_secs(2), core.registry.wait_until_empty())
+        .await
+        .expect("the retry must finish cleanup");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    core.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn positive_ownership_deadline_expires_and_release_before_retry_deadline_succeeds() {
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let domain = source.domain();
+    let held = source.try_reserve().expect("the test source has one slot");
+    let core = core(SupervisorConfig::default());
+    core.set_ownership_source_for_test(source);
+    core.start().expect("runtime startup");
+    let wait_for = Duration::from_secs(5);
+
+    let first = TaskFn::arc(|_ctx| async { Ok(()) });
+    let mut expiring = Box::pin(core.add_task_with_ownership_timeout(
+        TaskSpec::once("positive-ownership-timeout", first),
+        wait_for,
+    ));
+    assert_pending_once(expiring.as_mut()).await;
+    assert_eq!(domain.snapshot(true).waiters, 1);
+
+    tokio::time::advance(wait_for).await;
+    assert!(matches!(
+        expiring.await,
+        Err(RuntimeError::OwnershipAdmissionTimeout { timeout, .. })
+            if timeout == wait_for
+    ));
+    assert_eq!(domain.snapshot(true).waiters, 0);
+
+    let retry = TaskFn::arc(|ctx: TaskContext| async move {
+        ctx.cancelled().await;
+        Ok(())
+    });
+    let mut admitted = Box::pin(core.add_task_with_ownership_timeout(
+        TaskSpec::once("ownership-release-before-deadline", retry),
+        wait_for,
+    ));
+    assert_pending_once(admitted.as_mut()).await;
+    assert_eq!(domain.snapshot(true).waiters, 1);
+
+    drop(held);
+    let id = admitted
+        .await
+        .expect("releasing ownership before the deadline must admit the task");
+    assert_eq!(
+        core.id_for_label("ownership-release-before-deadline").await,
+        Some(id)
+    );
+
+    core.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ownership_timeout_stops_after_permit_before_registry_queue_wait() {
+    let (core, filler_reply) = core_with_full_command_queue();
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    core.set_ownership_source_for_test(source);
+
+    let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
+        ctx.cancelled().await;
+        Ok(())
+    });
+    let mut add = Box::pin(core.add_task_with_ownership_timeout(
+        TaskSpec::restartable("ownership-timeout-after-permit", task),
+        Duration::ZERO,
+    ));
+    assert_pending_once(add.as_mut()).await;
+    assert_pending_once(add.as_mut()).await;
+
+    start_and_release_command_queue(&core, filler_reply).await;
+    let id = timeout(Duration::from_secs(2), add)
+        .await
+        .expect("registry queue release must resume the add")
+        .expect("the expired ownership timer must not affect post-permit waits");
+    assert!(core.contains_id(id).await);
+
+    let _ = core.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn shutdown_wins_when_ownership_deadline_is_also_ready() {
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let domain = source.domain();
+    let held = source.try_reserve().expect("the test source has one slot");
+    let core = core(SupervisorConfig::default());
+    core.set_ownership_source_for_test(source);
+    core.start().expect("runtime startup");
+
+    let task = TaskFn::arc(|_ctx| async { Ok(()) });
+    let mut add = Box::pin(core.add_task_with_ownership_timeout(
+        TaskSpec::once("shutdown-versus-ownership-timeout", task),
+        Duration::from_secs(5),
+    ));
+    assert_pending_once(add.as_mut()).await;
+    assert_eq!(domain.snapshot(true).waiters, 1);
+
+    core.shutdown().await.expect("empty runtime shutdown");
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert!(matches!(add.await, Err(RuntimeError::ShuttingDown)));
+    assert_eq!(domain.snapshot(false).waiters, 0);
+    drop(held);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn saturated_static_batch_fails_fast_without_consuming_run_lifecycle() {
     let source = crate::core::deferred_drop::TestReservationSource::new(1);
     let held = source.try_reserve().expect("the test source has one slot");

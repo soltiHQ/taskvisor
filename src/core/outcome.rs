@@ -81,10 +81,11 @@ impl TaskOutcomeKind {
 ///
 /// Watched work is created by:
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
+/// - [`SupervisorHandle::add_and_watch_with_ownership_timeout`](crate::SupervisorHandle::add_and_watch_with_ownership_timeout)
 /// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch), [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout), and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
 )]
 ///
 /// Events carry [`TaskOutcomeKind`] for best-effort observation.
@@ -259,10 +260,11 @@ impl TaskOutcome {
 ///
 /// Created by:
 /// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
+/// - [`SupervisorHandle::add_and_watch_with_ownership_timeout`](crate::SupervisorHandle::add_and_watch_with_ownership_timeout)
 /// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)\n- [`PreparedSubmission::submit_and_watch`](crate::PreparedSubmission::submit_and_watch)\n- [`PreparedSubmission::try_submit_and_watch`](crate::PreparedSubmission::try_submit_and_watch)"
+    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)\n- [`PreparedSubmission::submit_and_watch`](crate::PreparedSubmission::submit_and_watch)\n- [`PreparedSubmission::submit_and_watch_with_ownership_timeout`](crate::PreparedSubmission::submit_and_watch_with_ownership_timeout)\n- [`PreparedSubmission::try_submit_and_watch`](crate::PreparedSubmission::try_submit_and_watch)"
 )]
 ///
 /// [`wait`](Self::wait) consumes the waiter. Dropping it does not cancel the task or submission.

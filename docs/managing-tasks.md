@@ -49,11 +49,23 @@ Configured, effective, available, and waiter values are copied together. `admiss
 includes a separate runtime-state read, and cleanup counts are copied together under their own
 lock. The complete snapshot is rolling rather than atomic across those reads.
 
-## Choose waiting or fail-fast intake
+## Choose waiting, bounded ownership, or fail-fast intake
 
 Regular `add*` calls wait for ownership admission and registry-command capacity.
-Their `try_add*` forms fail fast at both boundaries, then still wait for the registry decision.
-Controller `submit*` calls wait for ownership admission and controller-command capacity; their `try_submit*` forms fail fast at both boundaries and return after command intake.
+`add_with_ownership_timeout` and `add_and_watch_with_ownership_timeout` bound only the ownership wait.
+After a permit is acquired, registry-command capacity and the registry decision can still wait beyond that duration.
+Their `try_add*` forms fail fast at both intake boundaries, then still wait for the registry decision.
+
+Controller `submit*` calls wait for ownership admission and controller-command capacity.
+`submit_with_ownership_timeout` and `submit_and_watch_with_ownership_timeout`, including their prepared forms,
+bound only ownership admission before controller command intake. Controller-command capacity, slot admission,
+and later registry admission are outside that deadline. Their `try_submit*` forms fail fast at both intake boundaries
+and return after command intake.
+
+An ownership timeout sends no command, starts no task, and publishes no lifecycle event for the request.
+A zero duration still accepts an ownership permit that is immediately ready. The timer cannot interrupt synchronous
+startup of dormant cleanup workers.
+
 Regular stop operations wait for the required management intake resources, while their `try_*` forms fail fast at those boundaries.
 Later registry or controller decisions can still reject work after command intake.
 The exact boundary and error are documented on each method in the [API reference](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html).

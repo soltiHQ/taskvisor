@@ -146,6 +146,166 @@ async fn prepared_submission_exposes_identity_before_events_and_preserves_it() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn controller_ownership_timeouts_cover_all_public_submission_paths() {
+    let collector = EventCollector::new();
+    let config = SupervisorConfig::default()
+        .try_with_ownership_capacity(2)
+        .expect("the subscriber and one task each need one ownership unit");
+    let supervisor = Supervisor::builder(config)
+        .with_subscribers(collector_subscribers(&collector))
+        .with_controller(ControllerConfig::default())
+        .build();
+    let handle = supervisor.serve().expect("runtime startup");
+    let (holder_id, holder_waiter) = handle
+        .add_and_watch(TaskSpec::once(
+            "controller-ownership-timeout-holder",
+            make_coop(),
+        ))
+        .await
+        .expect("the holder must consume the remaining ownership unit");
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle.is_alive("controller-ownership-timeout-holder").await
+        })
+        .await,
+        "the holder must start before saturation is tested"
+    );
+
+    let error = handle
+        .submit_with_ownership_timeout(
+            ControllerSpec::queue(TaskSpec::once(
+                "controller-ownership-timeout-submit",
+                make_ok_once(),
+            )),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a saturated submission must time out");
+    assert!(matches!(
+        error,
+        ControllerError::OwnershipAdmissionTimeout { timeout, .. }
+            if timeout == Duration::ZERO
+    ));
+
+    let error = handle
+        .submit_and_watch_with_ownership_timeout(
+            ControllerSpec::queue(TaskSpec::once(
+                "controller-ownership-timeout-submit-watched",
+                make_ok_once(),
+            )),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("a saturated watched submission must time out");
+    assert!(matches!(
+        error,
+        ControllerError::OwnershipAdmissionTimeout { timeout, .. }
+            if timeout == Duration::ZERO
+    ));
+
+    let prepared = handle
+        .prepare_submission(ControllerSpec::queue(TaskSpec::once(
+            "controller-ownership-timeout-prepared",
+            make_ok_once(),
+        )))
+        .expect("controller configured");
+    let prepared_id = prepared.id();
+    let error = prepared
+        .submit_with_ownership_timeout(Duration::ZERO)
+        .await
+        .expect_err("a saturated prepared submission must time out");
+    assert!(matches!(
+        error,
+        ControllerError::OwnershipAdmissionTimeout { timeout, .. }
+            if timeout == Duration::ZERO
+    ));
+
+    let prepared_watched = handle
+        .prepare_submission(ControllerSpec::queue(TaskSpec::once(
+            "controller-ownership-timeout-prepared-watched",
+            make_ok_once(),
+        )))
+        .expect("controller configured");
+    let prepared_watched_id = prepared_watched.id();
+    let error = prepared_watched
+        .submit_and_watch_with_ownership_timeout(Duration::ZERO)
+        .await
+        .expect_err("a saturated watched prepared submission must time out");
+    assert!(matches!(
+        error,
+        ControllerError::OwnershipAdmissionTimeout { timeout, .. }
+            if timeout == Duration::ZERO
+    ));
+
+    let saturated = handle.ownership_snapshot();
+    assert_eq!(saturated.available, Some(0));
+    assert_eq!(saturated.waiters, 0);
+    assert!(
+        handle
+            .controller_snapshot()
+            .await
+            .expect("controller configured")
+            .slots
+            .is_empty(),
+        "timed-out submissions must not enter controller state"
+    );
+
+    assert!(handle.cancel(holder_id).await.expect("cancel holder"));
+    assert!(matches!(
+        with_timeout(2, holder_waiter.wait()).await,
+        Ok(TaskOutcome::Canceled)
+    ));
+    assert!(
+        poll_until(Duration::from_secs(2), || async {
+            handle.ownership_snapshot().available == Some(1)
+        })
+        .await,
+        "the holder cleanup must return its ownership unit"
+    );
+
+    let (_, marker_waiter) = handle
+        .submit_and_watch_with_ownership_timeout(
+            ControllerSpec::queue(TaskSpec::once(
+                "controller-ownership-timeout-marker",
+                make_ok_once(),
+            )),
+            Duration::ZERO,
+        )
+        .await
+        .expect("an immediately available ownership unit must beat a zero deadline");
+    assert!(matches!(
+        with_timeout(2, marker_waiter.wait()).await,
+        Ok(TaskOutcome::Completed)
+    ));
+    assert!(
+        collector
+            .wait_until(Duration::from_secs(2), |events| {
+                events.iter().any(|event| {
+                    event.kind == EventKind::TaskRemoved
+                        && event.task.as_deref() == Some("controller-ownership-timeout-marker")
+                })
+            })
+            .await,
+        "the marker event must flush earlier lifecycle events"
+    );
+    for label in [
+        "controller-ownership-timeout-submit",
+        "controller-ownership-timeout-submit-watched",
+        "controller-ownership-timeout-prepared",
+        "controller-ownership-timeout-prepared-watched",
+    ] {
+        assert!(
+            collector.by_label(label).is_empty(),
+            "timed-out submission {label} must not emit lifecycle events"
+        );
+    }
+    assert!(collector.by_id(prepared_id).is_empty());
+    assert!(collector.by_id(prepared_watched_id).is_empty());
+
+    handle.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn dropping_prepared_submission_starts_no_work_and_publishes_no_event() {
     let (handle, collector) = served_controller(ControllerConfig::default());
     let starts = Arc::new(AtomicUsize::new(0));
@@ -493,6 +653,22 @@ async fn submit_without_controller_is_consistent_across_construction_paths() {
                 handle.submit(spec.clone()).await,
                 Err(ControllerError::NotConfigured),
                 "submit must reject a supervisor created through {constructor}"
+            );
+            assert_eq!(
+                handle
+                    .submit_with_ownership_timeout(spec.clone(), Duration::ZERO)
+                    .await,
+                Err(ControllerError::NotConfigured),
+                "timed submit must reject a supervisor created through {constructor}"
+            );
+            assert!(
+                matches!(
+                    handle
+                        .submit_and_watch_with_ownership_timeout(spec.clone(), Duration::ZERO)
+                        .await,
+                    Err(ControllerError::NotConfigured)
+                ),
+                "timed watched submit must reject a supervisor created through {constructor}"
             );
             assert_eq!(
                 handle.try_submit(spec),
