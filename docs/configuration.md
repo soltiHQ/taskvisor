@@ -42,6 +42,9 @@ fn configured_supervisor() -> Arc<Supervisor> {
 }
 ```
 
+The values in this example show where each setting belongs.
+They are not capacity recommendations for every application.
+
 ## Know the defaults
 
 Main defaults:
@@ -77,6 +80,49 @@ Use `Supervisor::ownership_snapshot` or `SupervisorHandle::ownership_snapshot` t
 configured and effective limits, available units, parked requests, and deferred-cleanup activity.
 
 During cleanup handoff, one task can temporarily consume two `max_registered_tasks` units.
+
+## Choose values for an application
+
+Work from the application contract instead of copying one set of numbers:
+
+1. Decide which failures may repeat and whether retries need a finite limit.
+2. Choose an attempt timeout only for operations that are safe to stop by dropping their future.
+3. Bound concurrent attempts and registered tasks according to the work and dependencies they consume.
+4. Keep finite ownership admission, or explicitly accept that retained user values and cleanup backlog can grow without a count bound.
+5. Choose task grace and subscriber drain deadlines that match the application's shutdown owner.
+6. When using keyed admission, configure controller queues and tracked-slot limits separately.
+7. Observe direct outcomes, best-effort events, and runtime snapshots at their documented boundaries.
+
+## Observe ownership pressure
+
+The ownership snapshot distinguishes admission pressure from deferred cleanup:
+
+```rust
+use taskvisor::SupervisorHandle;
+
+fn report_ownership(handle: &SupervisorHandle) {
+    let state = handle.ownership_snapshot();
+
+    println!(
+        "in_use={:?} available={:?} waiters={} cleanup_queued={} \
+         cleanup_running={} retired={:?} admission_open={}",
+        state.in_use(),
+        state.available,
+        state.waiters,
+        state.cleanup_queued,
+        state.cleanup_running,
+        state.retired(),
+        state.admission_open,
+    );
+}
+```
+
+`waiters` counts ownership requests currently parked for capacity.
+`cleanup_queued` and `cleanup_running` count deferred-cleanup batches on the isolated destructor path.
+`retired()` reports permanent loss from a finite ownership capacity after destructor failure.
+An `available` value of zero does not by itself prove that the next waiting request will fail; another lifetime may release its unit.
+Capacity fields are `None` when ownership admission is unlimited.
+The complete snapshot is rolling and can become stale immediately.
 
 Capacity values are non-zero where zero would make the runtime unusable.
 Checked `try_with_*` methods accept raw integers and return a configuration error for invalid values.

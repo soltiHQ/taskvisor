@@ -24,6 +24,32 @@ Implement `Task` when a reusable type should hold state or dependencies across a
 Each call to `Task::spawn` must return a fresh future.
 Keep synchronous work in `spawn` short; put the actual operation inside the returned future.
 
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use taskvisor::{BoxTaskFuture, Task, TaskContext};
+
+struct EndpointProbe {
+    endpoint: Arc<str>,
+}
+
+impl Task for EndpointProbe {
+    fn spawn(&self, ctx: TaskContext) -> BoxTaskFuture {
+        let endpoint = Arc::clone(&self.endpoint);
+
+        Box::pin(async move {
+            ctx.run_until_cancelled(tokio::time::sleep(Duration::from_millis(100)))
+                .await?;
+            println!("checked {endpoint}");
+            Ok(())
+        })
+    }
+}
+```
+
+The task object keeps `endpoint` across attempts.
+The cloned value inside the returned future belongs to one attempt.
+
 ## Reuse task values safely
 
 A shared `TaskRef` can back several registrations. Registrations that overlap in one supervisor need different names.

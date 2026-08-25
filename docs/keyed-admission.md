@@ -65,6 +65,69 @@ assert_eq!(request.slot_name(), "customer-42");
 `submit().await?` confirms command intake only. `submit_and_watch` returns a task ID and waiter.
 The waiter resolves to `Rejected` if admission fails or to the registered task's final outcome if admission succeeds.
 
+A complete busy-slot flow starts one owner, rejects a competing `DropIfRunning` submission for the same slot, and then stops the owner:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Notify;
+use taskvisor::prelude::*;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = Supervisor::builder(SupervisorConfig::default())
+        .with_controller(ControllerConfig::default())
+        .try_build()?;
+    let handle = supervisor.serve()?;
+
+    let owner_started = Arc::new(Notify::new());
+    let owner: TaskRef = {
+        let owner_started = Arc::clone(&owner_started);
+        TaskFn::arc(move |ctx| {
+            let owner_started = Arc::clone(&owner_started);
+            async move {
+                owner_started.notify_one();
+                ctx.cancelled().await;
+                Err(TaskError::Canceled)
+            }
+        })
+    };
+
+    let owner_request = ControllerSpec::queue(TaskSpec::once("tenant-42/owner", owner))
+        .with_slot("tenant-42");
+    let (owner_id, owner_waiter) = handle.submit_and_watch(owner_request).await?;
+    owner_started.notified().await;
+
+    let contender: TaskRef = TaskFn::arc(|_ctx| async { Ok(()) });
+    let contender_request = ControllerSpec::drop_if_running(TaskSpec::once(
+        "tenant-42/contender",
+        contender,
+    ))
+    .with_slot("tenant-42");
+    let (_, contender_waiter) = handle.submit_and_watch(contender_request).await?;
+
+    assert!(matches!(
+        contender_waiter.wait().await?,
+        TaskOutcome::Rejected {
+            kind: RejectionKind::SlotBusy,
+            ..
+        }
+    ));
+
+    assert!(handle.cancel(owner_id).await?);
+    assert!(matches!(
+        owner_waiter.wait().await?,
+        TaskOutcome::Canceled
+    ));
+
+    handle.shutdown().await?;
+    Ok(())
+}
+```
+
+The notification proves that the first task has started and still owns the slot before the contender is submitted.
+`submit_and_watch` returning `Ok` still confirms controller command intake, not positive slot admission.
+The two waiters deliver the contender's later rejection and the owner's final task outcome directly.
+
 `prepare_submission` allocates a task ID before intake.
 It does not reserve a name, slot, queue position, or runtime capacity.
 

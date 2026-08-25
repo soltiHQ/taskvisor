@@ -6,6 +6,8 @@ description: Run a retrying Taskvisor task and wait for its direct final outcome
 # Quick start
 
 This example runs one task, retries two temporary failures, and waits for the final outcome.
+It uses `serve` and `add_and_watch` because the caller needs that task's result.
+`Supervisor::run` would report the shared supervisor lifecycle instead of returning one task outcome.
 
 ## Create a project
 
@@ -80,6 +82,12 @@ final outcome: Completed
 
 ## Understand what happened
 
+```text
+TaskFn ──► TaskSpec ──► add_and_watch ──► supervised attempts ──► TaskWaiter
+                                │                                  │
+                                └──────── task ID ──────────────────┘
+```
+
 `TaskFn` creates a fresh future for every attempt.
 The first two attempts return retryable failures.
 Taskvisor waits for the configured backoff before each retry, and the third attempt succeeds.
@@ -91,9 +99,16 @@ The limit of two therefore permits the initial attempt and at most two retries.
 Its direct in-process channel delivers the final `TaskOutcome` outside the best-effort event path.
 `handle.shutdown().await` then joins the shared shutdown and cleanup workflow.
 
+Every retry starts a new attempt.
+Before returning a retryable failure for work with external side effects, make the operation safe to repeat.
+Read [Make repeated attempts safe](lifecycle-policies.md#make-repeated-attempts-safe) before applying this policy to real I/O.
+
 ## Continue from here
 
-- [Define a task](defining-tasks.md) explains `TaskFn`, `Task`, and shared task values.
-- [Choose task behavior](lifecycle-policies.md) covers restart policies, backoff, timeouts, and retry limits.
-- [Manage tasks at runtime](managing-tasks.md) covers add, watch, inspect, cancel, and remove operations.
-- [Examples](../examples/README.md) provides complete runnable programs for the main Taskvisor workflows.
+| Next need                                  | Continue with                                                                                       |
+|--------------------------------------------|------------------------------------------------------------------------------------------------------|
+| Fixed or resident workers                  | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs)     |
+| Runtime-discovered work                    | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs)     |
+| Queue, replace, or reject work by key      | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)         |
+| Logs, traces, metrics, or direct outcomes  | [Final outcomes and lifecycle events](outcomes-and-events.md)                                        |
+| Production limits and shutdown boundaries | [Configure Taskvisor](configuration.md) and [Production boundaries](production-boundaries.md)        |

@@ -32,23 +32,20 @@ navigation:
       - quick-start
       - mental-model
       - installation
+
+  - title: Use Taskvisor
+    pages:
       - defining-tasks
       - lifecycle-policies
-
-  - title: Run
-    pages:
       - running-and-managing
       - managing-tasks
-      - cancellation-and-shutdown
-
-  - title: Extend
-    pages:
       - outcomes-and-events
+      - cancellation-and-shutdown
       - keyed-admission
-      - configuration
 
-  - title: Deploy
+  - title: Operate
     pages:
+      - configuration
       - production-boundaries
       - common-mistakes
 

@@ -48,6 +48,13 @@ Keep attempt-future destructors short.
 The CPU example uses Rayon and shows that cancellation drops the receiver but does not stop computation already running.
 See [Define a task](defining-tasks.md) and [cpu_job.rs](../examples/cpu_job.rs).
 
+## Do not retry an ambiguous side effect blindly
+
+A retry creates a fresh attempt.
+It can repeat an external side effect whose previous result was ambiguous, and Taskvisor does not roll that effect back.
+Classify the failure as retryable only when repeating the operation is acceptable.
+See [Choose task behavior](lifecycle-policies.md).
+
 ## Treat timeouts as stop requests, not rollback
 
 An attempt timeout cancels the context and drops the attempt future.
@@ -55,6 +62,12 @@ An attempt timeout cancels the context and drops the attempt future.
 Neither action undoes external side effects.
 Check cancellation safety and use an explicit commit or acknowledgement protocol when dropping an operation is unsafe.
 See [Cancellation and shutdown](cancellation-and-shutdown.md) and [Production boundaries](production-boundaries.md).
+
+## Do not treat an ownership timeout as a task deadline
+
+Ownership-specific timeout methods bound only the wait for cleanup ownership before command intake.
+They do not bound later command queues, controller admission, registry admission, task execution, or final outcome delivery.
+See [Manage tasks at runtime](managing-tasks.md) and [Coordinate work by key](keyed-admission.md).
 
 ## Continue learning
 

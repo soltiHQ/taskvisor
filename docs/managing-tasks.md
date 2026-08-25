@@ -36,31 +36,58 @@ Controller work that is still queued does not own a registered task name; stop i
 `list` returns registry membership.
 It includes tasks waiting for attempt capacity, in retry backoff, running, or completing cleanup.
 `alive_snapshot` and `is_alive` answer a different question: whether a physical attempt is still active.
-Both are point-in-time snapshots and may be stale as soon as concurrent work changes.
-
 `ownership_snapshot` reports the separate lifetime and deferred-cleanup boundary.
-It shows configured, effective, and available ownership capacity, parked admission requests,
-and cleanup batches that are queued or claimed by destructor workers.
-A completed task can be absent from `list` and `alive_snapshot` while it still appears through
-the ownership snapshot's in-use or cleanup counts.
-
-Capacity fields are `None` when the ownership limit is disabled.
-Configured, effective, available, and waiter values are copied together. `admission_open` also
-includes a separate runtime-state read, and cleanup counts are copied together under their own
-lock. The complete snapshot is rolling rather than atomic across those reads.
+It can still show in-use ownership or deferred cleanup after a completed task disappears from `list` and `alive_snapshot`.
+These views are point-in-time diagnostics and can become stale immediately.
+See [Configure Taskvisor](configuration.md#observe-ownership-pressure) for the ownership fields and a reporting example.
 
 ## Choose waiting, bounded ownership, or fail-fast intake
 
-Regular `add*` calls wait for ownership admission and registry-command capacity.
-`add_with_ownership_timeout` and `add_and_watch_with_ownership_timeout` bound only the ownership wait.
-After a permit is acquired, registry-command capacity and the registry decision can still wait beyond that duration.
-Their `try_add*` forms fail fast at both intake boundaries, then still wait for the registry decision.
+Direct registry work has these intake boundaries:
 
-Controller `submit*` calls wait for ownership admission and controller-command capacity.
-`submit_with_ownership_timeout` and `submit_and_watch_with_ownership_timeout`, including their prepared forms,
-bound only ownership admission before controller command intake. Controller-command capacity, slot admission,
-and later registry admission are outside that deadline. Their `try_submit*` forms fail fast at both intake boundaries
-and return after command intake.
+| Method family                         | Ownership admission | Registry command queue | Registry decision |
+|---------------------------------------|---------------------|------------------------|-------------------|
+| `add*`                                | Waits.              | Waits.                 | Waits.            |
+| `add*_with_ownership_timeout`         | Caller deadline.    | Waits without it.      | Waits without it. |
+| `try_add*`                            | Fails fast.         | Fails fast.            | Waits.            |
+
+Controller submissions have different completion semantics:
+
+| Method family                         | Ownership admission | Controller command queue | Slot and registry admission |
+|---------------------------------------|---------------------|--------------------------|-----------------------------|
+| `submit*`                             | Waits.              | Waits.                   | Happens later.              |
+| `submit*_with_ownership_timeout`      | Caller deadline.    | Waits without it.        | Happens later.              |
+| `try_submit*`                         | Fails fast.         | Fails fast.              | Happens later.              |
+
+An ownership timeout is not an end-to-end task deadline.
+It stops after Taskvisor acquires the ownership permit.
+`try_add*` still waits for the registry decision after successful intake, while `try_submit*` returns after controller command intake.
+Once a state-changing method commits its command, dropping the caller's future does not cancel that command.
+Dropping a returned `TaskWaiter` also does not cancel the task or submission.
+Keep the returned task ID when the surrounding request can end before the work and the application may need an explicit stop operation.
+
+Use fail-fast intake when the application must choose its own overload behavior:
+
+```rust
+use taskvisor::{Error, RuntimeError, SupervisorHandle, TaskSpec, TaskWaiter};
+
+async fn try_accept(
+    handle: &SupervisorHandle,
+    spec: TaskSpec,
+) -> Result<Option<TaskWaiter>, Error> {
+    match handle.try_add_and_watch(spec).await {
+        Ok((_id, waiter)) => Ok(Some(waiter)),
+        Err(
+            RuntimeError::ResourceLimitReached { .. }
+            | RuntimeError::CommandQueueFull,
+        ) => Ok(None), // Apply the application's overload policy.
+        Err(error) => Err(error.into()),
+    }
+}
+```
+
+The application decides whether overload means retry, shedding work, or another response.
+Taskvisor does not map these failures to a transport-specific status.
 
 An ownership timeout sends no command, starts no task, and publishes no lifecycle event for the request.
 A zero duration still accepts an ownership permit that is immediately ready. The timer cannot interrupt synchronous

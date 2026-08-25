@@ -43,4 +43,16 @@ description: Understand Taskvisor durability, cancellation, observability, sched
 - Ownership-specific timeout methods bound only permit admission; later command queues, controller policy, registry admission, and task execution remain outside that deadline.
 - Removing the ownership limit allows retained user values and cleanup backlog to grow without a count bound.
 
+## Check before deployment
+
+- Use durable external state when work must recover after process failure.
+- Review every timeout, cancellation, and force-abort boundary for external side effects.
+- Make retryable operations safe to repeat or protect them with an application-owned idempotency or acknowledgement protocol.
+- Use watched outcomes when application correctness depends on a final task result.
+- Choose retry, concurrency, registration, ownership, command-queue, subscriber-queue, and controller limits deliberately.
+- Decide whether the application or Taskvisor owns operating-system signal handling.
+- Join shutdown from a caller that can report cleanup errors.
+- Test cooperative cancellation, grace expiry, and application shutdown behavior.
+- Monitor event-loss diagnostics and runtime snapshots where operational visibility requires them.
+
 The crate forbids unsafe Rust with `#![forbid(unsafe_code)]`.
