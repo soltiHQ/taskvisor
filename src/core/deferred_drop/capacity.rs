@@ -1,7 +1,8 @@
 //! Limits how many user-owned values one supervisor can retain.
 //!
 //! [`CapacityBroker`] sits between a started cleanup executor and [`DropReservation`](super::bundle::DropReservation) creation.
-//! A request receives every requested unit or none. Dropping a healthy [`OwnershipPermit`] returns its units.
+//! Waiting admission requests one unit in FIFO order. Fail-fast batches receive every requested unit or none.
+//! Dropping a healthy [`OwnershipPermit`] returns its units.
 //! Cleanup that panics or is marked poisoned retires them.
 
 use std::{
@@ -51,16 +52,6 @@ impl CapacitySignal {
     }
 }
 
-/// Queue entry for one all-or-nothing request.
-struct CapacityWaiter {
-    /// Number of units that must be granted together.
-    units: usize,
-    /// Units granted past this request while it could not fit.
-    bypassed_units: usize,
-    /// Result state shared with the waiting future.
-    signal: Arc<CapacitySignal>,
-}
-
 /// Mutable accounting for one configured ownership limit.
 struct LimitedCapacityState {
     /// Units that are not granted or held by permits.
@@ -68,7 +59,7 @@ struct LimitedCapacityState {
     /// Units that remain usable after permanent retirement.
     effective_capacity: usize,
     /// Pending requests in arrival order.
-    waiters: VecDeque<CapacityWaiter>,
+    waiters: VecDeque<Arc<CapacitySignal>>,
 }
 
 /// Accounting selected by the public ownership-capacity setting.
@@ -87,11 +78,7 @@ struct CapacityState {
     mode: CapacityMode,
 }
 
-/// Cancellation-safe ownership admission with bounded bypass.
-///
-/// An older request may be bypassed while it cannot fit. Each older request counts the units granted past it.
-/// Newer requests may pass only while that count stays within the current effective capacity.
-/// Once the count reaches the limit, released capacity accumulates for the older request.
+/// Cancellation-safe single-unit FIFO admission plus atomic fail-fast batches.
 pub(super) struct CapacityBroker {
     /// Original finite limit, or `None` for unlimited admission.
     limit: Option<NonZeroUsize>,
@@ -141,8 +128,6 @@ enum CapacityStart {
 struct CapacityRequest {
     /// Broker that owns the request queue.
     broker: Arc<CapacityBroker>,
-    /// Units that must transfer together.
-    units: usize,
     /// Result state registered with the broker queue.
     signal: Arc<CapacitySignal>,
     /// Whether `Drop` must remove the request or return its grant.
@@ -170,7 +155,7 @@ impl CapacityRequest {
                         .status
                         .store(CAPACITY_TAKEN, AtomicOrdering::Release);
                     self.active = false;
-                    return Ok(OwnershipPermit::new(Arc::clone(&self.broker), self.units));
+                    return Ok(OwnershipPermit::new(Arc::clone(&self.broker), 1));
                 }
                 CAPACITY_CLOSED => {
                     self.active = false;
@@ -190,7 +175,7 @@ impl Drop for CapacityRequest {
     /// Returns any grant that was not transferred into a permit.
     fn drop(&mut self) {
         if self.active {
-            self.broker.cancel(self.units, &self.signal);
+            self.broker.cancel(&self.signal);
         }
     }
 }
@@ -229,17 +214,15 @@ impl CapacityBroker {
         DropCapacityError::new(self.limit)
     }
 
-    /// Waits until every requested unit can move into one permit.
+    /// Waits until one unit can move into a permit.
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid request, a closed broker, an impossible
-    /// request after capacity retirement, or a full waiter queue.
-    pub(super) async fn acquire(
+    /// Returns an error for a closed broker, exhausted effective capacity, or a full waiter queue.
+    pub(super) async fn acquire_one(
         self: &Arc<Self>,
-        units: usize,
     ) -> Result<OwnershipPermit, DropCapacityError> {
-        match self.start_acquire(units)? {
+        match self.start_acquire_one()? {
             CapacityStart::Ready(permit) => Ok(permit),
             CapacityStart::Waiting(request) => request.wait().await,
         }
@@ -281,11 +264,8 @@ impl CapacityBroker {
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid or impossible request, a closed broker, or a full waiter queue.
-    fn start_acquire(self: &Arc<Self>, units: usize) -> Result<CapacityStart, DropCapacityError> {
-        if units == 0 || self.limit.is_some_and(|limit| units > limit.get()) {
-            return Err(self.error());
-        }
+    /// Returns an error for a closed broker, exhausted effective capacity, or a full waiter queue.
+    fn start_acquire_one(self: &Arc<Self>) -> Result<CapacityStart, DropCapacityError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed {
             return Err(self.error());
@@ -293,17 +273,17 @@ impl CapacityBroker {
         let CapacityMode::Limited(limited) = &mut state.mode else {
             return Ok(CapacityStart::Ready(OwnershipPermit::new(
                 Arc::clone(self),
-                units,
+                1,
             )));
         };
-        if units > limited.effective_capacity {
+        if limited.effective_capacity == 0 {
             return Err(self.error());
         }
-        if limited.waiters.is_empty() && limited.available >= units {
-            limited.available -= units;
+        if limited.waiters.is_empty() && limited.available > 0 {
+            limited.available -= 1;
             return Ok(CapacityStart::Ready(OwnershipPermit::new(
                 Arc::clone(self),
-                units,
+                1,
             )));
         }
         let capacity = self
@@ -315,24 +295,10 @@ impl CapacityBroker {
         }
 
         let signal = Arc::new(CapacitySignal::waiting());
-        limited.waiters.push_back(CapacityWaiter {
-            units,
-            bypassed_units: 0,
-            signal: Arc::clone(&signal),
-        });
-        let (ready, valid) = Self::dispatch_limited(limited);
-        if !valid {
-            state.closed = true;
-            let closed = Self::close_waiters_locked(&mut state);
-            drop(state);
-            Self::notify(closed);
-            return Err(self.error());
-        }
+        limited.waiters.push_back(Arc::clone(&signal));
         drop(state);
-        Self::notify(ready);
         Ok(CapacityStart::Waiting(CapacityRequest {
             broker: Arc::clone(self),
-            units,
             signal,
             active: true,
         }))
@@ -355,8 +321,7 @@ impl CapacityBroker {
 
     /// Permanently removes units whose cleanup cannot safely return them.
     ///
-    /// Requests above the new effective limit are rejected.
-    /// Feasible requests continue against the remaining units.
+    /// Single-unit waiters continue against any remaining effective capacity.
     fn retire(&self, units: usize) {
         if units == 0 {
             return;
@@ -368,7 +333,7 @@ impl CapacityBroker {
         let CapacityMode::Limited(limited) = &mut state.mode else {
             return;
         };
-        let mut rejected = Vec::new();
+        let mut signals = Vec::new();
         let mut retirement = None;
         let close = if let Some(effective_capacity) = limited.effective_capacity.checked_sub(units)
         {
@@ -384,18 +349,6 @@ impl CapacityBroker {
                     effective_capacity,
                     retired_units: units,
                 });
-                limited.waiters.retain(|waiter| {
-                    if waiter.units <= effective_capacity {
-                        true
-                    } else {
-                        waiter
-                            .signal
-                            .status
-                            .store(CAPACITY_CLOSED, AtomicOrdering::Release);
-                        rejected.push(Arc::clone(&waiter.signal));
-                        false
-                    }
-                });
                 effective_capacity == 0
             }
         } else {
@@ -403,12 +356,12 @@ impl CapacityBroker {
         };
         if close {
             state.closed = true;
-            rejected.extend(Self::close_waiters_locked(&mut state));
+            signals.extend(Self::close_waiters_locked(&mut state));
         } else {
-            rejected.extend(Self::dispatch_locked(&mut state));
+            signals.extend(Self::dispatch_locked(&mut state));
         }
         drop(state);
-        Self::notify(rejected);
+        Self::notify(signals);
         if let Some(retirement) = retirement {
             self.report_retirement(retirement);
         }
@@ -429,7 +382,7 @@ impl CapacityBroker {
     }
 
     /// Removes a waiting request or returns its unobserved grant.
-    fn cancel(&self, units: usize, signal: &Arc<CapacitySignal>) {
+    fn cancel(&self, signal: &Arc<CapacitySignal>) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         match signal.status.load(AtomicOrdering::Acquire) {
             CAPACITY_WAITING => {
@@ -443,13 +396,13 @@ impl CapacityBroker {
                 if let Some(position) = limited
                     .waiters
                     .iter()
-                    .position(|waiter| Arc::ptr_eq(&waiter.signal, signal))
+                    .position(|waiter| Arc::ptr_eq(waiter, signal))
                 {
                     limited.waiters.remove(position);
                 }
             }
             CAPACITY_GRANTED => {
-                if !Self::return_capacity_locked(&mut state, units) {
+                if !Self::return_capacity_locked(&mut state, 1) {
                     signal
                         .status
                         .store(CAPACITY_CANCELED, AtomicOrdering::Release);
@@ -518,17 +471,15 @@ impl CapacityBroker {
         limited
             .waiters
             .drain(..)
-            .map(|waiter| {
-                waiter
-                    .signal
+            .inspect(|signal| {
+                signal
                     .status
                     .store(CAPACITY_CLOSED, AtomicOrdering::Release);
-                waiter.signal
             })
             .collect()
     }
 
-    /// Grants feasible requests without exceeding each older bypass budget.
+    /// Grants queued single-unit requests from the front while capacity exists.
     fn dispatch_locked(state: &mut CapacityState) -> Vec<Arc<CapacitySignal>> {
         if state.closed {
             return Vec::new();
@@ -536,53 +487,23 @@ impl CapacityBroker {
         let CapacityMode::Limited(limited) = &mut state.mode else {
             return Vec::new();
         };
-        let (mut ready, valid) = Self::dispatch_limited(limited);
-        if !valid {
-            state.closed = true;
-            ready.extend(Self::close_waiters_locked(state));
-        }
-        ready
+        Self::dispatch_limited(limited)
     }
 
-    /// Dispatches finite-capacity waiters and reports whether queue accounting remained valid.
-    fn dispatch_limited(limited: &mut LimitedCapacityState) -> (Vec<Arc<CapacitySignal>>, bool) {
-        let effective_capacity = limited.effective_capacity;
+    /// Dispatches finite-capacity waiters in FIFO order.
+    fn dispatch_limited(limited: &mut LimitedCapacityState) -> Vec<Arc<CapacitySignal>> {
         let mut ready = Vec::new();
-        loop {
-            let mut selected = None;
-            for (index, waiter) in limited.waiters.iter().enumerate() {
-                if waiter.units <= limited.available {
-                    let exceeds_bypass_budget = limited.waiters.iter().take(index).any(|older| {
-                        older.bypassed_units.saturating_add(waiter.units) > effective_capacity
-                    });
-                    if exceeds_bypass_budget {
-                        break;
-                    }
-                    selected = Some(index);
-                    break;
-                }
-                if waiter.bypassed_units >= effective_capacity {
-                    break;
-                }
-            }
-            let Some(index) = selected else {
+        while limited.available > 0 {
+            let Some(signal) = limited.waiters.pop_front() else {
                 break;
             };
-            let granted_units = limited.waiters[index].units;
-            for waiter in limited.waiters.iter_mut().take(index) {
-                waiter.bypassed_units = waiter.bypassed_units.saturating_add(granted_units);
-            }
-            let Some(waiter) = limited.waiters.remove(index) else {
-                return (ready, false);
-            };
-            limited.available -= waiter.units;
-            waiter
-                .signal
+            limited.available -= 1;
+            signal
                 .status
                 .store(CAPACITY_GRANTED, AtomicOrdering::Release);
-            ready.push(waiter.signal);
+            ready.push(signal);
         }
-        (ready, true)
+        ready
     }
 
     /// Sends wakeups after the caller releases the broker mutex.

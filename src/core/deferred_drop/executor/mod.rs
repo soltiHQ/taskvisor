@@ -79,7 +79,7 @@ impl DropExecutor {
     ///
     /// Returns an error when admission closes or the unit can no longer be granted.
     pub(super) async fn reserve(self: &Arc<Self>) -> Result<DropReservation, DropCapacityError> {
-        let permit = self.capacity.acquire(1).await?;
+        let permit = self.capacity.acquire_one().await?;
         Ok(DropReservation::new(Arc::clone(self), permit))
     }
 
@@ -91,23 +91,6 @@ impl DropExecutor {
     pub(super) fn try_reserve(self: &Arc<Self>) -> Result<DropReservation, DropCapacityError> {
         let permit = self.capacity.try_acquire(1)?;
         Ok(DropReservation::new(Arc::clone(self), permit))
-    }
-
-    /// Waits for a complete test batch and creates one reservation per unit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the batch is invalid, admission closes, or the complete batch can no longer be granted.
-    #[cfg(test)]
-    pub(super) async fn reserve_many(
-        self: &Arc<Self>,
-        count: usize,
-    ) -> Result<Vec<DropReservation>, DropCapacityError> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let mut combined = self.capacity.acquire(count).await?;
-        Ok(self.split_reservations(&mut combined, count))
     }
 
     /// Creates one reservation per unit only when the complete batch is available.
