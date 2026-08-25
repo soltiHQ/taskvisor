@@ -13,22 +13,22 @@ The application still owns task logic, external side effects, durable state, dep
 
 ## What Taskvisor manages
 
-| Need                   | Taskvisor contract                                                                                       |
-|------------------------|-----------------------------------------------------------------------------------------------------------|
-| Supervised lifecycle   | One-shot, retrying, or periodic tasks with backoff, jitter, retry limits, and attempt timeouts.           |
-| Runtime control        | Add work and optionally request its final result; inspect, cancel, or remove registrations later.          |
-| Direct final outcomes  | One process-local `TaskOutcome` through `TaskWaiter`, outside the best-effort event path.                 |
-| Per-key admission      | Queue, replace, or reject competing submissions through an optional controller slot.                     |
-| Typed observability    | Lifecycle events for logs, traces, metrics, and live diagnostics.                                        |
-| Explicit resource use  | Configurable bounds for attempts, registrations, command queues, subscriber queues, and retained values. |
+| Need                  | Taskvisor contract                                                                                       |
+|-----------------------|----------------------------------------------------------------------------------------------------------|
+| Supervised lifecycle  | One-shot, retrying, or periodic tasks with backoff, jitter, retry limits, and attempt timeouts.          |
+| Runtime control       | Add work and optionally request its final result; inspect, cancel, or remove registrations later.        |
+| Direct final outcomes | One process-local `TaskOutcome` through `TaskWaiter`, outside the best-effort event path.                |
+| Per-key admission     | Queue, replace, or reject competing submissions through an optional controller slot.                     |
+| Typed observability   | Lifecycle events for logs, traces, metrics, and live diagnostics.                                        |
+| Explicit resource use | Configurable bounds for attempts, registrations, command queues, subscriber queues, and retained values. |
 
 ## Choose a workflow
 
-| Application need                                      | Taskvisor path                                      | Start here                                                                                      |
-|-------------------------------------------------------|------------------------------------------------------|--------------------------------------------------------------------------------------------------|
-| A fixed batch or resident workers known at startup    | `run`, `run_until`, or `run_with_os_signals`        | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs) |
-| Work discovered while the service is running          | `serve`, then `add*` through `SupervisorHandle`     | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs) |
-| Competing work that must coordinate by application key | `serve`, then controller `submit*` methods          | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)     |
+| Application need                                       | Taskvisor path                                  | Start here                                                                                        |
+|--------------------------------------------------------|-------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| A fixed batch or resident workers known at startup     | `run`, `run_until`, or `run_with_os_signals`    | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs) |
+| Work discovered while the service is running           | `serve`, then `add*` through `SupervisorHandle` | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs) |
+| Competing work that must coordinate by application key | `serve`, then controller `submit*` methods      | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)     |
 
 These paths describe how work enters the runtime.
 `TaskSpec::once`, `restartable`, and `periodic` separately describe what happens after each attempt.

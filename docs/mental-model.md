@@ -11,10 +11,10 @@ One registration gets a task ID and runs its attempts sequentially under the sup
 
 ## Choose how work enters
 
-| Entry path                    | Use it for                                                   |
-|-------------------------------|--------------------------------------------------------------|
-| `Supervisor::run*`            | A fixed batch or resident workers known at startup.          |
-| `Supervisor::serve` + `add*`  | Work discovered or managed while the service is running.     |
+| Entry path                      | Use it for                                                      |
+|---------------------------------|-----------------------------------------------------------------|
+| `Supervisor::run*`              | A fixed batch or resident workers known at startup.             |
+| `Supervisor::serve` + `add*`    | Work discovered or managed while the service is running.        |
 | `Supervisor::serve` + `submit*` | Work that first needs per-key queue, replace, or reject policy. |
 
 Static batches and direct adds enter the same registry.
@@ -32,7 +32,7 @@ Task / TaskFn ──► TaskSpec
 
 registry ──► task actor ──► sequential attempts ──► final outcome
                                                      └── watched ──► TaskWaiter
-runtime lifecycle ───────────────────────────────────────────────► Event subscribers
+runtime lifecycle ─────────────────────────────────────────────────► Event subscribers
 ```
 
 `TaskSpec::once`, `restartable`, and `periodic` choose behavior after an attempt.

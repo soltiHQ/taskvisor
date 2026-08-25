@@ -85,7 +85,7 @@ final outcome: Completed
 ```text
 TaskFn ──► TaskSpec ──► add_and_watch ──► supervised attempts ──► TaskWaiter
                                 │                                  │
-                                └──────── task ID ──────────────────┘
+                                └──────── task ID ─────────────────┘
 ```
 
 `TaskFn` creates a fresh future for every attempt.
@@ -105,10 +105,10 @@ Read [Make repeated attempts safe](lifecycle-policies.md#make-repeated-attempts-
 
 ## Continue from here
 
-| Next need                                  | Continue with                                                                                       |
-|--------------------------------------------|------------------------------------------------------------------------------------------------------|
-| Fixed or resident workers                  | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs)     |
-| Runtime-discovered work                    | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs)     |
-| Queue, replace, or reject work by key      | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)         |
-| Logs, traces, metrics, or direct outcomes  | [Final outcomes and lifecycle events](outcomes-and-events.md)                                        |
-| Production limits and shutdown boundaries | [Configure Taskvisor](configuration.md) and [Production boundaries](production-boundaries.md)        |
+| Next need                                 | Continue with                                                                                     |
+|-------------------------------------------|---------------------------------------------------------------------------------------------------|
+| Fixed or resident workers                 | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs) |
+| Runtime-discovered work                   | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs) |
+| Queue, replace, or reject work by key     | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)     |
+| Logs, traces, metrics, or direct outcomes | [Final outcomes and lifecycle events](outcomes-and-events.md)                                     |
+| Production limits and shutdown boundaries | [Configure Taskvisor](configuration.md) and [Production boundaries](production-boundaries.md)     |

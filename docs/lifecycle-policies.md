@@ -46,13 +46,13 @@ A restartable task can execute its attempt body again after `TaskError::Fail`, `
 Taskvisor cannot determine whether an external system committed a side effect before that failure.
 Return a retryable result only when running the attempt again is acceptable.
 
-| Application decision                                      | Attempt result             |
-|-----------------------------------------------------------|----------------------------|
-| Temporary failure and repeating the operation is safe     | `TaskError::Fail`          |
-| Task-reported deadline and repeating the operation is safe | `TaskError::Timeout`       |
-| The application classifies the failure as permanent       | `TaskError::Fatal`         |
-| Cancellation was observed and cooperative cleanup finished | `TaskError::Canceled`      |
-| The attempt completed its required work                    | `Ok(())`                   |
+| Application decision                                       | Attempt result        |
+|------------------------------------------------------------|-----------------------|
+| Temporary failure and repeating the operation is safe      | `TaskError::Fail`     |
+| Task-reported deadline and repeating the operation is safe | `TaskError::Timeout`  |
+| The application classifies the failure as permanent        | `TaskError::Fatal`    |
+| Cancellation was observed and cooperative cleanup finished | `TaskError::Canceled` |
+| The attempt completed its required work                    | `Ok(())`              |
 
 For external side effects, use an application-owned idempotency key, transaction, reconciliation read, deduplication record, or acknowledgement protocol as appropriate.
 Taskvisor provides retry lifecycle. It does not provide rollback, durable execution, or exactly-once execution.

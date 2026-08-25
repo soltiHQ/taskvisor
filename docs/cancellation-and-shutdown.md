@@ -39,14 +39,14 @@ The Tokio sleep in [graceful_worker.rs](../examples/graceful_worker.rs) is a sim
 
 Taskvisor deadlines cover different waits:
 
-| API or setting                                      | What it bounds                                      | What expiry means                                                                                           |
-|-----------------------------------------------------|-----------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `TaskSpec::with_timeout` or `TaskDefaults::with_timeout` | One attempt after `Task::spawn` returns its future. | Cancel the attempt context and destroy the future; the timeout remains retryable under policy if cleanup succeeds. |
-| `add*_with_ownership_timeout`                       | Ownership admission before registry command commit. | Return `RuntimeError::OwnershipAdmissionTimeout`; start no task and publish no lifecycle event for the request. |
-| `submit*_with_ownership_timeout`                    | Ownership admission before controller command intake. | Return `ControllerError::OwnershipAdmissionTimeout`; later queues, admission, execution, and outcome remain outside the deadline. |
-| `cancel*_with_timeout`                              | This caller's terminal wait after the registry claim. | Return `RuntimeError::TaskTerminationTimeout`; the cancellation request remains active.                     |
-| `SupervisorConfig::with_grace`                      | Shared task cleanup during shutdown.                | Commit logical force-abort where needed and return `RuntimeError::GraceExceeded`; physical code may remain active. |
-| `SupervisorConfig::with_subscriber_shutdown_timeout` | The separate shared drain of subscriber queues.    | Drop remaining queued events after the deadline; a callback already running cannot be interrupted.          |
+| API or setting                                           | What it bounds                                        | What expiry means                                                                                                                 |
+|----------------------------------------------------------|-------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `TaskSpec::with_timeout` or `TaskDefaults::with_timeout` | One attempt after `Task::spawn` returns its future.   | Cancel the attempt context and destroy the future; the timeout remains retryable under policy if cleanup succeeds.                |
+| `add*_with_ownership_timeout`                            | Ownership admission before registry command commit.   | Return `RuntimeError::OwnershipAdmissionTimeout`; start no task and publish no lifecycle event for the request.                   |
+| `submit*_with_ownership_timeout`                         | Ownership admission before controller command intake. | Return `ControllerError::OwnershipAdmissionTimeout`; later queues, admission, execution, and outcome remain outside the deadline. |
+| `cancel*_with_timeout`                                   | This caller's terminal wait after the registry claim. | Return `RuntimeError::TaskTerminationTimeout`; the cancellation request remains active.                                           |
+| `SupervisorConfig::with_grace`                           | Shared task cleanup during shutdown.                  | Commit logical force-abort where needed and return `RuntimeError::GraceExceeded`; physical code may remain active.                |
+| `SupervisorConfig::with_subscriber_shutdown_timeout`     | The separate shared drain of subscriber queues.       | Drop remaining queued events after the deadline; a callback already running cannot be interrupted.                                |
 
 Both ownership-admission timeouts happen before command intake.
 Neither starts work or publishes a lifecycle event for the request.
