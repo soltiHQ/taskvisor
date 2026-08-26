@@ -1,0 +1,58 @@
+name: Main action
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: main-action-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {
+  contents: read,
+  actions: write
+}
+
+jobs:
+  origin:
+    name: Push origin
+    runs-on: ubuntu-24.04
+    permissions: {
+      contents: read,
+      pull-requests: read
+    }
+    outputs:
+      direct: ${{ steps.check.outputs.direct }}
+    steps:
+      - name: Detect pull-request origin
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          filter='[.[] | select(.merged_at != null and .merge_commit_sha == env.SHA)] | length'
+          if ! merged=$(gh api "repos/$REPOSITORY/commits/$SHA/pulls" --jq "$filter"); then
+            echo "direct=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not resolve pull requests for $SHA. Validating to stay safe."
+            exit 0
+          fi
+          if [ "$merged" -gt 0 ]; then
+            echo "direct=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$SHA reached main by merging a pull request. PR action already validated it."
+          else
+            echo "direct=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$SHA was pushed directly to main. Running validation."
+          fi
+
+  ci:
+    name: ci
+    needs: origin
+    if: needs.origin.outputs.direct == 'true'
+    uses: soltiHQ/actions/.github/workflows/rust-ci.yml@v1
+
+  docs:
+    name: docs
+    needs: origin
+    if: needs.origin.outputs.direct == 'true'
+    uses: soltiHQ/actions/.github/workflows/docs-ci.yml@v1
