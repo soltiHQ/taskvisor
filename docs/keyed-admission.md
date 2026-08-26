@@ -27,11 +27,11 @@ Direct `add*` methods bypass controller admission.
 `submit*` methods accept a [ControllerSpec](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerSpec.html).
 The controller applies its slot policy before asking the runtime registry to admit the task.
 
-| Identity        | Scope                                                    |
-|-----------------|----------------------------------------------------------|
+| Identity                                                                         | Scope                                                    |
+|----------------------------------------------------------------------------------|----------------------------------------------------------|
 | [TaskId](https://docs.rs/taskvisor/latest/taskvisor/identity/struct.TaskId.html) | One process-local registration or controller submission. |
-| Task name       | Registry key inside one supervisor.                      |
-| Controller slot | Admission key inside one supervisor controller.          |
+| Task name                                                                        | Registry key inside one supervisor.                      |
+| Controller slot                                                                  | Admission key inside one supervisor controller.          |
 
 Different task names can share a slot.
 Without [with_slot](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerSpec.html#method.with_slot), the task name is also the slot.
@@ -42,16 +42,16 @@ Busy does not always mean that a task body is currently polling.
 
 ## Choose a busy-slot policy
 
-| Policy          | Busy-slot behavior                                                                     |
-|-----------------|----------------------------------------------------------------------------------------|
-| `Queue`         | Append to the bounded FIFO queue. A later `Replace` can still displace the queue head. |
-| `Replace`       | Request the owner to stop; create or replace the queue head.                           |
-| `DropIfRunning` | Reject the incoming submission without changing the owner or queue.                    |
+| Policy                                                                                                                   | Busy-slot behavior                                                                                                                                                                        |
+|--------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`Queue`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.Queue)                 | Append to the bounded FIFO queue. A later [`Replace`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.Replace) can still displace the queue head. |
+| [`Replace`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.Replace)             | Request the owner to stop; create or replace the queue head.                                                                                                                              |
+| [`DropIfRunning`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.DropIfRunning) | Reject the incoming submission without changing the owner or queue.                                                                                                                       |
 
 A replacement is not guaranteed to become the next owner.
-A newer `Replace` can displace it before admission. The registry can also reject it later.
-`Replace` changes only the queue head and preserves the FIFO tail.
-It does not use the per-slot `max_slot_queue` limit, but creating a new head can still reach `max_total_pending`.
+A newer [`Replace`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.Replace) can displace it before admission. The registry can also reject it later.
+[`Replace`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.Replace) changes only the queue head and preserves the FIFO tail.
+It does not use the per-slot [`max_slot_queue`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.max_slot_queue) limit, but creating a new head can still reach [`max_total_pending`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.max_total_pending).
 
 ```rust
 use taskvisor::{ControllerSpec, TaskFn, TaskRef, TaskSpec};
@@ -68,13 +68,13 @@ assert_eq!(request.slot_name(), "customer-42");
 
 [submit](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit) confirms command intake only.
 [submit_and_watch](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit_and_watch) returns a task ID and waiter.
-The waiter resolves to `Rejected` if admission fails or to the registered task's final outcome if admission succeeds.
+The waiter resolves to [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) if admission fails or to the registered task's final outcome if admission succeeds.
 
 The call first waits for cleanup ownership and controller-command capacity.
 After the command is queued, returning to the caller and processing the command can race.
-The return from `submit_and_watch` is not an admission reply or proof that the task has started.
+The return from [`submit_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit_and_watch) is not an admission reply or proof that the task has started.
 
-This diagram shows successful admission. Slot or registry rejection resolves the waiter to `Rejected` instead.
+This diagram shows successful admission. Slot or registry rejection resolves the waiter to [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) instead.
 
 ```mermaid
 sequenceDiagram
@@ -110,7 +110,7 @@ The slot becomes reusable only after the registered task physically completes an
 Deferred destruction of retained user values can continue after slot release.
 See [task management](managing-tasks.md#choose-waiting-bounded-ownership-or-fail-fast-intake) for waiting and fail-fast calls.
 
-This example starts an owner, rejects a competing `DropIfRunning` submission, and then stops the owner:
+This example starts an owner, rejects a competing [`DropIfRunning`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.DropIfRunning) submission, and then stops the owner:
 
 ```rust
 use std::sync::Arc;
@@ -184,11 +184,11 @@ Do not treat it as a transaction boundary.
 
 ## Know timeout and cancellation scope
 
-Attempt timeout starts only after registry admission and after `Task::spawn` returns the attempt future.
+Attempt timeout starts only after registry admission and after [`Task::spawn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html#tymethod.spawn) returns the attempt future.
 It does not limit time spent in a controller queue. Controller submission has no built-in end-to-end deadline.
 
 [submit_with_ownership_timeout](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit_with_ownership_timeout)
-and `submit_and_watch_with_ownership_timeout` limit only the wait for cleanup ownership before command intake.
+and [`submit_and_watch_with_ownership_timeout`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit_and_watch_with_ownership_timeout) limit only the wait for cleanup ownership before command intake.
 The timer stops when Taskvisor acquires the ownership permit.
 It does not cover controller-command capacity, a busy-slot queue, slot admission, registry-command capacity, task execution, or final outcome delivery.
 Prepared submission methods use the same boundary.
@@ -198,23 +198,23 @@ Slots govern admission, not cancellation.
 There is no slot-wide cancel or remove operation.
 Stop queued work by task ID and registered work by task ID or task name.
 Removing or canceling work that is still queued or waiting for registry-command capacity removes it before it runs.
-Its waiter resolves to `Rejected` with [RejectionKind::RemovedFromQueue](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.RemovedFromQueue), not `Canceled`.
+Its waiter resolves to [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) with [RejectionKind::RemovedFromQueue](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.RemovedFromQueue), not [`Canceled`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Canceled).
 
 ## Bound controller resources
 
 [ControllerConfig](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html) bounds separate stages:
 
-| Setting | What it bounds | When full |
-|---------|----------------|-----------|
-| `queue_capacity` | Ordered controller commands. | Async submit waits; `try_submit*` returns `ControllerError::Full`. |
-| `max_slot_queue` | Pending depth behind one owner, including a replacement head. | New `Queue` submissions get watched `Rejected` with `QueueFull`. |
-| `max_total_pending` | Slot queues and registry-capacity waits. | New pending entries get watched `Rejected` with `ResourceLimit`. |
-| `max_controller_slots` | Tracked slots. | New slots get watched `Rejected` with `ResourceLimit`. |
-| `admission_capacity` | Waits for registry-command capacity. | New waits get watched `Rejected` with `ResourceLimit`. |
-| `identity_operation_capacity` | Concurrent registry-backed ID remove/cancel calls. | The call returns `RuntimeError::ResourceLimitReached`. |
+| Setting                                                                                                                                                | What it bounds                                                | When full                                                                                                                                                                                                                                                                                                                                                  |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`queue_capacity`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.queue_capacity)                           | Ordered controller commands.                                  | Async submit waits; `try_submit*` returns [`ControllerError::Full`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.ControllerError.html#variant.Full).                                                                                                                                                                                         |
+| [`max_slot_queue`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.max_slot_queue)                           | Pending depth behind one owner, including a replacement head. | New [`Queue`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.AdmissionPolicy.html#variant.Queue) submissions get watched [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) with [`QueueFull`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.QueueFull). |
+| [`max_total_pending`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.max_total_pending)                     | Slot queues and registry-capacity waits.                      | New pending entries get watched [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) with [`ResourceLimit`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.ResourceLimit).                                                                                              |
+| [`max_controller_slots`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.max_controller_slots)               | Tracked slots.                                                | New slots get watched [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) with [`ResourceLimit`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.ResourceLimit).                                                                                                        |
+| [`admission_capacity`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.admission_capacity)                   | Waits for registry-command capacity.                          | New waits get watched [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) with [`ResourceLimit`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.ResourceLimit).                                                                                                        |
+| [`identity_operation_capacity`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.identity_operation_capacity) | Concurrent registry-backed ID remove/cancel calls.            | The call returns [`RuntimeError::ResourceLimitReached`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.ResourceLimitReached).                                                                                                                                                                                             |
 
 Queued controller removal happens before the identity-operation limit is checked.
-Buffered controller commands and work already handed to the registry do not count toward `max_total_pending`.
+Buffered controller commands and work already handed to the registry do not count toward [`max_total_pending`](https://docs.rs/taskvisor/latest/taskvisor/controller/struct.ControllerConfig.html#method.max_total_pending).
 Replacing an existing queue head does not need another pending unit.
 See the API reference for defaults and [configuration](configuration.md#bound-different-resources) for runtime and ownership limits.
 

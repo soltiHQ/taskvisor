@@ -6,8 +6,8 @@ description: Run a retrying Taskvisor task and wait for its direct final outcome
 # Quick start
 
 This example runs one task, retries two temporary failures, and waits for the final outcome.
-It uses `serve` and [add_and_watch](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) because the caller needs that task's result.
-`Supervisor::run` would wait for the supervisor lifecycle, not return one task's result.
+It uses [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) and [add_and_watch](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) because the caller needs that task's result.
+[`Supervisor::run`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run) would wait for the supervisor lifecycle, not return one task's result.
 
 ## Create a project
 
@@ -105,9 +105,9 @@ Taskvisor waits for the configured backoff before each retry, and the third atte
 A retry limit counts retries after the first failed attempt.
 The limit of two therefore permits the initial attempt and at most two retries.
 
-`add_and_watch` returns a [TaskWaiter](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html).
-It delivers the final `TaskOutcome` through a direct channel. It does not depend on event delivery.
-`handle.shutdown().await` then joins the shared shutdown and cleanup workflow.
+[`add_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) returns a [TaskWaiter](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html).
+It delivers the final [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html) through a direct channel. It does not depend on event delivery.
+[`handle.shutdown().await`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.shutdown) then joins the shared shutdown and cleanup workflow.
 
 Every retry starts a new attempt.
 Before returning a retryable failure for work with external side effects, make the operation safe to repeat.

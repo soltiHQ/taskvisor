@@ -26,7 +26,7 @@ Clone captured shared state into the returned future when needed.
 
 Implement [`Task`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html) when a reusable type should hold state or dependencies across attempts.
 Each [`Task::spawn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html#tymethod.spawn) call must return a fresh future.
-`spawn` runs synchronously, before the attempt timeout starts.
+[`spawn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html#tymethod.spawn) runs synchronously, before the attempt timeout starts.
 Keep it short. Put the actual operation inside the returned future.
 
 ```rust
@@ -53,7 +53,7 @@ impl Task for EndpointProbe {
 ```
 
 The task object keeps `endpoint` across attempts.
-Each future owns a separate `Arc` clone that points to the same endpoint string.
+Each future owns a separate [`Arc`](https://doc.rust-lang.org/std/sync/struct.Arc.html) clone that points to the same endpoint string.
 The [task contract](../src/tasks/task.rs) defines the boundary between the task object and its attempt futures.
 
 ## Reuse task values safely
@@ -62,7 +62,7 @@ A shared [`TaskRef`](https://docs.rs/taskvisor/latest/taskvisor/tasks/type.TaskR
 Registrations that overlap in one supervisor need different names.
 A name can be reused after the earlier registration releases it.
 The registrations receive different task IDs.
-Their `spawn` calls may run concurrently when the configured attempt capacity allows it.
+Their [`spawn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html#tymethod.spawn) calls may run concurrently when the configured attempt capacity allows it.
 Shared task state must support that use.
 
 After a force-abort, Taskvisor may keep the name reserved until it observes that the task attempt has physically returned.
@@ -81,7 +81,7 @@ This is separate from [deferred cleanup of the retained task object](production-
 
 Runnable examples:
 
-- [basic.rs](../examples/basic.rs) uses `TaskFn` for one static task;
-- [task_type.rs](../examples/task_type.rs) implements `Task` for reusable state;
+- [basic.rs](../examples/basic.rs) uses [`TaskFn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskFn.html) for one static task;
+- [task_type.rs](../examples/task_type.rs) implements [`Task`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html) for reusable state;
 - [queue_consumer.rs](../examples/queue_consumer.rs) supervises a cancellation-aware receive loop;
 - [cpu_job.rs](../examples/cpu_job.rs) moves CPU work to Rayon and explains the cancellation limit.

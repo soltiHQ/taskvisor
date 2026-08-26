@@ -57,7 +57,7 @@ See [ownership configuration](configuration.md#bound-different-resources) and th
 
 The [attempt reaper](../src/core/registry/scheduler/reaper.rs) retains actor handles and results after force-abort.
 If its coordinator is closed, `spawn_or_retain()` tries to spawn detached cleanup on the current Tokio runtime.
-If the calling thread has no current Tokio runtime context, it intentionally leaks the reaping future with `std::mem::forget`.
+If the calling thread has no current Tokio runtime context, it intentionally leaks the reaping future with [`std::mem::forget`](https://doc.rust-lang.org/std/mem/fn.forget.html).
 This avoids dropping its owned values on that thread.
 
 User values and ownership capacity held by the unfinished reaper record remain retained for the rest of the process lifetime.

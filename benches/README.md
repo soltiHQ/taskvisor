@@ -8,7 +8,7 @@ Each result states what was timed and what stayed outside the timer.
 Run all five benchmark suites with the colored Taskvisor report:
 
 ```bash
-task rust:benchmark
+task rust:test/bench
 ```
 
 The equivalent Cargo command is:
@@ -17,42 +17,103 @@ The equivalent Cargo command is:
 cargo bench --bench '*' --features controller --locked -- --quiet --color always
 ```
 
+Run each selected case as a smoke check, without collecting statistical estimates:
+
+```bash
+cargo bench --bench '*' --features controller --locked -- --test
+```
+
+Smoke mode exercises the case assertions. It does not produce the Taskvisor performance snapshot.
+
 Run one suite:
 
 ```bash
-cargo bench --bench controller --features controller -- --color always
+cargo bench --bench controller --features controller --locked -- --color always
 ```
 
 Run matching cases from one suite:
 
 ```bash
-cargo bench --bench controller --features controller -- 'steady/queue_one_slot'
+cargo bench --bench controller --features controller --locked -- 'controller/cold/first_try_submit'
 ```
 
-## What each suite measures
+The shared defaults are 30 samples, 1 second of warmup, and 3 seconds of measurement per case.
+Criterion flags such as `--sample-size`, `--warm-up-time`, and `--measurement-time` override these defaults.
+Setup, checks, and cleanup can make the full command take longer than the measurement window.
 
-| Suite        | What it measures                                                              |
-|--------------|-------------------------------------------------------------------------------|
-| `lifecycle`  | One task from a fresh supervisor to its final result and cleanup.             |
-| `throughput` | Complete batches of instant tasks or tasks with small CPU work.               |
-| `fanout`     | Complete task batches with 0, 1, 4, or 8 subscribers.                         |
-| `dynamic`    | Adding, canceling, listing, and cleaning up tasks through `SupervisorHandle`. |
-| `controller` | Submission intake, queueing, replacement, rejection, and completed tasks.     |
+## What each case measures
 
-Case names use a few common labels:
+### [Lifecycle](lifecycle.rs)
 
-- `cold`: the case uses a fresh supervisor.
-- `steady`: Taskvisor is warmed up before timing starts.
-- `current_thread`: Tokio uses its current-thread runtime.
-- `multi_thread`: Tokio uses four worker threads.
+| Case                     | Timed work                                                                                                              | What it does not measure                                                                                          |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Cold single task         | Fresh supervisor construction, one instant task, and shared shutdown. The task body is checked to have run.             | Tokio runtime and task-value construction.                                                                        |
+| Watched completion       | Admission through `Completed`, either on the first attempt or after two failed attempts and a successful third attempt. | Startup, task-value construction, deferred ownership cleanup, or a positive backoff delay. Retry backoff is zero. |
+| Cancel scheduled backoff | Cancellation through the reliable `Canceled` outcome after a subscriber has confirmed `BackoffScheduled`.               | Scheduling and waiting out the configured 60-second backoff. The case cancels that wait.                          |
 
-The runtime label describes Tokio only. Taskvisor may also use cleanup workers and subscriber threads.
+### [Throughput](throughput.rs)
+
+These cases admit and wait for batches of 256 successful tasks on a warmed supervisor, without subscribers.
+Each task must return `Completed`. Startup, task-value construction, and ownership cleanup stay outside the timer.
+There is no synthetic CPU loop in the task body.
+
+The instant-task case is the baseline for the subscriber cases. A second pair uses identical tasks that explicitly yield once, with and without a 60-second attempt deadline. 
+The yield ensures the deadline timer is polled before the task succeeds.
+This comparison includes timer registration and removal, deadline selection, and scheduling; it is not a pure timer microbenchmark.
+It does not promise that another task runs during the yield, and it does not measure timeout expiry.
+Positive delays and deadline expiry are exercised in the [lifecycle tests](../tests/lifecycle.rs)
+and [timeout tests](../tests/timeout.rs); these benchmarks do not measure their elapsed latency.
+
+### [Subscriber fan-out](fanout.rs)
+
+- **Healthy subscribers:** 256 tasks with 1, 4, or 8 subscribers. Timing includes watched task completion and every subscriber receiving all `TaskFinished` events with `Completed` outcomes. Overflow is not allowed in this case.
+- **Saturated subscriber:** 256 tasks, one healthy subscriber, and one blocked callback whose queue capacity is one. Timing includes all watched `Completed` outcomes and delivery of their `TaskFinished` events to the healthy subscriber. The blocked callback is confirmed before timing; gate release and verification of its overflow happen afterward.
+
+These rates count completed tasks, not callbacks. The saturated case exercises overflow in one subscriber lane while tasks and another subscriber progress.
+It does not measure shared event-bus overflow, delivery to the blocked subscriber, or its recovery time.
+Setup, final shutdown, and ownership reset are excluded.
+
+### [Dynamic management](dynamic.rs)
+
+| Case                           | Timed work                                                                                                              | State prepared or reset outside the timer                                                                                                                              |
+|--------------------------------|-------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Bounded registry admission     | 32 `add` calls through registry acceptance, with capacity available.                                                    | Task construction, cancellation, and cleanup of the accepted batch. This is not task completion throughput.                                                            |
+| Cancel running task            | Cancellation and the `Canceled` outcome of a task already known to be running.                                          | Admission, the start handshake, and ownership cleanup.                                                                                                                 |
+| List held tasks                | One registry snapshot with 32 or 256 tasks retained.                                                                    | Population, snapshot validation and disposal, and task removal. The unit is a snapshot, not a task.                                                                    |
+| Ownership release to admission | With ownership capacity one, release a gated final task destructor and wait for an already-parked admission to succeed. | Filling capacity, parking the waiter, completion of the new task, and cleanup. This measures recovery after release, not an arbitrary time spent waiting for capacity. |
+
+### [Controller admission](controller.rs)
+
+| Case                  | Timed work                                                                                                              | What it does not measure                                                                           |
+|-----------------------|-------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| Cold first submission | First successful `try_submit` on a fresh served supervisor, including lazy cleanup-worker startup.                      | Supervisor/controller and Tokio runtime startup, request construction, task outcome, and shutdown. |
+| Reused intake burst   | Acceptance of a fixed burst of 64 requests.                                                                             | Slot admission and final task outcomes.                                                            |
+| Busy-slot Drop        | 32 requests rejected with `SlotBusy` while an owner holds the slot.                                                     | Owner setup and cleanup.                                                                           |
+| Busy-slot Replace     | 32 watched submissions through 31 `SupersededByReplace` rejections, after the newest request replaces the pending head. | The retention snapshot check, newest task completion, and owner teardown.                          |
+| One-slot Queue        | 32 task completions through one serial slot, on Tokio current-thread only.                                              | Runtime startup, warmup, request construction, and ownership reset.                                |
+| Eight-slot Queue      | 64 task completions across eight slots, on both runtime variants.                                                       | Runtime startup, warmup, request construction, and ownership reset.                                |
+
+In the reused intake burst, the current-thread runtime cannot consume commands during the synchronous producer loop.
+The multi-thread runtime can consume them concurrently. Both cases measure submission intake, not completed work.
+
+## Measurement boundaries and reset
+
+`cold` uses a fresh supervisor; `Boundary` states whether its construction is timed. `steady` and `reused` exclude startup and warmup.
+Each iteration uses a fixed operation or batch. Gates establish required running, busy, or blocked states before timing starts.
+
+A watched outcome can arrive before deferred destruction releases ownership. The fixtures wait for ownership and cleanup to return
+to the case's starting level before reusing state. This reset is outside the timer unless `Boundary` explicitly includes it.
+Criterion's iteration count therefore does not turn a fixed burst into a growing queue or change the available capacity between iterations.
+
+The shared fixtures live in [support/fixtures.rs](support/fixtures.rs); the report wrapper stays in [support/mod.rs](support/mod.rs).
+`current_thread` uses Tokio's current-thread runtime. `multi_thread` uses four Tokio workers.
+These labels describe Tokio only: Taskvisor may also use cleanup workers and subscriber threads.
 
 ## How to read a result
 
 The Taskvisor snapshot translates Criterion output into named operations:
 
-Results with the same measured boundary share one card. 
+Results with the same measured boundary share one card.
 Runtime and case-parameter variants appear as separate entries inside that card.
 
 - `Results` is the number of individual runtime and case-parameter measurements.
@@ -72,14 +133,8 @@ A policy result measures verified controller decisions. A query result measures 
 For a batch, the report shows both total time and average time per item.
 The average is not the latency of one task inside a concurrent batch.
 
-Criterion prints the generic unit `elem/s`. The Taskvisor snapshot replaces it with the real unit,
-such as completed tasks, accepted submissions, rejections, or snapshot calls.
-
-`Performance has regressed`, `improved`, and `no change` compare the result with a saved Criterion
-baseline. They do not change the absolute time or operation rate from the current run.
-
-In `controller/steady/intake_try_submit`, the current-thread case measures one producer burst.
-The controller can consume submissions at the same time only in the multi-thread case.
+Criterion prints the generic unit `elem/s`. 
+The Taskvisor snapshot replaces it with the real unit, such as completed tasks, accepted submissions, rejections, or snapshot calls.
 
 ## Scope labels
 
@@ -93,6 +148,22 @@ The report classifies results by what their rate counts:
 
 These labels describe the measured unit. They do not rate the result as high or low.
 Card colors distinguish measurement scopes. They do not grade performance.
+
+## Compare runs
+
+`Performance has regressed`, `improved`, and `no change` compare the result with a saved Criterion baseline. 
+They do not change the absolute time or operation rate from the current run.
+
+Changed measurement boundaries use new case IDs. The earlier cold-batch, CPU-loop, and growing-admission cases are not comparable
+with the warmed, fixed-work cases described here. Keep separate baselines for them; the new results do not establish an improvement or regression against those older measurements.
+
+For a separate set of results and HTML reports, set `CRITERION_HOME` when running Cargo:
+
+```bash
+CRITERION_HOME=target/criterion-reworked cargo bench --bench '*' --features controller --locked -- --color always
+```
+
+Compare matching case IDs, boundaries, parameters, features, and runtime settings on the same machine under comparable load.
 
 ## What the result means
 

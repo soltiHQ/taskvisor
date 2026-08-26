@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod fixtures;
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;

@@ -42,15 +42,15 @@ See the [context implementation](../src/tasks/context.rs) for cancellation prior
 
 Taskvisor deadlines cover different waits:
 
-| API or setting | What it bounds | What expiry means |
-|----------------|----------------|-------------------|
-| [`TaskSpec::with_timeout`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.with_timeout) or [`TaskDefaults::with_timeout`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskDefaults.html#method.with_timeout) | One attempt after `Task::spawn` returns its future. | Cancel the attempt context and destroy the future. The timeout is retryable under policy if cleanup succeeds. |
-| `add*_with_ownership_timeout` | Ownership admission before registry command commit. | Return `RuntimeError::OwnershipAdmissionTimeout`. Start no task and publish no lifecycle event for the request. |
-| `submit*_with_ownership_timeout` | Ownership admission before controller command intake. | Return `ControllerError::OwnershipAdmissionTimeout`. Later queues, admission, and execution are outside this deadline. |
-| `cancel*_with_timeout` | This caller's terminal wait after the registry claim. | Return `RuntimeError::TaskTerminationTimeout`. The cancellation request remains active. |
-| [`with_grace`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.with_grace) for `remove` or `cancel` | One registered task's cooperative stop after a new claim. | Request abort and commit `ForceAborted`. `cancel` still returns its claim boolean. |
-| `with_grace` for shutdown | One shared drain of tasks and pending removals. | Return `RuntimeError::GraceExceeded` if work did not drain in time. Commit force-abort where needed. |
-| [`with_subscriber_shutdown_timeout`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.with_subscriber_shutdown_timeout) | The separate shared drain of subscriber queues. | Drop queued events after the deadline. A callback already running cannot be interrupted. |
+| API or setting                                                                                                                                                                                                                                                                                                                      | What it bounds                                                                                                                         | What expiry means                                                                                                                                                                                                                                                              |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`TaskSpec::with_timeout`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.with_timeout) or [`TaskDefaults::with_timeout`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskDefaults.html#method.with_timeout)                                                                               | One attempt after [`Task::spawn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html#tymethod.spawn) returns its future. | Cancel the attempt context and destroy the future. The timeout is retryable under policy if cleanup succeeds.                                                                                                                                                                  |
+| `add*_with_ownership_timeout`                                                                                                                                                                                                                                                                                                       | Ownership admission before registry command commit.                                                                                    | Return [`RuntimeError::OwnershipAdmissionTimeout`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.OwnershipAdmissionTimeout). Start no task and publish no lifecycle event for the request.                                                   |
+| `submit*_with_ownership_timeout`                                                                                                                                                                                                                                                                                                    | Ownership admission before controller command intake.                                                                                  | Return [`ControllerError::OwnershipAdmissionTimeout`](https://docs.rs/taskvisor/latest/taskvisor/controller/enum.ControllerError.html#variant.OwnershipAdmissionTimeout). Later queues, admission, and execution are outside this deadline.                                    |
+| `cancel*_with_timeout`                                                                                                                                                                                                                                                                                                              | This caller's terminal wait after the registry claim.                                                                                  | Return [`RuntimeError::TaskTerminationTimeout`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.TaskTerminationTimeout). The cancellation request remains active.                                                                              |
+| [`with_grace`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.with_grace) for [`remove`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.remove) or [`cancel`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel) | One registered task's cooperative stop after a new claim.                                                                              | Request abort and commit [`ForceAborted`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.ForceAborted). [`cancel`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel) still returns its claim boolean. |
+| [`with_grace`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.with_grace) for shutdown                                                                                                                                                                                                         | One shared drain of tasks and pending removals.                                                                                        | Return [`RuntimeError::GraceExceeded`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.GraceExceeded) if work did not drain in time. Commit force-abort where needed.                                                                          |
+| [`with_subscriber_shutdown_timeout`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.with_subscriber_shutdown_timeout)                                                                                                                                                                          | The separate shared drain of subscriber queues.                                                                                        | Drop queued events after the deadline. A callback already running cannot be interrupted.                                                                                                                                                                                       |
 
 Both ownership-admission timeouts happen before command intake.
 Neither starts work or publishes a lifecycle event for the request.
@@ -60,7 +60,7 @@ None rolls back external side effects. Timers cannot interrupt synchronous Rust 
 
 ## Understand attempt timeouts
 
-The [attempt runner](../src/core/runner.rs) starts the timeout after `Task::spawn` returns its future.
+The [attempt runner](../src/core/runner.rs) starts the timeout after [`Task::spawn`](https://docs.rs/taskvisor/latest/taskvisor/tasks/trait.Task.html#tymethod.spawn) returns its future.
 On expiry, it cancels the attempt context and drops the future.
 It does not poll the future again to run async cleanup or undo side effects.
 A blocking future destructor can delay attempt release beyond the configured timeout.
@@ -71,10 +71,10 @@ A blocking future destructor can delay attempt release beyond the configured tim
 [`cancel`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel) waits until registry membership is removed and the final outcome is committed.
 Both use the configured grace period when they create a new stop claim for registered work.
 
-If the task does not stop within grace, Taskvisor requests abort and commits `ForceAborted`.
-A plain `cancel` can then return `Ok(true)`. It does not return `GraceExceeded` for this task.
-A `cancel` that joins an existing removal waits for the same cleanup and returns `Ok(false)`.
-Use a `TaskWaiter` to learn the task's final outcome; the boolean reports only who made the stop claim.
+If the task does not stop within grace, Taskvisor requests abort and commits [`ForceAborted`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.ForceAborted).
+A plain [`cancel`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel) can then return `Ok(true)`. It does not return [`GraceExceeded`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.GraceExceeded) for this task.
+A [`cancel`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel) that joins an existing removal waits for the same cleanup and returns `Ok(false)`.
+Use a [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) to learn the task's final outcome; the boolean reports only who made the stop claim.
 
 The [registry stop commands](../src/core/registry/removal/commands.rs) create or join the claim.
 The [join reporter](../src/core/registry/removal/join.rs) applies the task's grace period.
@@ -85,10 +85,10 @@ The [join reporter](../src/core/registry/removal/join.rs) applies the task's gra
 Controller ordering, command-queue admission, and the registry claim happen outside that timer.
 A timeout stops this caller's wait. It does not undo cancellation or change the task grace period.
 If task completion is observed at the timeout boundary, completion wins.
-Queued controller work is removed directly, and `cancel_with_timeout` does not apply its wait timer to that path.
-A watched queued submission then resolves to `Rejected` with [`RejectionKind::RemovedFromQueue`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.RemovedFromQueue), not to `Canceled`.
+Queued controller work is removed directly, and [`cancel_with_timeout`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel_with_timeout) does not apply its wait timer to that path.
+A watched queued submission then resolves to [`Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) with [`RejectionKind::RemovedFromQueue`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.RejectionKind.html#variant.RemovedFromQueue), not to [`Canceled`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Canceled).
 The matching `try_*` methods make command-queue admission fail fast. Their remaining behavior is unchanged.
-If the caller already holds a `TaskWaiter`, a `TaskTerminationTimeout` neither consumes nor cancels it.
+If the caller already holds a [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html), a [`TaskTerminationTimeout`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.TaskTerminationTimeout) neither consumes nor cancels it.
 The waiter can still deliver the eventual terminal outcome.
 See the [caller-wait implementation](../src/core/runtime/management/cancel.rs).
 
@@ -106,7 +106,7 @@ The workflow has concurrent parts:
 - The controller rejects pending submissions as its loop exits. This can overlap the registry grace period.
 - Taskvisor joins runtime and controller cleanup, then drains subscriber queues up to their separate deadline.
 
-If task cleanup exceeds grace, shutdown reports `RuntimeError::GraceExceeded` and force-aborts work as needed.
+If task cleanup exceeds grace, shutdown reports [`RuntimeError::GraceExceeded`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.GraceExceeded) and force-aborts work as needed.
 The [shutdown coordinator](../src/core/runtime/shutdown_workflow/mod.rs) owns the shared result.
 The [cleanup workflow](../src/core/runtime/shutdown_workflow/cleanup.rs) owns the drain order and deadlines.
 
@@ -159,15 +159,15 @@ The [attempt reaper](../src/core/registry/scheduler/reaper.rs) retains force-abo
 
 Taskvisor exposes separate views for these stages:
 
-| Question                                           | Interface                            |
-|----------------------------------------------------|--------------------------------------|
-| What final logical result did watched work reach? | [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) and [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html) |
-| Is the task still registered? | [`list`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.list) |
-| Is a physical attempt still active? | [`alive_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.alive_snapshot) and [`is_alive`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.is_alive) |
-| Are user values retained or awaiting destruction? | [`ownership_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.ownership_snapshot) |
+| Question                                          | Interface                                                                                                                                                                                                                             |
+|---------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| What final logical result did watched work reach? | [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) and [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html)                                                     |
+| Is the task still registered?                     | [`list`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.list)                                                                                                                                    |
+| Is a physical attempt still active?               | [`alive_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.alive_snapshot) and [`is_alive`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.is_alive) |
+| Are user values retained or awaiting destruction? | [`ownership_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.ownership_snapshot)                                                                                                        |
 
-After `ForceAborted`, a task can be absent from `list` while its name remains in `alive_snapshot`.
-After physical exit, the name can leave `alive_snapshot` while ownership is still in use.
+After [`ForceAborted`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.ForceAborted), a task can be absent from [`list`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.list) while its name remains in [`alive_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.alive_snapshot).
+After physical exit, the name can leave [`alive_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.alive_snapshot) while ownership is still in use.
 Its ownership unit stays charged until the retained user values finish isolated destruction.
 A destructor panic permanently retires that unit from finite capacity instead of releasing it.
 

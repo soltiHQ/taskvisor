@@ -16,25 +16,25 @@ Your application still owns the work itself, external side effects, stored data,
 
 ## What Taskvisor manages
 
-| Need                  | Taskvisor contract                                                                                       |
-|-----------------------|----------------------------------------------------------------------------------------------------------|
-| Supervised lifecycle  | One-shot, retrying, or periodic tasks with backoff, jitter, retry limits, and attempt timeouts.          |
-| Runtime control       | Add work and optionally request its final result; inspect, cancel, or remove registrations later.        |
-| Direct final outcomes | One process-local `TaskOutcome` through `TaskWaiter`, outside the best-effort event path.                |
-| Per-key admission     | Queue, replace, or reject competing submissions through an optional controller slot.                     |
-| Typed observability   | Lifecycle events for logs, traces, metrics, and live diagnostics.                                        |
-| Explicit resource use | Configurable bounds for attempts, registrations, command queues, subscriber queues, and retained values. |
+| Need                  | Taskvisor contract                                                                                                                                                                                                                           |
+|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Supervised lifecycle  | One-shot, retrying, or periodic tasks with backoff, jitter, retry limits, and attempt timeouts.                                                                                                                                              |
+| Runtime control       | Add work and optionally request its final result; inspect, cancel, or remove registrations later.                                                                                                                                            |
+| Direct final outcomes | One process-local [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html) through [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html), outside the best-effort event path. |
+| Per-key admission     | Queue, replace, or reject competing submissions through an optional controller slot.                                                                                                                                                         |
+| Typed observability   | Lifecycle events for logs, traces, metrics, and live diagnostics.                                                                                                                                                                            |
+| Explicit resource use | Configurable bounds for attempts, registrations, command queues, subscriber queues, and retained values.                                                                                                                                     |
 
 ## Choose a workflow
 
-| Application need                                       | Taskvisor path                                  | Start here                                                                                        |
-|--------------------------------------------------------|-------------------------------------------------|---------------------------------------------------------------------------------------------------|
-| A fixed batch or resident workers known at startup     | `run`, `run_until`, or `run_with_os_signals`    | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs) |
-| Work discovered while the service is running           | `serve`, then `add*` through `SupervisorHandle` | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs) |
-| Competing work that must coordinate by application key | `serve`, then controller `submit*` methods      | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)     |
+| Application need                                       | Taskvisor path                                                                                                                                                                                                                                                                                                                    | Start here                                                                                        |
+|--------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| A fixed batch or resident workers known at startup     | [`run`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run), [`run_until`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run_until), or [`run_with_os_signals`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run_with_os_signals) | [Run Taskvisor](running-and-managing.md) and [graceful_worker.rs](../examples/graceful_worker.rs) |
+| Work discovered while the service is running           | [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve), then `add*` through [`SupervisorHandle`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html)                                                                                                            | [Manage tasks at runtime](managing-tasks.md) and [dynamic_tasks.rs](../examples/dynamic_tasks.rs) |
+| Competing work that must coordinate by application key | [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve), then controller `submit*` methods                                                                                                                                                                                                 | [Coordinate work by key](keyed-admission.md) and [tenant_sync.rs](../examples/tenant_sync.rs)     |
 
 These paths describe how work enters the runtime.
-`TaskSpec::once`, `restartable`, and `periodic` separately describe what happens after each attempt.
+[`TaskSpec::once`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.once), [`restartable`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.restartable), and [`periodic`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.periodic) separately describe what happens after each attempt.
 Use a watched add or submission whenever application logic needs the final outcome.
 
 ## Check the fit
@@ -53,7 +53,7 @@ It is not a persistent job queue or an external scheduler.
 
 - Tasks, queued submissions, task IDs, events, and watched outcomes do not survive process exit.
 - Cancellation is cooperative. Timeouts and force-abort do not roll back external side effects.
-- `TaskWaiter` is the direct result path. Events and subscriber queues are bounded and best-effort.
+- [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) is the direct result path. Events and subscriber queues are bounded and best-effort.
 - Periodic work uses a delay after completion, not cron or missed-run recovery.
 - Controller slots and resource budgets belong to one supervisor. They do not coordinate another process or bound operating-system resources.
 

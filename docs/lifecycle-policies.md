@@ -9,38 +9,38 @@ description: Configure success repetition, retryable failures, backoff, attempt 
 
 [TaskSpec](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html) selects what happens after success or a retryable failure:
 
-| Constructor               | After success                         | After a retryable failure                                |
-|---------------------------|---------------------------------------|----------------------------------------------------------|
-| [once](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.once) | Stop. | Stop. |
-| [restartable](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.restartable) | Stop. | Retry if the retry limit allows. |
-| [periodic](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.periodic) | Repeat after the interval; see [periodic timing](#understand-periodic-timing) for zero. | Retry through failure backoff if the retry limit allows. |
-| [from_defaults](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.from_defaults) | Use `TaskDefaults`. | Use `TaskDefaults`. |
+| Constructor                                                                                                 | After success                                                                                   | After a retryable failure                                                                       |
+|-------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| [once](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.once)                   | Stop.                                                                                           | Stop.                                                                                           |
+| [restartable](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.restartable)     | Stop.                                                                                           | Retry if the retry limit allows.                                                                |
+| [periodic](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.periodic)           | Repeat after the interval; see [periodic timing](#understand-periodic-timing) for zero.         | Retry through failure backoff if the retry limit allows.                                        |
+| [from_defaults](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.from_defaults) | Use [`TaskDefaults`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskDefaults.html). | Use [`TaskDefaults`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskDefaults.html). |
 
 One task ID runs attempts sequentially. Two attempts for that ID never overlap.
-These constructors choose a [RestartPolicy](https://docs.rs/taskvisor/latest/taskvisor/policies/enum.RestartPolicy.html), or inherit it from `TaskDefaults`.
-An explicit `with_restart` call can change that choice.
+These constructors choose a [RestartPolicy](https://docs.rs/taskvisor/latest/taskvisor/policies/enum.RestartPolicy.html), or inherit it from [`TaskDefaults`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskDefaults.html).
+An explicit [`with_restart`](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskSpec.html#method.with_restart) call can change that choice.
 
 ## Interpret attempt results
 
 Each attempt returns `Ok(())` or a [TaskError](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html):
 
-| Attempt result        | Meaning                                                                  |
-|-----------------------|--------------------------------------------------------------------------|
-| `Ok(())`              | Success. The restart policy decides whether another attempt follows.     |
-| `TaskError::Fail`     | Retryable failure.                                                       |
-| `TaskError::Timeout`  | Retryable timeout reported by task code.                                 |
-| `TaskError::Fatal`    | Permanent failure; stop without retry.                                   |
-| `TaskError::Canceled` | Cooperative cancellation; stop without retry.                            |
-| Configured timeout    | Drop the attempt future; report a retryable timeout if cleanup succeeds. |
+| Attempt result                                                                                                 | Meaning                                                                  |
+|----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------|
+| `Ok(())`                                                                                                       | Success. The restart policy decides whether another attempt follows.     |
+| [`TaskError::Fail`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Fail)         | Retryable failure.                                                       |
+| [`TaskError::Timeout`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Timeout)   | Retryable timeout reported by task code.                                 |
+| [`TaskError::Fatal`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Fatal)       | Permanent failure; stop without retry.                                   |
+| [`TaskError::Canceled`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Canceled) | Cooperative cancellation; stop without retry.                            |
+| Configured timeout                                                                                             | Drop the attempt future; report a retryable timeout if cleanup succeeds. |
 
-A returned `TaskError::Timeout` produces the ordinary `AttemptFailed` event.
+A returned [`TaskError::Timeout`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Timeout) produces the ordinary [`AttemptFailed`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.EventKind.html#variant.AttemptFailed) event.
 A configured attempt deadline drops the attempt future.
 If cleanup succeeds, it produces [AttemptTimedOut](https://docs.rs/taskvisor/latest/taskvisor/events/enum.EventKind.html#variant.AttemptTimedOut) and a retryable timeout.
 Both timeout failures follow the restart policy and retry limit.
-If dropping the attempt future panics, Taskvisor instead produces `AttemptFailed` and ends with a final `Panicked` outcome without retrying.
+If dropping the attempt future panics, Taskvisor instead produces [`AttemptFailed`](https://docs.rs/taskvisor/latest/taskvisor/events/enum.EventKind.html#variant.AttemptFailed) and ends with a final [`Panicked`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Panicked) outcome without retrying.
 
 With panic unwinding enabled, a panic while creating or polling the attempt future becomes a retryable failure.
-A panic while destroying attempt-owned data inside the actor can instead produce a final `Panicked` outcome.
+A panic while destroying attempt-owned data inside the actor can instead produce a final [`Panicked`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Panicked) outcome.
 Later deferred destruction of the retained task object cannot change an outcome already delivered.
 `panic = "abort"` cannot be caught.
 
@@ -52,13 +52,13 @@ A restartable task can run again after a retryable failure, timeout, or caught t
 Taskvisor cannot know whether an external system committed a side effect before the failure.
 Return a retryable result only when repeating the attempt is acceptable.
 
-| Application decision                                       | Attempt result        |
-|------------------------------------------------------------|-----------------------|
-| Temporary failure and repeating the operation is safe      | `TaskError::Fail`     |
-| Task-reported deadline and repeating the operation is safe | `TaskError::Timeout`  |
-| The application classifies the failure as permanent        | `TaskError::Fatal`    |
-| Cancellation was observed and cooperative cleanup finished | `TaskError::Canceled` |
-| The attempt completed its required work                    | `Ok(())`              |
+| Application decision                                       | Attempt result                                                                                                 |
+|------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
+| Temporary failure and repeating the operation is safe      | [`TaskError::Fail`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Fail)         |
+| Task-reported deadline and repeating the operation is safe | [`TaskError::Timeout`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Timeout)   |
+| The application classifies the failure as permanent        | [`TaskError::Fatal`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Fatal)       |
+| Cancellation was observed and cooperative cleanup finished | [`TaskError::Canceled`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.TaskError.html#variant.Canceled) |
+| The attempt completed its required work                    | `Ok(())`                                                                                                       |
 
 For external side effects, use an application-owned idempotency key, transaction, reconciliation read, deduplication record, or acknowledgement protocol as appropriate.
 Taskvisor manages retries. It does not provide rollback, durable execution, or exactly-once execution.
@@ -93,13 +93,13 @@ fn supervised(name: &str, task: TaskRef) -> TaskSpec {
 
 [Equal jitter](https://docs.rs/taskvisor/latest/taskvisor/policies/enum.JitterPolicy.html#variant.Equal) chooses a delay between half of the current base delay and the full base delay.
 This spreads retries that would otherwise happen together.
-Per-task settings override values inherited from `TaskDefaults`; see [configuration inheritance](configuration.md#inherit-or-override-task-settings).
+Per-task settings override values inherited from [`TaskDefaults`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskDefaults.html); see [configuration inheritance](configuration.md#inherit-or-override-task-settings).
 
 ## Understand periodic timing
 
 A non-zero periodic interval starts after a successful attempt completes.
 It is fixed-delay scheduling, not a wall-clock or cron schedule.
-Passing `Duration::ZERO` removes the configured interval; Taskvisor still applies its internal fast-loop guard.
+Passing [`Duration::ZERO`](https://doc.rust-lang.org/std/time/struct.Duration.html#associatedconstant.ZERO) removes the configured interval; Taskvisor still applies its internal fast-loop guard.
 
 See [periodic.rs](../examples/periodic.rs), [restart_policies.rs](../examples/restart_policies.rs), and [configuration.rs](../examples/configuration.rs).
 
