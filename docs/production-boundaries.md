@@ -53,6 +53,17 @@ Attempt futures are different: their destructors run synchronously inside the [p
 
 See [ownership configuration](configuration.md#bound-different-resources) and the [snapshot fields](../src/core/ownership.rs).
 
+### Cleanup without a runtime context
+
+The [attempt reaper](../src/core/registry/scheduler/reaper.rs) retains actor handles and results after force-abort.
+If its coordinator is closed, `spawn_or_retain()` tries to spawn detached cleanup on the current Tokio runtime.
+If the calling thread has no current Tokio runtime context, it intentionally leaks the reaping future with `std::mem::forget`.
+This avoids dropping its owned values on that thread.
+
+User values and ownership capacity held by the unfinished reaper record remain retained for the rest of the process lifetime.
+The capacity stays occupied; this path does not retire it as a destructor panic would.
+A runtime may still exist elsewhere in the process. Its destruction is not a precondition for this fallback.
+
 ## Check before deployment
 
 - Use durable external state when work must recover after process failure.
