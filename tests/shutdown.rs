@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::*;
 use taskvisor::prelude::*;
@@ -143,6 +143,65 @@ impl Subscribe for BlockingSubscriber {
     }
 }
 
+struct BlockingSubscriberTlsDrop {
+    gate: CallbackGate,
+}
+
+impl Drop for BlockingSubscriberTlsDrop {
+    fn drop(&mut self) {
+        let (state, ready) = &*self.gate;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        ready.notify_all();
+        while !state.released {
+            state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        state.finished = true;
+        ready.notify_all();
+    }
+}
+
+thread_local! {
+    static SUBSCRIBER_TLS_DROP: std::cell::RefCell<Option<BlockingSubscriberTlsDrop>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct TlsSubscriber {
+    callback: Arc<BlockingSubscriber>,
+    tls_gate: CallbackGate,
+}
+
+impl Subscribe for TlsSubscriber {
+    fn on_event(&self, event: &Event) {
+        SUBSCRIBER_TLS_DROP.with(|value| {
+            value
+                .borrow_mut()
+                .get_or_insert_with(|| BlockingSubscriberTlsDrop {
+                    gate: Arc::clone(&self.tls_gate),
+                });
+        });
+        self.callback.on_event(event);
+    }
+
+    fn name(&self) -> &str {
+        "tls-shutdown"
+    }
+
+    fn queue_capacity(&self) -> NonZeroUsize {
+        self.callback.queue_capacity()
+    }
+}
+
+struct ReleaseCallbackGates(Vec<CallbackGate>);
+
+impl Drop for ReleaseCallbackGates {
+    fn drop(&mut self) {
+        for gate in &self.0 {
+            release_callback(gate);
+        }
+    }
+}
+
 fn blocking_subscriber() -> (Arc<BlockingSubscriber>, CallbackGate) {
     let gate = Arc::new((Mutex::new(CallbackGateState::default()), Condvar::new()));
     let subscriber = Arc::new(BlockingSubscriber {
@@ -152,6 +211,13 @@ fn blocking_subscriber() -> (Arc<BlockingSubscriber>, CallbackGate) {
 }
 
 fn spawn_callback_watchdog(gate: CallbackGate) -> std::thread::JoinHandle<()> {
+    spawn_callback_watchdog_with_timeout(gate, Duration::from_secs(2))
+}
+
+fn spawn_callback_watchdog_with_timeout(
+    gate: CallbackGate,
+    timeout: Duration,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (state, ready) = &*gate;
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,7 +229,7 @@ fn spawn_callback_watchdog(gate: CallbackGate) -> std::thread::JoinHandle<()> {
         }
 
         let (mut state, _) = ready
-            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.released)
+            .wait_timeout_while(state, timeout, |state| !state.released)
             .unwrap_or_else(|e| e.into_inner());
         if !state.released {
             state.watchdog_fired = true;
@@ -335,6 +401,137 @@ async fn subscriber_deadline_bounds_natural_run_completion() {
     assert!(
         watchdog_stayed_idle,
         "the test must beat its safety watchdog"
+    );
+}
+
+const SUBSCRIBER_TLS_DROP_CHILD: &str = "TASKVISOR_SUBSCRIBER_TLS_DROP_CHILD";
+
+#[test]
+fn subscriber_tls_teardown_does_not_block_current_thread_runtime() {
+    if std::env::var_os(SUBSCRIBER_TLS_DROP_CHILD).is_some() {
+        subscriber_tls_teardown_child();
+        return;
+    }
+
+    let mut child = Command::new(std::env::current_exe().expect("the test binary path must exist"))
+        .arg("--exact")
+        .arg("subscriber_tls_teardown_does_not_block_current_thread_runtime")
+        .arg("--nocapture")
+        .env(SUBSCRIBER_TLS_DROP_CHILD, "1")
+        .spawn()
+        .expect("the isolated TLS destructor test process must start");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .expect("the TLS test child must be waitable")
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the TLS destructor test exceeded its external process watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "the isolated TLS regression failed: {status}"
+    );
+}
+
+fn subscriber_tls_teardown_child() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the isolated Tokio runtime must build");
+    let tls_gate = Arc::new((Mutex::new(CallbackGateState::default()), Condvar::new()));
+    let (first_callback, first_gate) = blocking_subscriber();
+    let (second_callback, second_gate) = blocking_subscriber();
+    let _release_on_drop = ReleaseCallbackGates(vec![
+        Arc::clone(&tls_gate),
+        Arc::clone(&first_gate),
+        Arc::clone(&second_gate),
+    ]);
+    let watchdog =
+        spawn_callback_watchdog_with_timeout(Arc::clone(&tls_gate), Duration::from_secs(10));
+
+    runtime.block_on(async {
+        let subscribers: Vec<Arc<dyn Subscribe>> = vec![
+            Arc::new(TlsSubscriber {
+                callback: first_callback,
+                tls_gate: Arc::clone(&tls_gate),
+            }),
+            Arc::new(TlsSubscriber {
+                callback: second_callback,
+                tls_gate: Arc::clone(&tls_gate),
+            }),
+        ];
+        let supervisor = Supervisor::builder(SupervisorConfig::default())
+            .with_subscriber_shutdown_timeout(Duration::from_millis(100))
+            .with_subscribers(subscribers)
+            .build();
+        let handle = supervisor.serve().expect("runtime startup");
+        let (_, waiter) = handle
+            .add_and_watch(TaskSpec::once("subscriber-tls", make_ok_once()))
+            .await
+            .expect("the warmup task must be admitted");
+        assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
+        assert!(
+            wait_for_callback(&first_gate, |state| state.entered).await,
+            "the first callback must hold a worker"
+        );
+        assert!(
+            wait_for_callback(&second_gate, |state| state.entered).await,
+            "the second callback must acquire a separate worker"
+        );
+        release_callback(&first_gate);
+        release_callback(&second_gate);
+
+        assert!(
+            wait_for_callback(&tls_gate, |state| state.entered).await,
+            "an idle subscriber worker must enter its real TLS destructor"
+        );
+        assert_subscriber_tls_blocked(&tls_gate, "before the heartbeat");
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        })
+        .await
+        .expect("the current-thread heartbeat task must complete");
+        assert_subscriber_tls_blocked(&tls_gate, "after the heartbeat");
+
+        handle
+            .shutdown()
+            .await
+            .expect("public shutdown must finish");
+        assert_subscriber_tls_blocked(&tls_gate, "after public shutdown");
+    });
+
+    drop(runtime);
+    assert_subscriber_tls_blocked(&tls_gate, "after Tokio runtime teardown");
+    release_callback(&tls_gate);
+    watchdog
+        .join()
+        .expect("the TLS safety watchdog must not panic");
+    let (state, ready) = &*tls_gate;
+    let state = state.lock().unwrap_or_else(|error| error.into_inner());
+    let (state, _) = ready
+        .wait_timeout_while(state, Duration::from_secs(5), |state| !state.finished)
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(state.finished, "the released TLS destructor must finish");
+    assert!(
+        !state.watchdog_fired,
+        "progress must precede watchdog release"
+    );
+}
+
+fn assert_subscriber_tls_blocked(gate: &CallbackGate, boundary: &str) {
+    let state = gate.0.lock().unwrap_or_else(|error| error.into_inner());
+    assert!(state.entered, "TLS Drop must start {boundary}");
+    assert!(
+        !state.released && !state.finished && !state.watchdog_fired,
+        "TLS Drop must remain blocked {boundary}; the safety watchdog must not release it"
     );
 }
 

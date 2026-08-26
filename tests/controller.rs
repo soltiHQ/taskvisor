@@ -57,14 +57,6 @@ fn logging_once(entry: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
     })
 }
 
-struct ReleaseBlockedPoll(Arc<AtomicBool>);
-
-impl Drop for ReleaseBlockedPoll {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 #[test]
 fn controller_spec_components_are_configured_through_accessors() {
     let spec = ControllerSpec::queue(TaskSpec::once("original", make_ok_once()))

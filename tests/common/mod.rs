@@ -199,6 +199,15 @@ pub fn make_stubborn() -> (TaskRef, Arc<tokio::sync::Notify>) {
     (task, started)
 }
 
+/// Releases a synchronous test fixture if the owning test scope exits early.
+pub struct ReleaseBlockedPoll(pub Arc<AtomicBool>);
+
+impl Drop for ReleaseBlockedPoll {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Blocks the current poll until release, then stays pending.
 pub fn synchronously_blocked_task(
     release: Arc<AtomicBool>,

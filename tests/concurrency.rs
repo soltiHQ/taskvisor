@@ -96,6 +96,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let first_started = Arc::new(Notify::new());
 
     let first = tracked_synchronously_blocked_task(
@@ -161,6 +162,7 @@ async fn force_aborted_attempt_keeps_its_name_reserved_until_physical_exit() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let started = Arc::new(Notify::new());
     let first = tracked_synchronously_blocked_task(
         active,
@@ -245,6 +247,7 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let started = Arc::new(Notify::new());
     let first = tracked_synchronously_blocked_task(
         active,
@@ -310,6 +313,7 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
     .expect("runtime startup");
 
     let release = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let drop_started = Arc::new(Notify::new());
     let source_release = Arc::clone(&release);
     let source_started = Arc::clone(&drop_started);
