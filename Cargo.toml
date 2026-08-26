@@ -18,6 +18,7 @@ exclude = [
     ".github/",
     ".gitignore",
     "Taskfile.yml",
+    "lychee.toml",
     "rust-toolchain.toml",
 ]
 
