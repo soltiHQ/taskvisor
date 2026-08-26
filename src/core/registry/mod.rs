@@ -40,11 +40,9 @@ mod scheduler;
 mod state;
 
 pub(crate) use completion::{OutcomeTx, RemovalCompletion};
-#[allow(unused_imports)]
 /// Wire types shared with runtime management.
 pub(crate) use protocol::{
-    AddBatchItem, AddReply, AddReplyRx, CancelDecision, CancelReply, CancelReplyRx,
-    RegistryCommand, RemoveReply, RemoveReplyRx,
+    AddBatchItem, AddReplyRx, CancelDecision, CancelReplyRx, RegistryCommand, RemoveReplyRx,
 };
 
 use listener::ListenerState;
