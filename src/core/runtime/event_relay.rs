@@ -101,7 +101,10 @@ impl SupervisorCore {
             }
         });
 
-        *self.subscriber_handle.lock().unwrap() = Some(handle);
+        *self
+            .subscriber_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handle);
     }
 
     /// Joins the relay and reports a runtime event when the join fails.
