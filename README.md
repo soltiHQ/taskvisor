@@ -211,7 +211,7 @@ Each reported case states what was timed and what remained outside the measureme
 From a cloned repository with [Task](https://taskfile.dev/) installed, run the complete suite:
 
 ```bash
-task rust:benchmark
+task rust:test/bench
 ```
 
 The [benchmark guide](benches/README.md) explains every result field.

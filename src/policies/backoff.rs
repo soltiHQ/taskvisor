@@ -284,8 +284,7 @@ impl BackoffPolicy {
     /// User floors can raise either result, but the final delay remains capped at [`Self::max`].
     #[must_use]
     pub fn delay_for_retry(&self, retry_index: u32) -> Duration {
-        let clamped_exp = retry_index.min(i32::MAX as u32) as i32;
-        let unclamped_secs = self.first.as_secs_f64() * self.factor.powi(clamped_exp);
+        let unclamped_secs = self.first.as_secs_f64() * self.factor.powf(f64::from(retry_index));
 
         let base = if self.first.is_zero() {
             Duration::ZERO
