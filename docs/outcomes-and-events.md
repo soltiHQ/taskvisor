@@ -156,6 +156,10 @@ Callbacks run one at a time for each subscriber. Different subscribers can run a
 
 Subscriber callbacks are synchronous and run outside Tokio worker threads. Keep them short.
 Forward async or long blocking work to an application-owned queue.
+Retiring callback threads keep their worker slots until their thread-local destructors finish.
+Slow thread-local destruction reduces available callback capacity until it returns.
+Taskvisor waits for these threads in a separate bounded OS thread pool, outside Tokio and its blocking pool.
+Shutdown does not wait for thread-local destruction.
 Shutdown deadlines can also drop events.
 [SubscriberOverflow](https://docs.rs/taskvisor/latest/taskvisor/events/enum.EventKind.html#variant.SubscriberOverflow) diagnostics report loss when possible.
 
