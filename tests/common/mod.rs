@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -150,6 +151,10 @@ pub fn served_with_collector(config: SupervisorConfig) -> (SupervisorHandle, Arc
     (supervisor.serve().expect("runtime startup"), collector)
 }
 
+pub fn served_with_collector_and_grace(grace_secs: u64) -> (SupervisorHandle, Arc<EventCollector>) {
+    served_with_collector(SupervisorConfig::default().with_grace(Duration::from_secs(grace_secs)))
+}
+
 pub async fn poll_until<F, Fut>(within: Duration, mut cond: F) -> bool
 where
     F: FnMut() -> Fut,
@@ -192,6 +197,51 @@ pub fn make_stubborn() -> (TaskRef, Arc<tokio::sync::Notify>) {
         }
     });
     (task, started)
+}
+
+/// Blocks the current poll until release, then stays pending.
+pub fn synchronously_blocked_task(
+    release: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
+) -> TaskRef {
+    synchronously_blocked_task_impl(None, release, started)
+}
+
+/// Also counts active blocked polls and their peak.
+pub fn tracked_synchronously_blocked_task(
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    release: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
+) -> TaskRef {
+    synchronously_blocked_task_impl(Some((active, peak)), release, started)
+}
+
+fn synchronously_blocked_task_impl(
+    counters: Option<(Arc<AtomicUsize>, Arc<AtomicUsize>)>,
+    release: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
+) -> TaskRef {
+    TaskFn::arc(move |_ctx: TaskContext| {
+        let counters = counters.clone();
+        let release = Arc::clone(&release);
+        let started = Arc::clone(&started);
+        async move {
+            if let Some((active, peak)) = &counters {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+            }
+            started.notify_one();
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            if let Some((active, _peak)) = &counters {
+                active.fetch_sub(1, Ordering::SeqCst);
+            }
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    })
 }
 
 pub async fn wait_for_start(name: &str, started: &tokio::sync::Notify) {

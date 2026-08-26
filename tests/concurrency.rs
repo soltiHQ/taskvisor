@@ -49,31 +49,6 @@ fn tracked_coop(
     })
 }
 
-fn synchronously_blocked_task(
-    active: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
-    release: Arc<AtomicBool>,
-    started: Arc<Notify>,
-) -> TaskRef {
-    TaskFn::arc(move |_ctx: TaskContext| {
-        let active = Arc::clone(&active);
-        let peak = Arc::clone(&peak);
-        let release = Arc::clone(&release);
-        let started = Arc::clone(&started);
-        async move {
-            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-            peak.fetch_max(now, Ordering::SeqCst);
-            started.notify_one();
-            while !release.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            active.fetch_sub(1, Ordering::SeqCst);
-            std::future::pending::<()>().await;
-            Ok(())
-        }
-    })
-}
-
 #[derive(Debug)]
 struct BlockingRetrySource {
     release: Arc<AtomicBool>,
@@ -123,7 +98,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
     let release = Arc::new(AtomicBool::new(false));
     let first_started = Arc::new(Notify::new());
 
-    let first = synchronously_blocked_task(
+    let first = tracked_synchronously_blocked_task(
         Arc::clone(&active),
         Arc::clone(&peak),
         Arc::clone(&release),
@@ -187,8 +162,12 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
-    let first =
-        synchronously_blocked_task(active, peak, Arc::clone(&release), Arc::clone(&started));
+    let first = tracked_synchronously_blocked_task(
+        active,
+        peak,
+        Arc::clone(&release),
+        Arc::clone(&started),
+    );
     let first_id = handle
         .add(TaskSpec::restartable("physically-reserved", first))
         .await
@@ -267,8 +246,12 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
     let peak = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Notify::new());
-    let first =
-        synchronously_blocked_task(active, peak, Arc::clone(&release), Arc::clone(&started));
+    let first = tracked_synchronously_blocked_task(
+        active,
+        peak,
+        Arc::clone(&release),
+        Arc::clone(&started),
+    );
     let first_id = handle
         .add(TaskSpec::restartable("budget-blocked-poll", first))
         .await

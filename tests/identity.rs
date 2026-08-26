@@ -9,12 +9,6 @@ use std::time::Duration;
 use common::*;
 use taskvisor::prelude::*;
 
-fn served_with_collector(grace_secs: u64) -> (SupervisorHandle, Arc<EventCollector>) {
-    common::served_with_collector(
-        SupervisorConfig::default().with_grace(Duration::from_secs(grace_secs)),
-    )
-}
-
 async fn stale_id(handle: &SupervisorHandle) -> TaskId {
     let id = handle
         .add(TaskSpec::restartable("throwaway", make_coop()))
@@ -32,7 +26,7 @@ async fn stale_id(handle: &SupervisorHandle) -> TaskId {
 
 #[tokio::test(flavor = "current_thread")]
 async fn add_confirms_registration_returns_id_and_starts_task() {
-    let (handle, collector) = served_with_collector(5);
+    let (handle, collector) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("worker", make_coop()))
@@ -60,7 +54,7 @@ async fn add_confirms_registration_returns_id_and_starts_task() {
 async fn duplicate_add_returns_error_and_only_first_runs() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let (handle, _collector) = served_with_collector(5);
+    let (handle, _collector) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id1 = handle
             .add(TaskSpec::restartable("dup", make_coop()))
@@ -94,7 +88,7 @@ async fn duplicate_add_returns_error_and_only_first_runs() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fast_task_registration_has_no_library_timeout() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::once("fast-registration", make_ok_once()))
@@ -108,7 +102,7 @@ async fn fast_task_registration_has_no_library_timeout() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn remove_by_id_removes_only_that_id() {
-    let (handle, collector) = served_with_collector(5);
+    let (handle, collector) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id_a = handle
             .add(TaskSpec::restartable("a", make_coop()))
@@ -142,7 +136,7 @@ async fn remove_by_id_removes_only_that_id() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn remove_unknown_id_is_noop_without_terminal_event() {
-    let (handle, collector) = served_with_collector(5);
+    let (handle, collector) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id_keep = handle
             .add(TaskSpec::restartable("keep", make_coop()))
@@ -199,7 +193,7 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn remove_by_name_returns_true_then_false() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -246,7 +240,7 @@ async fn remove_by_name_returns_true_then_false() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_by_id_true_then_false_on_double_cancel() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("c", make_coop()))
@@ -262,7 +256,7 @@ async fn cancel_by_id_true_then_false_on_double_cancel() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_by_name_true_then_false() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let _ = handle
             .add(TaskSpec::restartable("lbl", make_coop()))
@@ -285,7 +279,7 @@ async fn cancel_by_name_true_then_false() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn by_label_compatibility_aliases_delegate_to_by_name() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         assert!(!handle.remove_by_label("missing").await.expect("remove"));
         assert!(
@@ -320,7 +314,7 @@ async fn by_label_compatibility_aliases_delegate_to_by_name() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn timed_cancel_variants_are_public_contracts() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("coop", make_coop()))
@@ -363,7 +357,7 @@ async fn timed_cancel_variants_are_public_contracts() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_timeout_does_not_stop_shared_removal() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let started = Arc::new(tokio::sync::Notify::new());
         let cancellation_seen = Arc::new(tokio::sync::Notify::new());
@@ -434,9 +428,8 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
-    let (handle, collector) = common::served_with_collector(
-        SupervisorConfig::default().with_grace(Duration::from_millis(300)),
-    );
+    let (handle, collector) =
+        served_with_collector(SupervisorConfig::default().with_grace(Duration::from_millis(300)));
 
     with_timeout(10, async {
         let (task, started) = make_stubborn();
@@ -476,7 +469,7 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn list_reflects_registered_set_sorted_by_id() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id_x = handle
             .add(TaskSpec::restartable("x", make_coop()))
@@ -516,7 +509,7 @@ async fn list_reflects_registered_set_sorted_by_id() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn snapshot_and_is_alive_track_alive_set() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         assert!(!handle.is_alive("never-registered").await);
         assert!(handle.alive_snapshot().await.is_empty());
@@ -563,7 +556,7 @@ async fn snapshot_and_is_alive_track_alive_set() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn events_carry_correct_id_across_full_lifecycle() {
-    let (handle, collector) = served_with_collector(5);
+    let (handle, collector) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("life", make_coop()))
@@ -596,7 +589,7 @@ async fn events_carry_correct_id_across_full_lifecycle() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn re_add_same_label_after_removal_succeeds_with_new_id() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id1 = handle
             .add(TaskSpec::restartable("reuse", make_coop()))
@@ -624,7 +617,7 @@ async fn re_add_same_label_after_removal_succeeds_with_new_id() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn add_after_shutdown_returns_shutting_down() {
-    let (handle, _c) = served_with_collector(5);
+    let (handle, _c) = served_with_collector_and_grace(5);
     let h2 = handle.clone();
     with_timeout(10, async {
         with_timeout(5, handle.shutdown())

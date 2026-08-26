@@ -57,21 +57,6 @@ fn logging_once(entry: &str, log: Arc<Mutex<Vec<String>>>) -> TaskRef {
     })
 }
 
-fn synchronously_blocked_task(release: Arc<AtomicBool>, started: Arc<Notify>) -> TaskRef {
-    TaskFn::arc(move |_ctx: TaskContext| {
-        let release = Arc::clone(&release);
-        let started = Arc::clone(&started);
-        async move {
-            started.notify_one();
-            while !release.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            std::future::pending::<()>().await;
-            Ok(())
-        }
-    })
-}
-
 struct ReleaseBlockedPoll(Arc<AtomicBool>);
 
 impl Drop for ReleaseBlockedPoll {
