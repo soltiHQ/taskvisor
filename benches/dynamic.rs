@@ -311,15 +311,21 @@ fn bench_ownership_release(c: &mut Criterion) {
 
                         let mut admission =
                             Box::pin(handle.add_and_watch(instant_task("after-release")));
-                        poll_fn(|cx| {
-                            assert!(
-                                admission.as_mut().poll(cx).is_pending(),
-                                "admission must wait for the retained ownership unit"
-                            );
-                            Poll::Ready(())
-                        })
+                        expect_within(
+                            "ownership waiter registration",
+                            poll_fn(|cx| {
+                                assert!(
+                                    admission.as_mut().poll(cx).is_pending(),
+                                    "admission must wait for the retained ownership unit"
+                                );
+                                if handle.ownership_snapshot().waiters == 1 {
+                                    Poll::Ready(())
+                                } else {
+                                    Poll::Pending
+                                }
+                            }),
+                        )
                         .await;
-                        assert_eq!(handle.ownership_snapshot().waiters, 1);
                         gate.assert_blocked();
 
                         let (accepted, elapsed) =
