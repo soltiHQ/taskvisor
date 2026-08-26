@@ -5,11 +5,14 @@ description: Supervise in-process Tokio work with lifecycle policies, runtime co
 
 # Taskvisor overview
 
-Taskvisor is an in-process task supervisor for Rust services.
-It turns Tokio work into named tasks with explicit lifecycle policy, cancellation, runtime control, final outcomes, and optional per-key admission.
+Taskvisor runs and manages Tokio tasks inside a Rust service.
+It gives tasks a name, retry rules, cancellation, and a final result.
+An optional controller can queue, replace, or reject work for the same application key.
 
-Taskvisor owns lifecycle mechanics inside one process.
-The application still owns task logic, external side effects, durable state, deployment, authentication, authorization, and other security policy.
+Taskvisor manages the task lifecycle inside one process.
+Your application still owns the work itself, external side effects, stored data, deployment, and security.
+
+[crates.io](https://crates.io/crates/taskvisor) · [API reference](https://docs.rs/taskvisor) · [Source code](https://github.com/soltiHQ/taskvisor)
 
 ## What Taskvisor manages
 
@@ -36,12 +39,12 @@ Use a watched add or submission whenever application logic needs the final outco
 
 ## Check the fit
 
-Taskvisor is intended for services that need one lifecycle and management boundary for concerns such as:
+Taskvisor can help when a service needs to:
 
-- tasks are added, removed, or watched while a service is running;
-- attempts need retry limits, timeouts, backoff, or coordinated cancellation;
-- application logic needs the final outcome of one task;
-- competing work for the same application key needs an explicit queue, replace, or reject policy.
+- add, remove, or watch tasks while the service is running;
+- set retry limits, timeouts, backoff, or shared cancellation;
+- wait for the final result of one task;
+- queue, replace, or reject competing work for the same key.
 
 Taskvisor may be more than an application needs for one retrying future or a small fixed set of workers with simple cancellation.
 It is not a persistent job queue or an external scheduler.
@@ -60,6 +63,7 @@ Read [Production boundaries](production-boundaries.md) before deploying a servic
 
 - Complete the [Quick start](quick-start.md) for one retrying watched task.
 - Read the [Mental model](mental-model.md) to separate entry paths, task behavior, identities, and result paths.
+- Follow the [source map](../src/ARCHITECTURE.md) to see which module owns each part of the runtime.
 - Browse the [Taskvisor examples](../examples/README.md) for complete static, dynamic, observability, and keyed-admission programs.
 - Use the [API documentation](https://docs.rs/taskvisor) for exact signatures, variants, and edge-case contracts.
 

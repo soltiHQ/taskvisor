@@ -11,14 +11,28 @@ Choose an entry point based on how tasks are supplied and who requests shutdown:
 
 | Entry point                       | Use it when                                                 |
 |-----------------------------------|-------------------------------------------------------------|
-| `Supervisor::run`                 | The initial batch finishes naturally.                       |
-| `Supervisor::run_until`           | The application owns the future that requests shutdown.     |
-| `Supervisor::run_with_os_signals` | Taskvisor should install process signal handlers.           |
-| `Supervisor::serve`               | Work is discovered or managed while the service is running. |
+| [`Supervisor::run`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run) | The initial batch finishes naturally. |
+| [`Supervisor::run_until`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run_until) | The application owns the future that requests shutdown. |
+| [`Supervisor::run_with_os_signals`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run_with_os_signals) | Taskvisor should install process signal handlers. |
+| [`Supervisor::serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) | Work is discovered or managed while the service is running. |
+
+## Construct and start one runtime
+
+Use [`Supervisor::new`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.new) for runtime configuration and subscribers.
+Use [`Supervisor::builder`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.builder) for task defaults or a controller.
+The builder's [`try_build`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorBuilder.html#method.try_build) returns typed construction errors.
+Panics from subscriber metadata methods (`name` or `queue_capacity`) still reach the caller.
+
+Construction does not start Tokio tasks.
+`serve` or a static run starts the runtime. First startup needs an active Tokio runtime.
+Repeated `serve` calls return handles to the same runtime; workers start only once.
+Shutdown is terminal. Calling `serve` again does not restart workers or reopen admission.
+See the [supervisor entry points](../src/core/supervisor.rs) and [startup code](../src/core/runtime/lifecycle/mod.rs).
 
 ## Run resident work under application-owned shutdown
 
-This complete flow starts one resident worker, uses an application-owned future to request shutdown, and joins cleanup before returning.
+This flow starts one resident worker and uses an application-owned future to request shutdown.
+It joins the shared shutdown workflow before returning.
 Replace the timer with the surrounding server's shutdown future.
 
 ```rust
@@ -51,29 +65,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`run_until` admits the initial batch and supervises it until the application future resolves.
-It then requests cooperative cancellation and joins the shared cleanup workflow.
-Its `Ok(())` result reports completion of the supervisor lifecycle, not the worker's individual outcome.
-The wrapped Tokio sleep is safe to stop by dropping. A real receive, commit, or acknowledgement operation needs its own cancellation-safety review.
+After the initial batch is admitted, `run_until` waits for any of these conditions:
 
-Use `serve` with watched `add*` methods instead when work arrives after startup or application logic needs each final task outcome.
+- the registry becomes empty;
+- the application shutdown future resolves;
+- another caller starts shared shutdown.
 
-`run`, `run_until`, and `run_with_os_signals` submit one initial batch through all-or-nothing registry admission.
-Admission can reject the full batch.
-`run_until` can begin shutdown before the batch commits, and `run_with_os_signals` can enter cleanup before the commit if signal-listener setup fails.
-An `Ok(())` return confirms that the shared supervisor lifecycle and cleanup workflow completed; it does not mean every task succeeded.
-Use watched work when application logic needs each final result.
+It then joins shared shutdown. When the application future wins, shutdown requests cooperative task cancellation.
+The method can return before the application future resolves if all registered tasks finish first.
+The [static-run code](../src/core/runtime/lifecycle/static_run.rs) owns these races.
+
+`Ok(())` reports completion of the supervisor lifecycle, not the worker's outcome.
+The wrapped Tokio sleep is safe to stop by dropping.
+A real receive, commit, or acknowledgement operation needs its own [cancellation-safety review](cancellation-and-shutdown.md#make-operations-cancellation-aware).
+
+Use `serve` with [`add_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) when work arrives after startup or application logic needs each task's final outcome.
 
 ## Understand the static lifecycle
 
-Tasks already registered through `serve` keep the registry non-empty and participate in the static lifecycle.
-A batch rejected by the registry after the static lifecycle commits consumes that lifecycle; errors before the commit leave it available for another static run.
-Registry rejection does not stop tasks that were added earlier through `serve`.
-Dropping a static run future after its lifecycle commits does not stop admitted tasks or start shutdown.
-A handle returned by `serve` can still request shutdown.
+`run`, `run_until`, and `run_with_os_signals` submit one initial batch through [all-or-nothing registry admission](../src/core/registry/admission/batch.rs).
+The registry accepts every task in that batch or rejects the full batch.
+After successful admission, all three methods start natural shutdown when the entire registry becomes empty.
+Tasks already added through `serve` also keep it non-empty.
 
-These three methods share one static lifecycle.
-After one commits, another static run on the same supervisor returns `RuntimeError::AlreadyRunning`.
+The three methods share one static lifecycle. Its commit is separate from registry admission.
+After a call commits, another static run on the same supervisor returns [`RuntimeError::AlreadyRunning`](https://docs.rs/taskvisor/latest/taskvisor/error/enum.RuntimeError.html#variant.AlreadyRunning).
+Errors before the lifecycle commit leave it available for another static run.
+A registry rejection consumes the lifecycle, but does not stop tasks added earlier through `serve`.
+
+`run_until` can begin shutdown before the batch reaches the registry.
+`run_with_os_signals` can enter cleanup before that point if signal-listener setup fails.
+An `Ok(())` return means the bounded supervisor lifecycle and shared cleanup workflow completed.
+It does not mean every task succeeded or every retained user value has been destroyed.
+
+Dropping a static run future after its lifecycle commits does not stop admitted tasks or start shutdown.
+A handle returned by `serve` can still [request shutdown](cancellation-and-shutdown.md#join-shutdown).
 
 ## Own signal handling and shutdown
 
@@ -84,14 +110,9 @@ An embedded application that already owns signals should use `run_until` or requ
 On Unix, dropping Taskvisor's signal listeners does not restore the default signal disposition.
 The application remains responsible for signal handling after the method returns.
 
-`serve` starts the same runtime without a static batch and returns a `SupervisorHandle`.
-It does not install signal handlers.
-Call `handle.shutdown().await` when the application wants the joined cleanup result.
-
-## Choose how to construct the supervisor
-
-Create a supervisor with `Supervisor::new` when runtime configuration and subscribers are enough.
-Use `Supervisor::builder` when the application also needs task defaults, a controller, or typed construction errors through `try_build`.
+`serve` does not install signal handlers.
+Call [`handle.shutdown().await`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.shutdown) for the shared shutdown result.
+Read [Cancellation and shutdown](cancellation-and-shutdown.md) before relying on its deadlines or return value.
 
 ## Run an entry-point example
 

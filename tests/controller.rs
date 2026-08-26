@@ -1090,27 +1090,185 @@ async fn replace_into_idle_slot_behaves_as_plain_admit() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn slot_freed_and_reusable_after_task_completes() {
+async fn wait_for_controller_slot_release(handle: &SupervisorHandle, slot: &str) {
+    let mut last_view = None;
+    let released = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            last_view = handle
+                .controller_snapshot()
+                .await
+                .expect("controller is configured")
+                .slot(slot)
+                .cloned();
+            if last_view.as_ref().is_none_or(|view| {
+                view.status == SlotStatusKind::Idle
+                    && view.owner_id.is_none()
+                    && view.queue_depth == 0
+            }) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "slot {slot:?} did not release without another submission: {last_view:?}"
+    );
+}
+
+async fn assert_slot_freed_and_reusable_after_task_completes() {
     let (handle, _collector) = served_controller(ControllerConfig::default());
     with_timeout(10, async {
         let (_first_id, first) = handle
             .submit_and_watch(
-                ControllerSpec::queue(TaskSpec::once("first", make_ok_once())).with_slot("s"),
+                ControllerSpec::drop_if_running(TaskSpec::once("first", make_ok_once()))
+                    .with_slot("s"),
             )
             .await
             .expect("first submission accepted");
         assert!(matches!(first.wait().await, Ok(TaskOutcome::Completed)));
+        wait_for_controller_slot_release(&handle, "s").await;
 
-        submit_running(
-            &handle,
-            ControllerSpec::drop_if_running(TaskSpec::restartable("second", make_coop()))
-                .with_slot("s"),
-        )
-        .await;
-        let _ = handle.shutdown().await;
+        let (_second_id, second) = handle
+            .submit_and_watch(
+                ControllerSpec::drop_if_running(TaskSpec::once("second", make_ok_once()))
+                    .with_slot("s"),
+            )
+            .await
+            .expect("single submission into the released slot");
+        assert!(matches!(second.wait().await, Ok(TaskOutcome::Completed)));
+        wait_for_controller_slot_release(&handle, "s").await;
+        handle.shutdown().await.expect("reusable slot shutdown");
     })
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slot_freed_and_reusable_after_task_completes() {
+    assert_slot_freed_and_reusable_after_task_completes().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slot_freed_and_reusable_after_task_completes_multi_thread() {
+    assert_slot_freed_and_reusable_after_task_completes().await;
+}
+
+/// The initial immediate-reuse diagnostic failed on pair 4: ordinary Completed,
+/// then SlotBusy with no candidate start, then autonomous slot release.
+async fn audit_drop_admission_after_ordinary_completion(runtime: &str) {
+    const PAIRS: usize = 2_048;
+    let (handle, _collector) = served_controller(ControllerConfig::default());
+    with_timeout(30, async {
+        let mut immediate_completed = 0;
+        let mut prior_slot_busy = 0;
+        let mut completed_after_release = 0;
+        let mut first_rejection = None;
+        for iteration in 0..PAIRS {
+            let slot = format!("completed-drop-{iteration}");
+            let owner_name = format!("completed-owner-{iteration}");
+            let candidate_name = format!("completed-candidate-{iteration}");
+            let candidate_starts = Arc::new(AtomicUsize::new(0));
+            let starts = Arc::clone(&candidate_starts);
+            let candidate = TaskFn::arc(move |_ctx| {
+                starts.fetch_add(1, Ordering::AcqRel);
+                async { Ok(()) }
+            });
+            let candidate = handle
+                .prepare_submission(
+                    ControllerSpec::drop_if_running(TaskSpec::once(candidate_name, candidate))
+                        .with_slot(slot.clone()),
+                )
+                .expect("prepare candidate");
+            let (owner_id, owner) = handle
+                .submit_and_watch(
+                    ControllerSpec::drop_if_running(TaskSpec::once(
+                        owner_name.clone(),
+                        make_ok_once(),
+                    ))
+                    .with_slot(slot.clone()),
+                )
+                .await
+                .expect("submit owner into a fresh slot");
+            assert!(matches!(owner.wait().await, Ok(TaskOutcome::Completed)));
+
+            let (candidate_id, outcome) = candidate
+                .submit_and_watch()
+                .await
+                .expect("submit candidate after ordinary completion");
+            let outcome = outcome.wait().await.expect("candidate final outcome");
+            match &outcome {
+                TaskOutcome::Completed => {
+                    immediate_completed += 1;
+                    assert_eq!(candidate_starts.load(Ordering::Acquire), 1);
+                }
+                TaskOutcome::Rejected {
+                    kind: RejectionKind::SlotBusy,
+                    ..
+                } => {
+                    prior_slot_busy += 1;
+                    assert_eq!(candidate_starts.load(Ordering::Acquire), 0);
+                    if first_rejection.is_none() {
+                        let snapshot = handle.controller_snapshot().await.unwrap();
+                        let owner_alive = handle.is_alive(&owner_name).await;
+                        first_rejection = Some(format!(
+                            "iteration={iteration}; owner={owner_id:?}; candidate={candidate_id:?}; outcome={outcome:?}; starts=0; owner_alive={owner_alive}; observed_slot={:?}",
+                            snapshot.slot(&slot),
+                        ));
+                    }
+                }
+                other => panic!("unexpected post-Completed outcome at {iteration}: {other:?}"),
+            }
+            wait_for_controller_slot_release(&handle, &slot).await;
+
+            let released_starts = Arc::new(AtomicUsize::new(0));
+            let starts = Arc::clone(&released_starts);
+            let released_task = TaskFn::arc(move |_ctx| {
+                starts.fetch_add(1, Ordering::AcqRel);
+                async { Ok(()) }
+            });
+            let (_released_id, released_outcome) = handle
+                .submit_and_watch(
+                    ControllerSpec::drop_if_running(TaskSpec::once(
+                        format!("after-release-{iteration}"),
+                        released_task,
+                    ))
+                    .with_slot(slot.clone()),
+                )
+                .await
+                .expect("single fresh Drop submission after observed controller release");
+            let released_outcome = released_outcome.wait().await.expect("after-release outcome");
+            assert!(
+                matches!(released_outcome, TaskOutcome::Completed),
+                "an observed free slot rejected fresh Drop work at {iteration}: {released_outcome:?}"
+            );
+            assert_eq!(released_starts.load(Ordering::Acquire), 1);
+            assert_eq!(
+                candidate_starts.load(Ordering::Acquire),
+                usize::from(matches!(outcome, TaskOutcome::Completed)),
+                "an earlier rejected candidate must never be replayed"
+            );
+            completed_after_release += 1;
+            wait_for_controller_slot_release(&handle, &slot).await;
+        }
+        assert_eq!(immediate_completed + prior_slot_busy, PAIRS);
+        assert_eq!(completed_after_release, PAIRS);
+        handle.shutdown().await.expect("diagnostic shutdown");
+        eprintln!(
+            "post-Completed Drop audit ({runtime}): pairs={PAIRS}; immediate_completed={immediate_completed}; prior_slot_busy={prior_slot_busy}; completed_after_release={completed_after_release}; first_rejection={first_rejection:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_completed_drop_admission_audit_current_thread() {
+    audit_drop_admission_after_ordinary_completion("current_thread").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_completed_drop_admission_audit_multi_thread() {
+    audit_drop_admission_after_ordinary_completion("multi_thread").await;
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -14,8 +14,9 @@ See [Run Taskvisor](running-and-managing.md) and [Final outcomes and lifecycle e
 
 ## Do not treat submit success as admission
 
-`submit().await?` confirms controller command intake.
-Slot admission and runtime registration happen later.
+`submit().await?` means that the controller accepted the command.
+It does not confirm slot admission or runtime registration.
+The controller may process the command before or after the call returns.
 Use `submit_and_watch` and await its `TaskWaiter` when the application must distinguish rejection from an admitted task outcome.
 See [Coordinate work by key](keyed-admission.md).
 
@@ -75,5 +76,6 @@ See [Manage tasks at runtime](managing-tasks.md) and [Coordinate work by key](ke
 |------------------------------------------------|----------------------------------------------------|
 | [Examples guide](../examples/README.md)        | Choose a complete runnable scenario.               |
 | [API documentation](https://docs.rs/taskvisor) | Read exact contracts for public types and methods. |
+| [crates.io](https://crates.io/crates/taskvisor) | Find published versions and package details. |
 | [Benchmark guide](../benches/README.md)        | Run and interpret the Criterion suites.            |
 | [Contributor map](../src/ARCHITECTURE.md)      | Follow runtime ownership and source boundaries.    |

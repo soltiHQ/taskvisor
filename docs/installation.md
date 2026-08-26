@@ -5,20 +5,22 @@ description: Install Taskvisor and select the controller, observability, interop
 
 # Install Taskvisor
 
-The default install includes the controller API:
+Taskvisor requires Rust 1.90 or newer.
+Add the [taskvisor crate](https://crates.io/crates/taskvisor) to your dependencies:
 
 ```toml
 taskvisor = "0.8"
 ```
 
-The controller has no runtime effect until a supervisor is built with `with_controller`.
+The default install includes the controller API.
+To use it, build the supervisor with [with_controller](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorBuilder.html#method.with_controller).
 
 | Feature              | Default | Adds                                                   |
 |----------------------|---------|--------------------------------------------------------|
 | `controller`         | Yes     | Slot-based admission control.                          |
-| `tracing`            | No      | `TracingBridge` for the `tracing` ecosystem.           |
-| `logging`            | No      | `LogWriter` for simple readable lifecycle output.      |
-| `tokio-util-interop` | No      | Access to the raw cancellation token in `TaskContext`. |
+| `tracing`            | No      | [TracingBridge](https://docs.rs/taskvisor/latest/taskvisor/subscribers/struct.TracingBridge.html) for structured events. |
+| `logging`            | No      | [LogWriter](https://docs.rs/taskvisor/latest/taskvisor/subscribers/struct.LogWriter.html) for readable lifecycle output. |
+| `tokio-util-interop` | No      | Access to the raw cancellation token in [TaskContext](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskContext.html). |
 | `test-util`          | No      | Constructors intended for external integration tests.  |
 
 Enable an optional integration:
@@ -37,7 +39,7 @@ taskvisor = { version = "0.8", default-features = false }
 
 With `test-util` enabled, `TaskContext::detached` and `TaskContext::detached_cancelled` create contexts for direct task-code tests.
 `TaskId::for_tests` creates a fresh process-local ID.
-`TaskOutcome::failed_for_tests`, `TaskOutcome::fatal_for_tests`, and `TaskOutcome::rejected_for_tests` construct non-exhaustive outcome variants for assertions.
+`TaskOutcome::failed_for_tests`, `TaskOutcome::fatal_for_tests`, and `TaskOutcome::rejected_for_tests` create failure and rejection values for assertions.
 
 Add the test-only feature and the Tokio test runtime:
 
@@ -69,4 +71,6 @@ async fn observes_cancellation() {
 ```
 
 For integration tests, start a supervisor with `serve`, add watched work, assert its `TaskOutcome`, then join `shutdown`.
-Use the [API documentation](https://docs.rs/taskvisor) for their exact contracts.
+See [TaskContext](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskContext.html) and [TaskOutcome](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html) for the test helpers.
+
+Source: [Cargo features](../Cargo.toml) and [test contexts](../src/tasks/context.rs).
