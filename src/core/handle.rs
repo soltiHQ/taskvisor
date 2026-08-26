@@ -19,7 +19,6 @@
 //! Identity-based remove and cancel operations pass through the controller when configured. This orders
 //! them after earlier submissions and lets them find work that has not reached the registry yet.
 //! Methods ending in `_by_name` use the task name from [`TaskSpec`].
-//! The older `_by_label` methods are compatibility aliases for the same registry key.
 
 use std::{sync::Arc, time::Duration};
 
@@ -282,24 +281,6 @@ impl SupervisorHandle {
         self.core().try_remove_by_label(Arc::from(name)).await
     }
 
-    /// Compatibility alias for [`remove_by_name`](Self::remove_by_name).
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors from [`remove_by_name`](Self::remove_by_name).
-    pub async fn remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.remove_by_name(name).await
-    }
-
-    /// Compatibility alias for [`try_remove_by_name`](Self::try_remove_by_name).
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors from [`try_remove_by_name`](Self::try_remove_by_name).
-    pub async fn try_remove_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.try_remove_by_name(name).await
-    }
-
     /// Returns the authoritative registry view as `(id, name)` pairs.
     ///
     /// The list comes from the registry and is sorted by [`TaskId`]. It includes every registry
@@ -461,53 +442,6 @@ impl SupervisorHandle {
         self.core()
             .try_cancel_by_label_with_timeout(Arc::from(name), wait_for)
             .await
-    }
-
-    /// Compatibility alias for [`cancel_by_name`](Self::cancel_by_name).
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors from [`cancel_by_name`](Self::cancel_by_name).
-    pub async fn cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.cancel_by_name(name).await
-    }
-
-    /// Compatibility alias for [`try_cancel_by_name`](Self::try_cancel_by_name).
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors from [`try_cancel_by_name`](Self::try_cancel_by_name).
-    pub async fn try_cancel_by_label(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.try_cancel_by_name(name).await
-    }
-
-    /// Compatibility alias for [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors from
-    /// [`cancel_by_name_with_timeout`](Self::cancel_by_name_with_timeout).
-    pub async fn cancel_by_label_with_timeout(
-        &self,
-        name: &str,
-        wait_for: Duration,
-    ) -> Result<bool, RuntimeError> {
-        self.cancel_by_name_with_timeout(name, wait_for).await
-    }
-
-    /// Compatibility alias for
-    /// [`try_cancel_by_name_with_timeout`](Self::try_cancel_by_name_with_timeout).
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors from
-    /// [`try_cancel_by_name_with_timeout`](Self::try_cancel_by_name_with_timeout).
-    pub async fn try_cancel_by_label_with_timeout(
-        &self,
-        name: &str,
-        wait_for: Duration,
-    ) -> Result<bool, RuntimeError> {
-        self.try_cancel_by_name_with_timeout(name, wait_for).await
     }
 
     /// Cancels by identity and limits how long this caller waits for cleanup.

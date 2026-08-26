@@ -7,7 +7,7 @@ use thiserror::Error;
 /// A failure before controller slot admission.
 ///
 /// [`NotConfigured`](Self::NotConfigured) can come from preparation or submission.
-/// The active variants below describe submission command intake; [`AlreadyStarted`](Self::AlreadyStarted) remains only for compatibility.
+/// Other variants describe submission command intake.
 /// `Ok` from preparation creates a local prepared value. `Ok` from a submit method confirms command intake. Neither result confirms slot admission.
 ///
 /// Use the error variants as follows:
@@ -82,13 +82,6 @@ pub enum ControllerError {
     /// The controller loop is stopping or has stopped.
     #[error("controller channel closed")]
     Closed,
-
-    /// A compatibility variant for the former fallible controller-start guard.
-    ///
-    /// Current controller startup does not return this variant.
-    /// It remains available for source compatibility.
-    #[error("controller already started")]
-    AlreadyStarted,
 }
 
 impl ControllerError {
@@ -103,7 +96,6 @@ impl ControllerError {
             ControllerError::OwnershipAdmissionTimeout { .. } => {
                 "controller_ownership_admission_timeout"
             }
-            ControllerError::AlreadyStarted => "controller_already_started",
             ControllerError::NotConfigured => "controller_not_configured",
             ControllerError::Closed => "controller_closed",
             ControllerError::Full => "controller_full",
@@ -146,10 +138,6 @@ mod tests {
                 "controller_thread_start_failed",
             ),
             (ControllerError::Closed, "controller_closed"),
-            (
-                ControllerError::AlreadyStarted,
-                "controller_already_started",
-            ),
         ] {
             assert_eq!(error.as_label(), expected);
         }

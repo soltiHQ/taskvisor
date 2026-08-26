@@ -278,32 +278,32 @@ async fn cancel_by_name_true_then_false() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn by_label_compatibility_aliases_delegate_to_by_name() {
+async fn by_name_operations_return_false_for_missing_tasks() {
     let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
-        assert!(!handle.remove_by_label("missing").await.expect("remove"));
+        assert!(!handle.remove_by_name("missing").await.expect("remove"));
         assert!(
             !handle
-                .try_remove_by_label("missing")
+                .try_remove_by_name("missing")
                 .await
                 .expect("try remove")
         );
-        assert!(!handle.cancel_by_label("missing").await.expect("cancel"));
+        assert!(!handle.cancel_by_name("missing").await.expect("cancel"));
         assert!(
             !handle
-                .try_cancel_by_label("missing")
+                .try_cancel_by_name("missing")
                 .await
                 .expect("try cancel")
         );
         assert!(
             !handle
-                .cancel_by_label_with_timeout("missing", Duration::ZERO)
+                .cancel_by_name_with_timeout("missing", Duration::ZERO)
                 .await
                 .expect("timed cancel")
         );
         assert!(
             !handle
-                .try_cancel_by_label_with_timeout("missing", Duration::ZERO)
+                .try_cancel_by_name_with_timeout("missing", Duration::ZERO)
                 .await
                 .expect("try timed cancel")
         );
