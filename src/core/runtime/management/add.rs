@@ -92,14 +92,14 @@ impl SupervisorCore {
     pub(crate) fn add_task_with_id_watched(
         &self,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
     ) -> Result<(AddReplyRx, RemovalCompletion), Box<crate::core::UncommittedWatchedAdd>> {
         let completion = RemovalCompletion::new();
         let (_id, reply) = self.enqueue_named_add_task_with_completion_recovering(
             id,
-            label,
+            name,
             owned,
             done,
             Some(completion.clone()),
@@ -133,14 +133,14 @@ impl SupervisorCore {
         &self,
         permit: ControllerAddPermit,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
     ) -> Result<(AddReplyRx, RemovalCompletion), Box<crate::core::UncommittedWatchedAdd>> {
         let Some(_admission) = self.command_admission() else {
             return Err(Box::new(crate::core::UncommittedWatchedAdd {
                 error: RuntimeError::ShuttingDown,
-                label,
+                name,
                 owned,
                 done,
             }));
@@ -150,12 +150,12 @@ impl SupervisorCore {
         let (reply, reply_rx) = oneshot::channel();
         self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskAddRequested)
-                .with_task(Arc::clone(&label))
+                .with_task(Arc::clone(&name))
                 .with_id(id)
         });
         permit.permit.send(RegistryCommand::Add {
             id,
-            label,
+            name,
             owned: Box::new(owned),
             outcome: done,
             completion: Some(completion.clone()),
@@ -227,12 +227,12 @@ impl SupervisorCore {
             .try_reserve()
             .map_err(|error| (Self::ownership_admission_error(error), done.take()))?;
         let owned = self.own_task(spec, reservation);
-        let label = owned.value.shared_name();
+        let name = owned.value.shared_name();
         let (permit, _admission) = match self.try_reserve_command_admission() {
             Ok(admission) => admission,
             Err(error) => return Err((error, done)),
         };
-        Ok(self.commit_add(permit, id, label, owned, done, None))
+        Ok(self.commit_add(permit, id, name, owned, done, None))
     }
 
     /// Commits an already-owned controller task or returns all uncommitted values.
@@ -240,7 +240,7 @@ impl SupervisorCore {
     fn enqueue_named_add_task_with_completion_recovering(
         &self,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
@@ -250,13 +250,13 @@ impl SupervisorCore {
             Err(error) => {
                 return Err(Box::new(crate::core::UncommittedWatchedAdd {
                     error,
-                    label,
+                    name,
                     owned,
                     done,
                 }));
             }
         };
-        Ok(self.commit_add(permit, id, label, owned, done, completion))
+        Ok(self.commit_add(permit, id, name, owned, done, completion))
     }
 
     /// Waits for cleanup ownership and queue capacity before the final shutdown gate.
@@ -301,7 +301,7 @@ impl SupervisorCore {
         }
         .map_err(|error| (error, done.take()))?;
         let owned = self.own_task(spec, reservation);
-        let label = owned.value.shared_name();
+        let name = owned.value.shared_name();
         let permit = match tokio::select! {
             biased;
             _ = self.shutdown.started.cancelled() => Err(()),
@@ -314,7 +314,7 @@ impl SupervisorCore {
             drop(permit);
             return Err((RuntimeError::ShuttingDown, done));
         };
-        Ok(self.commit_add(permit, id, label, owned, done, None))
+        Ok(self.commit_add(permit, id, name, owned, done, None))
     }
 
     /// Publishes the request event immediately before an already-reserved add.
@@ -324,7 +324,7 @@ impl SupervisorCore {
         &self,
         permit: mpsc::Permit<'_, RegistryCommand>,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
@@ -332,12 +332,12 @@ impl SupervisorCore {
         let (reply, reply_rx) = oneshot::channel();
         self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskAddRequested)
-                .with_task(Arc::clone(&label))
+                .with_task(Arc::clone(&name))
                 .with_id(id)
         });
         permit.send(RegistryCommand::Add {
             id,
-            label,
+            name,
             owned: Box::new(owned),
             outcome: done,
             completion,
@@ -368,7 +368,7 @@ impl SupervisorCore {
         for item in &items {
             self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskAddRequested)
-                    .with_task(Arc::clone(&item.label))
+                    .with_task(Arc::clone(&item.name))
                     .with_id(item.id)
             });
         }

@@ -25,7 +25,7 @@ pub(crate) type AddReplyRx = oneshot::Receiver<AddReply>;
 /// One task owned by the atomic static-run registration command.
 pub(crate) struct AddBatchItem {
     pub(crate) id: TaskId,
-    pub(crate) label: Arc<str>,
+    pub(crate) name: Arc<str>,
     pub(crate) owned: OwnedTask<TaskSpec>,
 }
 
@@ -77,7 +77,7 @@ pub(crate) enum RegistryCommand {
     /// Register one task under an assigned runtime identity.
     Add {
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         /// Keeps destructor capacity reserved after command handoff.
         owned: Box<OwnedTask<TaskSpec>>,
         /// Direct path for a watched terminal or rejected outcome.
@@ -101,11 +101,11 @@ pub(crate) enum RegistryCommand {
         /// Reports the claim without waiting for terminal cleanup.
         reply: oneshot::Sender<RemoveReply>,
     },
-    /// Resolve a label and claim its current owner in one registry operation.
+    /// Resolve a name and claim its current owner in one registry operation.
     ///
     /// The registry claims under the state lock, then publishes `TaskRemoveRequested` with the resolved identity.
-    RemoveByLabel {
-        label: Arc<str>,
+    RemoveByName {
+        name: Arc<str>,
         /// Reports the claim without waiting for terminal cleanup.
         reply: oneshot::Sender<RemoveReply>,
     },
@@ -115,9 +115,9 @@ pub(crate) enum RegistryCommand {
         /// Returns the resolved identity, claim result, and logical latch.
         reply: oneshot::Sender<CancelReply>,
     },
-    /// Resolve a label and start or join its cancellation atomically.
-    CancelByLabel {
-        label: Arc<str>,
+    /// Resolve a name and start or join its cancellation atomically.
+    CancelByName {
+        name: Arc<str>,
         /// Returns the resolved identity, claim result, and logical latch.
         reply: oneshot::Sender<CancelReply>,
     },

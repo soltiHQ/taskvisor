@@ -109,7 +109,7 @@ enum ShutdownOutcome {
     GraceExceeded {
         /// Configured task cleanup deadline.
         grace: Duration,
-        /// Task labels and join reporters pending at the deadline.
+        /// Task names and join reporters pending at the deadline.
         stuck: Vec<Arc<str>>,
     },
     /// Operating-system signal setup failed before normal task drain.

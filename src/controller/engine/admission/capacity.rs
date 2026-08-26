@@ -125,14 +125,14 @@ impl Controller {
                 }
                 None => Err(Box::new(crate::core::UncommittedWatchedAdd {
                     error: RuntimeError::ShuttingDown,
-                    label: task_name,
+                    name: task_name,
                     owned,
                     done,
                 })),
             },
             Err(error) => Err(Box::new(crate::core::UncommittedWatchedAdd {
                 error,
-                label: task_name,
+                name: task_name,
                 owned,
                 done,
             })),

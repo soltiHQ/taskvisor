@@ -58,12 +58,12 @@ impl Controller {
     pub(super) fn drop_start_failure(&self, pending: StartFailure, terminal: Option<TaskOutcome>) {
         let crate::core::UncommittedWatchedAdd {
             error,
-            label,
+            name,
             owned,
             done,
         } = *pending;
         debug_assert!(done.is_none(), "the watcher must be restored before drop");
-        drop((error, label, done));
+        drop((error, name, done));
         self.dispose_owned_task(owned, terminal);
     }
 

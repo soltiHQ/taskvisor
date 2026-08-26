@@ -365,7 +365,7 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
         requested.seq < all_stopped.seq,
         "ShutdownRequested must precede AllStopped"
     );
-    for (id, label) in [(id_c1, "c1"), (id_c2, "c2")] {
+    for (id, name) in [(id_c1, "c1"), (id_c2, "c2")] {
         assert_eq!(
             collector
                 .by_id(id)
@@ -373,7 +373,7 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
                 .filter(|event| event.kind == EventKind::TaskRemoved)
                 .count(),
             1,
-            "shutdown must emit exactly one TaskRemoved for {label}"
+            "shutdown must emit exactly one TaskRemoved for {name}"
         );
     }
 }

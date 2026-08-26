@@ -231,7 +231,7 @@ async fn remove_by_name_returns_true_then_false() {
             !handle
                 .remove_by_name("never-existed")
                 .await
-                .expect("remove unknown label")
+                .expect("remove unknown name")
         );
         let _ = handle.shutdown().await;
     })
@@ -490,8 +490,8 @@ async fn list_reflects_registered_set_sorted_by_id() {
         let mut sorted = ids.clone();
         sorted.sort();
         assert_eq!(ids, sorted, "list must be sorted ascending by id");
-        let labels: HashSet<&str> = list.iter().map(|(_, l)| &**l).collect();
-        assert_eq!(labels, HashSet::from(["x", "y", "z"]));
+        let names: HashSet<&str> = list.iter().map(|(_, l)| &**l).collect();
+        assert_eq!(names, HashSet::from(["x", "y", "z"]));
         assert!(ids.contains(&id_x) && ids.contains(&id_y) && ids.contains(&id_z));
 
         assert!(handle.remove(id_y).await.expect("remove y"));
@@ -577,7 +577,7 @@ async fn events_carry_correct_id_across_full_lifecycle() {
         let by_id = collector.by_id(id);
         assert!(by_id.iter().any(|e| e.kind == EventKind::AttemptStarting));
         assert!(by_id.iter().any(|e| e.kind == EventKind::TaskRemoved));
-        for e in collector.by_label("life") {
+        for e in collector.by_name("life") {
             if let Some(eid) = e.id {
                 assert_eq!(eid, id, "event {:?} carried a foreign id", e.kind);
             }
@@ -588,7 +588,7 @@ async fn events_carry_correct_id_across_full_lifecycle() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn re_add_same_label_after_removal_succeeds_with_new_id() {
+async fn re_add_same_name_after_removal_succeeds_with_new_id() {
     let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id1 = handle
@@ -606,7 +606,7 @@ async fn re_add_same_label_after_removal_succeeds_with_new_id() {
             .add(TaskSpec::restartable("reuse", make_coop()))
             .await
             .unwrap();
-        assert_ne!(id1, id2, "re-added label must get a fresh id");
+        assert_ne!(id1, id2, "re-added name must get a fresh id");
         let list = handle.list().await;
         assert!(list.iter().any(|(i, l)| *i == id2 && &**l == "reuse"));
         assert!(!list.iter().any(|(i, _)| *i == id1));

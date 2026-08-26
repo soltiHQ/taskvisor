@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Force-abort transfers physical ownership to [`AttemptReaper`] before requesting abort.
-//! The reaper keeps the label and activity state until the actor output and terminal cleanup
+//! The reaper keeps the name and activity state until the actor output and terminal cleanup
 //! bundle meet. This prevents a replacement from overlapping a physically active attempt.
 //! Registry shutdown does not wait for a blocked reaper attempt.
 //! The host Tokio runtime is the outer lifetime boundary.

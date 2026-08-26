@@ -178,7 +178,7 @@ pub(crate) struct TaskActorResources {
 pub(crate) struct TaskActor {
     /// Runtime identity stamped on lifecycle events for this task run.
     id: TaskId,
-    /// Task label.
+    /// Task name.
     name: Arc<str>,
     /// Task to execute.
     task: Arc<dyn Task>,

@@ -266,7 +266,7 @@ impl SupervisorHandle {
     ///
     /// - [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn remove_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.core().remove_by_label(Arc::from(name)).await
+        self.core().remove_by_name(Arc::from(name)).await
     }
 
     /// Requests removal by name only if the registry queue has capacity now.
@@ -278,7 +278,7 @@ impl SupervisorHandle {
     /// Returns the errors from [`remove_by_name`](Self::remove_by_name). It also returns
     /// [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
     pub async fn try_remove_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.core().try_remove_by_label(Arc::from(name)).await
+        self.core().try_remove_by_name(Arc::from(name)).await
     }
 
     /// Returns the authoritative registry view as `(id, name)` pairs.
@@ -387,7 +387,7 @@ impl SupervisorHandle {
     ///
     /// Returns [`RuntimeError::ShuttingDown`] when the runtime no longer accepts commands.
     pub async fn cancel_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.core().cancel_by_label(Arc::from(name)).await
+        self.core().cancel_by_name(Arc::from(name)).await
     }
 
     /// Cancels by name only if the registry queue has capacity now.
@@ -399,7 +399,7 @@ impl SupervisorHandle {
     /// Returns the errors from [`cancel_by_name`](Self::cancel_by_name).
     /// It also returns [`RuntimeError::CommandQueueFull`] when the registry queue has no capacity.
     pub async fn try_cancel_by_name(&self, name: &str) -> Result<bool, RuntimeError> {
-        self.core().try_cancel_by_label(Arc::from(name)).await
+        self.core().try_cancel_by_name(Arc::from(name)).await
     }
 
     /// Cancels by name and limits how long this caller waits for cleanup.
@@ -421,7 +421,7 @@ impl SupervisorHandle {
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
         self.core()
-            .cancel_by_label_with_timeout(Arc::from(name), wait_for)
+            .cancel_by_name_with_timeout(Arc::from(name), wait_for)
             .await
     }
 
@@ -440,7 +440,7 @@ impl SupervisorHandle {
         wait_for: Duration,
     ) -> Result<bool, RuntimeError> {
         self.core()
-            .try_cancel_by_label_with_timeout(Arc::from(name), wait_for)
+            .try_cancel_by_name_with_timeout(Arc::from(name), wait_for)
             .await
     }
 

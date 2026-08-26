@@ -11,7 +11,7 @@
 //! listener ───────────────────► removal ───────────► terminal state ──► outcome and cleanup
 //! ```
 //!
-//! `state` maps each [`TaskId`](crate::TaskId) and label to one lifecycle entry. An entry moves from
+//! `state` maps each [`TaskId`](crate::TaskId) and name to one lifecycle entry. An entry moves from
 //! registered to removing before it disappears. The winning removal claim owns the actor handle.
 //! Joins may run outside the listener, but terminal removal always returns to the shared state.
 //!
@@ -21,7 +21,7 @@
 //! Direct replies, completion latches, and watched outcomes carry registry results.
 //!
 //! A force-aborted attempt can outlive membership.
-//! `scheduler` keeps its label, activity, and user values until the physical attempt exits.
+//! `scheduler` keeps its name, activity, and user values until the physical attempt exits.
 
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 

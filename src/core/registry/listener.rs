@@ -184,7 +184,7 @@ impl Registry {
         match command {
             RegistryCommand::Add {
                 id,
-                label,
+                name,
                 owned,
                 outcome,
                 completion,
@@ -192,7 +192,7 @@ impl Registry {
             } => {
                 self.guarded(
                     "registry",
-                    self.spawn_and_register(id, label, *owned, outcome, completion, reply),
+                    self.spawn_and_register(id, name, *owned, outcome, completion, reply),
                 )
                 .await;
             }
@@ -203,15 +203,15 @@ impl Registry {
             RegistryCommand::Remove { id, reply } => {
                 self.guarded("registry", self.remove_task(id, reply)).await;
             }
-            RegistryCommand::RemoveByLabel { label, reply } => {
-                self.guarded("registry", self.remove_task_by_label(label, reply))
+            RegistryCommand::RemoveByName { name, reply } => {
+                self.guarded("registry", self.remove_task_by_name(name, reply))
                     .await;
             }
             RegistryCommand::Cancel { id, reply } => {
                 self.guarded("registry", self.cancel_task(id, reply)).await;
             }
-            RegistryCommand::CancelByLabel { label, reply } => {
-                self.guarded("registry", self.cancel_task_by_label(label, reply))
+            RegistryCommand::CancelByName { name, reply } => {
+                self.guarded("registry", self.cancel_task_by_name(name, reply))
                     .await;
             }
         }

@@ -230,10 +230,10 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
             .await,
         "the marker event must flush earlier lifecycle events"
     );
-    assert!(collector.by_label("ownership-timeout-add").is_empty());
+    assert!(collector.by_name("ownership-timeout-add").is_empty());
     assert!(
         collector
-            .by_label("ownership-timeout-add-watched")
+            .by_name("ownership-timeout-add-watched")
             .is_empty()
     );
 

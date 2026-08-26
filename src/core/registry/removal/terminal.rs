@@ -1,7 +1,7 @@
 //! Commits final registry state after the actor join produces a result.
 //!
 //! Every removal source reaches this module with one [`RemovalReport`]. The join result is first
-//! mapped to its public outcome. Terminal commit then removes the identity and label indexes under
+//! mapped to its public outcome. Terminal commit then removes the identity and name indexes under
 //! the state lock. After the lock is released, it publishes terminal events, resolves a watched outcome,
 //! and transfers user values with their capacity reservation to physical and deferred cleanup.
 //!
@@ -140,15 +140,15 @@ impl PendingTerminalReport {
                 else {
                     unreachable!("the removing entry was checked above")
                 };
-                if st.by_label.get(entry.label.as_ref()) == Some(&self.id) {
-                    st.by_label.remove(entry.label.as_ref());
+                if st.by_name.get(entry.name.as_ref()) == Some(&self.id) {
+                    st.by_name.remove(entry.name.as_ref());
                 }
                 let is_empty = st.tasks.is_empty();
-                Some((entry.label, state_completion, is_empty))
+                Some((entry.name, state_completion, is_empty))
             }
         };
 
-        let Some((label, state_completion, is_empty)) = removed else {
+        let Some((name, state_completion, is_empty)) = removed else {
             self.finish_without_membership();
             return;
         };
@@ -172,7 +172,7 @@ impl PendingTerminalReport {
         Registry::report_outcome(
             &self.bus,
             self.id,
-            &label,
+            &name,
             terminal_outcome,
             outcome,
             cleanup,
@@ -339,7 +339,7 @@ impl Registry {
     fn report_outcome(
         bus: &Bus,
         id: TaskId,
-        label: &str,
+        name: &str,
         outcome: TaskOutcome,
         done: Option<OutcomeTx>,
         cleanup: &mut DropBundle,
@@ -347,7 +347,7 @@ impl Registry {
         let mut outcome = OutcomeDropGuard::new(outcome, cleanup);
         bus.publish_lazy(|| {
             let mut finished = Event::new(EventKind::TaskFinished)
-                .with_task(label)
+                .with_task(name)
                 .with_id(id)
                 .with_outcome_kind(outcome.get().kind());
             match outcome.get() {
@@ -380,7 +380,7 @@ impl Registry {
         }
         bus.publish_lazy(|| {
             Event::new(EventKind::TaskRemoved)
-                .with_task(label)
+                .with_task(name)
                 .with_id(id)
         });
     }

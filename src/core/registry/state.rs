@@ -1,6 +1,6 @@
 //! Stores the registry's authoritative membership and removal phase.
 //!
-//! Admission inserts one [`Entry`] into the identity map and label index while holding a single write lock.
+//! Admission inserts one [`Entry`] into the identity map and name index while holding a single write lock.
 //! Remove, cancel, natural completion, and shutdown compete for the same transition:
 //!
 //! ```text
@@ -146,8 +146,8 @@ pub(super) enum EntryState {
 
 /// Authoritative membership record kept until terminal join cleanup finishes.
 pub(super) struct Entry {
-    /// Canonical task label reserved by this entry.
-    pub(super) label: Arc<str>,
+    /// Canonical task name reserved by this entry.
+    pub(super) name: Arc<str>,
     /// Authoritative indication that this task is currently inside an attempt.
     pub(super) activity: Arc<AtomicBool>,
     /// Current membership and actor-ownership phase.
@@ -156,7 +156,7 @@ pub(super) struct Entry {
 
 /// Registry indexes guarded by one lock.
 ///
-/// Keeping both maps under the same lock keeps identity and label lookup in sync.
+/// Keeping both maps under the same lock keeps identity and name lookup in sync.
 #[derive(Default)]
 pub(super) struct Inner {
     /// Canonical task map keyed by runtime identity.
@@ -164,6 +164,6 @@ pub(super) struct Inner {
     /// Entries stay here in both `Registered` and `Removing` phases.
     pub(super) tasks: HashMap<TaskId, Entry>,
 
-    /// Label lookup used for conflict checks and label-based operations.
-    pub(super) by_label: HashMap<Arc<str>, TaskId>,
+    /// Name lookup used for conflict checks and name-based operations.
+    pub(super) by_name: HashMap<Arc<str>, TaskId>,
 }

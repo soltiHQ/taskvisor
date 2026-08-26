@@ -273,15 +273,15 @@ async fn controller_ownership_timeouts_cover_all_public_submission_paths() {
             .await,
         "the marker event must flush earlier lifecycle events"
     );
-    for label in [
+    for name in [
         "controller-ownership-timeout-submit",
         "controller-ownership-timeout-submit-watched",
         "controller-ownership-timeout-prepared",
         "controller-ownership-timeout-prepared-watched",
     ] {
         assert!(
-            collector.by_label(label).is_empty(),
-            "timed-out submission {label} must not emit lifecycle events"
+            collector.by_name(name).is_empty(),
+            "timed-out submission {name} must not emit lifecycle events"
         );
     }
     assert!(collector.by_id(prepared_id).is_empty());
@@ -562,7 +562,7 @@ async fn remove_of_queued_submission_purges_it_before_start() {
         );
         assert!(
             collector
-                .by_label("queued-victim")
+                .by_name("queued-victim")
                 .iter()
                 .all(|e| e.kind != EventKind::AttemptStarting),
             "a removed queued submission must never start"
@@ -596,9 +596,9 @@ async fn shutdown_does_not_start_queued_tasks() {
     .await;
 
     assert!(
-        collector.by_label("queued").is_empty()
+        collector.by_name("queued").is_empty()
             || collector
-                .by_label("queued")
+                .by_name("queued")
                 .iter()
                 .all(|e| e.kind != EventKind::AttemptStarting),
         "queued task must not start during shutdown"
@@ -686,7 +686,7 @@ async fn idle_submit_admits_emits_submitted_then_running_transition() {
                 .await
         );
 
-        let slot_events = collector.by_label("web");
+        let slot_events = collector.by_name("web");
         let submitted = slot_events
             .iter()
             .find(|event| {
@@ -711,14 +711,14 @@ async fn idle_submit_admits_emits_submitted_then_running_transition() {
         );
         assert!(
             collector
-                .by_label("runner-7")
+                .by_name("runner-7")
                 .iter()
                 .any(|event| event.kind == EventKind::TaskAdded && event.id == Some(id)),
             "TaskAdded must carry the id returned by submit()"
         );
         assert!(
             collector
-                .by_label("runner-7")
+                .by_name("runner-7")
                 .iter()
                 .any(|e| { e.kind == EventKind::AttemptStarting && e.id == Some(id) }),
             "the lifecycle must run under the id minted at submit()"
@@ -754,7 +754,7 @@ async fn queue_three_drains_in_fifo_order() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn slot_waits_for_force_reaped_owner_before_starting_different_label() {
+async fn slot_waits_for_force_reaped_owner_before_starting_different_name() {
     let supervisor =
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
             .with_controller(ControllerConfig::default())
@@ -830,7 +830,7 @@ async fn slot_waits_for_force_reaped_owner_before_starting_different_label() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
+async fn slot_waits_for_force_reaped_owner_before_readmitting_same_name() {
     let supervisor =
         Supervisor::builder(SupervisorConfig::default().with_grace(Duration::from_millis(20)))
             .with_controller(ControllerConfig::default())
@@ -839,12 +839,12 @@ async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
     let release = Arc::new(AtomicBool::new(false));
     let _release_on_drop = ReleaseBlockedPoll(Arc::clone(&release));
     let started = Arc::new(Notify::new());
-    let label = "physical-same-label";
+    let name = "physical-same-label";
 
     let (owner_id, owner_waiter) = handle
         .submit_and_watch(
             ControllerSpec::queue(TaskSpec::restartable(
-                label,
+                name,
                 synchronously_blocked_task(Arc::clone(&release), Arc::clone(&started)),
             ))
             .with_slot("physical-slot-same"),
@@ -866,7 +866,7 @@ async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
     });
     let (_replacement_id, replacement_waiter) = handle
         .submit_and_watch(
-            ControllerSpec::queue(TaskSpec::once(label, replacement))
+            ControllerSpec::queue(TaskSpec::once(name, replacement))
                 .with_slot("physical-slot-same"),
         )
         .await
@@ -882,7 +882,7 @@ async fn slot_waits_for_force_reaped_owner_before_readmitting_same_label() {
         tokio::time::timeout(Duration::from_millis(100), replacement_outcome.as_mut())
             .await
             .is_err(),
-        "the queued same-label task must wait while the reaper reserves its label"
+        "the queued same-name task must wait while the reaper reserves its name"
     );
     assert_eq!(replacement_runs.load(Ordering::SeqCst), 0);
 
@@ -1066,7 +1066,7 @@ async fn replace_into_idle_slot_behaves_as_plain_admit() {
                 })
                 .await
         );
-        assert!(collector.by_label("s").iter().all(|e| {
+        assert!(collector.by_name("s").iter().all(|e| {
             e.kind != EventKind::ControllerSlotTransition
                 || e.reason.as_deref() != Some("running→terminating (replace)")
         }));

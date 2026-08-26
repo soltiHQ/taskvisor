@@ -51,7 +51,7 @@ impl EventCollector {
             .collect()
     }
 
-    pub fn by_label(&self, name: &str) -> Vec<Event> {
+    pub fn by_name(&self, name: &str) -> Vec<Event> {
         self.events
             .lock()
             .unwrap()

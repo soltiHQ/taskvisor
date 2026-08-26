@@ -61,19 +61,19 @@ impl Controller {
                 if matches!(uncommitted.error, RuntimeError::CommandQueueFull) {
                     let crate::core::UncommittedWatchedAdd {
                         error: _,
-                        label,
+                        name,
                         owned,
                         done,
                     } = *uncommitted;
                     debug_assert!(done.is_none(), "the watcher must remain controller-owned");
                     let waiting = CapacityPending {
                         slot_name: Arc::clone(slot_name),
-                        pending: PendingSubmission::new(id, label, owned),
+                        pending: PendingSubmission::new(id, name, owned),
                     };
                     if let Err((limit, waiting)) = self.try_index_capacity_pending(id, waiting) {
                         let waiting = *waiting;
                         let PendingSubmission {
-                            task_name: label,
+                            task_name: name,
                             owned,
                             ..
                         } = waiting.pending;
@@ -82,7 +82,7 @@ impl Controller {
                                 resource: "controller_pending",
                                 limit,
                             },
-                            label,
+                            name,
                             owned,
                             done,
                         }));
@@ -90,7 +90,7 @@ impl Controller {
                     if let Err(limit) = operations.capacity.enqueue(id) {
                         let waiting = self.unindex_capacity_pending(id);
                         let PendingSubmission {
-                            task_name: label,
+                            task_name: name,
                             owned,
                             ..
                         } = waiting.pending;
@@ -99,7 +99,7 @@ impl Controller {
                                 resource: "controller_admission",
                                 limit,
                             },
-                            label,
+                            name,
                             owned,
                             done,
                         }));

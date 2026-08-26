@@ -12,19 +12,19 @@ use crate::identity::TaskId;
 impl SupervisorCore {
     /// Returns registry members and entries still completing removal.
     ///
-    /// Results are `(id, label)` pairs sorted by identity.
+    /// Results are `(id, name)` pairs sorted by identity.
     pub(in crate::core) async fn list_tasks(&self) -> Vec<(TaskId, Arc<str>)> {
         self.registry.list().await
     }
 
-    /// Returns sorted labels that still own a physical attempt.
+    /// Returns sorted names that still own a physical attempt.
     pub(in crate::core) async fn snapshot(&self) -> Vec<Arc<str>> {
         self.registry.alive_snapshot().await
     }
 
-    /// Reports whether a label still owns a physical attempt.
-    pub(in crate::core) async fn is_alive(&self, label: &str) -> bool {
-        self.registry.is_alive(label).await
+    /// Reports whether a name still owns a physical attempt.
+    pub(in crate::core) async fn is_alive(&self, name: &str) -> bool {
+        self.registry.is_alive(name).await
     }
 
     /// Checks registry membership for runtime tests.
@@ -39,9 +39,9 @@ impl SupervisorCore {
         self.cmd_tx.capacity()
     }
 
-    /// Resolves the current registry owner of a label in tests.
+    /// Resolves the current registry owner of a name in tests.
     #[cfg(test)]
-    pub(crate) async fn id_for_label(&self, label: &str) -> Option<TaskId> {
-        self.registry.id_for_label(label).await
+    pub(crate) async fn id_for_name(&self, name: &str) -> Option<TaskId> {
+        self.registry.id_for_name(name).await
     }
 }

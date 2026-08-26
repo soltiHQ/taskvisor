@@ -30,7 +30,7 @@ impl Registry {
         }
     }
 
-    /// Returns registered and removing tasks as `(identity, label)` pairs.
+    /// Returns registered and removing tasks as `(identity, name)` pairs.
     ///
     /// Results are sorted by identity.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
@@ -38,29 +38,29 @@ impl Registry {
         let mut tasks: Vec<(TaskId, Arc<str>)> = st
             .tasks
             .iter()
-            .map(|(id, entry)| (*id, Arc::clone(&entry.label)))
+            .map(|(id, entry)| (*id, Arc::clone(&entry.name)))
             .collect();
         drop(st);
         tasks.sort_by_key(|(id, _)| *id);
         tasks
     }
 
-    /// Returns whether a label still owns a physical task attempt.
+    /// Returns whether a name still owns a physical task attempt.
     ///
     /// This checks registry activity and force-aborted attempts that remain active after removal.
-    pub(in crate::core) async fn is_alive(&self, label: &str) -> bool {
+    pub(in crate::core) async fn is_alive(&self, name: &str) -> bool {
         let state = self.state.read().await;
-        let registered = state.by_label.get(label).is_some_and(|id| {
+        let registered = state.by_name.get(name).is_some_and(|id| {
             state
                 .tasks
                 .get(id)
                 .is_some_and(|entry| entry.activity.load(Ordering::Acquire))
         });
         drop(state);
-        registered || self.actors.attempt_reaper().is_alive(label)
+        registered || self.actors.attempt_reaper().is_alive(name)
     }
 
-    /// Returns sorted labels that still own a physical task attempt.
+    /// Returns sorted names that still own a physical task attempt.
     ///
     /// This combines registry activity with force-aborted attempts that remain active after removal.
     pub(in crate::core) async fn alive_snapshot(&self) -> Vec<Arc<str>> {
@@ -69,10 +69,10 @@ impl Registry {
             .tasks
             .values()
             .filter(|entry| entry.activity.load(Ordering::Acquire))
-            .map(|entry| Arc::clone(&entry.label))
+            .map(|entry| Arc::clone(&entry.name))
             .collect();
         drop(state);
-        alive.extend(self.actors.attempt_reaper().alive_labels());
+        alive.extend(self.actors.attempt_reaper().alive_names());
         alive.sort_unstable();
         alive.dedup();
         alive
@@ -84,10 +84,10 @@ impl Registry {
         self.state.read().await.tasks.contains_key(&id)
     }
 
-    /// Resolves a label to its membership identity, including a removing entry.
+    /// Resolves a name to its membership identity, including a removing entry.
     #[cfg(test)]
-    pub async fn id_for_label(&self, label: &str) -> Option<TaskId> {
-        self.state.read().await.by_label.get(label).copied()
+    pub async fn id_for_name(&self, name: &str) -> Option<TaskId> {
+        self.state.read().await.by_name.get(name).copied()
     }
 
     /// Returns true if no tasks are registered or removing.

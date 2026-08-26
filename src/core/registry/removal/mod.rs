@@ -3,7 +3,7 @@
 //! Remove, cancel, actor completion, and shutdown can all request this transition.
 //! They compete under the state lock.
 //! One winner changes the entry to removing and takes its actor handle.
-//! The label remains reserved during the join.
+//! The name remains reserved during the join.
 //!
 //! ```text
 //! command or completion ──► claim ────────────────────► actor join ───► terminal commit

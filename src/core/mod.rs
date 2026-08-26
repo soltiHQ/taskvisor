@@ -80,7 +80,7 @@ pub(crate) struct UncommittedWatchedAdd {
     /// Registry error that prevented command commit.
     pub(crate) error: crate::RuntimeError,
     /// Stable task name prepared for registry admission.
-    pub(crate) label: std::sync::Arc<str>,
+    pub(crate) name: std::sync::Arc<str>,
     /// Task specification and its reserved cleanup ownership.
     pub(crate) owned: deferred_drop::OwnedTask<crate::TaskSpec>,
     /// Watched-outcome sender returned to controller ownership.

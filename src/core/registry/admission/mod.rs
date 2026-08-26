@@ -1,6 +1,6 @@
 //! Turns add commands into committed registry entries.
 //!
-//! The registry listener calls this package for single adds and static batches. Admission checks label
+//! The registry listener calls this package for single adds and static batches. Admission checks name
 //! ownership and the registration limit. It builds actors outside the state write lock.
 //! It repeats the checks after acquiring the write lock because preparation did not hold registry state.
 //!
@@ -45,8 +45,8 @@ mod single;
 struct PreparedRegistration {
     /// Stable identity assigned to the task.
     id: TaskId,
-    /// Label reserved by the registry entry.
-    label: Arc<str>,
+    /// Name reserved by the registry entry.
+    name: Arc<str>,
     /// Actor handle retained by the registry entry.
     join: ActorHandle,
     /// Token used to stop the actor.
@@ -88,7 +88,7 @@ impl Registry {
     fn prepare_registration(
         &self,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
@@ -104,7 +104,7 @@ impl Registry {
 
         let actor = TaskActor::new(
             self.bus.clone(),
-            Arc::clone(&label),
+            Arc::clone(&name),
             task,
             TaskActorParams {
                 restart: spec.restart(),
@@ -135,7 +135,7 @@ impl Registry {
         let (scheduled, join) = ScheduledActor::new(
             ActorRegistration {
                 id,
-                label: Arc::clone(&label),
+                name: Arc::clone(&name),
                 activity: Arc::clone(&activity),
                 cleanup_poisoned,
                 physical_release: completion.clone(),
@@ -147,7 +147,7 @@ impl Registry {
 
         PreparedRegistration {
             id,
-            label,
+            name,
             join,
             cancel: task_token,
             done,

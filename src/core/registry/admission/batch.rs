@@ -1,7 +1,7 @@
 //! Commits a static task batch as one registry decision.
 //!
 //! Static run sends one [`RegistryCommand::AddBatch`](crate::core::registry::RegistryCommand::AddBatch)
-//! to the listener. This module rejects duplicate labels inside the batch and conflicts with
+//! to the listener. This module rejects duplicate names inside the batch and conflicts with
 //! registry ownership or force-aborted attempts that have not physically exited.
 //! It also checks the registration limit for the complete batch.
 //!
@@ -39,20 +39,20 @@ impl Registry {
         let current = {
             let st = self.state.read().await;
             let reaper_conflicts =
-                reaper.reserves_labels(items.iter().map(|item| item.label.as_ref()));
+                reaper.reserves_names(items.iter().map(|item| item.name.as_ref()));
             for (item, reaper_conflict) in items.iter().zip(reaper_conflicts) {
                 let conflicts_with_registry =
-                    st.by_label.contains_key(&item.label) || reaper_conflict;
-                let repeats_in_batch = !seen.insert(item.label.as_ref());
+                    st.by_name.contains_key(&item.name) || reaper_conflict;
+                let repeats_in_batch = !seen.insert(item.name.as_ref());
                 if conflicts_with_registry || repeats_in_batch {
-                    first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
+                    first_conflict.get_or_insert_with(|| Arc::clone(&item.name));
                     conflicting_ids.insert(item.id);
                 }
             }
             st.tasks.len()
         };
 
-        if let Some(label) = first_conflict {
+        if let Some(name) = first_conflict {
             for item in &items {
                 let conflict = conflicting_ids.contains(&item.id);
                 let (kind, reason) = if conflict {
@@ -62,13 +62,13 @@ impl Registry {
                 };
                 self.bus.publish_lazy(|| {
                     Event::new(EventKind::TaskAddFailed)
-                        .with_task(Arc::clone(&item.label))
+                        .with_task(Arc::clone(&item.name))
                         .with_id(item.id)
                         .with_rejection_kind(kind)
                         .with_reason(reason)
                 });
             }
-            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name: label }));
+            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name }));
             drop(items);
             return;
         }
@@ -78,7 +78,7 @@ impl Registry {
             for item in &items {
                 self.bus.publish_lazy(|| {
                     Event::new(EventKind::TaskAddFailed)
-                        .with_task(Arc::clone(&item.label))
+                        .with_task(Arc::clone(&item.name))
                         .with_id(item.id)
                         .with_rejection_kind(RejectionKind::ResourceLimit)
                         .with_reason(reason.clone())
@@ -98,7 +98,7 @@ impl Registry {
             .map(|item| {
                 self.prepare_registration(
                     item.id,
-                    item.label,
+                    item.name,
                     item.owned,
                     None,
                     None,
@@ -113,17 +113,17 @@ impl Registry {
         let mut first_conflict = None;
 
         let reaper_conflicts =
-            reaper.reserves_labels(prepared.iter().map(|item| item.label.as_ref()));
+            reaper.reserves_names(prepared.iter().map(|item| item.name.as_ref()));
         for (item, reaper_conflict) in prepared.iter().zip(reaper_conflicts) {
-            let conflicts_with_registry = st.by_label.contains_key(&item.label) || reaper_conflict;
-            let repeats_in_batch = !seen.insert(item.label.as_ref());
+            let conflicts_with_registry = st.by_name.contains_key(&item.name) || reaper_conflict;
+            let repeats_in_batch = !seen.insert(item.name.as_ref());
             if conflicts_with_registry || repeats_in_batch {
-                first_conflict.get_or_insert_with(|| Arc::clone(&item.label));
+                first_conflict.get_or_insert_with(|| Arc::clone(&item.name));
                 conflicting_ids.insert(item.id);
             }
         }
 
-        if let Some(label) = first_conflict {
+        if let Some(name) = first_conflict {
             drop(st);
             for item in prepared {
                 let reason = if conflicting_ids.contains(&item.id) {
@@ -138,13 +138,13 @@ impl Registry {
                 };
                 self.bus.publish_lazy(|| {
                     Event::new(EventKind::TaskAddFailed)
-                        .with_task(Arc::clone(&item.label))
+                        .with_task(Arc::clone(&item.name))
                         .with_id(item.id)
                         .with_rejection_kind(rejection_kind)
                         .with_reason(reason)
                 });
             }
-            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name: label }));
+            let _ = reply.send(Err(RuntimeError::TaskAlreadyExists { name }));
             return;
         }
 
@@ -155,7 +155,7 @@ impl Registry {
             for item in &prepared {
                 self.bus.publish_lazy(|| {
                     Event::new(EventKind::TaskAddFailed)
-                        .with_task(Arc::clone(&item.label))
+                        .with_task(Arc::clone(&item.name))
                         .with_id(item.id)
                         .with_rejection_kind(RejectionKind::ResourceLimit)
                         .with_reason(reason.clone())
@@ -173,7 +173,7 @@ impl Registry {
         for item in prepared {
             let PreparedRegistration {
                 id,
-                label,
+                name,
                 join,
                 cancel,
                 done,
@@ -183,7 +183,7 @@ impl Registry {
                 activity,
             } = item;
             let entry = Entry {
-                label: Arc::clone(&label),
+                name: Arc::clone(&name),
                 activity,
                 state: EntryState::Registered(Box::new(Handle::new(
                     join,
@@ -194,15 +194,15 @@ impl Registry {
                 ))),
             };
             st.tasks.insert(id, entry);
-            st.by_label.insert(Arc::clone(&label), id);
-            accepted.push((id, label, scheduled));
+            st.by_name.insert(Arc::clone(&name), id);
+            accepted.push((id, name, scheduled));
         }
         drop(st);
 
-        for (id, label, _) in &accepted {
+        for (id, name, _) in &accepted {
             self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskAdded)
-                    .with_task(Arc::clone(label))
+                    .with_task(Arc::clone(name))
                     .with_id(*id)
             });
         }

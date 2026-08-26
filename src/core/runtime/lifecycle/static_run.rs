@@ -180,9 +180,9 @@ impl SupervisorCore {
             .into_iter()
             .zip(reservations)
             .map(|(spec, reservation)| {
-                let label = spec.shared_name();
+                let name = spec.shared_name();
                 let owned = self.own_task(spec, reservation);
-                (label, owned)
+                (name, owned)
             })
             .collect();
 
@@ -195,9 +195,9 @@ impl SupervisorCore {
 
         let items = tasks
             .into_iter()
-            .map(|(label, owned)| AddBatchItem {
+            .map(|(name, owned)| AddBatchItem {
                 id: TaskId::next(),
-                label,
+                name,
                 owned,
             })
             .collect();

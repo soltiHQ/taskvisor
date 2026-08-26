@@ -149,7 +149,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
+async fn force_aborted_attempt_keeps_its_name_reserved_until_physical_exit() {
     let handle = Supervisor::builder(
         SupervisorConfig::default()
             .with_grace(Duration::from_millis(20))
@@ -185,7 +185,7 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
             .alive_snapshot()
             .await
             .iter()
-            .any(|label| label.as_ref() == "physically-reserved")
+            .any(|name| name.as_ref() == "physically-reserved")
     );
 
     let replacement_runs = Arc::new(AtomicUsize::new(0));
@@ -203,7 +203,7 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
             Err(RuntimeError::TaskAlreadyExists { ref name, .. })
                 if name.as_ref() == "physically-reserved"
         ),
-        "the label must remain reserved while the old attempt is physically alive: {duplicate:?}"
+        "the name must remain reserved while the old attempt is physically alive: {duplicate:?}"
     );
     assert_eq!(replacement_runs.load(Ordering::SeqCst), 0);
 
@@ -226,7 +226,7 @@ async fn force_aborted_attempt_keeps_its_label_reserved_until_physical_exit() {
         }
     })
     .await
-    .expect("the label must release after physical attempt exit");
+    .expect("the name must release after physical attempt exit");
     assert!(replacement_id.get() > first_id.get());
 
     let _ = handle.shutdown().await;

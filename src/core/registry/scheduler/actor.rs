@@ -237,8 +237,8 @@ pub(in crate::core::registry) struct ScheduledActor {
 pub(in crate::core::registry) struct ActorRegistration {
     /// Stable task identity.
     pub(in crate::core::registry) id: TaskId,
-    /// Unique label reserved through physical exit and terminal matching.
-    pub(in crate::core::registry) label: Arc<str>,
+    /// Unique name reserved through physical exit and terminal matching.
+    pub(in crate::core::registry) name: Arc<str>,
     /// Current actor activity state.
     pub(in crate::core::registry) activity: Arc<AtomicBool>,
     /// Shared panic cleanup status.
@@ -259,7 +259,7 @@ impl ScheduledActor {
     ) -> (Self, ActorHandle) {
         let ActorRegistration {
             id,
-            label,
+            name,
             activity,
             cleanup_poisoned,
             physical_release,
@@ -276,7 +276,7 @@ impl ScheduledActor {
             logical: None,
             reservation: Some(AttemptReservation::new(
                 id,
-                label,
+                name,
                 activity,
                 Arc::clone(&cleanup_poisoned),
                 physical_release,

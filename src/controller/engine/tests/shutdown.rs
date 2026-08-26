@@ -776,7 +776,7 @@ async fn no_queue_advancement_after_shutdown_starts() {
         "shutdown must prevent a queued admission from being scheduled"
     );
     assert!(
-        sup.core().id_for_label("queued").await.is_none(),
+        sup.core().id_for_name("queued").await.is_none(),
         "controller must not start queued tasks once shutdown has been requested"
     );
 
@@ -829,7 +829,7 @@ async fn admission_rejection_after_shutdown_does_not_advance_queue() {
     assert!(operations.removals.is_empty());
     assert!(
         sup.core()
-            .id_for_label("queued-after-admission-rejection")
+            .id_for_name("queued-after-admission-rejection")
             .await
             .is_none()
     );
