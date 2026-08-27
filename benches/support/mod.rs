@@ -21,6 +21,7 @@ const REPORT_WIDTH: usize = 92;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Lifecycle,
+    Drain,
     Intake,
     Policy,
     Query,
@@ -30,6 +31,7 @@ impl Scope {
     const fn badge(self) -> &'static str {
         match self {
             Self::Lifecycle => "FULL LIFECYCLE",
+            Self::Drain => "DRAIN ONLY",
             Self::Policy => "POLICY DECISION",
             Self::Intake => "INTAKE ONLY",
             Self::Query => "QUERY",
@@ -39,6 +41,7 @@ impl Scope {
     const fn color(self) -> AnsiColor {
         match self {
             Self::Lifecycle => AnsiColor::BrightGreen,
+            Self::Drain => AnsiColor::BrightGreen,
             Self::Policy => AnsiColor::BrightYellow,
             Self::Query => AnsiColor::BrightMagenta,
             Self::Intake => AnsiColor::BrightBlue,
@@ -97,6 +100,26 @@ impl CaseFamily {
             group_id,
             title,
             scope: Scope::Intake,
+            unit_singular,
+            unit_plural,
+            boundary,
+            outside,
+            interpretation: Interpretation::Neutral,
+        }
+    }
+
+    pub const fn drain(
+        group_id: &'static str,
+        title: &'static str,
+        unit_singular: &'static str,
+        unit_plural: &'static str,
+        boundary: &'static str,
+        outside: &'static str,
+    ) -> Self {
+        Self {
+            group_id,
+            title,
+            scope: Scope::Drain,
             unit_singular,
             unit_plural,
             boundary,
@@ -703,6 +726,11 @@ fn write_observation_line(
 fn scope_description(family: CaseFamily) -> String {
     if family.interpretation == Interpretation::ManagedTaskLifecycle {
         "COMPLETE MANAGED-TASK LIFECYCLE".to_owned()
+    } else if family.scope == Scope::Drain {
+        format!(
+            "TASK DRAIN, NOT END-TO-END LIFECYCLE · {}",
+            family.unit_plural.to_ascii_uppercase()
+        )
     } else if family.scope == Scope::Lifecycle {
         format!(
             "COMPLETE LIFECYCLE · {}",

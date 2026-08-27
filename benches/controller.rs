@@ -10,7 +10,8 @@ mod support;
 
 use std::hint::black_box;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
@@ -21,7 +22,7 @@ use taskvisor::{
 };
 
 use support::fixtures::{
-    self, AsyncFlag, ProducerGate, RUNTIMES, RtFactory, bench_config, expect_canceled,
+    self, AsyncFlag, RUNTIMES, RtFactory, WATCHDOG, bench_config, expect_canceled,
     expect_completed, expect_within, instant_task, wait_for_ownership,
 };
 use support::{CaseFamily, print_suite_header, record_case};
@@ -45,12 +46,12 @@ const STEADY_INTAKE: CaseFamily = CaseFamily::intake(
 );
 
 const CONCURRENT_INTAKE: CaseFamily = CaseFamily::intake(
-    "controller/reused/concurrent_intake_try_submit",
-    "CONCURRENT TRY_SUBMIT PRODUCERS",
+    "controller/reused/parked_controller_concurrent_native_try_submit",
+    "CONCURRENT NATIVE TRY_SUBMIT · PARKED CONTROLLER",
     "accepted submission",
     "accepted submissions",
-    "synchronized release of 1, 2, 4, or 8 producer tasks through 64 caller-side try_submit acceptances on one reused multi-thread supervisor",
-    "Supervisor/controller startup, named-slot warmup, request construction, producer task creation and readiness, controller decisions and outcomes, post-batch ownership drain, shutdown, and Tokio runtime construction",
+    "start-condvar release through completion-condvar observation for 1, 2, 4, or 8 already-spawned native producer threads making exactly 1024 caller-side try_submit calls while the current-thread runtime is synchronously parked and cannot process controller commands",
+    "Supervisor/controller startup, named-slot warmup, producer thread spawn/join, request construction and transfer to workers, start-line readiness wait, acceptance checks, all controller processing and outcomes, post-batch ownership/slot drain, shutdown, and Tokio runtime construction",
 );
 
 const DROP_REJECTION: CaseFamily = CaseFamily::policy(
@@ -159,6 +160,199 @@ async fn warm_controller_slots(handle: &SupervisorHandle, slots: &[&str]) {
     // Idle slots may be collected. Warm the same admission paths and wait for
     // their previous owners to leave instead of preserving a stale slot owner.
     drain_controller(handle).await;
+}
+
+enum NativeProducerCommand {
+    Run(Vec<ControllerSpec>),
+    Stop,
+}
+
+#[derive(Default)]
+struct NativeProducerState {
+    ready: usize,
+    released: bool,
+    completed: usize,
+    accepted: usize,
+    first_error: Option<String>,
+}
+
+struct NativeProducerGate {
+    expected: usize,
+    state: Mutex<NativeProducerState>,
+    changed: Condvar,
+}
+
+impl NativeProducerGate {
+    fn new(expected: usize) -> Arc<Self> {
+        assert!(expected != 0, "a producer gate needs at least one caller");
+        Arc::new(Self {
+            expected,
+            state: Mutex::new(NativeProducerState::default()),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn reset(&self) {
+        let mut state = self.state.lock().expect("producer gate lock poisoned");
+        assert!(
+            (state.ready == 0 && state.completed == 0)
+                || (state.ready == self.expected && state.completed == self.expected),
+            "producer gate reset before the previous batch completed"
+        );
+        *state = NativeProducerState::default();
+    }
+
+    fn arrive_and_wait(&self) {
+        let mut state = self.state.lock().expect("producer gate lock poisoned");
+        state.ready += 1;
+        assert!(
+            state.ready <= self.expected,
+            "more producers reached the gate than configured"
+        );
+        self.changed.notify_all();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .expect("producer gate lock poisoned while parked");
+        }
+    }
+
+    fn wait_until_ready(&self) {
+        let state = self.state.lock().expect("producer gate lock poisoned");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, WATCHDOG, |state| state.ready != self.expected)
+            .expect("producer gate lock poisoned while waiting for readiness");
+        assert!(
+            !timeout.timed_out() && state.ready == self.expected,
+            "benchmark timed out while parking all native producers"
+        );
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("producer gate lock poisoned");
+        assert_eq!(
+            state.ready, self.expected,
+            "producer batch released before every caller was ready"
+        );
+        state.released = true;
+        self.changed.notify_all();
+    }
+
+    fn complete(&self, accepted: usize, first_error: Option<String>) {
+        let mut state = self.state.lock().expect("producer gate lock poisoned");
+        state.accepted += accepted;
+        if state.first_error.is_none() {
+            state.first_error = first_error;
+        }
+        state.completed += 1;
+        assert!(
+            state.completed <= self.expected,
+            "more producers completed than configured"
+        );
+        self.changed.notify_all();
+    }
+
+    fn wait_until_complete(&self) -> (usize, Option<String>) {
+        let state = self.state.lock().expect("producer gate lock poisoned");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, WATCHDOG, |state| state.completed != self.expected)
+            .expect("producer gate lock poisoned while waiting for completion");
+        assert!(
+            !timeout.timed_out() && state.completed == self.expected,
+            "benchmark timed out while waiting for native producers"
+        );
+        (state.accepted, state.first_error.clone())
+    }
+}
+
+struct NativeProducerPool {
+    commands: Vec<mpsc::SyncSender<NativeProducerCommand>>,
+    joins: Vec<thread::JoinHandle<()>>,
+    gate: Arc<NativeProducerGate>,
+}
+
+impl NativeProducerPool {
+    fn new(handle: &SupervisorHandle, producers: usize) -> Self {
+        let gate = NativeProducerGate::new(producers);
+        let mut commands = Vec::with_capacity(producers);
+        let mut joins = Vec::with_capacity(producers);
+
+        for producer in 0..producers {
+            let (command_tx, command_rx) = mpsc::sync_channel(0);
+            let producer_handle = handle.clone();
+            let producer_gate = Arc::clone(&gate);
+            let join = thread::Builder::new()
+                .name(format!("taskvisor-bench-producer-{producer}"))
+                .spawn(move || {
+                    while let Ok(command) = command_rx.recv() {
+                        let NativeProducerCommand::Run(requests) = command else {
+                            break;
+                        };
+                        producer_gate.arrive_and_wait();
+
+                        let mut accepted = 0usize;
+                        let mut first_error = None;
+                        for request in requests {
+                            match producer_handle.try_submit(request) {
+                                Ok(id) => {
+                                    accepted += 1;
+                                    black_box(id);
+                                }
+                                Err(error) => {
+                                    if first_error.is_none() {
+                                        first_error = Some(format!("{error:?}"));
+                                    }
+                                }
+                            }
+                        }
+                        producer_gate.complete(accepted, first_error);
+                    }
+                })
+                .expect("native benchmark producer thread startup");
+            commands.push(command_tx);
+            joins.push(join);
+        }
+
+        Self {
+            commands,
+            joins,
+            gate,
+        }
+    }
+
+    fn prepare(&self, batches: Vec<Vec<ControllerSpec>>) {
+        assert_eq!(batches.len(), self.commands.len());
+        self.gate.reset();
+        for (command, requests) in self.commands.iter().zip(batches) {
+            command
+                .send(NativeProducerCommand::Run(requests))
+                .expect("native benchmark producer stopped before its batch");
+        }
+        self.gate.wait_until_ready();
+    }
+
+    fn release(&self) {
+        self.gate.release();
+    }
+
+    fn wait_until_complete(&self) -> (usize, Option<String>) {
+        self.gate.wait_until_complete()
+    }
+
+    fn shutdown(mut self) {
+        for command in &self.commands {
+            command
+                .send(NativeProducerCommand::Stop)
+                .expect("native benchmark producer stopped before shutdown");
+        }
+        for join in self.joins.drain(..) {
+            join.join()
+                .expect("native benchmark producer thread panicked");
+        }
+    }
 }
 
 async fn start_held_owner(
@@ -297,74 +491,73 @@ fn bench_steady_try_submit(c: &mut Criterion) {
 }
 
 fn bench_concurrent_try_submit(c: &mut Criterion) {
-    const COUNT: usize = 64;
+    const COUNT: usize = 1_024;
 
     let mut group = c.benchmark_group(CONCURRENT_INTAKE.group_id);
     group.throughput(Throughput::Elements(COUNT as u64));
 
     for producers in [1usize, 2, 4, 8] {
-        let rt_name = "multi_thread";
-        let parameter = format!("{COUNT}_accepted_submissions_{producers}_producers");
+        let rt_name = "current_thread";
+        let producer_label = if producers == 1 {
+            "native_producer"
+        } else {
+            "native_producers"
+        };
+        let parameter = format!("{COUNT}_accepted_submissions_{producers}_{producer_label}");
         group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
             record_case(CONCURRENT_INTAKE, rt_name, Some(parameter.clone()));
             b.iter_custom(|iters| {
-                let rt = fixtures::rt_multi_thread();
+                let rt = fixtures::rt_current_thread();
                 rt.block_on(async {
-                    let supervisor = Supervisor::builder(bench_config())
-                        .with_controller(
-                            ControllerConfig::default()
-                                .with_queue_capacity(NonZeroUsize::new(COUNT).unwrap()),
-                        )
-                        .build();
+                    let batch_capacity = NonZeroUsize::new(COUNT).unwrap();
+                    let supervisor = Supervisor::builder(
+                        bench_config().with_ownership_capacity(Some(batch_capacity)),
+                    )
+                    .with_controller(
+                        ControllerConfig::default().with_queue_capacity(batch_capacity),
+                    )
+                    .build();
                     let handle = supervisor.serve().expect("runtime startup");
                     warm_controller_slots(&handle, &["concurrent-intake-slot"]).await;
+                    let producer_pool = NativeProducerPool::new(&handle, producers);
 
                     let mut total = Duration::ZERO;
                     for iteration in 0..iters {
                         let per_producer = COUNT / producers;
                         assert_eq!(per_producer * producers, COUNT);
-                        let gate = ProducerGate::new(producers);
-                        let mut joins = Vec::with_capacity(producers);
-
-                        for producer in 0..producers {
-                            let requests: Vec<_> = (0..per_producer)
-                                .map(|i| {
-                                    ControllerSpec::drop_if_running(instant_task(format!(
-                                        "concurrent-intake-{iteration}-{producer}-{i}"
-                                    )))
-                                    .with_slot("concurrent-intake-slot")
-                                })
-                                .collect();
-                            let producer_handle = handle.clone();
-                            let producer_gate = Arc::clone(&gate);
-                            joins.push(tokio::spawn(async move {
-                                producer_gate.arrive_and_wait().await;
-                                requests
-                                    .into_iter()
-                                    .map(|request| {
-                                        producer_handle
-                                            .try_submit(request)
-                                            .expect("concurrent try_submit intake failed")
+                        let batches: Vec<Vec<_>> = (0..producers)
+                            .map(|producer| {
+                                (0..per_producer)
+                                    .map(|i| {
+                                        ControllerSpec::drop_if_running(instant_task(format!(
+                                            "concurrent-intake-{iteration}-{producer}-{i}"
+                                        )))
+                                        .with_slot("concurrent-intake-slot")
                                     })
-                                    .collect::<Vec<_>>()
-                            }));
-                        }
+                                    .collect()
+                            })
+                            .collect();
+                        producer_pool.prepare(batches);
 
-                        gate.wait_until_ready().await;
+                        // This is the `Runtime::block_on` root on a current-thread runtime.
+                        // Its synchronous completion wait parks the only runtime thread, so
+                        // the controller cannot process these commands inside the timer.
                         let start = Instant::now();
-                        gate.release();
-                        let mut accepted = 0usize;
-                        for join in joins {
-                            let ids = join.await.expect("concurrent producer task failed");
-                            accepted += ids.len();
-                            black_box(ids);
-                        }
-                        total += start.elapsed();
+                        producer_pool.release();
+                        let (accepted, first_error) = producer_pool.wait_until_complete();
+                        let elapsed = start.elapsed();
+
                         assert_eq!(accepted, COUNT);
+                        assert!(
+                            first_error.is_none(),
+                            "concurrent try_submit intake failed: {first_error:?}"
+                        );
+                        total += elapsed;
 
                         drain_controller(&handle).await;
                     }
 
+                    producer_pool.shutdown();
                     handle.shutdown().await.expect("shutdown failed");
                     total
                 })

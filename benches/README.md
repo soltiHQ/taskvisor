@@ -56,20 +56,25 @@ Setup, checks, and cleanup can make the full command take longer than the measur
 
 ### [Throughput](throughput.rs)
 
-These cases admit and wait for batches of 256 successful tasks on a warmed supervisor, without subscribers.
-Each task must return `Completed`. Startup, task-value construction, and ownership cleanup stay outside the timer.
-There is no synthetic CPU loop in the task body.
+Every case uses a warmed supervisor without subscribers and requires every watched task to return `Completed`.
+The suite separates admission-through-completion measurements from drain-only measurements whose tasks are admitted and whose case-specific initial readiness is observed before timing.
 
-The instant-task case is the no-subscriber reference. The fan-out suite repeats that same reference as its zero-subscriber variant so subscriber-count comparisons stay in one benchmark family and binary.
-A second pair uses identical tasks that explicitly yield once, with and without a 60-second attempt deadline.
-The yield ensures the deadline timer is polled before the task succeeds.
-This comparison includes timer registration and removal, deadline selection, and scheduling; it is not a pure timer microbenchmark.
-It does not promise that another task runs during the yield, and it does not measure timeout expiry.
-Positive delays and deadline expiry are exercised in the [lifecycle tests](../tests/lifecycle.rs)
-and [timeout tests](../tests/timeout.rs); these benchmarks do not measure their elapsed latency.
+| Case | Timed work | What it does not measure |
+|------|------------|--------------------------|
+| Instant / one yield / deadline | First watched admission through 256 `Completed` outcomes. The yielding pair differs only by a 60-second attempt deadline that is polled but never expires. | Startup, task construction, ownership reset, shutdown, application I/O, or deadline expiry. |
+| `max_concurrent` enabled-path overhead | First watched admission through 256 instant-task outcomes with the limit disabled or set to 1, 4, or 256. | A known saturated state. Instant tasks can finish while the batch is still being admitted. |
+| Cooperative CPU drain | One shared release through 64 outcomes after all 64 admitted task bodies have reached the gate. Each body runs 16 deterministic CPU chunks of 4,096 steps and yields between chunks. | Admission, entry handshake, result validation, ownership reset, or application-specific work. This is a synthetic matched runtime workload. |
+| Saturated `max_concurrent` drain | One shared release through 64 outcomes with limits 1, 4, or 64. Before timing, the task-body counter and `alive_snapshot` must both remain exactly `min(limit, 64)`; the remaining bodies enter during the timed drain, and all 64 must have entered afterward. | Admission, the pre-release entry and stability handshake, and any claim about an unobserved internal semaphore state. |
 
-The `max_concurrent` family runs the same 256 instant tasks with the limit disabled and with limits of 1, 4, and 256.
-It times watched admission through every `Completed` outcome, including semaphore acquisition, cancellation selection, permit release, and any configured contention.
+The instant-task case is the no-subscriber reference. The fan-out suite repeats that reference as its zero-subscriber variant so subscriber-count comparisons stay in one benchmark family and binary.
+The one-yield deadline comparison includes timer registration and removal, deadline selection, and scheduling; it is not a pure timer microbenchmark.
+Positive delays and deadline expiry are exercised in the [lifecycle tests](../tests/lifecycle.rs) and [timeout tests](../tests/timeout.rs).
+
+For both drain families, task construction, watched admission, initial observable readiness, outcome-vector allocation, and an explicit first poll that registers the watchdog timer happen before `Instant::now`.
+In the saturated family, only the initial `min(limit, 64)` task-body entries are part of that readiness state; entry of the remaining admitted tasks is timed.
+The timer starts immediately before the shared release and stops after every watched outcome is received.
+Outcome and CPU-result assertions run afterward.
+The cooperative CPU family is matched across `current_thread` and the four-worker `multi_thread` runtime; compare those two variants to observe the runtime effect on the same released work.
 
 ### [Subscriber fan-out](fanout.rs)
 
@@ -85,12 +90,19 @@ Setup, final shutdown, and ownership reset are excluded.
 
 ### [Dynamic management](dynamic.rs)
 
-| Case                           | Timed work                                                                                                              | State prepared or reset outside the timer                                                                                                                              |
-|--------------------------------|-------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Bounded registry admission     | 32 `add` calls through registry acceptance, with capacity available.                                                    | Task construction, cancellation, and cleanup of the accepted batch. This is not task completion throughput.                                                            |
-| Cancel running task            | Cancellation and the `Canceled` outcome of a task already known to be running.                                          | Admission, the start handshake, and ownership cleanup.                                                                                                                 |
-| List held tasks                | One registry snapshot with 32 or 256 tasks retained.                                                                    | Population, snapshot validation and disposal, and task removal. The unit is a snapshot, not a task.                                                                    |
-| Ownership release to admission | With ownership capacity one, release a gated final task destructor and wait for an already-parked admission to succeed. | Filling capacity, parking the waiter, completion of the new task, and cleanup. This measures recovery after release, not an arbitrary time spent waiting for capacity. |
+| Case                                     | Timed work                                                                                                                    | State prepared or reset outside the timer                                                                                                                              |
+|------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Sequential registry add · root caller    | 32 serialized `add` calls from the `Runtime::block_on` root through their authoritative registry decisions.                    | Task construction, result validation, cancellation, and cleanup of the accepted batch. This is a caller-topology diagnostic, not task completion throughput.           |
+| Sequential registry add · spawned caller | 32 serialized `add` calls from one spawned Tokio task through their authoritative registry decisions.                         | Task construction, spawned-task scheduling before the internal timer, root-side `JoinHandle` polling, result validation, cancellation, and cleanup.                       |
+| Pipelined registry add · spawned caller  | Concurrent polling of 32 prebuilt `add` futures from one spawned Tokio task through all authoritative registry decisions.     | Task and add-future construction, spawned-task scheduling before the internal timer, root-side `JoinHandle` polling, result validation, cancellation, and cleanup.        |
+| Cancel running task                      | Cancellation and the `Canceled` outcome of a task already known to be running.                                                | Admission, the start handshake, and ownership cleanup.                                                                                                                 |
+| List held tasks                          | One registry snapshot with 32 or 256 tasks retained.                                                                          | Population, snapshot validation and disposal, and task removal. The unit is a snapshot, not a task.                                                                    |
+| Ownership release to admission           | With ownership capacity one, release a gated final task destructor and wait for an already-parked admission to succeed.       | Filling capacity, parking the waiter, completion of the new task, and cleanup. This measures recovery after release, not an arbitrary time spent waiting for capacity. |
+
+The root-caller sequential case is deliberately topology-specific: on the multi-thread runtime, the caller is outside the worker pool while the registry listener runs in it.
+Its ratio across runtime variants can depend on runtime scheduling and the host, so use it as a topology diagnostic rather than a portable estimate of dynamic-admission throughput.
+The spawned-caller sequential case moves the same serialized request/reply loop into a Tokio task.
+The pipelined case keeps the spawned-caller topology but polls all 32 admissions together, making it the batch-throughput comparison.
 
 ### [Controller admission](controller.rs)
 
@@ -98,7 +110,7 @@ Setup, final shutdown, and ownership reset are excluded.
 |-----------------------|-------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
 | Cold first submission | First successful `try_submit` on a fresh served supervisor, including lazy cleanup-worker startup.                      | Supervisor/controller and Tokio runtime startup, request construction, task outcome, and shutdown. |
 | Reused intake burst   | Acceptance of a fixed burst of 64 requests from one caller.                                                             | Slot admission and final task outcomes.                                                            |
-| Concurrent producers  | Synchronized release of 1, 2, 4, or 8 producer tasks through 64 `try_submit` acceptances on Tokio multi-thread.         | Producer creation/readiness, controller decisions and outcomes, reset, and shutdown.               |
+| Concurrent producers  | Start-condvar release through exactly 1024 `try_submit` calls and completion-condvar observation by 1, 2, 4, or 8 persistent native callers while the current-thread controller is parked. | Thread spawn/join, batch construction and transfer, readiness wait, acceptance checks, all controller processing, reset, and shutdown. |
 | Busy-slot Drop        | 32 requests rejected with `SlotBusy` while an owner holds the slot.                                                     | Owner setup and cleanup.                                                                           |
 | Busy-slot Replace     | 32 watched submissions through 31 `SupersededByReplace` rejections, after the newest request replaces the pending head. | The retention snapshot check, newest task completion, and owner teardown.                          |
 | One-slot Queue        | 32 task completions through one serial slot, on Tokio current-thread only.                                              | Runtime startup, warmup, request construction, and ownership reset.                                |
@@ -106,7 +118,14 @@ Setup, final shutdown, and ownership reset are excluded.
 
 In the reused intake burst, the current-thread runtime cannot consume commands during the synchronous producer loop.
 The multi-thread runtime can consume them concurrently. Both cases measure submission intake, not completed work.
-The concurrent-producer family keeps total work fixed at 64 and changes only the number of producer tasks.
+The concurrent-producer family keeps total work fixed at 1024 and changes only the number of native caller threads.
+Those threads are spawned once, receive each prebuilt batch, and park at an observable start line before timing begins.
+This family uses the current-thread runtime, whose `block_on` root synchronously waits on the completion condvar.
+The controller therefore cannot consume its commands until the timer has stopped.
+The timer includes releasing that start condvar, all 1024 `try_submit` calls, and observing all callers on the completion condvar.
+It excludes thread spawn/join and per-iteration request construction, dispatch, and readiness synchronization.
+The controller queue and ownership capacities both equal 1024, every call must be accepted, and the queued commands, slots, and ownership are drained before the next iteration.
+The one-producer result includes the same start/completion synchronization as the multi-producer variants and is their matched reference.
 
 ## Measurement boundaries and reset
 
@@ -158,6 +177,7 @@ The report classifies results by what their rate counts:
 |-------------------------------------------------|------------------------------------------------------------------|
 | `COMPLETE MANAGED-TASK LIFECYCLE`               | Each unit is one Taskvisor-managed task completed end to end.    |
 | `COMPLETE LIFECYCLE · <NAMED UNIT>`             | The label states the completed unit, such as management cycles.  |
+| `TASK DRAIN, NOT END-TO-END LIFECYCLE · <UNIT>` | Admission and the case-specific initial readiness precede the timed release-to-outcome drain. |
 | `OPERATION RATE, NOT COMPLETED-TASK THROUGHPUT` | The case measures intake, policy decisions, or query calls.      |
 
 These labels describe the measured unit. They do not rate the result as high or low.

@@ -11,6 +11,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
+use futures_util::future::join_all;
 use taskvisor::{
     BoxTaskFuture, Supervisor, SupervisorHandle, Task, TaskContext, TaskFn, TaskRef, TaskSpec,
 };
@@ -23,13 +24,31 @@ use support::{CaseFamily, print_suite_header, record_case};
 
 const BURST_SIZE: usize = 32;
 
-const REGISTRY_ADD: CaseFamily = CaseFamily::intake(
-    "dynamic/steady/bounded_registry_add_burst",
-    "BOUNDED REGISTRY ADD BURST",
+const ROOT_SEQUENTIAL_ADD: CaseFamily = CaseFamily::intake(
+    "dynamic/latency/sequential_registry_add_root",
+    "SEQUENTIAL REGISTRY ADD · ROOT CALLER",
     "accepted add",
     "accepted adds",
-    "32 sequential add calls through registry acceptance on a warmed supervisor with free ownership and registry capacity; tasks stay registered until untimed cancellation",
-    "TaskSpec construction, Supervisor startup and warmup, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
+    "32 serialized add calls from the Runtime::block_on root through authoritative registry decisions on a warmed supervisor with free ownership and registry capacity",
+    "TaskSpec construction, Supervisor startup and warmup, result validation, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
+);
+
+const WORKER_SEQUENTIAL_ADD: CaseFamily = CaseFamily::intake(
+    "dynamic/latency/sequential_registry_add_worker",
+    "SEQUENTIAL REGISTRY ADD · SPAWNED CALLER",
+    "accepted add",
+    "accepted adds",
+    "32 serialized add calls from one spawned Tokio task through authoritative registry decisions on a warmed supervisor with free ownership and registry capacity",
+    "TaskSpec construction, spawned-task scheduling before its internal timer, root-side JoinHandle polling, result validation, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
+);
+
+const WORKER_PIPELINED_ADD: CaseFamily = CaseFamily::intake(
+    "dynamic/throughput/pipelined_registry_add_worker",
+    "PIPELINED REGISTRY ADD · SPAWNED CALLER",
+    "accepted add",
+    "accepted adds",
+    "concurrent polling of 32 prebuilt add futures from one spawned Tokio task through all authoritative registry decisions on a warmed supervisor with free ownership and registry capacity",
+    "TaskSpec and add-future construction, spawned-task scheduling before its internal timer, root-side JoinHandle polling, result validation, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
 );
 
 const CANCEL_STARTED: CaseFamily = CaseFamily::lifecycle(
@@ -102,19 +121,19 @@ impl Drop for RetainedFinalDrop {
     }
 }
 
-fn bench_add_burst(c: &mut Criterion) {
+fn bench_registry_add(c: &mut Criterion) {
     print_suite_header("dynamic management");
-    let mut group = c.benchmark_group(REGISTRY_ADD.group_id);
+    let mut group = c.benchmark_group(ROOT_SEQUENTIAL_ADD.group_id);
     group.throughput(Throughput::Elements(BURST_SIZE as u64));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
         group.bench_function(
-            BenchmarkId::new(rt_name, format!("{BURST_SIZE}_held_tasks")),
+            BenchmarkId::new(rt_name, format!("{BURST_SIZE}_adds")),
             |b| {
                 record_case(
-                    REGISTRY_ADD,
+                    ROOT_SEQUENTIAL_ADD,
                     rt_name,
-                    Some(format!("{BURST_SIZE}_held_tasks")),
+                    Some(format!("{BURST_SIZE}_adds")),
                 );
                 b.iter_custom(|iters| {
                     let rt = rt_fn();
@@ -137,7 +156,7 @@ fn bench_add_burst(c: &mut Criterion) {
                                 "the full burst must fit without waiting for task cleanup"
                             );
 
-                            let elapsed = expect_within("a bounded add burst", async {
+                            let elapsed = expect_within("root-caller sequential adds", async {
                                 let start = Instant::now();
                                 for spec in specs {
                                     accepted.push(handle.add(spec).await);
@@ -149,6 +168,135 @@ fn bench_add_burst(c: &mut Criterion) {
                             let ids: Vec<_> = accepted
                                 .into_iter()
                                 .map(|result| result.expect("burst admission failed"))
+                                .collect();
+                            cancel_held(&handle, ids).await;
+                            total += elapsed;
+                        }
+
+                        expect_within("runtime shutdown", handle.shutdown())
+                            .await
+                            .expect("runtime shutdown failed");
+                        total
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group(WORKER_SEQUENTIAL_ADD.group_id);
+    group.throughput(Throughput::Elements(BURST_SIZE as u64));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        group.bench_function(
+            BenchmarkId::new(rt_name, format!("{BURST_SIZE}_adds")),
+            |b| {
+                record_case(
+                    WORKER_SEQUENTIAL_ADD,
+                    rt_name,
+                    Some(format!("{BURST_SIZE}_adds")),
+                );
+                b.iter_custom(|iters| {
+                    let rt = rt_fn();
+                    rt.block_on(async {
+                        let supervisor = Supervisor::new(bench_config(), vec![]);
+                        let handle = supervisor.serve().expect("runtime startup");
+                        warm_runtime(&handle, 0).await;
+
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let specs: Vec<_> = (0..BURST_SIZE)
+                                .map(|i| cooperative_task(format!("worker-sequential-{i}"), None))
+                                .collect();
+                            assert!(
+                                handle
+                                    .ownership_snapshot()
+                                    .available
+                                    .is_some_and(|available| available >= BURST_SIZE),
+                                "the full batch must fit without waiting for task cleanup"
+                            );
+
+                            let worker_handle = handle.clone();
+                            let caller = tokio::spawn(async move {
+                                let mut accepted = Vec::with_capacity(BURST_SIZE);
+                                let start = Instant::now();
+                                for spec in specs {
+                                    accepted.push(worker_handle.add(spec).await);
+                                }
+                                (accepted, start.elapsed())
+                            });
+                            let (accepted, elapsed) =
+                                expect_within("spawned-caller sequential adds", caller)
+                                    .await
+                                    .expect("spawned add caller failed");
+
+                            let ids: Vec<_> = accepted
+                                .into_iter()
+                                .map(|result| result.expect("sequential admission failed"))
+                                .collect();
+                            cancel_held(&handle, ids).await;
+                            total += elapsed;
+                        }
+
+                        expect_within("runtime shutdown", handle.shutdown())
+                            .await
+                            .expect("runtime shutdown failed");
+                        total
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group(WORKER_PIPELINED_ADD.group_id);
+    group.throughput(Throughput::Elements(BURST_SIZE as u64));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        group.bench_function(
+            BenchmarkId::new(rt_name, format!("{BURST_SIZE}_adds")),
+            |b| {
+                record_case(
+                    WORKER_PIPELINED_ADD,
+                    rt_name,
+                    Some(format!("{BURST_SIZE}_adds")),
+                );
+                b.iter_custom(|iters| {
+                    let rt = rt_fn();
+                    rt.block_on(async {
+                        let supervisor = Supervisor::new(bench_config(), vec![]);
+                        let handle = supervisor.serve().expect("runtime startup");
+                        warm_runtime(&handle, 0).await;
+
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let specs: Vec<_> = (0..BURST_SIZE)
+                                .map(|i| cooperative_task(format!("worker-pipelined-{i}"), None))
+                                .collect();
+                            assert!(
+                                handle
+                                    .ownership_snapshot()
+                                    .available
+                                    .is_some_and(|available| available >= BURST_SIZE),
+                                "the full batch must fit without waiting for task cleanup"
+                            );
+
+                            let worker_handle = handle.clone();
+                            let caller = tokio::spawn(async move {
+                                let additions =
+                                    join_all(specs.into_iter().map(|spec| worker_handle.add(spec)));
+                                let start = Instant::now();
+                                let accepted = additions.await;
+                                (accepted, start.elapsed())
+                            });
+                            let (accepted, elapsed) =
+                                expect_within("spawned-caller pipelined adds", caller)
+                                    .await
+                                    .expect("spawned add caller failed");
+
+                            let ids: Vec<_> = accepted
+                                .into_iter()
+                                .map(|result| result.expect("pipelined admission failed"))
                                 .collect();
                             cancel_held(&handle, ids).await;
                             total += elapsed;
@@ -359,7 +507,7 @@ fn bench_ownership_release(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = fixtures::criterion();
-    targets = bench_add_burst, bench_cancel_started, bench_list, bench_ownership_release
+    targets = bench_registry_add, bench_cancel_started, bench_list, bench_ownership_release
 }
 
 fn main() {
