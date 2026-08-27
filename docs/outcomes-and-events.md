@@ -154,14 +154,37 @@ When the shared bus is full, it drops the oldest event and retains the newest on
 When one subscriber queue is full, Taskvisor drops the incoming event for that subscriber.
 Callbacks run one at a time for each subscriber.
 
-Subscriber callbacks are synchronous and run outside Tokio worker threads. Keep them short.
-Forward async or long blocking work to an application-owned queue.
-Short callbacks use one fixed library-owned OS worker by default.
-A blocked callback on that shared worker delays the other shared subscriber lanes.
-Override [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html) with `SubscriberExecution::Dedicated` when one subscriber needs blocking isolation.
-Each dedicated subscriber adds one native thread and can run concurrently with the shared worker and other dedicated subscribers.
-Keep short callbacks on `Shared`; reserve `Dedicated` for callbacks that can block and must be isolated.
-Dedicated execution is an isolation choice, not a general throughput default. Use the matched [fan-out cases](../benches/README.md#subscriber-fan-out) to compare completion-and-delivery time for short callbacks on representative hardware.
+### Choose shared or dedicated callback execution
+
+Subscriber callbacks are synchronous and run outside Tokio worker threads.
+Choose the execution mode from the work done inside the callback:
+
+- Use `Shared`, the default, for short, bounded, non-blocking work.
+  Examples are an atomic counter as in [custom_subscriber.rs](../examples/custom_subscriber.rs), in-process metrics as in [metrics.rs](../examples/metrics.rs), or a non-blocking handoff.
+- Use `SubscriberExecution::Dedicated` when a callback can block synchronously and must not delay other subscriber lanes.
+  Override [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html).
+  Examples are standard-output writes in [LogWriter](https://docs.rs/taskvisor/latest/taskvisor/subscribers/struct.LogWriter.html) and synchronous dispatch in [TracingBridge](https://docs.rs/taskvisor/latest/taskvisor/subscribers/struct.TracingBridge.html).
+- Do not perform async I/O, long blocking work, or substantial processing in either callback mode.
+  Copy the required event fields and hand them to an application-owned bounded queue and worker.
+- Do not use a subscriber for a result that application logic cannot lose.
+  Use [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) instead.
+
+All `Shared` lanes use one fixed library-owned OS worker.
+A blocked callback on that worker delays the other shared lanes.
+Each `Dedicated` subscriber adds one native thread and can run concurrently with the shared worker and other dedicated subscribers.
+Its own bounded queue can still overflow.
+
+`Dedicated` is a blocking-isolation mode, not a faster callback mode.
+In one Taskvisor 0.9.0 reference run on Linux/aarch64 with 14 logical CPUs, the matched short-callback fan-out benchmark measured this complete lifecycle-and-delivery boundary:
+
+- current-thread: one `Dedicated` subscriber at 55.407 K tasks/s, eight `Dedicated` at 6.434 K tasks/s, and eight `Shared` at 48.200 K tasks/s;
+- multi-thread with four workers: one `Dedicated` at 48.960 K tasks/s, eight `Dedicated` at 9.126 K tasks/s, and eight `Shared` at 53.909 K tasks/s.
+
+The run establishes that eight `Dedicated` subscribers were slower for this measured workload.
+It does not establish a portable ratio or that every dedicated callback workload is slower on every host.
+The benchmark measures 256 watched task completions plus matching `TaskFinished` delivery to every short-callback subscriber; it is not a callback-only microbenchmark.
+The [fan-out benchmark contract](../benches/README.md#subscriber-fan-out) defines the included and excluded work.
+
 Taskvisor does not elastically add callback workers or retire them merely because they are idle.
 A callback still running when the shared shutdown deadline expires may continue on its detached worker after shutdown returns.
 Taskvisor does not wait for callback-worker thread-local destructors; they may also continue after shutdown returns.

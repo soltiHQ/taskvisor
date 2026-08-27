@@ -29,6 +29,54 @@ Repeated [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Superv
 Shutdown is terminal. Calling [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) again does not restart workers or reopen admission.
 See the [supervisor entry points](../src/core/supervisor.rs) and [startup code](../src/core/runtime/lifecycle/mod.rs).
 
+### Choose the application Tokio runtime
+
+Taskvisor uses the active application runtime; it does not choose a Tokio runtime flavor for the application.
+Choose from the workload and deployment constraints, not from task duration alone:
+
+| Application boundary                                                                                          | Starting point               |
+|---------------------------------------------------------------------------------------------------------------|------------------------------|
+| The process intentionally uses one Tokio worker, and measured management concurrency and task latency fit    | `current_thread`             |
+| Multiple independent futures need to be runnable on Tokio workers concurrently                               | `multi_thread`               |
+| Task code performs heavy CPU work or blocking calls                                                           | Neither runtime flavor fixes the task; use a suitable CPU or blocking pool and await its result from the supervised task |
+| The production workload is mixed or its ready-future pattern is not yet known                                 | Measure the real workload on both runtime flavors |
+
+For example, an intentionally single-threaded CLI with non-blocking timers or queue receive loops can start with:
+
+```rust
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    // Construct and run Taskvisor here.
+}
+```
+
+A service that needs several Tokio workers to run independent ready futures can start with:
+
+```rust
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() {
+    // Construct and run Taskvisor here.
+}
+```
+
+Four workers match the benchmark fixture below; they are not a general worker-count recommendation.
+Taskvisor can also own native cleanup and subscriber threads, so `current_thread` describes Tokio only.
+
+Two matched benchmark boundaries show why task duration alone is not a runtime-selection rule:
+
+- **Root-driven serialized lifecycle.**
+  For 256 instant watched tasks, from the first serialized root-caller admission through all outcomes, the Taskvisor 0.9.0 Linux/aarch64 reference run measured 95.661 K tasks/s on current-thread and 55.467 K tasks/s on multi-thread with four workers.
+  Current-thread was faster for this boundary.
+- **Pre-admitted cooperative CPU drain.**
+  For 64 already-admitted tasks, each running 16 independent CPU chunks of 4,096 steps and yielding after every chunk, the same run measured 12.446 K tasks/s on current-thread and 29.945 K tasks/s on multi-thread with four workers.
+  Multi-thread was `2.406×` faster for this boundary.
+
+The first result does not establish that short tasks are generally faster on current-thread.
+It includes serialized caller-to-registry round trips and contains no parallel task work.
+The second result excludes admission and includes user CPU work, so `2.406×` is the speedup of that complete synthetic drain boundary, not a measurement of Taskvisor overhead alone.
+See the [throughput](../benches/README.md#throughput) and [dynamic-management](../benches/README.md#dynamic-management) benchmark contracts before comparing results.
+Keep heavy CPU work [off Tokio](defining-tasks.md#keep-blocking-work-off-tokio); [cpu_job.rs](../examples/cpu_job.rs) shows a supervised bridge to Rayon.
+
 ## Run resident work under application-owned shutdown
 
 This flow starts one resident worker and uses an application-owned future to request shutdown.

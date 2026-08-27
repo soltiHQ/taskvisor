@@ -190,8 +190,8 @@ See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 #![warn(missing_debug_implementations, missing_docs, unreachable_pub)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-/// Compiles runnable Rust code blocks in `README.md` as doctests.
-#[cfg(doctest)]
+/// Compiles runnable Rust code blocks in `README.md` when its controller API is available.
+#[cfg(all(doctest, feature = "controller"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
