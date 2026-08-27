@@ -158,7 +158,7 @@ Subscriber callbacks are synchronous and run outside Tokio worker threads. Keep 
 Forward async or long blocking work to an application-owned queue.
 Short callbacks use one fixed library-owned OS worker by default.
 A blocked callback on that shared worker delays the other shared subscriber lanes.
-Override [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.execution) with `SubscriberExecution::Dedicated` when one subscriber needs blocking isolation.
+Override [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html) with `SubscriberExecution::Dedicated` when one subscriber needs blocking isolation.
 Each dedicated subscriber adds one native thread and can run concurrently with the shared worker and other dedicated subscribers.
 Taskvisor does not elastically add callback workers or retire them merely because they are idle.
 A callback still running when the shared shutdown deadline expires may continue on its detached worker after shutdown returns.
