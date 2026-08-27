@@ -5,7 +5,7 @@
 [![Minimum Rust 1.90](https://img.shields.io/badge/rust-1.90%2B-orange.svg)](https://rust-lang.org)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache2.0-blue.svg)](./LICENSE)
 
-> **One owner per key. Queue conflicting work, replace the queue head, or reject the incoming submission — and let watched callers await final outcomes directly.**
+> **One owner per key. Queue conflicting work, keep the newest replacement at the queue head, or reject the incoming submission — and let watched callers await final outcomes directly.**
 
 Taskvisor is an in-process task supervisor for Tokio services.
 It manages retries, per-attempt timeouts, cooperative cancellation, coordinated shutdown, and a direct outcome channel for watched work.
@@ -27,7 +27,7 @@ submission ──► slot "tenant-42"
                     ├── idle ──► start now
                     └── busy
                          ├── Queue ─────────► wait in FIFO order
-                         ├── Replace ───────► stop owner; create or replace queue head
+                         ├── Replace ───────► request owner stop; create or replace queue head
                          └── DropIfRunning ─► reject without starting
 ```
 
