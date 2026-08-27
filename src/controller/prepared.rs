@@ -4,12 +4,14 @@
 //! [`PreparedSubmission`] first exposes the submission identity, then creates the same operation without changing that identity.
 //!
 //! ```text
-//! ControllerSpec ──► Submit ──► execute / try_intake ──► controller intake
+//! ControllerSpec ──► Submit ──► await / execute / try_intake ──► controller intake
 //!                         └──► watch ──► TaskWaiter
 //! ```
 //!
 //! Building, configuring, or dropping a submission operation sends no command and starts no work.
 
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::time::Duration;
 
 use super::{
@@ -25,11 +27,14 @@ use crate::{
 ///
 /// Configure whether the caller needs a final-outcome waiter and whether ownership admission has
 /// a deadline, then finish with `execute` or `try_intake`.
+/// The default waiting, unwatched operation can also be awaited directly.
+/// Direct await creates one boxed `Send` future; `execute` avoids that shorthand wrapper.
+/// APIs that accept a [`Future`] require `execute()` or [`IntoFuture::into_future`].
 /// Every terminal method consumes the operation, including when intake returns an error.
 ///
 /// `Watch` and `Admission` are type states maintained by [`watch`](Self::watch) and
 /// [`ownership_timeout`](Self::ownership_timeout). Applications do not need to name them.
-#[must_use = "a submission starts no work until execute or try_intake consumes it"]
+#[must_use = "await the default submission, call and await `execute`, or call `try_intake`"]
 pub struct Submit<'a, Watch = Unwatched, Admission = Waiting> {
     /// Direct or pre-identified submission payload retained until a terminal method runs.
     request: SubmitRequest<'a>,
@@ -208,6 +213,7 @@ impl Submit<'_, Unwatched, Waiting> {
     /// Waits for ownership and command capacity, then confirms controller command intake.
     ///
     /// `Ok(id)` confirms only intake. Slot admission and runtime registration happen later.
+    /// Awaiting the default operation directly is equivalent to calling this method.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, ControllerError> {
         let (controller, id, spec) = self.request.into_parts()?;
@@ -221,6 +227,17 @@ impl Submit<'_, Unwatched, Waiting> {
     #[inline(always)]
     pub fn try_intake(self) -> Result<TaskId, ControllerError> {
         self.request.try_submit()
+    }
+}
+
+impl<'a> IntoFuture for Submit<'a, Unwatched, Waiting> {
+    type Output = Result<TaskId, ControllerError>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    /// Executes the default waiting, unwatched controller submission.
+    #[inline]
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.execute())
     }
 }
 
@@ -292,9 +309,9 @@ impl<Watch, Admission> std::fmt::Debug for Submit<'_, Watch, Admission> {
 ///
 /// Dropping this value or the resulting [`Submit`] operation starts no work.
 /// Retrying after any terminal intake error requires a new prepared value and a new task identity.
-#[must_use = "a prepared submission starts no work until submit creates an executed operation"]
+#[must_use = "call submit, then await, execute, or try the resulting operation"]
 pub struct PreparedSubmission {
-    /// Controller command sender used when the submission operation executes.
+    /// Controller command sender used when the submission operation commits.
     controller: ControllerHandle,
 
     /// Task ID allocated before any controller command is sent.
@@ -331,8 +348,9 @@ impl PreparedSubmission {
 
     /// Creates the explicit submission operation while preserving this prepared identity.
     ///
-    /// Configure the returned [`Submit`] and finish with `execute` or `try_intake`.
-    #[must_use = "execute or try the prepared submission operation"]
+    /// Await the default operation directly, or configure it and finish with `execute` or
+    /// `try_intake`.
+    #[must_use = "await, execute, or try the prepared submission operation"]
     #[inline]
     pub fn submit(self) -> Submit<'static> {
         let Self {

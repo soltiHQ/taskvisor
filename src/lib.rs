@@ -93,11 +93,11 @@
 //!
 //! ## Choose task behavior
 //!
-//! | Constructor               | After success                  | After a retry-eligible failure |
-//! |---------------------------|--------------------------------|--------------------------------|
-//! | [`TaskSpec::once`]        | Stop                           | Stop                           |
-//! | [`TaskSpec::restartable`] | Stop                           | Retry if the limit allows      |
-//! | [`TaskSpec::periodic`]    | Wait its interval, then repeat | Retry if the limit allows      |
+//! | Constructor               | After success                           | After a retry-eligible failure |
+//! |---------------------------|-----------------------------------------|--------------------------------|
+//! | [`TaskSpec::once`]        | Stop                                    | Stop                           |
+//! | [`TaskSpec::restartable`] | Stop                                    | Retry if the limit allows      |
+//! | [`TaskSpec::periodic`]    | Wait at least its interval, then repeat | Retry if the limit allows      |
 //!
 //! Each registration has one [`TaskId`] and one internal actor. Attempts for that ID never overlap.
 //! [`RestartPolicy`] decides whether success repeats and whether a retryable failure may run again.

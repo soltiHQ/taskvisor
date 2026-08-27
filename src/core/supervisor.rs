@@ -125,10 +125,7 @@ impl Supervisor {
     ///     Err(TaskError::Canceled)
     /// });
     ///
-    /// let id = handle
-    ///     .add(TaskSpec::once("worker", worker))
-    ///     .execute()
-    ///     .await?;
+    /// let id = handle.add(TaskSpec::once("worker", worker)).await?;
     /// handle.cancel(id).execute().await?;
     /// handle.shutdown().await?;
     /// # Ok(()) }

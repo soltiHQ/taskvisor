@@ -2,7 +2,9 @@
 //!
 //! [`Supervisor::serve`](crate::Supervisor::serve) starts the runtime and returns a [`SupervisorHandle`].
 //! State-changing methods create typed operations.
-//! Building or configuring an operation has no effect; its `execute` or `try_intake` terminal commits the request.
+//! Building or configuring an operation has no effect.
+//! Awaiting a default operation directly, or calling `execute` or `try_intake`, commits the
+//! request.
 //!
 //! ```text
 //! application ──► SupervisorHandle
@@ -25,7 +27,9 @@ use crate::tasks::TaskSpec;
 ///
 /// `add`, `remove`, `cancel`, and controller `submit` return single-use operation builders.
 /// Their modifiers select watched results, admission behavior, or a cancellation deadline without multiplying methods on this handle.
-/// Call `execute().await` to run an asynchronous operation; controller submission also offers synchronous `try_intake()`.
+/// Await a default waiting, unwatched `add` or controller `submit` operation directly.
+/// Call `execute().await` for configured operations and for `remove` or `cancel`; controller
+/// submission also offers synchronous `try_intake()`.
 ///
 /// Once a terminal method commits its queue command, the runtime owns that command even if the caller drops the returned future.
 ///
@@ -52,10 +56,7 @@ use crate::tasks::TaskSpec;
 ///         }
 ///     });
 ///
-///     let id = handle
-///         .add(TaskSpec::restartable("worker", task))
-///         .execute()
-///         .await?;
+///     let id = handle.add(TaskSpec::restartable("worker", task)).await?;
 ///     let _claimed = handle.cancel(id).execute().await?;
 ///     handle.shutdown().await?;
 ///     Ok(())
@@ -110,13 +111,13 @@ impl SupervisorHandle {
     /// Creates a direct registry-registration operation.
     ///
     /// The default operation waits for cleanup ownership, registry command capacity, and the authoritative registration decision.
-    /// Successful `execute` returns the registered
+    /// Awaiting the default operation directly or successfully calling `execute` returns the registered
     /// [`TaskId`]. Use `watch()` to receive a [`TaskWaiter`](crate::TaskWaiter),
     /// `ownership_timeout(duration)` to bound only cleanup-ownership admission, or `fail_fast()`
     /// to require immediately available ownership and command capacity.
     ///
     /// Direct adds bypass controller slot admission.
-    #[must_use = "configure and execute the add operation"]
+    #[must_use = "await the default add or configure and execute the operation"]
     #[inline]
     pub fn add(&self, spec: TaskSpec) -> AddOperation<'_, Unwatched, Waiting> {
         AddOperation::new(self.core(), spec)
@@ -260,18 +261,19 @@ impl SupervisorHandle {
 
     /// Creates a controller command-intake operation.
     ///
-    /// The default `execute` waits for cleanup ownership and controller command capacity, then
-    /// returns a reserved [`TaskId`]. It confirms command intake only; slot and registry admission
-    /// happen later. Use `watch()` to return a final-outcome waiter, `ownership_timeout(duration)`
-    /// to bound only cleanup-ownership admission, or synchronous `try_intake()` to require
-    /// immediately available ownership and command capacity.
+    /// Awaiting the default operation directly or calling `execute` waits for cleanup ownership
+    /// and controller command capacity, then returns a reserved [`TaskId`]. It confirms command
+    /// intake only; slot and registry admission happen later. Use `watch()` to return a
+    /// final-outcome waiter, `ownership_timeout(duration)` to bound only cleanup-ownership
+    /// admission, or synchronous `try_intake()` to require immediately available ownership and
+    /// command capacity.
     ///
     /// A supervisor without a controller reports
     /// [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) from the terminal
     /// method. Building or dropping the operation allocates no task identity and sends no command.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
-    #[must_use = "configure and execute the controller submission"]
+    #[must_use = "await the default submission or configure and execute the operation"]
     #[inline]
     pub fn submit(&self, spec: crate::controller::ControllerSpec) -> crate::controller::Submit<'_> {
         crate::controller::Submit::direct(self.controller.as_deref(), spec)

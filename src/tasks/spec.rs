@@ -245,9 +245,10 @@ impl TaskSpec {
 
     /// Creates a named task that may run again after success or retryable failure.
     ///
-    /// After success, the actor waits `every` before the next attempt.
-    /// A zero value removes the configured interval; an internal one-millisecond floor
-    /// still prevents an instant attempt from forming a hot loop.
+    /// After success, the actor waits at least `every` before the next attempt.
+    /// Taskvisor also keeps successive attempt starts at least one millisecond apart, so a fast
+    /// task configured below one millisecond can wait longer than `every`. A zero value removes
+    /// the configured interval; the one-millisecond start-spacing guard still applies.
     ///
     /// Retryable failures use the backoff policy, not `every`. A retry limit can stop
     /// the task after repeated failures. Fatal failure and cancellation always stop it.

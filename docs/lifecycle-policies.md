@@ -99,7 +99,11 @@ Per-task settings override values inherited from [`TaskDefaults`](https://docs.r
 
 A non-zero periodic interval starts after a successful attempt completes.
 It is fixed-delay scheduling, not a wall-clock or cron schedule.
-Passing [`Duration::ZERO`](https://doc.rust-lang.org/std/time/struct.Duration.html#associatedconstant.ZERO) removes the configured interval; Taskvisor still applies its internal fast-loop guard.
+Taskvisor also keeps successive attempt starts at least one millisecond apart. When the attempt
+runtime plus the configured interval is shorter, Taskvisor extends the wait to reach that spacing.
+For example, a `500µs` interval remains configured, but a sufficiently fast task starts no more
+often than once per millisecond.
+Passing [`Duration::ZERO`](https://doc.rust-lang.org/std/time/struct.Duration.html#associatedconstant.ZERO) removes the configured interval; the one-millisecond start-spacing guard still applies.
 
 See [periodic.rs](../examples/periodic.rs), [restart_policies.rs](../examples/restart_policies.rs), and [configuration.rs](../examples/configuration.rs).
 

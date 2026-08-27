@@ -1,5 +1,7 @@
 //! Builds one direct registry-add operation.
 
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::time::Duration;
 
 use crate::{RuntimeError, TaskId, TaskSpec, TaskWaiter};
@@ -9,11 +11,14 @@ use crate::core::SupervisorCore;
 
 /// A direct task-registration operation with typed outcome and admission policy.
 ///
-/// Call `execute` explicitly to commit the operation.
+/// Await the default waiting, unwatched operation directly, or call `execute` explicitly to
+/// commit any configured operation.
+/// Direct await creates one boxed `Send` future; `execute` avoids that shorthand wrapper.
+/// APIs that accept a [`Future`] require `execute()` or [`IntoFuture::into_future`].
 /// Dropping the builder starts no work.
 /// [`watch`](Self::watch) changes the terminal result from [`TaskId`] to [`TaskWaiter`].
 /// [`ownership_timeout`](Self::ownership_timeout) and [`fail_fast`](Self::fail_fast) are mutually exclusive and therefore cannot both be selected.
-#[must_use = "an add operation starts no work until `.execute()` is awaited"]
+#[must_use = "await the default add operation or call and await `.execute()`"]
 pub struct AddOperation<'a, Watch = Unwatched, Admission = Waiting> {
     core: &'a SupervisorCore,
     spec: TaskSpec,
@@ -92,9 +97,22 @@ impl<'a, Watch> AddOperation<'a, Watch, Waiting> {
 
 impl AddOperation<'_, Unwatched, Waiting> {
     /// Waits for admission and returns the identity after registry registration succeeds.
+    ///
+    /// Awaiting the default operation directly is equivalent to calling this method.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, RuntimeError> {
         self.core.add_task(self.spec).await
+    }
+}
+
+impl<'a> IntoFuture for AddOperation<'a, Unwatched, Waiting> {
+    type Output = Result<TaskId, RuntimeError>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    /// Executes the default waiting, unwatched add operation.
+    #[inline]
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.execute())
     }
 }
 

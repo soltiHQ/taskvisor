@@ -14,7 +14,10 @@ use crate::events::Event;
 const DEFAULT_QUEUE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 /// Selects which library-owned OS worker executes a subscriber's serial callback lane.
+///
+/// This enum is non-exhaustive; include a wildcard arm when matching it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SubscriberExecution {
     /// Runs the lane on the one fixed worker shared by all subscribers using this mode.
     ///

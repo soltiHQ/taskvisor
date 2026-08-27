@@ -8,13 +8,17 @@ description: Add, watch, inspect, cancel, and remove registered or controller-su
 A [SupervisorHandle](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html) lets you manage tasks while the service is running.
 The registry tracks accepted tasks by ID and name. Registration does not mean that the task has started or finished.
 
+Direct `.await` is available only on the default waiting, unwatched `add` and `submit`
+operations. After `watch`, `ownership_timeout`, or `fail_fast`, use the operation's explicit
+`execute().await` or `try_intake()` terminal.
+
 ## Choose an operation
 
 | Operation                                                                                                | What an `Ok` result means                                                                                                     |
 |----------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
-| `add(spec).execute()`                                                                                    | The runtime registry accepted the task. The first attempt may not have started yet.                                           |
+| `add(spec).await`                                                                                        | The runtime registry accepted the task. The first attempt may not have started yet.                                           |
 | `add(spec).watch().execute()`                                                                            | Registration succeeded and the caller received a final-outcome waiter.                                                        |
-| `submit(request).execute()`                                                                              | The controller accepted the command. The return is not an admission decision.                                                 |
+| `submit(request).await`                                                                                  | The controller accepted the command. The return is not an admission decision.                                                 |
 | `submit(request).watch().execute()`                                                                      | Command intake succeeded and the caller received a waiter for rejection or the admitted task's final outcome.                 |
 | [`TaskWaiter::wait`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html#method.wait) | A direct final in-process outcome was delivered.                                                                              |
 | `remove(target).execute()`                                                                               | `true` means this call started removal. Registered cleanup may continue; queued work is removed before return.                |
@@ -32,7 +36,7 @@ Without an installed controller, their terminal methods return [`ControllerError
 
 Use [TaskId](https://docs.rs/taskvisor/latest/taskvisor/identity/struct.TaskId.html) for one exact registration or controller submission.
 Pass a task name to [`remove`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.remove) or [`cancel`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.cancel) for registered work addressed by name.
-Controller work that is still queued does not own a registered task name; stop it with the task ID returned by `submit(request).execute().await`.
+Controller work that is still queued does not own a registered task name; stop it with the task ID returned by `submit(request).await`.
 
 ## Inspect runtime state
 
@@ -50,7 +54,7 @@ Direct registry work has these intake boundaries:
 
 | Operation                                      | Ownership admission | Registry command queue | Registry decision |
 |------------------------------------------------|---------------------|------------------------|-------------------|
-| `add(spec).execute()`                          | Waits.              | Waits.                 | Waits.            |
+| `add(spec).await`                              | Waits.              | Waits.                 | Waits.            |
 | `add(spec).ownership_timeout(d).execute()`     | Caller deadline.    | Waits without it.      | Waits without it. |
 | `add(spec).fail_fast().execute()`              | Fails fast.         | Fails fast.            | Waits.            |
 
@@ -58,7 +62,7 @@ Controller submissions have different completion semantics:
 
 | Operation                                             | Ownership admission | Controller command queue | Slot and registry admission   |
 |-------------------------------------------------------|---------------------|--------------------------|-------------------------------|
-| `submit(request).execute()`                           | Waits.              | Waits.                   | Does not wait for a decision. |
+| `submit(request).await`                               | Waits.              | Waits.                   | Does not wait for a decision. |
 | `submit(request).ownership_timeout(d).execute()`      | Caller deadline.    | Waits without it.        | Does not wait for a decision. |
 | `submit(request).try_intake()`                        | Fails fast.         | Fails fast.              | Does not wait for a decision. |
 

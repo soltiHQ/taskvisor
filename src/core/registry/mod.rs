@@ -19,6 +19,10 @@
 //! does not discard actor completion or control input. A shutdown fence replies after the listener
 //! processes commands committed before admission closed. Lifecycle events are observations.
 //! Direct replies, completion latches, and watched outcomes carry registry results.
+//! The completion, control, and reaper channels are intentionally unbounded. Each accepted actor emits
+//! at most one completion identity, each force-abort transfer emits one reaper future, and the shared
+//! shutdown path emits at most one fence and one reaper close. Configured limits bound live ownership,
+//! not channel capacity.
 //!
 //! A force-aborted attempt can outlive membership.
 //! `scheduler` keeps its name, activity, and user values until the physical attempt exits.

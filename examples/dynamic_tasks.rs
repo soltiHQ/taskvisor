@@ -5,13 +5,13 @@
 //!
 //! ```text
 //! application ──► serve ──► SupervisorHandle
-//!                                 ├── add(...).execute ───► registry ──► task attempts
+//!                                 ├── add(...).await ─────► registry ──► task attempts
 //!                                 ├── remove(...).execute ► claim a stop and return
 //!                                 ├── cancel(...).execute ► wait for cleanup
 //!                                 └── shutdown ──► close admission and wait
 //! ```
 //!
-//! `add(...).execute().await` confirms registry admission.
+//! `add(...).await` confirms registry admission.
 //! It does not confirm that an attempt started or finished.
 //! `list` reads registry membership. `is_alive` reads physical attempt activity directly.
 //! Neither query depends on lifecycle-event delivery.
@@ -61,10 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add workers dynamically
     println!("Adding worker-a and worker-b...");
-    let id_a = handle.add(make_worker("worker-a")).execute().await?;
-    let id_b = handle.add(make_worker("worker-b")).execute().await?;
+    let id_a = handle.add(make_worker("worker-a")).await?;
+    let id_b = handle.add(make_worker("worker-b")).await?;
 
-    // Demo pacing only: execute().await has already confirmed registration.
+    // Demo pacing only: direct await has already confirmed registration.
     tokio::time::sleep(Duration::from_secs(1)).await;
     println!("Registered: {:?}", handle.list().await);
 
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add worker-c
     println!("\nAdding worker-c...");
-    handle.add(make_worker("worker-c")).execute().await?;
+    handle.add(make_worker("worker-c")).await?;
     // Demo pacing only: let the terminal show a worker-c tick.
     tokio::time::sleep(Duration::from_millis(500)).await;
 

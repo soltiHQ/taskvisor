@@ -38,7 +38,9 @@ pub enum RestartPolicy {
     /// - `Some(duration)` waits at least that long after the attempt completes.
     /// - `None` adds no configured interval.
     ///
-    /// A small internal floor limits fast successful restart loops, including when `interval` is `None` or zero.
+    /// After success, Taskvisor keeps consecutive attempt starts at least one millisecond apart.
+    /// When the attempt runtime plus `interval` is shorter, Taskvisor extends the wait by the
+    /// remaining time. This guard also applies when `interval` is `None` or zero.
     ///
     /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
     /// The retry limit applies to a failure streak, not to successful repeats.
@@ -46,7 +48,7 @@ pub enum RestartPolicy {
     Always {
         /// Configured wait after success and before the next attempt.
         ///
-        /// `None` adds no interval. The fast-loop safety floor still applies.
+        /// `None` adds no configured interval. The one-millisecond start-spacing guard still applies.
         interval: Option<std::time::Duration>,
     },
 }
