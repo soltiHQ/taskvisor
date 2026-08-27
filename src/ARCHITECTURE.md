@@ -14,8 +14,8 @@ The optional controller adds one admission step before the registry and can reje
 ```text
 application
 ├── run* ───► registry
-├── serve ──► SupervisorHandle ──► add* ─────► registry
-└── serve ──► SupervisorHandle ──► submit* ──► controller ──► registry
+├── serve ──► SupervisorHandle ──► add operation ─────► registry
+└── serve ──► SupervisorHandle ──► submit operation ──► controller ──► registry
 
 registry
 ├── admitted task ───────────► TaskActor ──► run_once ──► Task
@@ -28,8 +28,8 @@ terminal user values ──► deferred cleanup domain
 
 `run*` means `run`, `run_until`, or `run_with_os_signals`. These methods manage an initial batch.
 `serve` returns a `SupervisorHandle` for dynamic management.
-The handle exposes `add*`, `submit*`, and `prepare_submission`.
-A `PreparedSubmission` exposes its own `submit*` methods for the reserved `TaskId`.
+The handle exposes `add`, `remove`, `cancel`, `submit`, and `prepare_submission`.
+A `PreparedSubmission` creates a `submit` operation for the reserved `TaskId`.
 
 `SupervisorCore` connects the runtime components. The registry owns task membership.
 A `TaskActor` owns the lifecycle of one registered task. `run_once` executes one physical attempt.
@@ -51,24 +51,24 @@ These rules define the main architecture:
 
 Use this table before following internal calls.
 
-| Area                 | Responsibility                                                        | Start here                                                                                                                 |
-|----------------------|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| Crate surface        | Public modules, re-exports, and feature gates                         | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                             |
-| Task model           | `Task`, `TaskFn`, `TaskSpec`, and cancellation context                | [`tasks/mod.rs`](tasks/mod.rs)                                                                                             |
-| Retry policy         | Restart, backoff, jitter, and retry timing                            | [`policies/mod.rs`](policies/mod.rs)                                                                                       |
-| Runtime package      | Internal composition and public runtime re-exports                    | [`core/mod.rs`](core/mod.rs)                                                                                               |
-| Construction         | Runtime limits, task defaults, and component wiring                   | [`core/builder.rs`](core/builder.rs), [`core/config.rs`](core/config.rs), [`core/task_defaults.rs`](core/task_defaults.rs) |
-| Public lifecycle     | Static run methods, dynamic handle methods, and public ownership      | [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/owner.rs`](core/owner.rs)           |
-| Runtime coordination | Startup, management routing, event relay, and shared shutdown         | [`core/runtime/mod.rs`](core/runtime/mod.rs)                                                                               |
-| Registry             | Authoritative admission, membership, scheduling, removal, and cleanup | [`core/registry/mod.rs`](core/registry/mod.rs)                                                                             |
-| Task execution       | Restart loop and one physical attempt                                 | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                       |
-| Watched results      | Final `TaskOutcome` delivery                                          | [`core/outcome.rs`](core/outcome.rs)                                                                                       |
-| Deferred cleanup     | Ownership capacity, public snapshots, and off-runtime destruction      | [`core/ownership.rs`](core/ownership.rs), [`core/deferred_drop/mod.rs`](core/deferred_drop/mod.rs)                         |
-| Controller API       | Slots, policies, configuration, submissions, snapshots, and errors    | [`controller/mod.rs`](controller/mod.rs)                                                                                   |
-| Controller engine    | Ordered commands, slot state, admission, identity, and shutdown       | [`controller/engine/mod.rs`](controller/engine/mod.rs)                                                                     |
-| Event model          | Event values and bounded ingress                                      | [`events/mod.rs`](events/mod.rs)                                                                                           |
-| Event delivery       | Per-subscriber queues, callback lanes, and built-in observers         | [`subscribers/mod.rs`](subscribers/mod.rs), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs)                   |
-| Shared contracts     | Public errors, identities, and internal diagnostic text               | [`error.rs`](error.rs), [`identity.rs`](identity.rs), [`reasons.rs`](reasons.rs)                                           |
+| Area                 | Responsibility                                                        | Start here                                                                                                                                                           |
+|----------------------|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Crate surface        | Public modules, re-exports, and feature gates                         | [`lib.rs`](lib.rs), [`prelude.rs`](prelude.rs)                                                                                                                       |
+| Task model           | `Task`, `TaskFn`, `TaskSpec`, and cancellation context                | [`tasks/mod.rs`](tasks/mod.rs)                                                                                                                                       |
+| Retry policy         | Restart, backoff, jitter, and retry timing                            | [`policies/mod.rs`](policies/mod.rs)                                                                                                                                 |
+| Runtime package      | Internal composition and public runtime re-exports                    | [`core/mod.rs`](core/mod.rs)                                                                                                                                         |
+| Construction         | Runtime limits, task defaults, and component wiring                   | [`core/builder.rs`](core/builder.rs), [`core/config.rs`](core/config.rs), [`core/task_defaults.rs`](core/task_defaults.rs)                                           |
+| Public lifecycle     | Static runs, dynamic handles, typed operations, and public ownership  | [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/operations/mod.rs`](core/operations/mod.rs), [`core/owner.rs`](core/owner.rs) |
+| Runtime coordination | Startup, management routing, event relay, and shared shutdown         | [`core/runtime/mod.rs`](core/runtime/mod.rs)                                                                                                                         |
+| Registry             | Authoritative admission, membership, scheduling, removal, and cleanup | [`core/registry/mod.rs`](core/registry/mod.rs)                                                                                                                       |
+| Task execution       | Restart loop and one physical attempt                                 | [`core/actor.rs`](core/actor.rs), [`core/runner.rs`](core/runner.rs)                                                                                                 |
+| Watched results      | Final `TaskOutcome` delivery                                          | [`core/outcome.rs`](core/outcome.rs)                                                                                                                                 |
+| Deferred cleanup     | Ownership capacity, public snapshots, and off-runtime destruction     | [`core/ownership.rs`](core/ownership.rs), [`core/deferred_drop/mod.rs`](core/deferred_drop/mod.rs)                                                                   |
+| Controller API       | Slots, policies, configuration, submissions, snapshots, and errors    | [`controller/mod.rs`](controller/mod.rs), [`controller/prepared.rs`](controller/prepared.rs)                                                                         |
+| Controller engine    | Ordered commands, slot state, admission, identity, and shutdown       | [`controller/engine/mod.rs`](controller/engine/mod.rs)                                                                                                               |
+| Event model          | Event values and bounded ingress                                      | [`events/mod.rs`](events/mod.rs)                                                                                                                                     |
+| Event delivery       | Per-subscriber queues, callback lanes, and built-in observers         | [`subscribers/mod.rs`](subscribers/mod.rs), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs)                                                             |
+| Shared contracts     | Public errors, identities, and internal diagnostic text               | [`error.rs`](error.rs), [`identity.rs`](identity.rs), [`reasons.rs`](reasons.rs)                                                                                     |
 
 Files outside `src/` provide executable context:
 
@@ -112,7 +112,7 @@ Module docs under [`core/registry/`](core/registry) describe the admission and r
 ### 3. Coordinate work through the controller
 
 The `controller` feature is enabled by default, but controller admission is a runtime opt-in through `SupervisorBuilder::with_controller`.
-Direct `add*` methods bypass it. `SupervisorHandle::submit*` methods use it.
+`SupervisorHandle::add` bypasses it. `SupervisorHandle::submit` uses it.
 
 ```text
 ControllerSpec ──► controller slot
@@ -131,7 +131,7 @@ Events do not. Start with [`controller/mod.rs`](controller/mod.rs) for the publi
 
 With a controller configured, cancel and remove operations by `TaskId` pass through the controller before the registry.
 This lets them reach queued submissions and preserves controller command order.
-`cancel_by_name` and `remove_by_name` target registered work because queued submissions do not own a registered name.
+Name targets passed to `cancel` and `remove` address registered work because queued submissions do not own a registered name.
 
 ### 4. Return results or publish observations
 
@@ -147,7 +147,7 @@ Choose the source that answers the question:
 | What happened for logs, metrics, or tracing?                   | Best-effort events and subscribers                   |
 
 A management reply is not a final task result. A `TaskWaiter` is direct but not durable across process termination.
-Event loss does not change runtime state or watched outcomes. A controller `submit*` reply confirms command intake,
+Event loss does not change runtime state or watched outcomes. A controller submission reply confirms command intake,
 not positive slot admission.
 
 ### 5. Shut down and release ownership
@@ -181,15 +181,15 @@ Remaining retained task and subscriber values move to [`core/deferred_drop/`](co
 | Task contract, cancellation, or task settings    | [`tasks/`](tasks), [`core/task_defaults.rs`](core/task_defaults.rs)                                                                                                                                                                                               | [`tests/defaults.rs`](../tests/defaults.rs), relevant examples                                                                        |
 | Restart, retry, backoff, or delay behavior       | [`policies/`](policies), [`core/actor.rs`](core/actor.rs)                                                                                                                                                                                                         | [`tests/failure.rs`](../tests/failure.rs), [`tests/lifecycle.rs`](../tests/lifecycle.rs)                                              |
 | One attempt, timeout, or panic capture           | [`core/runner.rs`](core/runner.rs)                                                                                                                                                                                                                                | [`tests/timeout.rs`](../tests/timeout.rs), [`tests/failure.rs`](../tests/failure.rs)                                                  |
-| Static or dynamic runtime API                    | [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/runtime/lifecycle/static_run.rs`](core/runtime/lifecycle/static_run.rs), [`core/runtime/management/`](core/runtime/management)                                             | [`tests/lifecycle.rs`](../tests/lifecycle.rs), [`tests/concurrency.rs`](../tests/concurrency.rs)                                      |
+| Static or dynamic runtime API                    | [`core/supervisor.rs`](core/supervisor.rs), [`core/handle.rs`](core/handle.rs), [`core/operations/`](core/operations), [`core/runtime/lifecycle/static_run.rs`](core/runtime/lifecycle/static_run.rs), [`core/runtime/management/`](core/runtime/management)      | [`tests/lifecycle.rs`](../tests/lifecycle.rs), [`tests/concurrency.rs`](../tests/concurrency.rs)                                      |
 | Admission, names, removal, or actor ownership    | [`core/registry/`](core/registry)                                                                                                                                                                                                                                 | [`tests/identity.rs`](../tests/identity.rs), [`tests/watch.rs`](../tests/watch.rs), [`tests/concurrency.rs`](../tests/concurrency.rs) |
 | Watched outcomes                                 | [`core/outcome.rs`](core/outcome.rs), [`core/registry/removal/`](core/registry/removal)                                                                                                                                                                           | [`tests/watch.rs`](../tests/watch.rs)                                                                                                 |
 | Events or subscriber delivery                    | [`events/`](events), [`subscribers/`](subscribers), [`core/runtime/event_relay.rs`](core/runtime/event_relay.rs)                                                                                                                                                  | [`tests/lifecycle.rs`](../tests/lifecycle.rs), module unit tests                                                                      |
-| Controller public behavior                       | Public files in [`controller/`](controller)                                                                                                                                                                                                                       | [`tests/controller.rs`](../tests/controller.rs)                                                                                       |
+| Controller public behavior                       | [`controller/mod.rs`](controller/mod.rs), [`controller/prepared.rs`](controller/prepared.rs), and the other public files in [`controller/`](controller)                                                                                                           | [`tests/controller.rs`](../tests/controller.rs)                                                                                       |
 | Controller queue, replace, reject, or slot state | [`controller/engine/admission/`](controller/engine/admission), [`controller/engine/state/`](controller/engine/state)                                                                                                                                              | Controller engine unit tests, [`tests/controller.rs`](../tests/controller.rs)                                                         |
 | Shared shutdown order or grace behavior          | [`core/runtime/shutdown_workflow/`](core/runtime/shutdown_workflow), [`core/runtime/lifecycle/`](core/runtime/lifecycle), [`core/registry/removal/`](core/registry/removal), [`controller/engine/lifecycle/shutdown.rs`](controller/engine/lifecycle/shutdown.rs) | [`tests/shutdown.rs`](../tests/shutdown.rs), [`tests/ownership.rs`](../tests/ownership.rs)                                            |
 | Operating-system signal handling                 | [`core/shutdown.rs`](core/shutdown.rs), [`core/supervisor.rs`](core/supervisor.rs)                                                                                                                                                                                | [`tests/signal_ownership.rs`](../tests/signal_ownership.rs)                                                                           |
-| Ownership limits or deferred cleanup             | [`core/config.rs`](core/config.rs), [`core/builder.rs`](core/builder.rs), [`core/ownership.rs`](core/ownership.rs), [`core/deferred_drop/`](core/deferred_drop), [`core/registry/removal/`](core/registry/removal)                                                    | [`tests/ownership.rs`](../tests/ownership.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                            |
+| Ownership limits or deferred cleanup             | [`core/config.rs`](core/config.rs), [`core/builder.rs`](core/builder.rs), [`core/ownership.rs`](core/ownership.rs), [`core/deferred_drop/`](core/deferred_drop), [`core/registry/removal/`](core/registry/removal)                                                | [`tests/ownership.rs`](../tests/ownership.rs), [`tests/shutdown.rs`](../tests/shutdown.rs)                                            |
 | User-facing documentation or workflows           | [`README.md`](../README.md), [`docs/`](../docs/index.md), [`examples/`](../examples), [`lib.rs`](lib.rs)                                                                                                                                                          | Example compilation and crate docs                                                                                                    |
 
 ## Read and validate a change

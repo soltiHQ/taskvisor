@@ -1,14 +1,13 @@
 //! Starts the workers that make a wired supervisor operational.
 //!
-//! [`Supervisor::serve`](crate::Supervisor::serve) and the static run methods enter this package
-//! after the builder has connected the core components. Startup is idempotent after success and
-//! serialized while it is in progress.
+//! [`Supervisor::serve`](crate::Supervisor::serve) and the static run methods enter this package after the builder has connected the core components.
+//! Startup is idempotent after success and serialized while it is in progress.
 //!
 //! ```text
 //! builder-wired core
 //!         ▼
 //!       start
-//!         ├── subscribers ──► callback executor
+//!         ├── subscribers ──► shared + dedicated callback workers
 //!         ├── enabled bus ──► event relay
 //!         ├── registry ─────► listener and force-abort tracker
 //!         └── controller ───► optional worker
@@ -24,14 +23,14 @@ use super::SupervisorCore;
 use crate::error::RuntimeError;
 
 impl SupervisorCore {
-    /// Makes startup visible only after every configured worker is launched.
+    /// Runtime startup published only after every configured worker is launched.
     ///
     /// Repeated calls after successful startup return without launching more workers.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::TokioRuntimeUnavailable`] outside a Tokio runtime.
-    /// Returns [`RuntimeError::ThreadStartFailed`] when subscriber workers cannot start.
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] when no Tokio runtime is active;
+    /// - [`RuntimeError::ThreadStartFailed`] when a subscriber worker cannot start.
     pub(crate) fn start(&self) -> Result<(), RuntimeError> {
         if self.started.load(Ordering::Acquire) {
             return Ok(());
@@ -45,7 +44,8 @@ impl SupervisorCore {
             return Ok(());
         }
 
-        tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::TokioRuntimeUnavailable)?;
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| RuntimeError::TokioRuntimeUnavailable)?;
         self.subs.start()?;
         if self.bus.is_enabled() {
             self.subscriber_listener();
@@ -55,6 +55,10 @@ impl SupervisorCore {
         if let Some(controller) = self.controller.get().and_then(std::sync::Weak::upgrade) {
             controller.run();
         }
+        assert!(
+            self.startup_runtime.set(runtime).is_ok(),
+            "serialized first startup must publish its Tokio runtime exactly once"
+        );
         self.started.store(true, Ordering::Release);
         Ok(())
     }

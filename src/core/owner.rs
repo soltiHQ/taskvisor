@@ -24,14 +24,14 @@ pub(crate) struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
-    /// Creates the first public ownership lease for `core`.
+    /// First public ownership lease for `core`.
     ///
     /// The returned `Arc` is cloned into each [`SupervisorHandle`](crate::SupervisorHandle).
     pub(crate) fn new(core: Arc<SupervisorCore>) -> Arc<Self> {
         Arc::new(Self { core })
     }
 
-    /// Borrows the shared runtime core without creating another public owner.
+    /// Shared runtime core without another public ownership lease.
     pub(crate) fn core(&self) -> &Arc<SupervisorCore> {
         &self.core
     }
@@ -44,7 +44,7 @@ impl std::fmt::Debug for RuntimeOwner {
     }
 }
 
-/// Starts the non-blocking last-owner fallback.
+/// Non-blocking last-owner fallback.
 ///
 /// `Drop` cannot await joins or return a shutdown result.
 /// Confirmed cleanup must go through [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).

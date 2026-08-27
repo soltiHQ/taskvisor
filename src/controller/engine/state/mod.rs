@@ -1,6 +1,6 @@
 //! Stores controller admission state.
 //!
-//! This module tree stores mutable admission data indexed by slot and [`TaskId`].
+//! This module tree owns mutable admission data indexed by slot and [`TaskId`].
 //! [`ControllerState`] holds cross-slot indexes.
 //! [`SlotState`] holds the owner phase and pending queue for one slot.
 //!
@@ -14,10 +14,9 @@
 //!
 //! The global state lock protects the indexes.
 //! Each slot has its own async lock for phase and queue changes.
-//! The serialized controller loop keeps queue and reverse-index mutations in one transition.
+//! The serialized controller loop keeps queue and reverse-index mutations together.
 //!
-//! The `slot` module defines the slot state machine.
-//! Admission and completion handlers drive it with registry results and physical completion signals.
+//! Registry results and physical completion signals drive the slot state machine below this module.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -53,7 +52,7 @@ pub(in crate::controller::engine) struct ControllerState {
 }
 
 impl ControllerState {
-    /// Returns the submissions charged to the aggregate pending-work limit.
+    /// Aggregate pending-work charge across slot queues and registry-capacity waits.
     pub(in crate::controller::engine) fn pending_len(&self) -> usize {
         self.queued_slots.len() + self.capacity_pending.len()
     }

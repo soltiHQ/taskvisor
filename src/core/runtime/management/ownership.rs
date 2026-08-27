@@ -4,9 +4,11 @@
 //! A reservation is attached to the [`TaskSpec`] inside an [`OwnedTask`].
 //! It then follows that task through registry membership, actor execution, physical reaping, and final destruction.
 //!
-//! Waiting admission observes shutdown. Static batches use one immediate atomic reservation for the full batch.
-//! A configured ownership limit can delay or reject admission. With no limit, the reservation still keeps final
-//! user-value destruction off runtime paths. Failures are translated into runtime errors here.
+//! Waiting admission observes shutdown.
+//! Static batches use one immediate atomic reservation for the full batch.
+//! A configured ownership limit can delay or reject admission.
+//! With no limit, the reservation still keeps final user-value destruction off runtime paths.
+//! Failures are translated into runtime errors here.
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -19,7 +21,7 @@ use crate::{
 };
 
 impl SupervisorCore {
-    /// Reserves one unit in this supervisor's cleanup ownership domain.
+    /// One unit from this supervisor's cleanup ownership domain.
     pub(super) async fn reserve_ownership(
         &self,
     ) -> Result<deferred_drop::DropReservation, deferred_drop::DropAdmissionError> {
@@ -40,7 +42,7 @@ impl SupervisorCore {
         self.drop_domain.reserve().await
     }
 
-    /// Reserves a complete static batch without entering the waiter queue.
+    /// Complete static batch without entering the waiter queue.
     pub(in crate::core::runtime) fn try_reserve_ownership_many(
         &self,
         count: usize,
@@ -95,7 +97,7 @@ impl SupervisorCore {
             .unwrap_or_else(|error| error.into_inner()) = Some(source);
     }
 
-    /// Cancels an ownership wait when shutdown starts or the command queue closes.
+    /// Ownership wait cancelled by shutdown or command-queue closure.
     pub(super) async fn wait_for_ownership<T, F>(&self, reserve: F) -> Result<T, RuntimeError>
     where
         F: Future<Output = Result<T, deferred_drop::DropAdmissionError>>,
@@ -108,7 +110,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Bounds only the ownership-admission stage and preserves closure precedence.
+    /// Ownership-only deadline with runtime closure precedence.
     pub(super) async fn wait_for_ownership_with_timeout<T, F>(
         &self,
         reserve: F,
@@ -128,7 +130,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Attaches cleanup ownership and destructor-panic reporting to a task specification.
+    /// Task specification with cleanup ownership and destructor-panic reporting attached.
     pub(in crate::core::runtime) fn own_task(
         &self,
         spec: TaskSpec,

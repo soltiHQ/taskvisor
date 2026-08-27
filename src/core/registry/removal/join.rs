@@ -1,11 +1,13 @@
 //! Joins claimed actors and hands their results to terminal cleanup.
 //!
 //! Command handlers and completion cleanup use this module after a successful registered-to-removing transition.
-//! The actor handle leaves shared state before any wait. A ready natural result can finish inline.
-//! Other joins run in detached reporters. Every result returns through [`Registry::finish_removal`].
+//! The actor handle leaves shared state before any wait.
+//! A ready natural result can finish inline.
+//! Other joins run in detached reporters.
+//! Every result returns through [`Registry::finish_removal`].
 //!
 //! Shutdown also claims entries here.
-//! [`PendingJoins`] provides its barrier and diagnostic labels.
+//! [`PendingJoins`] provides its barrier and diagnostic names.
 
 use std::{sync::Arc, time::Duration};
 
@@ -20,15 +22,15 @@ use crate::{
 };
 
 impl Registry {
-    /// Waits up to `grace` for all claimed removal owners.
+    /// Removal owners still active after waiting up to `grace`.
     ///
-    /// An owner finishes after membership removal, outcome delivery, and the final `TaskRemoved`
-    /// publication are attempted. This barrier is separate from cancellation completion.
+    /// An owner finishes after membership removal, outcome delivery, and the final `TaskRemoved` publication are attempted.
+    /// This barrier is separate from cancellation completion.
     ///
-    /// Returns labels for removal owners still active when `grace` expires.
-    pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
+    /// The returned names identify owners still active when `grace` expires.
+    pub(in crate::core) async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let _ = tokio::time::timeout(grace, self.pending_joins.wait_drained()).await;
-        self.pending_joins.pending_labels()
+        self.pending_joins.pending_names()
     }
 
     /// Claims and cancels all registered entries within one shared grace window.
@@ -36,16 +38,16 @@ impl Registry {
     /// Entries already being removed keep their owner.
     /// This method waits for all pending removal owners only until the same deadline.
     ///
-    /// Returns labels for actors claimed here that required force-abort.
+    /// The returned names identify actors claimed here that required force-abort.
     /// [`wait_joins_within`](Self::wait_joins_within) reports older owners.
-    pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
+    pub(in crate::core) async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let handles: Vec<(TaskId, Arc<str>, Handle, RemovalCompletion)> = {
             let mut st = self.state.write().await;
             let ids: Vec<TaskId> = st.tasks.keys().copied().collect();
             ids.into_iter()
                 .filter_map(|id| {
                     Self::claim_registered(&mut st, &self.pending_joins, id)
-                        .map(|(label, handle, completion)| (id, label, handle, completion))
+                        .map(|(name, handle, completion)| (id, name, handle, completion))
                 })
                 .collect()
         };
@@ -57,13 +59,13 @@ impl Registry {
         let mut stuck = Vec::new();
         let reaper = self.actors.attempt_reaper();
 
-        for (id, label, mut handle, removal_completion) in handles {
+        for (id, name, mut handle, removal_completion) in handles {
             let join = match tokio::time::timeout_at(deadline, handle.join_mut()).await {
                 Ok(res) => JoinCompletion::Joined(res),
                 Err(_elapsed) => {
                     handle.abort();
                     let _ = handle.join_mut().await;
-                    stuck.push(Arc::clone(&label));
+                    stuck.push(Arc::clone(&name));
                     JoinCompletion::ForceAborted
                 }
             };
@@ -88,12 +90,13 @@ impl Registry {
         stuck
     }
 
-    /// Cleans up a finished actor by identity.
+    /// Terminal cleanup for one actor completion identity.
     ///
-    /// Duplicate or stale completion signals are no-ops. An early signal starts a bounded detached join.
+    /// Duplicate or stale completion signals are no-ops.
+    /// An early signal starts a bounded detached join.
     /// A ready result is collected inline because the actor tail no longer owns user values.
     pub(in crate::core::registry) async fn cleanup_completed_task(&self, id: TaskId) {
-        let Some((_label, mut handle, removal_completion)) = self.claim_task(id).await else {
+        let Some((_name, mut handle, removal_completion)) = self.claim_task(id).await else {
             return;
         };
         if !handle.result_ready() {
@@ -120,10 +123,10 @@ impl Registry {
         .await;
     }
 
-    /// Changes one task from registered to removing state.
+    /// Registered-to-removing claim for one task.
     ///
     /// The winning caller receives the only actor handle.
-    /// Identity and label indexes remain until that caller finishes the join.
+    /// Identity and name indexes remain until that caller finishes the join.
     pub(super) async fn claim_task(
         &self,
         id: TaskId,
@@ -132,7 +135,7 @@ impl Registry {
         Self::claim_registered(&mut st, &self.pending_joins, id)
     }
 
-    /// Performs the registered-to-removing transition under the state lock.
+    /// Registered-to-removing transition while the caller holds the state lock.
     pub(super) fn claim_registered(
         st: &mut Inner,
         pending_joins: &PendingJoins,
@@ -155,14 +158,15 @@ impl Registry {
         ) else {
             unreachable!("a removing entry was checked above")
         };
-        let label = Arc::clone(&entry.label);
-        pending_joins.inc_with_label(id, Arc::clone(&label));
-        Some((label, *handle, completion))
+        let name = Arc::clone(&entry.name);
+        pending_joins.inc_with_name(id, Arc::clone(&name));
+        Some((name, *handle, completion))
     }
 
-    /// Joins an actor in a detached task and commits its terminal result.
+    /// Detached actor join with terminal result commit.
     ///
-    /// `force_after` bounds the join when present. Runtime shutdown always aborts an unfinished actor.
+    /// `force_after` bounds the join when present.
+    /// Runtime shutdown always aborts an unfinished actor.
     /// Both paths commit through `finish_removal`.
     pub(super) fn spawn_join_report(
         &self,

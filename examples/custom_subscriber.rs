@@ -11,7 +11,7 @@
 //!       │ relay and fan-out
 //!       ▼
 //! one bounded subscriber lane          full: drop new event for this subscriber
-//!       │ serial callback executor
+//!       │ selected serial callback worker
 //!       ▼
 //! Subscribe::on_event
 //! ```

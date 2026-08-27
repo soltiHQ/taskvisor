@@ -203,32 +203,32 @@ async fn start_and_release_command_queue(core: &SupervisorCore, filler_reply: Re
 #[derive(Clone, Copy, Debug)]
 enum ManagementOperation {
     RemoveId,
-    RemoveLabel,
+    RemoveName,
     CancelId,
-    CancelLabel,
+    CancelName,
     CancelIdWithTimeout,
-    CancelLabelWithTimeout,
+    CancelNameWithTimeout,
 }
 
 impl ManagementOperation {
     const ALL: [Self; 6] = [
         Self::RemoveId,
-        Self::RemoveLabel,
+        Self::RemoveName,
         Self::CancelId,
-        Self::CancelLabel,
+        Self::CancelName,
         Self::CancelIdWithTimeout,
-        Self::CancelLabelWithTimeout,
+        Self::CancelNameWithTimeout,
     ];
 
     async fn execute(self, core: &SupervisorCore, id: TaskId) -> Result<bool, RuntimeError> {
         match self {
             Self::RemoveId => core.remove(id).await,
-            Self::RemoveLabel => core.remove_by_label(Arc::from("missing")).await,
+            Self::RemoveName => core.remove_by_name(Arc::from("missing")).await,
             Self::CancelId => core.cancel(id).await,
-            Self::CancelLabel => core.cancel_by_label(Arc::from("missing")).await,
+            Self::CancelName => core.cancel_by_name(Arc::from("missing")).await,
             Self::CancelIdWithTimeout => core.cancel_with_timeout(id, Duration::ZERO).await,
-            Self::CancelLabelWithTimeout => {
-                core.cancel_by_label_with_timeout(Arc::from("missing"), Duration::ZERO)
+            Self::CancelNameWithTimeout => {
+                core.cancel_by_name_with_timeout(Arc::from("missing"), Duration::ZERO)
                     .await
             }
         }
@@ -237,12 +237,12 @@ impl ManagementOperation {
     async fn try_execute(self, core: &SupervisorCore, id: TaskId) -> Result<bool, RuntimeError> {
         match self {
             Self::RemoveId => core.try_remove(id).await,
-            Self::RemoveLabel => core.try_remove_by_label(Arc::from("missing")).await,
+            Self::RemoveName => core.try_remove_by_name(Arc::from("missing")).await,
             Self::CancelId => core.try_cancel(id).await,
-            Self::CancelLabel => core.try_cancel_by_label(Arc::from("missing")).await,
+            Self::CancelName => core.try_cancel_by_name(Arc::from("missing")).await,
             Self::CancelIdWithTimeout => core.try_cancel_with_timeout(id, Duration::ZERO).await,
-            Self::CancelLabelWithTimeout => {
-                core.try_cancel_by_label_with_timeout(Arc::from("missing"), Duration::ZERO)
+            Self::CancelNameWithTimeout => {
+                core.try_cancel_by_name_with_timeout(Arc::from("missing"), Duration::ZERO)
                     .await
             }
         }
@@ -613,7 +613,7 @@ async fn first_dynamic_add_reports_lazy_drop_start_failure_and_exact_retry_succe
     assert!(!domain.is_started());
     assert_eq!(injected.spawn_calls(), 2);
     assert_eq!(runs.load(Ordering::SeqCst), 0);
-    assert!(core.id_for_label("lazy-dynamic-start").await.is_none());
+    assert!(core.id_for_name("lazy-dynamic-start").await.is_none());
 
     core.add_task(TaskSpec::once("lazy-dynamic-start", task))
         .await
@@ -717,7 +717,7 @@ async fn ownership_timeout_removes_waiter_commits_nothing_and_capacity_is_reusab
     let timed_out = domain.snapshot(true);
     assert_eq!(timed_out.waiters, 0);
     assert_eq!(timed_out.available, Some(0));
-    assert!(core.id_for_label("ownership-timeout").await.is_none());
+    assert!(core.id_for_name("ownership-timeout").await.is_none());
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     while let Ok(event) = events.try_recv() {
         assert!(
@@ -790,7 +790,7 @@ async fn positive_ownership_deadline_expires_and_release_before_retry_deadline_s
         .await
         .expect("releasing ownership before the deadline must admit the task");
     assert_eq!(
-        core.id_for_label("ownership-release-before-deadline").await,
+        core.id_for_name("ownership-release-before-deadline").await,
         Some(id)
     );
 
@@ -1160,7 +1160,7 @@ async fn shutdown_fence_processes_whole_committed_batch_before_drain() {
     let mut events = core.bus.subscribe();
     let mut ids = Vec::new();
     let mut items = Vec::new();
-    for label in ["batch-before-shutdown-a", "batch-before-shutdown-b"] {
+    for name in ["batch-before-shutdown-a", "batch-before-shutdown-b"] {
         let task: TaskRef = TaskFn::arc(|ctx: TaskContext| async move {
             ctx.cancelled().await;
             Err(TaskError::Canceled)
@@ -1169,8 +1169,8 @@ async fn shutdown_fence_processes_whole_committed_batch_before_drain() {
         ids.push(id);
         items.push(AddBatchItem {
             id,
-            label: Arc::from(label),
-            owned: owned_task(TaskSpec::restartable(label, task)),
+            name: Arc::from(name),
+            owned: owned_task(TaskSpec::restartable(name, task)),
         });
     }
     let batch_reply = core
@@ -1219,7 +1219,7 @@ async fn committed_duplicate_batch_keeps_its_error_during_shutdown() {
     let mut events = core.bus.subscribe();
     let runs = Arc::new(AtomicUsize::new(0));
     let mut items = Vec::new();
-    for label in ["shutdown-peer", "shutdown-duplicate", "shutdown-duplicate"] {
+    for name in ["shutdown-peer", "shutdown-duplicate", "shutdown-duplicate"] {
         let runs = Arc::clone(&runs);
         let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
             runs.fetch_add(1, Ordering::SeqCst);
@@ -1227,8 +1227,8 @@ async fn committed_duplicate_batch_keeps_its_error_during_shutdown() {
         });
         items.push(AddBatchItem {
             id: TaskId::next(),
-            label: Arc::from(label),
-            owned: owned_task(TaskSpec::once(label, task)),
+            name: Arc::from(name),
+            owned: owned_task(TaskSpec::once(name, task)),
         });
     }
     let batch_reply = core
@@ -1298,7 +1298,7 @@ async fn backpressured_batch_loses_whole_admission_race_to_shutdown() {
     let runs = Arc::new(AtomicUsize::new(0));
     let mut ids = Vec::new();
     let mut items = Vec::new();
-    for label in ["batch-after-shutdown-a", "batch-after-shutdown-b"] {
+    for name in ["batch-after-shutdown-a", "batch-after-shutdown-b"] {
         let runs = Arc::clone(&runs);
         let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| {
             runs.fetch_add(1, Ordering::SeqCst);
@@ -1308,8 +1308,8 @@ async fn backpressured_batch_loses_whole_admission_race_to_shutdown() {
         ids.push(id);
         items.push(AddBatchItem {
             id,
-            label: Arc::from(label),
-            owned: owned_task(TaskSpec::once(label, task)),
+            name: Arc::from(name),
+            owned: owned_task(TaskSpec::once(name, task)),
         });
     }
 
@@ -1419,7 +1419,7 @@ async fn confirmed_add_waits_for_capacity_and_registry_reply() {
     });
     let mut add = Box::pin(core.add_task(TaskSpec::restartable("backpressured-add", task)));
     assert_pending_once(add.as_mut()).await;
-    assert!(core.id_for_label("backpressured-add").await.is_none());
+    assert!(core.id_for_name("backpressured-add").await.is_none());
 
     start_and_release_command_queue(&core, filler_reply).await;
     let id = timeout(Duration::from_secs(2), add)
@@ -1490,7 +1490,7 @@ async fn try_management_operations_wait_for_registry_decision_after_admission() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn try_cancel_by_label_with_timeout_bounds_terminal_completion() {
+async fn try_cancel_by_name_with_timeout_bounds_terminal_completion() {
     let core = core(SupervisorConfig::default());
     core.start().expect("runtime startup");
 
@@ -1501,7 +1501,7 @@ async fn try_cancel_by_label_with_timeout_bounds_terminal_completion() {
         .expect("the task must be registered");
 
     match core
-        .try_cancel_by_label_with_timeout(Arc::from("timed-label"), Duration::ZERO)
+        .try_cancel_by_name_with_timeout(Arc::from("timed-label"), Duration::ZERO)
         .await
     {
         Err(RuntimeError::TaskTerminationTimeout {
@@ -1518,7 +1518,7 @@ async fn try_cancel_by_label_with_timeout_bounds_terminal_completion() {
         controlled.cancellation_seen.notified(),
     )
     .await
-    .expect("the timed-out caller must leave label cancellation running");
+    .expect("the timed-out caller must leave name cancellation running");
 
     controlled.release.notify_one();
     timeout(Duration::from_secs(2), core.registry.wait_until_empty())
@@ -1528,7 +1528,7 @@ async fn try_cancel_by_label_with_timeout_bounds_terminal_completion() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn remove_by_label_orders_after_an_already_queued_add() {
+async fn remove_by_name_orders_after_an_already_queued_add() {
     use crate::{TaskContext, TaskFn, TaskRef};
 
     let core = core(SupervisorConfig::default());
@@ -1548,7 +1548,7 @@ async fn remove_by_label_orders_after_an_already_queued_add() {
         .await
         .expect("the Add command must enter the queue first");
 
-    let mut remove = Box::pin(core.remove_by_label(Arc::from("ordered-label")));
+    let mut remove = Box::pin(core.remove_by_name(Arc::from("ordered-label")));
     assert_pending_once(remove.as_mut()).await;
     core.start().expect("runtime startup");
 
@@ -1561,9 +1561,9 @@ async fn remove_by_label_orders_after_an_already_queued_add() {
     assert!(
         timeout(Duration::from_secs(2), remove)
             .await
-            .expect("label Remove must resolve")
-            .expect("label Remove must receive a registry reply"),
-        "the label lookup must happen after the queued Add is committed"
+            .expect("name Remove must resolve")
+            .expect("name Remove must receive a registry reply"),
+        "the name lookup must happen after the queued Add is committed"
     );
     assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
         event.kind == EventKind::TaskRemoveRequested
@@ -1579,7 +1579,7 @@ async fn remove_by_label_orders_after_an_already_queued_add() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_by_label_orders_after_an_already_queued_add() {
+async fn cancel_by_name_orders_after_an_already_queued_add() {
     use crate::{TaskContext, TaskFn, TaskRef};
 
     let core = core(SupervisorConfig::default());
@@ -1598,7 +1598,7 @@ async fn cancel_by_label_orders_after_an_already_queued_add() {
         .await
         .expect("the Add command must enter the queue first");
 
-    let mut cancel = Box::pin(core.cancel_by_label(Arc::from("ordered-cancel-label")));
+    let mut cancel = Box::pin(core.cancel_by_name(Arc::from("ordered-cancel-label")));
     assert_pending_once(cancel.as_mut()).await;
     core.start().expect("runtime startup");
 
@@ -1611,9 +1611,9 @@ async fn cancel_by_label_orders_after_an_already_queued_add() {
     assert!(
         timeout(Duration::from_secs(2), cancel)
             .await
-            .expect("label Cancel must resolve after terminal cleanup")
-            .expect("label Cancel must receive a registry reply"),
-        "the label lookup must happen after the queued Add is committed"
+            .expect("name Cancel must resolve after terminal cleanup")
+            .expect("name Cancel must receive a registry reply"),
+        "the name lookup must happen after the queued Add is committed"
     );
     assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
         event.kind == EventKind::TaskRemoveRequested
@@ -1685,7 +1685,7 @@ async fn backpressured_add_returns_shutting_down_when_queue_closes() {
         .await
         .expect("the buffered filler must still resolve");
     core.registry.join_listener().await;
-    assert!(core.id_for_label("closed-while-waiting").await.is_none());
+    assert!(core.id_for_name("closed-while-waiting").await.is_none());
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 
     let _ = core.shutdown().await;
@@ -1712,7 +1712,7 @@ async fn try_add_reports_full_without_event_or_task_start() {
         Err(RuntimeError::CommandQueueFull)
     ));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
-    assert!(core.id_for_label("try-add-full").await.is_none());
+    assert!(core.id_for_name("try-add-full").await.is_none());
     while let Ok(event) = events.try_recv() {
         assert!(
             event.kind != EventKind::TaskAddRequested
@@ -1736,7 +1736,7 @@ async fn try_add_waits_for_registry_decision_after_admission() {
     });
     let mut add = Box::pin(core.try_add_task(TaskSpec::restartable("try-add-confirmed", task)));
     assert_pending_once(add.as_mut()).await;
-    assert!(core.id_for_label("try-add-confirmed").await.is_none());
+    assert!(core.id_for_name("try-add-confirmed").await.is_none());
 
     core.start().expect("runtime startup");
     let id = timeout(Duration::from_secs(2), add)
@@ -1789,7 +1789,7 @@ async fn dropping_add_before_enqueue_rolls_back_admission() {
     drop(add);
 
     start_and_release_command_queue(&core, filler_reply).await;
-    assert!(core.id_for_label("dropped-before-enqueue").await.is_none());
+    assert!(core.id_for_name("dropped-before-enqueue").await.is_none());
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 
     let _ = core.shutdown().await;
@@ -1843,7 +1843,7 @@ async fn dropping_add_after_enqueue_does_not_roll_command_back() {
         .await
         .expect("the queued task must start after its caller is dropped")
         .expect("the task must signal start");
-    assert!(core.id_for_label("dropped-after-enqueue").await.is_some());
+    assert!(core.id_for_name("dropped-after-enqueue").await.is_some());
 
     let _ = core.shutdown().await;
 }
@@ -2070,12 +2070,12 @@ async fn add_task_with_id_watched_returns_watcher_on_failure() {
         Err(uncommitted) => {
             let crate::core::UncommittedWatchedAdd {
                 error,
-                label,
+                name,
                 owned,
                 done,
             } = *uncommitted;
             assert!(matches!(error, RuntimeError::ShuttingDown));
-            assert_eq!(&*label, "x");
+            assert_eq!(&*name, "x");
             assert_eq!(owned.value.name(), "x");
             let returned = done.expect("the watcher must be returned with the task spec");
             returned
@@ -2120,7 +2120,7 @@ async fn controller_completion_waits_for_registry_membership_cleanup() {
     let replacement: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
     core.add_task(TaskSpec::once("completion-cleanup", replacement))
         .await
-        .expect("completion must mean the registry label can be reused");
+        .expect("completion must mean the registry name can be reused");
 
     let _ = core.shutdown().await;
 }

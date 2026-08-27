@@ -1,11 +1,10 @@
 //! Moves an idle slot into runtime registry admission.
 //!
-//! `placement` and `advance` call this module after selecting the next slot owner.
-//! It tries to commit the task's stable identity, name, specification, and optional outcome sender to the registry Add command.
+//! The selected slot owner crosses this boundary with its stable identity, name, task value, and optional outcome sender intact.
 //!
 //! A full registry queue starts a controller-owned capacity wait when admission limits allow it.
 //! The controller retains the task and watcher and keeps the slot `Admitting`.
-//! Limit failures and other errors before commit return the intact handoff for rejection and cleanup.
+//! Any other pre-commit failure returns task ownership for rejection and cleanup.
 
 use std::sync::Arc;
 
@@ -22,9 +21,10 @@ use super::{
 };
 
 impl Controller {
-    /// Starts registry admission for one pending task in an idle slot.
+    /// Registry handoff for one pending task in an idle slot.
     ///
-    /// The slot becomes `Admitting` after the Add command commits or after the capacity wait is stored.
+    /// The slot becomes `Admitting` after the Add command commits.
+    /// A stored capacity wait has the same slot state.
     /// A different pre-commit failure returns ownership.
     pub(super) fn start_in_slot(
         &self,
@@ -61,19 +61,19 @@ impl Controller {
                 if matches!(uncommitted.error, RuntimeError::CommandQueueFull) {
                     let crate::core::UncommittedWatchedAdd {
                         error: _,
-                        label,
+                        name,
                         owned,
                         done,
                     } = *uncommitted;
                     debug_assert!(done.is_none(), "the watcher must remain controller-owned");
                     let waiting = CapacityPending {
                         slot_name: Arc::clone(slot_name),
-                        pending: PendingSubmission::new(id, label, owned),
+                        pending: PendingSubmission::new(id, name, owned),
                     };
                     if let Err((limit, waiting)) = self.try_index_capacity_pending(id, waiting) {
                         let waiting = *waiting;
                         let PendingSubmission {
-                            task_name: label,
+                            task_name: name,
                             owned,
                             ..
                         } = waiting.pending;
@@ -82,7 +82,7 @@ impl Controller {
                                 resource: "controller_pending",
                                 limit,
                             },
-                            label,
+                            name,
                             owned,
                             done,
                         }));
@@ -90,7 +90,7 @@ impl Controller {
                     if let Err(limit) = operations.capacity.enqueue(id) {
                         let waiting = self.unindex_capacity_pending(id);
                         let PendingSubmission {
-                            task_name: label,
+                            task_name: name,
                             owned,
                             ..
                         } = waiting.pending;
@@ -99,7 +99,7 @@ impl Controller {
                                 resource: "controller_admission",
                                 limit,
                             },
-                            label,
+                            name,
                             owned,
                             done,
                         }));

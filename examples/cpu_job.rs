@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(200)));
 
     // Await the job's final result: the supervisor retried it for us.
-    let (_id, waiter) = handle.add_and_watch(spec).await?;
+    let waiter = handle.add(spec).watch().execute().await?;
     println!("outcome: {:?}", waiter.wait().await?);
 
     handle.shutdown().await?;

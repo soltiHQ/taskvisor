@@ -11,19 +11,24 @@ vars:
     sh: sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' Cargo.toml | head -n 1
 
 tasks:
+  ci:
+    desc: "List of CI tasks."
+    cmds:
+      - task -l | grep "ci\/"
+
   ci/fmt:
-    desc: Run 'cargo fmt --check'.
+    desc: "Run 'cargo fmt'. FMT_ARGS = <args> (optional; default: --check --verbose)."
     cmds:
       - task: rust:fmt
 
   ci/check:
-    desc: Run 'cargo check' on the declared MSRV.
+    desc: "Run 'cargo check'."
     cmds:
       - task: rust:check
         vars: { CHECK_ARGS: '--all-targets --all-features --locked' }
 
   ci/clippy:
-    desc: "Run 'cargo clippy' for one feature set. FEATURE = none|all|<feature-name> (default: all)."
+    desc: "Run 'cargo clippy'. FEATURE = none|all|<feature-name> (optional; default: all)."
     vars:
       FEATURE: '{{.FEATURE | default "all"}}'
       FEATURE_FLAGS:
@@ -37,20 +42,14 @@ tasks:
       - task: rust:clippy
         vars: { CLIPPY_ARGS: '--all-targets {{.FEATURE_FLAGS}} --locked -- -D warnings' }
 
-  ci/test:
-    desc: Run 'cargo test' (all targets, all features).
-    cmds:
-      - task: rust:test
-        vars: { TEST_ARGS: '--all-features --locked' }
-
-  ci/test-unit:
-    desc: Run unit tests ('cargo test --lib').
+  ci/test/unit:
+    desc: "Run 'cargo test --lib'."
     cmds:
       - task: rust:test
         vars: { TEST_ARGS: '--lib --all-features --locked' }
 
-  ci/test-integration:
-    desc: Run integration tests ('cargo test --test "*"').
+  ci/test/integration:
+    desc: "Run 'cargo test --test \"*\"'."
     cmds:
       - task: rust:test
         vars: { TEST_ARGS: '--test "*" --all-features --locked' }
@@ -60,12 +59,30 @@ tasks:
     cmds:
       - task: rust:audit
 
-  ci/docs:
-    desc: Validate API documentation and the versioned user guide.
+  ci/build:
+    desc: "Build examples. CRATE = <package-name> (required)."
+    requires:
+      vars: [ CRATE ]
     cmds:
-      - task: rust:doc
+      - task: rust:build
+        vars:
+          CRATE: '{{.CRATE}}'
+          BUILD_ARGS: '--examples --all-features --locked'
+
+  ci/publish/dry-run:
+    desc: "Simulate 'cargo publish'."
+    cmds:
+      - task: rust:publish-dry-run
+        vars:
+          CRATE: "taskvisor"
+          PUBLISH_ARGS: '--all-features --locked'
+
+  ci/docs:
+    desc: "Validate API docs and the user guide."
+    cmds:
+      - task: rust:doc/build
         vars: { DOC_ARGS: '--locked --no-deps' }
-      - task: rust:doc
+      - task: rust:doc/build
         vars: { DOC_ARGS: '--locked --no-deps --all-features' }
       - task: docs:api/generate
         vars:
@@ -74,7 +91,7 @@ tasks:
           PRODUCT: taskvisor
           PACKAGE: taskvisor
           VERSION: '{{.docs_version}}'
-      - task: rust:docs
+      - task: rust:doc/build-nightly
         vars: { DOCS_ARGS: '--all-features --locked' }
       - task: docs:validate
         vars:
@@ -94,28 +111,23 @@ tasks:
       - task: rust:test
         vars: { TEST_ARGS: '--doc --all-features --locked' }
 
-  ci/build:
-    desc: Build all examples for a package. Pass CRATE.
-    requires:
-      vars: [ CRATE ]
+  rust:
+    desc: "List of Rust tasks."
     cmds:
-      - task: rust:build
-        vars:
-          CRATE: '{{.CRATE}}'
-          BUILD_ARGS: '--examples --all-features --locked'
+      - task -l | grep "rust:"
 
-  ci/publish-dry-run:
-    desc: Simulate 'cargo publish' for the taskvisor crate.
+  rust:test/all:
+    desc: "Run tests with all features."
     cmds:
-      - task: rust:publish-dry-run
-        vars:
-          CRATE: "taskvisor"
-          PUBLISH_ARGS: '--all-features --locked'
+      - task: rust:test
+        vars: { TEST_ARGS: '--all-features --locked' }
 
-  rust:benchmark:
-    desc: Run all Taskvisor benchmarks with the colorized performance report.
+  rust:test/bench:
+    desc: "Run Taskvisor benchmarks. SCOPE = <bench-name> (optional; default: *)."
+    vars:
+      SCOPE: '{{.SCOPE | default "*"}}'
     cmds:
       - task: rust:bench
         vars:
           BENCH_ARGS: >-
-            --bench '*' --features controller --locked -- --quiet --color always
+            --bench '{{.SCOPE}}' --features controller --locked -- --quiet --color always

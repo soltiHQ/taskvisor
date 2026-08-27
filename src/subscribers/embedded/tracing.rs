@@ -29,7 +29,7 @@ use tracing::Level;
 
 use crate::TaskOutcomeKind;
 use crate::events::{Event, EventKind, RejectionKind};
-use crate::subscribers::Subscribe;
+use crate::subscribers::{Subscribe, SubscriberExecution};
 
 const MAX_TEXT_CHARS: usize = 4096;
 
@@ -43,18 +43,22 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
     Cow::Owned(value)
 }
 
-/// Sends runtime events to `tracing` without free-form reason text.
+/// Structured `tracing` subscriber without free-form reason text.
 ///
 /// Register this value with Taskvisor, then configure a `tracing` subscriber in the application.
 /// Filter on target `taskvisor` and the stable `event` field.
 /// Other typed labels are suitable for structured filtering and metrics.
+/// The bridge selects [`SubscriberExecution::Dedicated`] because the configured dispatcher runs
+/// synchronously inside the callback.
 ///
 /// Event kinds map to tracing levels as follows:
 ///
 /// - `ERROR`: runtime failures, ownership-capacity retirement, subscriber panics, and fatal or panicked final outcomes.
-/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry; overflow; and `AdmissionFailed` or unclassified rejections.
+/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry; overflow; and
+///   `AdmissionFailed` or unclassified rejections.
 /// - `INFO`: completed or canceled outcomes and shutdown milestones.
-/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, controller submissions, and all other typed rejections.
+/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, controller
+///   submissions, and all other typed rejections.
 /// - `TRACE`: attempt transitions, management requests, and controller slot transitions.
 ///
 /// # Examples
@@ -67,11 +71,11 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 /// let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TracingBridge;
 
 impl TracingBridge {
-    /// Creates a tracing subscriber that includes [`Event::reason`].
+    /// Structured `tracing` subscriber that includes [`Event::reason`].
     ///
     /// Task code and runtime errors can supply this free-form text.
     /// Longer reasons keep their first 4096 characters and add a truncation marker.
@@ -81,12 +85,12 @@ impl TracingBridge {
     }
 }
 
-/// Sends runtime events to `tracing` and includes free-form reason text.
+/// Structured `tracing` subscriber with free-form reason text.
 ///
 /// Create this variant with [`TracingBridge::with_reasons`].
 /// It otherwise uses the same fields and level mapping as [`TracingBridge`].
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TracingBridgeWithReasons;
 
 fn rejection_level(kind: Option<RejectionKind>) -> Level {
@@ -221,6 +225,10 @@ impl Subscribe for TracingBridge {
     fn name(&self) -> &str {
         "TracingBridge"
     }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
+    }
 }
 
 impl Subscribe for TracingBridgeWithReasons {
@@ -230,6 +238,10 @@ impl Subscribe for TracingBridgeWithReasons {
 
     fn name(&self) -> &str {
         "TracingBridgeWithReasons"
+    }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
     }
 }
 
@@ -244,6 +256,15 @@ mod tests {
     use tracing::{Level, Metadata, span};
 
     type Captured = (Level, HashMap<String, String>);
+
+    #[test]
+    fn tracing_bridges_use_dedicated_execution() {
+        assert_eq!(TracingBridge.execution(), SubscriberExecution::Dedicated);
+        assert_eq!(
+            TracingBridge::with_reasons().execution(),
+            SubscriberExecution::Dedicated
+        );
+    }
 
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Captured>>>);

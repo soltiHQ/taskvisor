@@ -147,13 +147,16 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
         .expect("the subscriber and one task each need one ownership unit");
     let supervisor = Supervisor::new(config, collector_subscribers(&collector));
     let handle = supervisor.serve().expect("runtime startup");
-    let (holder_id, holder_waiter) = handle
-        .add_and_watch(TaskSpec::once(
+    let holder_waiter = handle
+        .add(TaskSpec::once(
             "ownership-timeout-holder",
             common::make_coop(),
         ))
+        .watch()
+        .execute()
         .await
         .expect("the holder must consume the remaining ownership unit");
+    let holder_id = holder_waiter.id();
     assert!(
         poll_until(Duration::from_secs(2), || async {
             handle.is_alive("ownership-timeout-holder").await
@@ -163,10 +166,12 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
     );
 
     let error = handle
-        .add_with_ownership_timeout(
-            TaskSpec::once("ownership-timeout-add", common::make_ok_once()),
-            Duration::ZERO,
-        )
+        .add(TaskSpec::once(
+            "ownership-timeout-add",
+            common::make_ok_once(),
+        ))
+        .ownership_timeout(Duration::ZERO)
+        .execute()
         .await
         .expect_err("a saturated direct add must time out");
     assert!(matches!(
@@ -176,10 +181,13 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
     ));
 
     let error = handle
-        .add_and_watch_with_ownership_timeout(
-            TaskSpec::once("ownership-timeout-add-watched", common::make_ok_once()),
-            Duration::ZERO,
-        )
+        .add(TaskSpec::once(
+            "ownership-timeout-add-watched",
+            common::make_ok_once(),
+        ))
+        .watch()
+        .ownership_timeout(Duration::ZERO)
+        .execute()
         .await
         .expect_err("a saturated watched add must time out");
     assert!(matches!(
@@ -195,7 +203,13 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
     assert_eq!(listed[0].0, holder_id);
     assert_eq!(listed[0].1.as_ref(), "ownership-timeout-holder");
 
-    assert!(handle.cancel(holder_id).await.expect("cancel holder"));
+    assert!(
+        handle
+            .cancel(holder_id)
+            .execute()
+            .await
+            .expect("cancel holder")
+    );
     assert!(matches!(
         with_timeout(2, holder_waiter.wait()).await,
         Ok(TaskOutcome::Canceled)
@@ -208,11 +222,14 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
         "the holder cleanup must return its ownership unit"
     );
 
-    let (_, marker_waiter) = handle
-        .add_and_watch_with_ownership_timeout(
-            TaskSpec::once("ownership-timeout-marker", common::make_ok_once()),
-            Duration::ZERO,
-        )
+    let marker_waiter = handle
+        .add(TaskSpec::once(
+            "ownership-timeout-marker",
+            common::make_ok_once(),
+        ))
+        .watch()
+        .ownership_timeout(Duration::ZERO)
+        .execute()
         .await
         .expect("an immediately available ownership unit must beat a zero deadline");
     assert!(matches!(
@@ -230,10 +247,10 @@ async fn direct_ownership_timeout_commits_nothing_and_capacity_is_reusable() {
             .await,
         "the marker event must flush earlier lifecycle events"
     );
-    assert!(collector.by_label("ownership-timeout-add").is_empty());
+    assert!(collector.by_name("ownership-timeout-add").is_empty());
     assert!(
         collector
-            .by_label("ownership-timeout-add-watched")
+            .by_name("ownership-timeout-add-watched")
             .is_empty()
     );
 
@@ -252,8 +269,10 @@ async fn ownership_snapshot_explains_blocked_final_cleanup_and_parked_admission(
     let task: TaskRef = Arc::new(BlockingFinalDropTask {
         gate: Arc::clone(&gate),
     });
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once("blocked-final-cleanup", task))
+    let waiter = handle
+        .add(TaskSpec::once("blocked-final-cleanup", task))
+        .watch()
+        .execute()
         .await
         .expect("the task must be admitted");
 
@@ -279,6 +298,7 @@ async fn ownership_snapshot_explains_blocked_final_cleanup_and_parked_admission(
         let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
         waiting_handle
             .add(TaskSpec::once("parked-behind-cleanup", task))
+            .execute()
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -331,8 +351,10 @@ async fn final_destructor_panic_retires_capacity_and_emits_one_typed_event() {
     let supervisor = Supervisor::new(config, collector_subscribers(&collector));
     let handle = supervisor.serve().expect("runtime startup");
     let task: TaskRef = Arc::new(PanickingFinalDropTask);
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once("panicking-final-cleanup", task))
+    let waiter = handle
+        .add(TaskSpec::once("panicking-final-cleanup", task))
+        .watch()
+        .execute()
         .await
         .expect("the task must be admitted");
 
@@ -445,6 +467,7 @@ fn dropping_last_public_owners_after_tokio_runtime_destruction_does_not_panic() 
         });
         handle
             .add(TaskSpec::once("runtime-destroyed-before-owners", task))
+            .execute()
             .await
             .expect("the task must be registered before runtime destruction");
         handle
@@ -471,8 +494,10 @@ async fn dropping_one_public_owner_keeps_other_owners_alive() {
     drop(first);
 
     let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
-    let (_, waiter) = second
-        .add_and_watch(TaskSpec::once("owner-still-live", task))
+    let waiter = second
+        .add(TaskSpec::once("owner-still-live", task))
+        .watch()
+        .execute()
         .await
         .expect("remaining handle must keep runtime open");
     assert!(matches!(
@@ -489,8 +514,10 @@ async fn temporary_supervisor_transfers_ownership_to_serve_handle() {
         .serve()
         .expect("runtime startup");
     let task = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once("temporary-owner", task))
+    let waiter = handle
+        .add(TaskSpec::once("temporary-owner", task))
+        .watch()
+        .execute()
         .await
         .expect("serve handle must retain the public lease");
 
@@ -522,6 +549,7 @@ async fn dropping_last_owner_cancels_a_running_task_without_blocking() {
     let handle = supervisor.serve().expect("runtime startup");
     handle
         .add(TaskSpec::once("last-owner-cancel", task))
+        .execute()
         .await
         .expect("task must be admitted");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -550,8 +578,10 @@ async fn watched_task_resolves_after_last_owner_drop() {
     });
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve().expect("runtime startup");
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once("abandoned-watcher", task))
+    let waiter = handle
+        .add(TaskSpec::once("abandoned-watcher", task))
+        .watch()
+        .execute()
         .await
         .expect("task must be admitted");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -578,6 +608,7 @@ async fn explicit_shutdown_keeps_its_result_while_other_owners_drop() {
     });
     handle
         .add(TaskSpec::once("shutdown-owner", task))
+        .execute()
         .await
         .expect("task must be admitted");
 
@@ -603,6 +634,7 @@ async fn last_owner_drop_rejects_queued_controller_work() {
         .submit(
             ControllerSpec::queue(TaskSpec::once("drop-slot-owner", owner)).with_slot("drop-slot"),
         )
+        .execute()
         .await
         .expect("slot owner must be submitted");
     assert!(
@@ -618,11 +650,13 @@ async fn last_owner_drop_rejects_queued_controller_work() {
     );
 
     let queued = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
-    let (_, waiter) = handle
-        .submit_and_watch(
+    let waiter = handle
+        .submit(
             ControllerSpec::queue(TaskSpec::once("drop-slot-queued", queued))
                 .with_slot("drop-slot"),
         )
+        .watch()
+        .execute()
         .await
         .expect("queued submission must enter controller intake");
     assert!(

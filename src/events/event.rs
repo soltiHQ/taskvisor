@@ -1,7 +1,8 @@
 //! Defines the event values delivered to subscribers.
 //!
-//! Runtime components create an [`Event`] to describe a lifecycle action. Ordinary events enter the bounded bus and may reach
-//! subscriber callbacks. Internal overflow and relay-failure diagnostics can enter subscriber lanes directly.
+//! Runtime components create an [`Event`] to describe a lifecycle action.
+//! Ordinary events enter the bounded bus and may reach subscriber callbacks.
+//! Internal overflow and relay-failure diagnostics can enter subscriber lanes directly.
 //! No event feeds back into task management or registry cleanup.
 //! Applications normally read events through [`Subscribe`](crate::Subscribe), not construct them.
 //!
@@ -16,10 +17,12 @@
 //!      └── internal diagnostic ──► subscriber lanes
 //! ```
 //!
-//! [`EventKind`] defines the event meaning. [`BackoffSource`], [`RejectionKind`], and [`TaskOutcomeKind`]
-//! provide typed categories where free-form text would be unsafe for machine decisions.
+//! [`EventKind`] defines the event meaning.
+//! [`BackoffSource`], [`RejectionKind`], and [`TaskOutcomeKind`] provide typed categories where
+//! free-form text would be unsafe for machine decisions.
 //!
-//! Every event contains `kind`, `at`, and `seq`. Other fields depend on the event kind.
+//! Every event contains `kind`, `at`, and `seq`.
+//! Other fields depend on the event kind.
 //! Read the variant documentation before using an optional field.
 //! Duration builders store whole milliseconds and clamp values above `u32::MAX` milliseconds.
 //!
@@ -59,8 +62,6 @@ use std::time::{Duration, SystemTime};
 use crate::{TaskOutcomeKind, identity::TaskId};
 
 /// Process-local counter for `seq` values.
-///
-/// Zero is the exhausted sentinel and is never returned.
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[inline]
@@ -85,9 +86,10 @@ fn next_event_seq() -> u64 {
 
 /// Classifies one best-effort runtime event.
 ///
-/// Every [`Event`] has `seq`, `at`, and `kind`. Variant documentation lists the additional metadata
-/// set by Taskvisor. Match on this value before reading optional metadata. This enum is non-exhaustive;
-/// include a wildcard arm when matching it.
+/// Every [`Event`] has `seq`, `at`, and `kind`.
+/// Variant documentation lists the additional metadata set by Taskvisor.
+/// Match on this value before reading optional metadata.
+/// This enum is non-exhaustive; include a wildcard arm when matching it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventKind {
@@ -103,21 +105,22 @@ pub enum EventKind {
 
     /// Cleanup retirement permanently reduced this supervisor's ownership capacity.
     ///
-    /// Carries the original finite limit in `configured_capacity`, the remaining usable limit in `effective_capacity`,
-    /// and the units retired by this transition in `retired_units`. `task` may identify the runtime component
-    /// that observed the retirement.
+    /// Carries the original finite limit in `configured_capacity`, the remaining usable limit in
+    /// `effective_capacity`, and the units retired by this transition in `retired_units`.
+    /// `task` may identify the runtime component that observed the retirement.
     OwnershipCapacityRetired,
 
     /// An event path fell behind or closed before delivery.
     ///
     /// `task` identifies the subscriber or internal relay.
-    /// `dropped` carries a loss count when known. `reason` contains diagnostic details.
+    /// `dropped` carries a loss count when known.
+    /// `reason` contains diagnostic details.
     SubscriberOverflow,
 
     /// Explicit shutdown entered the shared shutdown workflow.
     ///
-    /// This includes a handle request, an application shutdown future, or a configured
-    /// operating-system signal. Natural shutdown does not emit it.
+    /// This includes a handle request, an application shutdown future, or a configured operating-system signal.
+    /// Natural shutdown does not emit it.
     ShutdownRequested,
 
     /// Registry task cleanup finished within the shared grace window.
@@ -135,7 +138,8 @@ pub enum EventKind {
 
     /// One task attempt returned `Ok(())`.
     ///
-    /// This is not always the final task result. Carries `id`, `task`, `attempt`, and `duration_ms`.
+    /// This is not always the final task result.
+    /// Carries `id`, `task`, `attempt`, and `duration_ms`.
     AttemptSucceeded,
 
     /// One task attempt returned [`TaskError::Canceled`](crate::TaskError::Canceled).
@@ -164,19 +168,22 @@ pub enum EventKind {
 
     /// A task add request was published before registry processing.
     ///
-    /// This does not confirm admission. An all-or-nothing batch publishes one event per item before
-    /// sending its single registry command. Carries the reserved `id` and requested `task` name.
+    /// This does not confirm admission.
+    /// An all-or-nothing batch publishes one event per item before sending its single registry command.
+    /// Carries the reserved `id` and requested `task` name.
     TaskAddRequested,
 
     /// Registry admission accepted the task.
     ///
-    /// The task body may not have started. Carries `id` and `task`.
+    /// The task body may not have started.
+    /// Carries `id` and `task`.
     TaskAdded,
 
     /// Registry admission rejected a task add.
     ///
-    /// No rejected task body starts. Batch rejection starts no item in the batch. Carries `id`, `task`,
-    /// diagnostic `reason`, [`TaskOutcomeKind::Rejected`], and a registry [`RejectionKind`].
+    /// No rejected task body starts.
+    /// Batch rejection starts no item in the batch.
+    /// Carries `id`, `task`, diagnostic `reason`, [`TaskOutcomeKind::Rejected`], and a registry [`RejectionKind`].
     TaskAddFailed,
 
     /// A remove or cancel request entered runtime or controller processing.
@@ -187,17 +194,19 @@ pub enum EventKind {
 
     /// Registry cleanup attempted the closing event for a removed task.
     ///
-    /// Registry membership is already absent. Final watched-outcome delivery, when requested,
-    /// was attempted first. A force-aborted task may still be physically active. Carries `id` and `task`.
+    /// Registry membership is already absent.
+    /// Final watched-outcome delivery, when requested, was attempted first.
+    /// A force-aborted task may still be physically active.
+    /// Carries `id` and `task`.
     TaskRemoved,
 
     /// Registry cleanup classified the final outcome of a registered task.
     ///
-    /// Membership is already absent. This event is attempted before watched outcome delivery and
-    /// [`TaskRemoved`](Self::TaskRemoved). Except for force-abort, task execution is physically
-    /// joined first. Carries `id`, `task`, `outcome_kind`, and optional diagnostic `reason`
-    /// and `exit_code`. Use [`TaskWaiter`](crate::TaskWaiter) when the final
-    /// outcome must not rely on best-effort event delivery.
+    /// Membership is already absent.
+    /// This event is attempted before watched outcome delivery and [`TaskRemoved`](Self::TaskRemoved).
+    /// Except for force-abort, task execution is physically joined first.
+    /// Carries `id`, `task`, `outcome_kind`, and optional diagnostic `reason` and `exit_code`.
+    /// Use [`TaskWaiter`](crate::TaskWaiter) when the final outcome must not rely on best-effort event delivery.
     TaskFinished,
 
     #[cfg(feature = "controller")]
@@ -224,7 +233,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    /// Returns the stable snake-case label for logs and metrics.
+    /// Stable snake-case label for logs and metrics.
     ///
     /// ```rust
     /// use taskvisor::EventKind;
@@ -276,7 +285,7 @@ pub enum BackoffSource {
 }
 
 impl BackoffSource {
-    /// Returns the stable label used by logs and metrics.
+    /// Stable label for logs and metrics.
     ///
     /// ```rust
     /// use taskvisor::BackoffSource;
@@ -295,8 +304,9 @@ impl BackoffSource {
 
 /// Classifies why submitted work was rejected before its task body ran.
 ///
-/// Use this enum for branching and telemetry. [`Event::reason`] and [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
-/// keep readable details. This enum is non-exhaustive; include a wildcard arm when matching it.
+/// Use this enum for branching and telemetry.
+/// [`Event::reason`] and [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected) keep readable details.
+/// This enum is non-exhaustive; include a wildcard arm when matching it.
 ///
 /// ```rust
 /// use taskvisor::RejectionKind;
@@ -309,8 +319,9 @@ impl BackoffSource {
 pub enum RejectionKind {
     /// The name is reserved or repeated in the same all-or-nothing batch.
     ///
-    /// An active or removing task reserves its name. A force-aborted task keeps the name reserved until
-    /// Taskvisor has observed the actor's physical exit and collected its terminal state.
+    /// An active or removing task reserves its name.
+    /// A force-aborted task keeps the name reserved until Taskvisor has observed the actor's physical
+    /// exit and collected its terminal state.
     AlreadyExists,
     /// A conflict elsewhere caused this item in an all-or-nothing batch to fail.
     BatchRejected,
@@ -331,7 +342,7 @@ pub enum RejectionKind {
 }
 
 impl RejectionKind {
-    /// Returns the stable label used by logs and metrics.
+    /// Stable label for logs and metrics.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         match self {
@@ -350,12 +361,13 @@ impl RejectionKind {
 
 /// One best-effort runtime event with optional typed metadata.
 ///
-/// Subscriber callbacks receive this value by reference. Match [`kind`](Self::kind) first, then read the
-/// fields documented for that variant. Do not parse [`reason`](Self::reason) for program logic;
-/// use typed category fields and their stable labels.
+/// Subscriber callbacks receive this value by reference.
+/// Match [`kind`](Self::kind) first, then read the fields documented for that variant.
+/// Do not parse [`reason`](Self::reason) for program logic.
+/// Use typed category fields and their stable labels.
 ///
-/// [`Event::new`] sets `kind`, `at`, and `seq`. The `with_*` builders attach metadata but do not
-/// validate that a field belongs to the selected kind.
+/// [`Event::new`] sets `kind`, `at`, and `seq`.
+/// The `with_*` builders attach metadata but do not validate that a field belongs to the selected kind.
 ///
 /// This struct is non-exhaustive; use `..` when matching it.
 #[derive(Clone)]
@@ -369,7 +381,8 @@ pub struct Event {
     pub seq: u64,
     /// Wall-clock timestamp captured when the event was created.
     ///
-    /// Wall clocks can move. This value is not a monotonic ordering source.
+    /// Wall clocks can move.
+    /// This value is not a monotonic ordering source.
     pub at: SystemTime,
 
     /// Configured task deadline in whole milliseconds.
@@ -388,8 +401,8 @@ pub struct Event {
     pub retired_units: Option<usize>,
     /// Human-readable diagnostic detail.
     ///
-    /// This text is not schema and may change. Use typed fields such as [`outcome_kind`](Self::outcome_kind)
-    /// and [`rejection_kind`](Self::rejection_kind) for machine decisions.
+    /// This text is not schema and may change.
+    /// Use typed fields such as [`outcome_kind`](Self::outcome_kind) and [`rejection_kind`](Self::rejection_kind) for machine decisions.
     pub reason: Option<Arc<str>>,
     /// Final category for `TaskFinished` and rejected work.
     ///
@@ -405,7 +418,8 @@ pub struct Event {
     pub attempt: Option<u32>,
     /// Name associated with the event.
     ///
-    /// Usually a task name. Diagnostics may store a subscriber, relay, or runtime component name.
+    /// Usually a task name.
+    /// Diagnostics may store a subscriber, relay, or runtime component name.
     /// Controller events store a slot name.
     pub task: Option<Arc<str>>,
     /// Submission and run identity associated with the event.
@@ -425,7 +439,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// Creates an event with the current wall-clock time and next sequence value.
+    /// New event envelope with the current wall-clock time and next process-local sequence.
     ///
     /// # Panics
     ///
@@ -454,7 +468,7 @@ impl Event {
         }
     }
 
-    /// Attaches a readable reason.
+    /// Readable diagnostic detail.
     #[inline]
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<Arc<str>>) -> Self {
@@ -462,7 +476,7 @@ impl Event {
         self
     }
 
-    /// Attaches a machine-readable final outcome category.
+    /// Readable final outcome category.
     #[inline]
     #[must_use]
     pub fn with_outcome_kind(mut self, kind: TaskOutcomeKind) -> Self {
@@ -470,7 +484,7 @@ impl Event {
         self
     }
 
-    /// Attaches a machine-readable submission rejection category.
+    /// Readable submission rejection category.
     ///
     /// This also sets [`outcome_kind`](Self::outcome_kind) to [`TaskOutcomeKind::Rejected`].
     #[inline]
@@ -481,7 +495,7 @@ impl Event {
         self
     }
 
-    /// Attaches the task, diagnostic component, or controller slot name.
+    /// Task, subscriber, diagnostic component, or controller slot name.
     #[inline]
     #[must_use]
     pub fn with_task(mut self, task: impl Into<Arc<str>>) -> Self {
@@ -489,7 +503,7 @@ impl Event {
         self
     }
 
-    /// Attaches the submission and run identity.
+    /// Submission and run identity.
     #[inline]
     #[must_use]
     pub fn with_id(mut self, id: TaskId) -> Self {
@@ -497,7 +511,9 @@ impl Event {
         self
     }
 
-    /// Attaches a deadline, stored as whole milliseconds.
+    /// Deadline in whole milliseconds.
+    ///
+    /// Fractional milliseconds are truncated and values above `u32::MAX` milliseconds are capped.
     #[inline]
     #[must_use]
     pub fn with_timeout(mut self, d: Duration) -> Self {
@@ -506,7 +522,9 @@ impl Event {
         self
     }
 
-    /// Attaches a retry or restart delay, stored as whole milliseconds.
+    /// Retry or restart delay in whole milliseconds.
+    ///
+    /// Fractional milliseconds are truncated and values above `u32::MAX` milliseconds are capped.
     #[inline]
     #[must_use]
     pub fn with_delay(mut self, d: Duration) -> Self {
@@ -515,7 +533,9 @@ impl Event {
         self
     }
 
-    /// Attaches an attempt duration, stored as whole milliseconds.
+    /// Attempt duration in whole milliseconds.
+    ///
+    /// Fractional milliseconds are truncated and values above `u32::MAX` milliseconds are capped.
     #[inline]
     #[must_use]
     pub fn with_duration(mut self, d: Duration) -> Self {
@@ -524,7 +544,7 @@ impl Event {
         self
     }
 
-    /// Attaches the number of events represented by an overflow report.
+    /// Number of events represented by one overflow report.
     #[inline]
     #[must_use]
     pub fn with_dropped(mut self, dropped: u64) -> Self {
@@ -532,7 +552,7 @@ impl Event {
         self
     }
 
-    /// Attaches the 1-based attempt number.
+    /// One-based attempt number.
     #[inline]
     #[must_use]
     pub fn with_attempt(mut self, n: u32) -> Self {
@@ -540,7 +560,7 @@ impl Event {
         self
     }
 
-    /// Attaches a numeric exit code from a process-like task.
+    /// Numeric exit code from a process-like task.
     #[inline]
     #[must_use]
     pub fn with_exit_code(mut self, code: i32) -> Self {
@@ -548,7 +568,7 @@ impl Event {
         self
     }
 
-    /// Attaches the cause of a scheduled delay.
+    /// Cause of a scheduled delay.
     #[inline]
     #[must_use]
     pub fn with_backoff_source(mut self, source: BackoffSource) -> Self {
@@ -556,21 +576,21 @@ impl Event {
         self
     }
 
-    /// Marks a delay scheduled after success.
+    /// Success source for a scheduled delay.
     #[inline]
     #[must_use]
     pub fn with_backoff_success(self) -> Self {
         self.with_backoff_source(BackoffSource::Success)
     }
 
-    /// Marks a delay scheduled after failure.
+    /// Failure source for a scheduled delay.
     #[inline]
     #[must_use]
     pub fn with_backoff_failure(self) -> Self {
         self.with_backoff_source(BackoffSource::Failure)
     }
 
-    /// Creates an overflow event for a subscriber or the internal relay.
+    /// Overflow diagnostic with its source in `task` and detail in `reason`.
     #[inline]
     #[must_use]
     pub fn subscriber_overflow(
@@ -582,7 +602,7 @@ impl Event {
             .with_reason(reason)
     }
 
-    /// Creates an event for a panicked subscriber callback.
+    /// Subscriber-panic diagnostic with the subscriber name in `task` and panic detail in `reason`.
     #[inline]
     #[must_use]
     pub fn subscriber_panicked(subscriber: impl Into<Arc<str>>, info: impl Into<Arc<str>>) -> Self {
@@ -591,7 +611,7 @@ impl Event {
             .with_reason(info)
     }
 
-    /// Creates an event for an internal runtime failure.
+    /// Runtime-failure diagnostic with the component in `task` and detail in `reason`.
     #[inline]
     #[must_use]
     pub fn runtime_failure(component: impl Into<Arc<str>>, reason: impl Into<Arc<str>>) -> Self {
@@ -600,7 +620,7 @@ impl Event {
             .with_reason(reason)
     }
 
-    /// Creates an event for one permanent reduction of a finite ownership capacity.
+    /// Permanent reduction of a finite ownership capacity.
     #[inline]
     #[must_use]
     pub fn ownership_capacity_retired(
@@ -615,7 +635,7 @@ impl Event {
         event
     }
 
-    /// Returns whether this is an internal diagnostic event.
+    /// Internal-diagnostic classification used to prevent recursive diagnostics.
     #[inline]
     #[must_use]
     pub fn is_internal_diagnostic(&self) -> bool {

@@ -1,7 +1,6 @@
 //! Internal slot admission engine.
 //!
-//! One loop owns the ordered command receiver.
-//! It applies commands, registry replies, runtime completion, and shutdown to controller state.
+//! One loop owns the ordered command receiver and all controller state transitions.
 //!
 //! ```text
 //! handle ───────────► command queue ──► lifecycle driver
@@ -22,9 +21,12 @@
 //!
 //! The shared state lock is not held across asynchronous waits, event publication, reply delivery, or user-value destruction.
 
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, Weak};
+use std::sync::{
+    Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -63,8 +65,7 @@ mod snapshot;
 pub(crate) struct Controller {
     /// Static controller configuration.
     config: ControllerConfig,
-    /// Runtime control surface.
-    /// `Weak` avoids extending the runtime core's lifetime during teardown.
+    /// Runtime control surface that does not extend the core lifetime during teardown.
     supervisor: Weak<SupervisorCore>,
     /// Supervisor-local ownership capacity and background cleanup workers.
     drop_domain: DropDomain,
@@ -80,28 +81,32 @@ pub(crate) struct Controller {
     /// Ordered command sender cloned into `ControllerHandle`.
     tx: mpsc::Sender<ControllerCommand>,
     /// Single-use command receiver owned by the controller loop.
-    rx: RwLock<Option<mpsc::Receiver<ControllerCommand>>>,
+    rx: StdMutex<Option<mpsc::Receiver<ControllerCommand>>>,
     /// Set when the controller loop begins shutdown or exits.
-    shutting_down: std::sync::atomic::AtomicBool,
+    shutting_down: AtomicBool,
     /// Single controller loop task shared by every start and join caller.
     task: OnceLock<ControllerTask>,
 }
 
 impl Controller {
-    /// Locks consolidated controller state, recovering after an internal panic.
+    /// Poison-recovering access to consolidated controller state.
     fn state(&self) -> StdMutexGuard<'_, ControllerState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    /// Clones a slot reference without keeping the controller-state lock.
+    /// Slot access without retaining the controller-state lock.
     fn slot(&self, name: &str) -> Option<Arc<Mutex<SlotState>>> {
         self.state().slots.get(name).cloned()
     }
 
-    /// Creates a controller and its bounded ordered command channel.
+    /// Bounded controller state with an inert command receiver.
     ///
     /// The controller is inert until [`run`](Self::run) is called.
-    pub fn new(config: ControllerConfig, supervisor: &Arc<SupervisorCore>, bus: Bus) -> Arc<Self> {
+    pub(crate) fn new(
+        config: ControllerConfig,
+        supervisor: &Arc<SupervisorCore>,
+        bus: Bus,
+    ) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(config.queue_capacity().get());
         let shutdown_token = supervisor.shutdown_started_token();
 
@@ -113,15 +118,15 @@ impl Controller {
             shutdown_token,
             state: StdMutex::new(ControllerState::default()),
             tx,
-            rx: RwLock::new(Some(rx)),
-            shutting_down: std::sync::atomic::AtomicBool::new(false),
+            rx: StdMutex::new(Some(rx)),
+            shutting_down: AtomicBool::new(false),
             task: OnceLock::new(),
         })
     }
 
-    /// Resolves a parked watched submission as `Rejected`.
+    /// Terminal rejection for a parked watched submission.
     ///
-    /// This is a no-op for unwatched submissions and for watched submissions already handed to the runtime registry.
+    /// Unwatched submissions and registry-owned watchers are unchanged.
     fn finalize_rejected(
         &self,
         id: TaskId,
@@ -132,7 +137,6 @@ impl Controller {
         Self::send_rejected(Some(tx), kind, reason)
     }
 
-    /// Sends a controller rejection and returns it if the receiver is gone.
     fn send_rejected(
         done: Option<OutcomeTx>,
         kind: RejectionKind,
@@ -146,24 +150,19 @@ impl Controller {
             .err()
     }
 
-    /// Marks the controller as no longer admitting or advancing queued work.
+    /// Admission fence before command-queue shutdown drain.
     ///
     /// The command receiver closes later during shutdown drain.
     /// Commands that enter before then are rejected or resolved by that drain.
     fn mark_shutting_down(&self) {
-        self.shutting_down
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.shutting_down.store(true, Ordering::Release);
     }
 
-    /// Returns `true` when the shutdown signal has fired or the loop set its local shutdown flag.
     fn is_shutting_down(&self) -> bool {
-        self.shutdown_token.is_cancelled()
-            || self
-                .shutting_down
-                .load(std::sync::atomic::Ordering::Acquire)
+        self.shutdown_token.is_cancelled() || self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Rejects any watcher retained after normal or abnormal loop exit.
+    /// Terminal rejection for every watcher retained after loop exit.
     fn finalize_remaining_watchers(&self) {
         let pending: Vec<TaskId> = self.state().watchers.keys().copied().collect();
         for id in pending {
@@ -182,8 +181,19 @@ impl Controller {
     }
 
     /// Returns a cloneable client for the ordered controller command queue.
-    pub fn handle(&self) -> ControllerHandle {
+    pub(crate) fn handle(&self) -> ControllerHandle {
         ControllerHandle::new(self.tx.clone(), self.bus.clone(), self.drop_domain.clone())
+    }
+}
+
+impl Drop for Controller {
+    /// Closes an inert receiver before it is destroyed.
+    fn drop(&mut self) {
+        self.mark_shutting_down();
+        let rx = self.rx.get_mut().unwrap_or_else(|error| error.into_inner());
+        if let Some(rx) = rx.as_mut() {
+            rx.close();
+        }
     }
 }
 

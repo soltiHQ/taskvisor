@@ -4,17 +4,18 @@
 //! It gives each application-defined **slot** at most one owner.
 //! Work in different slots can proceed independently.
 //!
-//! Use controller `submit*` methods when tasks for the same customer, device, document, deployment,
-//! or other key must not overlap. Use direct `add*` methods when keyed admission is not needed;
-//! direct adds bypass this module.
+//! Use [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) for keyed work that must not overlap.
+//! Use [`SupervisorHandle::add`](crate::SupervisorHandle::add) when keyed admission is not needed.
+//! Direct adds bypass this module.
 //!
-//! The `controller` crate feature is enabled by default. A supervisor still needs an explicit
-//! [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller)
+//! The `controller` crate feature is enabled by default.
+//! A supervisor still needs an explicit [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller)
 //! call before controller methods can accept work.
 //!
 //! # Quick start
 //!
-//! This example submits a job to a customer-specific lane and receives its final result through a dedicated waiter:
+//! This example submits a job to a customer-specific lane.
+//! A dedicated waiter returns its final result.
 //!
 //! ```rust,no_run
 //! use taskvisor::prelude::*;
@@ -30,7 +31,7 @@
 //! let request = ControllerSpec::queue(TaskSpec::once("customer-42-job-7", task))
 //!     .with_slot("customer-42");
 //!
-//! let (_id, waiter) = handle.submit_and_watch(request).await?;
+//! let waiter = handle.submit(request).watch().execute().await?;
 //! println!("{:?}", waiter.wait().await?);
 //! handle.shutdown().await?;
 //! # Ok(())
@@ -43,7 +44,7 @@
 //! application
 //!      │ ControllerSpec
 //!      ▼
-//! SupervisorHandle::submit*
+//! SupervisorHandle::submit
 //!      │ command intake
 //!      ▼
 //! controller slot
@@ -63,41 +64,46 @@
 //! - a [`TaskSpec`](crate::TaskSpec) name is a unique registry key and label;
 //! - a [`TaskId`](crate::TaskId) is the identity of one submission and outcome.
 //!
-//! The task name is the default slot. Use [`ControllerSpec::with_slot`] to put differently named
-//! tasks in one admission lane. Slot admission does not reserve a task name.
-//! The runtime registry still checks name uniqueness.
+//! The task name is the default slot.
+//! Use [`ControllerSpec::with_slot`] to put differently named tasks in one admission lane.
+//! Slot admission does not reserve a task name. The runtime registry still checks name uniqueness.
 //!
-//! Cancellation and removal never act on an entire slot. `TaskId` methods can claim queued or registered work.
-//! [`SupervisorHandle::remove_by_name`](crate::SupervisorHandle::remove_by_name) and
-//! [`SupervisorHandle::cancel_by_name`](crate::SupervisorHandle::cancel_by_name) see only work already in the
-//! registry because queued submissions do not own a registered name.
+//! Cancellation and removal never act on an entire slot.
+//! `TaskId` targets can claim queued or registered work.
+//! Name targets passed to [`SupervisorHandle::remove`](crate::SupervisorHandle::remove) or
+//! [`SupervisorHandle::cancel`](crate::SupervisorHandle::cancel) see only registered work.
+//! Queued submissions do not own a registered name.
 //! Removing one queued item leaves the other submissions in its slot unchanged.
 //!
 //! # Choose a busy-slot policy
 //!
-//! - [`AdmissionPolicy::Queue`] appends to a bounded FIFO queue. Use it when every item should be considered in order.
-//! - [`AdmissionPolicy::Replace`] retires the owner and replaces the queue head. Use it when the next item should carry the newest value.
-//! - [`AdmissionPolicy::DropIfRunning`] rejects the new item without running it. Use it when duplicate work can be skipped.
+//! - [`AdmissionPolicy::Queue`] appends to a bounded FIFO queue when every item should be considered in order.
+//! - [`AdmissionPolicy::Replace`] retires the owner and makes the newest value the queue head.
+//! - [`AdmissionPolicy::DropIfRunning`] rejects duplicate work without running it.
 //!
 //! After preflight, every policy takes the same idle-slot path and attempts registry admission.
-//! `Replace` changes only the queue head; older FIFO entries behind it remain.
+//! `Replace` changes only the queue head. Older FIFO entries behind it remain.
 //!
-//! # Choose a submission API
+//! # Configure a submission
 //!
-//! - Wait for intake capacity with [`SupervisorHandle::submit`](crate::SupervisorHandle::submit).
-//! - Bound only ownership admission with [`SupervisorHandle::submit_with_ownership_timeout`](crate::SupervisorHandle::submit_with_ownership_timeout).
-//! - Use [`SupervisorHandle::try_submit`](crate::SupervisorHandle::try_submit) to fail fast when intake is full.
-//! - Receive rejection or the final task result with [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch).
-//! - Bound ownership admission and receive that result with [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout).
-//! - Fail fast and receive that result with [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch).
-//! - Allocate the `TaskId` before intake or events with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
+//! [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) is the direct entry point to a [`Submit`] operation.
 //!
-//! `Ok(id)` from a submit method confirms only command intake. Slot admission and runtime registration happen later.
-//! Use a watched method when application logic must know whether work was rejected or how an admitted task ended.
-//! [`TaskWaiter`](crate::TaskWaiter) delivers that result directly; lifecycle events remain a best-effort observability path.
-//! Ownership-timeout methods stop their timer after the permit is acquired. They do not bound controller-command capacity,
-//! slot admission, later registry admission, or task execution. On timeout, no command or lifecycle event is produced.
-//! [`PreparedSubmission`] provides the same waiting, ownership-timeout, and fail-fast choices.
+//! - `execute().await` waits for ownership and command capacity, then returns the task ID.
+//! - `ownership_timeout(duration)` bounds only ownership admission before `execute().await`.
+//! - `try_intake()` requires ownership and command capacity to be available immediately.
+//! - `watch()` changes a successful terminal result from [`TaskId`](crate::TaskId) to [`TaskWaiter`](crate::TaskWaiter), including for ownership-bounded and fail-fast intake.
+//! - [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission) allocates the `TaskId` before intake or events.
+//!
+//! `Ok(id)` from an unwatched terminal confirms only command intake.
+//! Slot admission and runtime registration happen later.
+//! Add `watch()` when application logic must know whether work was rejected or how an admitted task ended.
+//! [`TaskWaiter`](crate::TaskWaiter) delivers that result directly.
+//! Lifecycle events remain a best-effort observability path.
+//! `ownership_timeout` stops its timer after the permit is acquired.
+//! It does not bound controller-command capacity or slot admission.
+//! It also does not bound later registry admission or task execution.
+//! A timeout produces no command or lifecycle event.
+//! [`PreparedSubmission::submit`] preserves the preallocated ID in that operation.
 //!
 //! During shutdown, buffered and controller-owned pending submissions are rejected.
 //! A watched pending submission reports [`RejectionKind::ControllerShuttingDown`](crate::RejectionKind::ControllerShuttingDown).
@@ -127,7 +133,7 @@ mod error;
 pub use error::ControllerError;
 
 mod prepared;
-pub use prepared::PreparedSubmission;
+pub use prepared::{PreparedSubmission, Submit};
 
 mod spec;
 pub use spec::ControllerSpec;

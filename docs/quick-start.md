@@ -6,8 +6,8 @@ description: Run a retrying Taskvisor task and wait for its direct final outcome
 # Quick start
 
 This example runs one task, retries two temporary failures, and waits for the final outcome.
-It uses `serve` and `add_and_watch` because the caller needs that task's result.
-`Supervisor::run` would report the shared supervisor lifecycle instead of returning one task outcome.
+It uses [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) and `add(spec).watch().execute()` because the caller needs that task's result.
+[`Supervisor::run`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run) would wait for the supervisor lifecycle, not return one task's result.
 
 ## Create a project
 
@@ -17,7 +17,7 @@ The default Taskvisor install includes everything this example uses; no addition
 ```sh
 cargo new taskvisor-quick-start
 cd taskvisor-quick-start
-cargo add taskvisor@0.8
+cargo add taskvisor@0.9
 cargo add tokio@1 --features full
 ```
 
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve()?;
 
-    let (_, waiter) = handle.add_and_watch(spec).await?;
+    let waiter = handle.add(spec).watch().execute().await?;
     println!("final outcome: {:?}", waiter.wait().await?);
 
     handle.shutdown().await?;
@@ -82,26 +82,38 @@ final outcome: Completed
 
 ## Understand what happened
 
-```text
-TaskFn ──► TaskSpec ──► add_and_watch ──► supervised attempts ──► TaskWaiter
-                                │                                  │
-                                └──────── task ID ─────────────────┘
+```mermaid
+flowchart TB
+accTitle: A watched task and its result
+accDescr: Task settings, supervised attempts, and the waiter connect through a watched registration.
+Task["TaskFn"]
+Spec["TaskSpec"]
+Add["add(spec).watch().execute()"]
+Attempts["Supervised attempts"]
+Waiter["TaskWaiter"]
+Task --> Spec
+Spec --> Add
+Add -->|"registers work"| Attempts
+Add -->|"returns with task ID"| Waiter
+Attempts -->|"final outcome"| Waiter
 ```
 
-`TaskFn` creates a fresh future for every attempt.
+[TaskFn](https://docs.rs/taskvisor/latest/taskvisor/tasks/struct.TaskFn.html) creates a fresh future for every attempt.
 The first two attempts return retryable failures.
 Taskvisor waits for the configured backoff before each retry, and the third attempt succeeds.
 
 A retry limit counts retries after the first failed attempt.
 The limit of two therefore permits the initial attempt and at most two retries.
 
-`add_and_watch` returns a `TaskWaiter`.
-Its direct in-process channel delivers the final `TaskOutcome` outside the best-effort event path.
-`handle.shutdown().await` then joins the shared shutdown and cleanup workflow.
+[`add`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add) starts an operation builder. Its `watch()` modifier makes `execute()` return a [TaskWaiter](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html).
+It delivers the final [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html) through a direct channel. It does not depend on event delivery.
+[`handle.shutdown().await`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.shutdown) then joins the shared shutdown and cleanup workflow.
 
 Every retry starts a new attempt.
 Before returning a retryable failure for work with external side effects, make the operation safe to repeat.
 Read [Make repeated attempts safe](lifecycle-policies.md#make-repeated-attempts-safe) before applying this policy to real I/O.
+
+Source: [task settings](../src/tasks/spec.rs), [the retry loop](../src/core/actor.rs), and [watched results](../src/core/outcome.rs).
 
 ## Continue from here
 

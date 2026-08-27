@@ -15,7 +15,8 @@
 //!                              └── cancellation token ────► tokio-util-interop feature
 //! ```
 //!
-//! This module only shortens imports. It creates no runtime state and changes no behavior.
+//! This module only shortens imports.
+//! It creates no runtime state and changes no behavior.
 //! Prefer explicit crate-root imports when a smaller local namespace or clearer dependencies matter.
 
 /// Supervisor construction, control, configuration, and final outcomes.
@@ -36,8 +37,8 @@ pub use crate::events::{BackoffSource, Event, EventKind, RejectionKind};
 /// Build, runtime, task, and combined error types.
 pub use crate::error::{BuildError, Error, RuntimeError, TaskError};
 
-/// Application callback interface for best-effort events.
-pub use crate::subscribers::Subscribe;
+/// Application callback interface and worker selection for best-effort events.
+pub use crate::subscribers::{Subscribe, SubscriberExecution};
 
 /// Process-local task submission identity.
 pub use crate::identity::TaskId;

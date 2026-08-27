@@ -1,9 +1,9 @@
 //! Defines limits and shutdown settings shared by one runtime.
 //!
 //! [`SupervisorConfig`] is read while [`SupervisorBuilder`](crate::SupervisorBuilder) builds the runtime.
-//! The resulting settings stay immutable. Per-task restart, backoff, timeout, and retry defaults belong to
-//! [`TaskDefaults`](crate::TaskDefaults). This configuration also bounds queues, task admission,
-//! concurrent attempts, and user lifetimes retained for cleanup. Queue capacity does not make events reliable.
+//! The resulting settings stay immutable.
+//! Per-task restart, backoff, timeout, and retry defaults belong to [`TaskDefaults`](crate::TaskDefaults).
+//! Queue capacity does not make events reliable.
 //! Use watched outcomes and direct management replies for application decisions.
 //!
 //! ```text
@@ -30,7 +30,7 @@ const DEFAULT_SUBSCRIBER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Structural upper bound shared by Tokio bounded channels and semaphores.
 pub(crate) const MAX_ASYNC_CAPACITY: usize = tokio::sync::Semaphore::MAX_PERMITS;
 
-/// Rejects a channel or semaphore capacity above Tokio's structural limit.
+/// Shared Taskvisor structural-capacity check for runtime and controller configuration.
 pub(crate) fn validate_async_capacity(
     field: &'static str,
     value: NonZeroUsize,
@@ -52,10 +52,10 @@ fn checked_async_capacity(field: &'static str, value: usize) -> Result<NonZeroUs
     Ok(value)
 }
 
-/// Largest effective task-stop window accepted by the runtime.
+/// Upper bound applied to the effective task-stop window.
 ///
-/// Bounding this once at configuration time keeps Tokio deadline arithmetic
-/// valid and makes getters, timeout behaviour, and diagnostics agree.
+/// Clamping once keeps Tokio deadline arithmetic valid.
+/// It also keeps getters, timeout behavior, and diagnostics consistent.
 const MAX_GRACE: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 30);
 
 const fn normalize_grace(grace: Duration) -> Duration {
@@ -97,8 +97,7 @@ pub enum ConfigError {
 
 /// Immutable runtime-wide settings for one supervisor.
 ///
-/// These settings control task shutdown, subscriber draining, bounded queues, registry membership, event ingress,
-/// concurrent attempts, and user lifetimes retained for cleanup.
+/// These settings control task shutdown, subscriber draining, bounded queues, registry membership, event ingress, concurrent attempts, and user lifetimes retained for cleanup.
 /// Start with [`Default`] and change the limits needed by the application.
 /// Pass the result to [`Supervisor::new`](crate::Supervisor::new) or [`Supervisor::builder`](crate::Supervisor::builder).
 #[derive(Clone, Debug)]
@@ -114,7 +113,7 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Creates [`Default::default`] in a const context.
+    /// Built-in runtime configuration available in const contexts.
     pub const fn new() -> Self {
         Self {
             grace: Duration::from_secs(60),
@@ -127,26 +126,28 @@ impl SupervisorConfig {
         }
     }
 
-    /// Returns the cooperative task-stop window.
+    /// Cooperative task-stop window before logical force-abort.
     ///
     /// Explicit removal, requested shutdown, and natural shutdown use this window.
     /// After it expires, Taskvisor commits a logical force-abort.
-    /// The physical task code may remain active after that point. Zero skips the wait.
+    /// The physical task code may remain active after that point.
+    /// Zero skips the wait.
     #[must_use]
     pub const fn grace(&self) -> Duration {
         self.grace
     }
 
-    /// Returns the shared deadline for draining subscriber queues.
+    /// Shared deadline for draining subscriber queues.
     ///
     /// Zero closes the queues without waiting for pending events.
-    /// The deadline can drop queued events. It cannot stop a callback already running.
+    /// The deadline can drop queued events.
+    /// It cannot stop a callback already running.
     #[must_use]
     pub const fn subscriber_shutdown_timeout(&self) -> Duration {
         self.subscriber_shutdown_timeout
     }
 
-    /// Returns the limit for task attempts running at the same time.
+    /// Limit for task attempts running at the same time.
     ///
     /// `None` means no limit.
     /// Permit waits and retry backoff do not count.
@@ -156,7 +157,7 @@ impl SupervisorConfig {
         self.max_concurrent
     }
 
-    /// Returns the registry membership limit.
+    /// Registry membership limit.
     ///
     /// Registered and removing tasks count until terminal cleanup removes their identity.
     /// Force-aborted work can keep consuming the limit after membership ends.
@@ -169,22 +170,23 @@ impl SupervisorConfig {
         self.max_registered_tasks
     }
 
-    /// Returns the limit for user lifetimes owned by this supervisor.
+    /// Limit for user lifetimes owned by this supervisor.
     ///
-    /// Configured subscribers and accepted tasks share this limit. Each accepted lifetime keeps
-    /// one unit through queued work, its physical execution path, and isolated terminal destruction.
+    /// Configured subscribers and accepted tasks share this limit.
+    /// Each accepted lifetime keeps one unit through queued work, physical execution, and isolated terminal destruction.
     /// Force-aborted work can remain charged after logical completion.
     /// A destructor panic permanently retires its unit from a finite limit.
+    /// A finite limit below the internal cleanup-worker ceiling also lowers that ceiling.
     ///
-    /// `None` removes the ownership admission limit. Destructor isolation and its worker ceiling
-    /// remain active. Blocked destructors can then retain an unbounded number of user values and
-    /// cleanup batches.
+    /// `None` removes the ownership admission limit.
+    /// Destructor isolation and its worker ceiling remain active.
+    /// Blocked destructors can then retain an unbounded number of user values and cleanup batches.
     #[must_use]
     pub const fn ownership_capacity(&self) -> Option<NonZeroUsize> {
         self.ownership_capacity
     }
 
-    /// Returns the number of newest events retained by the event ingress.
+    /// Number of newest events retained by the event ingress.
     ///
     /// The bus remains best-effort.
     /// When publishers outrun the relay, older events are replaced and loss is reported through overflow diagnostics.
@@ -193,16 +195,16 @@ impl SupervisorConfig {
         self.bus_capacity
     }
 
-    /// Returns the capacity of the registry management queue.
+    /// Capacity of the registry management queue.
     ///
-    /// Regular management methods wait for this capacity.
-    /// Their `try_*` forms return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when no slot is available immediately.
+    /// Default direct-registry operations wait for this capacity.
+    /// Operations configured with `fail_fast()` return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when no slot is available immediately.
     #[must_use]
     pub const fn registry_queue_capacity(&self) -> NonZeroUsize {
         self.registry_queue_capacity
     }
 
-    /// Sets the cooperative task-stop window before logical force-abort.
+    /// Cooperative task-stop window before logical force-abort.
     ///
     /// Values above 30 years are normalized to 30 years.
     /// [`grace`](Self::grace) always returns the effective value used by timeout logic and diagnostics.
@@ -211,7 +213,7 @@ impl SupervisorConfig {
         self
     }
 
-    /// Sets the shared deadline for draining subscriber queues.
+    /// Shared deadline for draining subscriber queues.
     ///
     /// Zero closes the queues without waiting for pending events.
     /// The deadline does not interrupt a subscriber callback already running.
@@ -220,31 +222,35 @@ impl SupervisorConfig {
         self
     }
 
-    /// Sets or clears the limit for task attempts running at the same time.
+    /// Optional limit for task attempts running at the same time.
     ///
     /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) rejects values above Tokio's structural limit.
-    /// Use [`try_with_max_concurrent`](Self::try_with_max_concurrent) for a raw integer. Pass `None` to remove the limit.
+    /// Use [`try_with_max_concurrent`](Self::try_with_max_concurrent) for a raw integer.
+    /// Pass `None` to remove the limit.
     pub const fn with_max_concurrent(mut self, max_concurrent: Option<NonZeroUsize>) -> Self {
         self.max_concurrent = max_concurrent;
         self
     }
 
-    /// Sets the concurrency limit from a raw integer.
+    /// Task-attempt concurrency limit from a raw integer.
+    ///
+    /// Use [`with_max_concurrent`](Self::with_max_concurrent) with `None` for no limit.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_concurrent` is zero, or [`ConfigError::TooLarge`] above Tokio's structural limit.
-    /// Use [`with_max_concurrent`](Self::with_max_concurrent) with `None` for no limit.
+    /// - [`ConfigError::Zero`] when `max_concurrent` is zero;
+    /// - [`ConfigError::TooLarge`] when `max_concurrent` exceeds Tokio's structural limit.
     pub fn try_with_max_concurrent(self, max_concurrent: usize) -> Result<Self, ConfigError> {
         let value = checked_async_capacity("max_concurrent", max_concurrent)?;
         Ok(self.with_max_concurrent(Some(value)))
     }
 
-    /// Sets or clears the registry membership limit.
+    /// Optional registry membership limit.
     ///
-    /// Registered and removing tasks count until terminal cleanup finishes. Force-aborted work can keep
-    /// consuming the limit after membership ends. `None` disables only this limit. It does not change
-    /// the separate [`ownership_capacity`](Self::ownership_capacity) setting.
+    /// Registered and removing tasks count until terminal cleanup finishes.
+    /// Force-aborted work can keep consuming the limit after membership ends.
+    /// `None` disables only this limit.
+    /// It does not change the separate [`ownership_capacity`](Self::ownership_capacity) setting.
     ///
     /// Use [`try_with_max_registered_tasks`](Self::try_with_max_registered_tasks) for a raw integer.
     pub const fn with_max_registered_tasks(
@@ -255,11 +261,11 @@ impl SupervisorConfig {
         self
     }
 
-    /// Sets the registry membership limit from a raw integer.
+    /// Registry membership limit from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_registered_tasks` is zero.
+    /// - [`ConfigError::Zero`] when `max_registered_tasks` is zero.
     pub fn try_with_max_registered_tasks(
         self,
         max_registered_tasks: usize,
@@ -270,11 +276,12 @@ impl SupervisorConfig {
         Ok(self.with_max_registered_tasks(Some(value)))
     }
 
-    /// Sets or clears the limit for user lifetimes owned by this supervisor.
+    /// Optional limit for user lifetimes owned by this supervisor.
     ///
-    /// Configured subscribers and accepted tasks share the limit. `None` disables ownership admission backpressure
-    /// but keeps destructor isolation and its worker ceiling enabled. Without this limit, blocked destructors can
-    /// retain an unbounded number of user values and cleanup batches.
+    /// Configured subscribers and accepted tasks share the limit.
+    /// `None` disables ownership admission backpressure but keeps destructor isolation and its worker ceiling enabled.
+    /// Without this limit, blocked destructors can retain an unbounded number of user values and cleanup batches.
+    /// A finite limit below the internal cleanup-worker ceiling also lowers that ceiling.
     ///
     /// Use [`try_with_ownership_capacity`](Self::try_with_ownership_capacity) for a raw integer.
     pub const fn with_ownership_capacity(
@@ -285,12 +292,13 @@ impl SupervisorConfig {
         self
     }
 
-    /// Sets the user-lifetime ownership limit from a raw integer.
+    /// User-lifetime ownership limit from a raw integer.
+    ///
+    /// Use [`with_ownership_capacity`](Self::with_ownership_capacity) with `None` for no limit.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `ownership_capacity` is zero.
-    /// Use [`with_ownership_capacity`](Self::with_ownership_capacity) with `None` for no limit.
+    /// - [`ConfigError::Zero`] when `ownership_capacity` is zero.
     pub fn try_with_ownership_capacity(
         self,
         ownership_capacity: usize,
@@ -301,7 +309,7 @@ impl SupervisorConfig {
         Ok(self.with_ownership_capacity(Some(value)))
     }
 
-    /// Sets how many newest events the event ingress retains.
+    /// Number of newest events retained by the event ingress.
     ///
     /// Increasing this value absorbs a larger event burst but does not make lifecycle events reliable.
     ///
@@ -311,17 +319,18 @@ impl SupervisorConfig {
         self
     }
 
-    /// Sets the event-bus capacity from a raw integer.
+    /// Event-bus capacity from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `bus_capacity` is zero, or [`ConfigError::TooLarge`] above Tokio's structural limit.
+    /// - [`ConfigError::Zero`] when `bus_capacity` is zero;
+    /// - [`ConfigError::TooLarge`] when `bus_capacity` exceeds Tokio's structural limit.
     pub fn try_with_bus_capacity(self, bus_capacity: usize) -> Result<Self, ConfigError> {
         let value = checked_async_capacity("bus_capacity", bus_capacity)?;
         Ok(self.with_bus_capacity(value))
     }
 
-    /// Sets the capacity of the registry management queue.
+    /// Capacity of the registry management queue.
     ///
     /// This bounds management commands waiting for the registry.
     /// It does not change the task membership or attempt-concurrency limits.
@@ -335,11 +344,12 @@ impl SupervisorConfig {
         self
     }
 
-    /// Sets the registry queue capacity from a raw integer.
+    /// Registry management-queue capacity from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `registry_queue_capacity` is zero, or [`ConfigError::TooLarge`] above Tokio's structural limit.
+    /// - [`ConfigError::Zero`] when `registry_queue_capacity` is zero;
+    /// - [`ConfigError::TooLarge`] when `registry_queue_capacity` exceeds Tokio's structural limit.
     pub fn try_with_registry_queue_capacity(
         self,
         registry_queue_capacity: usize,
@@ -348,7 +358,6 @@ impl SupervisorConfig {
         Ok(self.with_registry_queue_capacity(value))
     }
 
-    /// Validates capacities accepted through infallible `NonZeroUsize` setters.
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if let Some(max_concurrent) = self.max_concurrent {
             validate_async_capacity("max_concurrent", max_concurrent)?;
@@ -359,9 +368,10 @@ impl SupervisorConfig {
 }
 
 impl Default for SupervisorConfig {
-    /// Returns the default runtime configuration.
+    /// Built-in runtime configuration.
     ///
     /// Defaults:
+    ///
     /// - graceful task shutdown: 60 seconds,
     /// - subscriber drain: 5 seconds,
     /// - task-attempt concurrency: unlimited,

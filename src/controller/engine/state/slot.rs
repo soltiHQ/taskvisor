@@ -38,7 +38,6 @@ pub(in crate::controller::engine) struct PendingSubmission {
 }
 
 impl PendingSubmission {
-    /// Creates a controller-owned pending submission.
     pub(in crate::controller::engine) fn new(
         id: TaskId,
         task_name: Arc<str>,
@@ -75,9 +74,10 @@ pub(in crate::controller::engine) enum SlotPhase {
     /// No current owner.
     Idle,
 
-    /// Registry admission has started but has no final Add decision.
+    /// Registry admission has started, but the controller has not applied a final Add decision.
     ///
-    /// The controller may still be waiting for bounded registry command capacity, or the registration request is waiting for its reply.
+    /// The controller may be waiting for bounded registry command capacity.
+    /// The registration request may instead be waiting for its reply.
     Admitting {
         /// Task identity waiting for registry admission.
         owner: TaskId,
@@ -121,9 +121,11 @@ pub(in crate::controller::engine) enum ReplaceAction {
     RemoveNow(TaskId),
     /// The registration reply must arrive before removal can be ordered.
     WaitForAdmission,
-    /// Replacement was already recorded; removal is pending or already requested.
+    /// Replacement was already recorded.
+    /// Removal is pending or already requested.
     AlreadyRequested,
-    /// The slot was idle. Replacement policy does not apply.
+    /// The slot was idle.
+    /// Replacement policy does not apply.
     Idle,
 }
 
@@ -132,7 +134,8 @@ pub(in crate::controller::engine) enum ReplaceAction {
 pub(in crate::controller::engine) enum AdmissionTransition {
     /// Admission completed and the slot is now running.
     Running,
-    /// Admission completed after an early replacement; removal must now be ordered.
+    /// Admission completed after an early replacement.
+    /// Removal must now be ordered.
     RemoveNow(TaskId),
     /// The reply does not belong to the current admission phase.
     Stale,
@@ -150,7 +153,7 @@ impl SlotPhase {
         }
     }
 
-    /// Returns the diagnostic status label for this phase.
+    /// Diagnostic status label for this phase.
     pub(in crate::controller::engine) fn label(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -185,14 +188,14 @@ impl SlotState {
         matches!(self.phase, SlotPhase::Idle)
     }
 
-    /// Returns the phase label used in busy-slot rejection details.
+    /// Phase label used in busy-slot rejection details.
     pub(in crate::controller::engine) fn status_label(&self) -> &'static str {
         self.phase.label()
     }
 
-    /// Starts admission when the slot is idle.
+    /// Idle-to-admitting transition for one owner.
     ///
-    /// Returns `false` without changing an occupied slot.
+    /// `false` leaves an occupied slot unchanged.
     pub(in crate::controller::engine) fn begin_admission(
         &mut self,
         owner: TaskId,
@@ -205,7 +208,7 @@ impl SlotState {
         true
     }
 
-    /// Applies replacement intent and returns the required removal action.
+    /// Replacement transition and required removal action for the current phase.
     pub(in crate::controller::engine) fn request_replacement(
         &mut self,
         requested_at: Instant,
@@ -232,7 +235,7 @@ impl SlotState {
         }
     }
 
-    /// Applies a successful registry Add decision for the matching owner.
+    /// Successful registry decision for a matching owner.
     pub(in crate::controller::engine) fn confirm_admission(
         &mut self,
         owner: TaskId,
@@ -257,9 +260,9 @@ impl SlotState {
         }
     }
 
-    /// Clears a matching admission after the registry rejects it.
+    /// Rejected registry decision for a matching owner.
     ///
-    /// Returns `false` without changing a stale or non-admitting owner.
+    /// `false` leaves a stale or non-admitting owner unchanged.
     pub(in crate::controller::engine) fn reject_admission(&mut self, owner: TaskId) -> bool {
         let matches_current = matches!(
             self.phase,
@@ -273,9 +276,9 @@ impl SlotState {
         matches_current
     }
 
-    /// Releases a matching accepted owner after physical completion.
+    /// Physical completion for a matching accepted owner.
     ///
-    /// Returns `false` for a stale owner or a phase without an accepted task.
+    /// `false` means the owner is stale or the phase has no accepted task.
     pub(in crate::controller::engine) fn complete_owner(&mut self, owner: TaskId) -> bool {
         let matches_current = matches!(
             self.phase,

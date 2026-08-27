@@ -13,9 +13,10 @@
 //!          runtime event relay ──► subscriber queues
 //! ```
 //!
-//! Publishing does not wait for free capacity. A full ring removes its oldest event and counts the loss.
-//! The receiver gets that count with the next retained event. This lets the relay emit one overflow
-//! diagnostic before it continues normal delivery.
+//! Publishing does not wait for free capacity.
+//! A full ring removes its oldest event and counts the loss.
+//! The receiver gets that count with the next retained event.
+//! This lets the relay emit one overflow diagnostic before it continues normal delivery.
 //!
 //! The bus stays disabled when the runtime has no event consumer.
 //! When the relay shuts down, it closes publication and transfers retained values out of the ring lock.
@@ -44,9 +45,7 @@ struct RingState {
 }
 
 impl RingState {
-    /// Retains the new event and returns the oldest event when the ring is full.
-    ///
-    /// The caller drops the displaced payload after releasing the ring lock.
+    /// The displaced event remains caller-owned and must be dropped after releasing the ring lock.
     fn push_retaining_newest(&mut self, event: Event, capacity: usize) -> (Option<Event>, bool) {
         let was_empty = self.events.is_empty();
         let displaced = if self.events.len() == capacity {
@@ -159,9 +158,10 @@ impl BusReceiver {
         self.try_message()
     }
 
-    /// Closes publication and takes all retained events and the pending loss count.
+    /// Final event-ring state for relay shutdown.
     ///
-    /// The returned events are owned by the caller so their destructors run after the ring mutex has been released.
+    /// The caller owns the returned events.
+    /// Their destructors run after the ring mutex has been released.
     pub(crate) fn close_and_take_pending(&mut self) -> (VecDeque<Event>, u64) {
         let mut state = self
             .shared
@@ -178,8 +178,8 @@ impl BusReceiver {
 }
 
 impl Bus {
-    /// Creates a disabled event ring with at least one retained slot.
-    pub fn new(capacity: usize) -> Self {
+    /// Disabled event ring with zero capacity clamped to one retained slot.
+    pub(crate) fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         #[cfg(test)]
         let (observers, _unused) = broadcast::channel(capacity);
@@ -206,14 +206,14 @@ impl Bus {
     ///
     /// A disabled or closed bus ignores the event.
     #[cfg(test)]
-    pub fn publish(&self, event: Event) {
+    pub(crate) fn publish(&self, event: Event) {
         if !self.shared.enabled.load(Ordering::Acquire) {
             return;
         }
         self.publish_enabled(event);
     }
 
-    /// Skips event construction when delivery is already disabled.
+    /// Lazy publication that avoids event construction while delivery is disabled.
     ///
     /// A concurrent relay shutdown may still discard the constructed event.
     pub(crate) fn publish_lazy(&self, make_event: impl FnOnce() -> Event) {
@@ -263,12 +263,11 @@ impl Bus {
         }
     }
 
-    /// Returns whether event retention is enabled.
     pub(crate) fn is_enabled(&self) -> bool {
         self.shared.enabled.load(Ordering::Acquire)
     }
 
-    /// Enables retention and transfers the only production receiver to the relay.
+    /// Exclusive production receiver for the relay, with retention enabled.
     ///
     /// # Panics
     ///

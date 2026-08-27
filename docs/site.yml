@@ -1,7 +1,7 @@
 schema: 1
 product: taskvisor
 title: Taskvisor
-compatibility_line: "0.8"
+compatibility_line: "0.9"
 repository: https://github.com/soltiHQ/taskvisor
 
 version:

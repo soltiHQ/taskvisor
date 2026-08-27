@@ -32,33 +32,37 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmissionPolicy {
-    /// Rejects new work while the slot has an owner.
+    /// Rejection of incoming work while the slot has an owner.
     ///
-    /// The task body does not start. The current owner and existing queue stay unchanged.
+    /// The task body does not start.
+    /// The current owner and existing queue stay unchanged.
     /// A watched submission resolves to [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected)
     /// with [`RejectionKind::SlotBusy`](crate::RejectionKind::SlotBusy).
     DropIfRunning,
 
-    /// Makes this submission the next candidate and retires the current owner.
+    /// Newest-head replacement with retirement of the current owner.
     ///
-    /// On a busy slot, this submission creates or replaces the queue head. Repeated replacements retain only the newest head.
-    /// FIFO items behind the head keep their order; `Replace` does not clear the entire queue.
+    /// On a busy slot, this submission creates or replaces the queue head.
+    /// Repeated replacements retain only the newest head.
+    /// FIFO items behind the head keep their order.
+    /// `Replace` does not clear the entire queue.
     ///
-    /// A registered owner receives a removal request. When registry admission is still pending,
-    /// the controller waits for that decision and orders removal only after acceptance.
+    /// A registered owner receives a removal request.
+    /// A pending registry admission must finish before removal can be ordered.
     /// The replacement starts after registry cleanup and physical release of the owner.
     ///
-    /// Replacement has no separate wait timeout. While physical release is pending, snapshots report the slot as
-    /// [`SlotStatusKind::Terminating`](crate::SlotStatusKind::Terminating).
+    /// Replacement has no separate wait timeout.
+    /// While physical release is pending, snapshots report the slot as [`SlotStatusKind::Terminating`](crate::SlotStatusKind::Terminating).
     ///
     /// This policy does not use [`ControllerConfig::max_slot_queue`](crate::ControllerConfig::max_slot_queue).
     /// Creating a new queue head can still hit the aggregate pending limit.
     /// A displaced watched head resolves with [`RejectionKind::SupersededByReplace`](crate::RejectionKind::SupersededByReplace).
     Replace,
 
-    /// Appends new work to the slot's FIFO queue.
+    /// FIFO admission behind the current owner and older pending work.
     ///
-    /// The current owner leaves the slot first. Pending submissions are then considered from the front of the queue.
+    /// The current owner leaves the slot first.
+    /// Pending submissions are then considered from the front of the queue.
     /// A later `Replace` submission can still displace that head.
     /// The per-slot queue limit can reject with [`RejectionKind::QueueFull`](crate::RejectionKind::QueueFull).
     /// The aggregate pending limit can reject with [`RejectionKind::ResourceLimit`](crate::RejectionKind::ResourceLimit).

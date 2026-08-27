@@ -1,11 +1,8 @@
-//! Advances an idle slot to its next queued submission.
+//! Advances an idle slot to the next admissible queued submission.
 //!
-//! Registry rejection, physical completion, or removal of a capacity waiter can clear a slot owner.
-//! Their handlers call this module after the slot returns to `Idle`.
-//! It pops work in queue order and sends each candidate to `handoff`.
-//!
-//! A handoff failure before registry commit rejects that candidate and moves to the next one.
-//! Recovered values return for cleanup after the slot unlocks.
+//! Authoritative rejection, physical completion, or capacity-wait removal can return a slot to `Idle`.
+//! Queue order is preserved while candidates cross the registry-handoff boundary.
+//! Pre-commit failures retain their values until the slot lock is released for cleanup.
 
 use std::sync::Arc;
 
@@ -20,9 +17,10 @@ use super::{
 };
 
 impl Controller {
-    /// Starts the first queued submission that can enter registry admission.
+    /// Registry handoff for the first admissible queued submission.
     ///
-    /// The slot must be idle. Failed handoffs are returned for deferred cleanup.
+    /// The slot must be idle.
+    /// Failed handoffs remain owned by the caller for deferred cleanup.
     pub(in crate::controller::engine) fn start_next_from_queue(
         &self,
         sup: &Arc<SupervisorCore>,

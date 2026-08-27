@@ -3,6 +3,68 @@
 use super::support::*;
 use crate::controller::engine::{Controller, ControllerTask};
 
+#[tokio::test]
+async fn controller_drop_closes_stored_receiver_and_drops_buffered_submission() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let handle = ctrl.handle().with_reservation_source(source.clone());
+    let (_, outcome) = handle
+        .try_submit_and_watch(
+            ControllerSpec::queue(waiting_spec("controller-drop-buffered"))
+                .with_slot("controller-drop-buffered-slot"),
+        )
+        .expect("the buffered submission must be accepted before controller drop");
+
+    drop(ctrl);
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), outcome).await,
+        Ok(Err(_))
+    ));
+    assert!(matches!(
+        handle.try_submit(ControllerSpec::queue(waiting_spec(
+            "controller-drop-late-submit"
+        ))),
+        Err(ControllerError::Closed)
+    ));
+    let recovered = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+        .await
+        .expect("controller drop must return ownership capacity")
+        .expect("ownership admission remains open");
+    drop(recovered);
+}
+
+#[tokio::test]
+async fn receiver_drop_closes_channel_and_drops_buffered_submission() {
+    let ctrl = make_controller(ControllerConfig::default(), Bus::new(64));
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let handle = ctrl.handle().with_reservation_source(source.clone());
+    let (_, outcome) = handle
+        .try_submit_and_watch(
+            ControllerSpec::queue(waiting_spec("receiver-drop-buffered"))
+                .with_slot("receiver-drop-buffered-slot"),
+        )
+        .expect("the buffered submission must be accepted before receiver drop");
+    let receiver = ctrl.take_command_receiver().expect("receiver present");
+    drop(receiver);
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), outcome).await,
+        Ok(Err(_))
+    ));
+    assert!(matches!(
+        handle.try_submit(ControllerSpec::queue(waiting_spec(
+            "receiver-drop-late-submit"
+        ))),
+        Err(ControllerError::Closed)
+    ));
+    let recovered = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+        .await
+        .expect("receiver drop must return ownership capacity")
+        .expect("ownership admission remains open");
+    drop(recovered);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn controller_task_join_can_resume_after_a_dropped_waiter() {
     let (release, released) = oneshot::channel::<()>();
@@ -133,12 +195,15 @@ async fn completed_owner_progresses_under_continuously_ready_intake() {
             }
         }
     });
-    let (owner_id, owner_waiter) = handle
-        .submit_and_watch(
+    let owner_waiter = handle
+        .submit(
             ControllerSpec::queue(TaskSpec::once("starvation-owner", owner)).with_slot("hot-slot"),
         )
+        .watch()
+        .execute()
         .await
         .expect("the initial owner submission must enter the controller");
+    let owner_id = owner_waiter.id();
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("the initial owner must start");
@@ -163,7 +228,7 @@ async fn completed_owner_progresses_under_continuously_ready_intake() {
         let producer_failed = Arc::clone(&producer_failed);
         producers.push(std::thread::spawn(move || {
             while !producer_stop.load(Ordering::Relaxed) {
-                match producer_handle.try_submit(producer_spec.clone()) {
+                match producer_handle.submit(producer_spec.clone()).try_intake() {
                     Ok(_) => {}
                     Err(ControllerError::Full) => {
                         producer_saw_full.store(true, Ordering::Release);

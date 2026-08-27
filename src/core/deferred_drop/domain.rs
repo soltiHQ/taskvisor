@@ -1,10 +1,12 @@
 //! Owns one supervisor's cleanup capacity and starts cleanup workers lazily.
 //!
-//! `SupervisorBuilder` creates a [`DropDomain`] and stores it in `SupervisorCore`. Subscriber construction
-//! reserves a complete batch from the domain. Runtime and controller admission reserve one unit per accepted task.
+//! `SupervisorBuilder` creates a [`DropDomain`] and stores it in `SupervisorCore`.
+//! Subscriber construction reserves a complete batch from the domain.
+//! Runtime and controller admission reserve one unit per accepted task.
 //!
 //! The first valid, non-empty reservation attempts to start the cleanup executor.
-//! Startup is transactional. No executor is published unless every required core worker reports ready.
+//! Startup is transactional.
+//! No executor is published unless every required core worker reports ready.
 //! Clones share this gate and the same capacity budget.
 
 use std::{
@@ -44,7 +46,7 @@ pub(crate) struct DropDomain(
 );
 
 impl DropDomain {
-    /// Creates the production domain without starting worker threads.
+    /// Production domain without started worker threads.
     pub(crate) fn unstarted(capacity: Option<NonZeroUsize>) -> Self {
         Self::unstarted_with_limit(CORE_WORKER_COUNT, capacity, system_spawner())
             .expect("the production drop domain configuration must be valid")
@@ -120,11 +122,12 @@ impl DropDomain {
         })))
     }
 
-    /// Returns the published executor or performs one transactional startup.
+    /// Published executor or one transactional startup attempt.
     ///
     /// # Errors
     ///
-    /// Returns an error when a required core worker cannot be created or report ready.
+    /// - [`DropStartError`] when a required core worker thread cannot be created;
+    /// - [`DropStartError`] when a required core worker exits before reporting ready.
     fn executor(&self) -> Result<Arc<DropExecutor>, DropStartError> {
         let mut executor = self
             .0
@@ -153,12 +156,12 @@ impl DropDomain {
         Ok(started)
     }
 
-    /// Returns the supervisor-local ownership limit.
+    /// Supervisor-local ownership limit.
     pub(crate) fn capacity(&self) -> Option<NonZeroUsize> {
         self.0.capacity
     }
 
-    /// Installs the best-effort callback for committed finite-capacity retirement.
+    /// Best-effort callback for committed finite-capacity retirement.
     pub(crate) fn set_retirement_reporter<F>(&self, report: F)
     where
         F: Fn(usize, usize, usize) + Send + Sync + 'static,
@@ -188,7 +191,7 @@ impl DropDomain {
         }
     }
 
-    /// Returns current ownership and deferred-cleanup state without starting workers.
+    /// Current ownership and deferred-cleanup state without starting workers.
     pub(crate) fn snapshot(&self, runtime_open: bool) -> OwnershipSnapshot {
         let executor = self
             .0
@@ -223,11 +226,14 @@ impl DropDomain {
         )
     }
 
-    /// Starts the domain when needed and waits for one ownership unit.
+    /// One ownership unit after lazy domain startup.
     ///
     /// # Errors
     ///
-    /// Returns a startup error or a capacity error from this domain.
+    /// - [`DropAdmissionError::Start`] when the cleanup executor cannot start;
+    /// - [`DropAdmissionError::Capacity`] when all effective ownership capacity has been retired;
+    /// - [`DropAdmissionError::Capacity`] when the bounded ownership waiter queue is full;
+    /// - [`DropAdmissionError::Capacity`] when the capacity broker closes before granting the request.
     pub(crate) async fn reserve(&self) -> Result<DropReservation, DropAdmissionError> {
         self.executor()
             .map_err(DropAdmissionError::Start)?
@@ -236,11 +242,12 @@ impl DropDomain {
             .map_err(DropAdmissionError::Capacity)
     }
 
-    /// Starts the domain when needed and requests one unit without waiting.
+    /// One immediately available ownership unit after lazy domain startup.
     ///
     /// # Errors
     ///
-    /// Returns a startup error or a capacity error from this domain.
+    /// - [`DropAdmissionError::Start`] when the cleanup executor cannot start;
+    /// - [`DropAdmissionError::Capacity`] when one ownership unit cannot be granted immediately.
     pub(crate) fn try_reserve(&self) -> Result<DropReservation, DropAdmissionError> {
         self.executor()
             .map_err(DropAdmissionError::Start)?
@@ -248,13 +255,14 @@ impl DropDomain {
             .map_err(DropAdmissionError::Capacity)
     }
 
-    /// Requests a complete batch without partial admission or waiting.
+    /// Complete fail-fast reservation batch without partial admission.
     ///
     /// An empty batch returns immediately and does not start the domain.
     ///
     /// # Errors
     ///
-    /// Returns a startup error or a capacity error from this domain.
+    /// - [`DropAdmissionError::Start`] when the cleanup executor cannot start;
+    /// - [`DropAdmissionError::Capacity`] when the complete non-empty batch cannot be granted atomically.
     pub(crate) fn try_reserve_many(
         &self,
         count: usize,

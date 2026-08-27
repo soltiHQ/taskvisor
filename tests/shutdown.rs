@@ -5,14 +5,15 @@ mod common;
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::task::Poll;
-use std::time::Duration;
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use common::*;
 use taskvisor::prelude::*;
@@ -42,6 +43,90 @@ async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
         Poll::Ready(_) => panic!("future completed before the expected ordering point"),
     })
     .await;
+}
+
+fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+    let mut context = Context::from_waker(Waker::noop());
+    future.as_mut().poll(&mut context)
+}
+
+fn served_gated_runtime(
+    name: &'static str,
+) -> (
+    tokio::runtime::Runtime,
+    Arc<Supervisor>,
+    SupervisorHandle,
+    TaskWaiter,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("origin runtime");
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (handle, waiter) = runtime.block_on(async {
+        let handle = supervisor.serve().expect("runtime startup");
+        let waiter = handle
+            .add(TaskSpec::restartable(
+                name,
+                make_gated_cancel(
+                    Arc::clone(&started),
+                    Arc::clone(&cancellation_seen),
+                    Arc::clone(&release),
+                ),
+            ))
+            .watch()
+            .execute()
+            .await
+            .expect("the gated task must register");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the gated task must start");
+        (handle, waiter)
+    });
+    (
+        runtime,
+        supervisor,
+        handle,
+        waiter,
+        cancellation_seen,
+        release,
+    )
+}
+
+fn finish_detached_shutdown(
+    runtime: &tokio::runtime::Runtime,
+    handle: SupervisorHandle,
+    waiter: TaskWaiter,
+    cancellation_seen: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+) {
+    runtime.block_on(async {
+        let mut shutdown = Box::pin(handle.shutdown());
+        tokio::select! {
+            biased;
+            result = &mut shutdown => {
+                panic!("shared shutdown finished before task cancellation: {result:?}");
+            }
+            _ = cancellation_seen.notified() => {}
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("the detached shutdown owner must finish")
+            .expect("the detached shutdown owner must publish a clean result");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), waiter.wait())
+                .await
+                .expect("the watched task must publish its outcome")
+                .expect("the watched task outcome must remain available"),
+            TaskOutcome::Canceled
+        ));
+    });
 }
 
 #[derive(Default)]
@@ -138,8 +223,75 @@ impl Subscribe for BlockingSubscriber {
         "blocking-shutdown"
     }
 
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
+    }
+
     fn queue_capacity(&self) -> NonZeroUsize {
         NonZeroUsize::new(64).unwrap()
+    }
+}
+
+struct BlockingSubscriberTlsDrop {
+    gate: CallbackGate,
+}
+
+impl Drop for BlockingSubscriberTlsDrop {
+    fn drop(&mut self) {
+        let (state, ready) = &*self.gate;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.entered = true;
+        ready.notify_all();
+        while !state.released {
+            state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        state.finished = true;
+        ready.notify_all();
+    }
+}
+
+thread_local! {
+    static SUBSCRIBER_TLS_DROP: std::cell::RefCell<Option<BlockingSubscriberTlsDrop>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct TlsSubscriber {
+    callback: Arc<BlockingSubscriber>,
+    tls_gate: CallbackGate,
+}
+
+impl Subscribe for TlsSubscriber {
+    fn on_event(&self, event: &Event) {
+        SUBSCRIBER_TLS_DROP.with(|value| {
+            value
+                .borrow_mut()
+                .get_or_insert_with(|| BlockingSubscriberTlsDrop {
+                    gate: Arc::clone(&self.tls_gate),
+                });
+        });
+        self.callback.on_event(event);
+    }
+
+    fn name(&self) -> &str {
+        "tls-shutdown"
+    }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
+    }
+
+    fn queue_capacity(&self) -> NonZeroUsize {
+        self.callback.queue_capacity()
+    }
+}
+
+struct ReleaseCallbackGates(Vec<CallbackGate>);
+
+impl Drop for ReleaseCallbackGates {
+    fn drop(&mut self) {
+        for gate in &self.0 {
+            release_callback(gate);
+        }
     }
 }
 
@@ -152,6 +304,13 @@ fn blocking_subscriber() -> (Arc<BlockingSubscriber>, CallbackGate) {
 }
 
 fn spawn_callback_watchdog(gate: CallbackGate) -> std::thread::JoinHandle<()> {
+    spawn_callback_watchdog_with_timeout(gate, Duration::from_secs(2))
+}
+
+fn spawn_callback_watchdog_with_timeout(
+    gate: CallbackGate,
+    timeout: Duration,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (state, ready) = &*gate;
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,7 +322,7 @@ fn spawn_callback_watchdog(gate: CallbackGate) -> std::thread::JoinHandle<()> {
         }
 
         let (mut state, _) = ready
-            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.released)
+            .wait_timeout_while(state, timeout, |state| !state.released)
             .unwrap_or_else(|e| e.into_inner());
         if !state.released {
             state.watchdog_fired = true;
@@ -244,6 +403,7 @@ async fn subscriber_deadline_bounds_explicit_shutdown() {
 
     let add_result = handle
         .add(TaskSpec::restartable("subscriber-deadline", make_coop()))
+        .execute()
         .await;
     let callback_entered = wait_for_callback(&gate, |state| state.entered).await;
     let mut shutdown_task = tokio::spawn(async move { handle.shutdown().await });
@@ -338,15 +498,152 @@ async fn subscriber_deadline_bounds_natural_run_completion() {
     );
 }
 
+const SUBSCRIBER_TLS_DROP_CHILD: &str = "TASKVISOR_SUBSCRIBER_TLS_DROP_CHILD";
+
+#[test]
+fn subscriber_tls_teardown_does_not_block_current_thread_runtime() {
+    if std::env::var_os(SUBSCRIBER_TLS_DROP_CHILD).is_some() {
+        subscriber_tls_teardown_child();
+        return;
+    }
+
+    let mut child = Command::new(std::env::current_exe().expect("the test binary path must exist"))
+        .arg("--exact")
+        .arg("subscriber_tls_teardown_does_not_block_current_thread_runtime")
+        .arg("--nocapture")
+        .env(SUBSCRIBER_TLS_DROP_CHILD, "1")
+        .spawn()
+        .expect("the isolated TLS destructor test process must start");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .expect("the TLS test child must be waitable")
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the TLS destructor test exceeded its external process watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "the isolated TLS regression failed: {status}"
+    );
+}
+
+fn subscriber_tls_teardown_child() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the isolated Tokio runtime must build");
+    let tls_gate = Arc::new((Mutex::new(CallbackGateState::default()), Condvar::new()));
+    let (first_callback, first_gate) = blocking_subscriber();
+    let (second_callback, second_gate) = blocking_subscriber();
+    let _release_on_drop = ReleaseCallbackGates(vec![
+        Arc::clone(&tls_gate),
+        Arc::clone(&first_gate),
+        Arc::clone(&second_gate),
+    ]);
+    let watchdog =
+        spawn_callback_watchdog_with_timeout(Arc::clone(&tls_gate), Duration::from_secs(10));
+
+    runtime.block_on(async {
+        let subscribers: Vec<Arc<dyn Subscribe>> = vec![
+            Arc::new(TlsSubscriber {
+                callback: first_callback,
+                tls_gate: Arc::clone(&tls_gate),
+            }),
+            Arc::new(TlsSubscriber {
+                callback: second_callback,
+                tls_gate: Arc::clone(&tls_gate),
+            }),
+        ];
+        let supervisor = Supervisor::builder(SupervisorConfig::default())
+            .with_subscriber_shutdown_timeout(Duration::from_millis(100))
+            .with_subscribers(subscribers)
+            .build();
+        let handle = supervisor.serve().expect("runtime startup");
+        let waiter = handle
+            .add(TaskSpec::once("subscriber-tls", make_ok_once()))
+            .watch()
+            .execute()
+            .await
+            .expect("the warmup task must be admitted");
+        assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
+        assert!(
+            wait_for_callback(&first_gate, |state| state.entered).await,
+            "the first callback must hold a worker"
+        );
+        assert!(
+            wait_for_callback(&second_gate, |state| state.entered).await,
+            "the second callback must acquire a separate worker"
+        );
+        release_callback(&first_gate);
+        release_callback(&second_gate);
+
+        let shutdown_task = tokio::spawn(async move { handle.shutdown().await });
+        assert!(
+            wait_for_callback(&tls_gate, |state| state.entered).await,
+            "a dedicated subscriber worker must enter its real TLS destructor during shutdown"
+        );
+        assert_subscriber_tls_blocked(&tls_gate, "before the heartbeat");
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        })
+        .await
+        .expect("the current-thread heartbeat task must complete");
+        assert_subscriber_tls_blocked(&tls_gate, "after the heartbeat");
+
+        tokio::time::timeout(Duration::from_secs(5), shutdown_task)
+            .await
+            .expect("public shutdown must not join a dedicated subscriber worker")
+            .expect("the public shutdown task must not panic")
+            .expect("public shutdown must finish");
+        assert_subscriber_tls_blocked(&tls_gate, "after public shutdown");
+    });
+
+    drop(runtime);
+    assert_subscriber_tls_blocked(&tls_gate, "after Tokio runtime teardown");
+    release_callback(&tls_gate);
+    watchdog
+        .join()
+        .expect("the TLS safety watchdog must not panic");
+    let (state, ready) = &*tls_gate;
+    let state = state.lock().unwrap_or_else(|error| error.into_inner());
+    let (state, _) = ready
+        .wait_timeout_while(state, Duration::from_secs(5), |state| !state.finished)
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(state.finished, "the released TLS destructor must finish");
+    assert!(
+        !state.watchdog_fired,
+        "progress must precede watchdog release"
+    );
+}
+
+fn assert_subscriber_tls_blocked(gate: &CallbackGate, boundary: &str) {
+    let state = gate.0.lock().unwrap_or_else(|error| error.into_inner());
+    assert!(state.entered, "TLS Drop must start {boundary}");
+    assert!(
+        !state.released && !state.finished && !state.watchdog_fired,
+        "TLS Drop must remain blocked {boundary}; the safety watchdog must not release it"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
     let (handle, collector) = served(Duration::from_secs(5));
     let id_c1 = handle
         .add(TaskSpec::restartable("c1", make_coop()))
+        .execute()
         .await
         .unwrap();
     let id_c2 = handle
         .add(TaskSpec::restartable("c2", make_coop()))
+        .execute()
         .await
         .unwrap();
 
@@ -365,7 +662,7 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
         requested.seq < all_stopped.seq,
         "ShutdownRequested must precede AllStopped"
     );
-    for (id, label) in [(id_c1, "c1"), (id_c2, "c2")] {
+    for (id, name) in [(id_c1, "c1"), (id_c2, "c2")] {
         assert_eq!(
             collector
                 .by_id(id)
@@ -373,7 +670,7 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
                 .filter(|event| event.kind == EventKind::TaskRemoved)
                 .count(),
             1,
-            "shutdown must emit exactly one TaskRemoved for {label}"
+            "shutdown must emit exactly one TaskRemoved for {name}"
         );
     }
 }
@@ -393,6 +690,7 @@ async fn concurrent_shutdown_waiters_share_clean_result() {
                 Arc::clone(&release),
             ),
         ))
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -451,6 +749,7 @@ async fn concurrent_shutdown_waiters_share_subscriber_drain() {
             "shared-subscriber-drain",
             make_coop(),
         ))
+        .execute()
         .await
         .expect("the cooperative task must register");
     assert!(
@@ -495,10 +794,12 @@ async fn concurrent_shutdown_waiters_share_grace_exceeded() {
     let (stubborn_b, started_b) = make_stubborn();
     handle
         .add(TaskSpec::once("shared-stuck-a", stubborn_a))
+        .execute()
         .await
         .expect("first stubborn task must register");
     handle
         .add(TaskSpec::once("shared-stuck-b", stubborn_b))
+        .execute()
         .await
         .expect("second stubborn task must register");
     wait_for_start("shared-stuck-a", &started_a).await;
@@ -556,6 +857,7 @@ async fn dropping_first_shutdown_waiter_does_not_cancel_owner() {
                 Arc::clone(&release),
             ),
         ))
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -588,8 +890,8 @@ async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_clean
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(
+    let waiter = handle
+        .add(TaskSpec::restartable(
             "only-dropped-shutdown-waiter",
             make_gated_cancel(
                 Arc::clone(&started),
@@ -597,6 +899,8 @@ async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_clean
                 Arc::clone(&release),
             ),
         ))
+        .watch()
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -630,6 +934,76 @@ async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_clean
         .await
         .expect("detached cleanup must publish its graceful result");
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+}
+
+#[test]
+fn shutdown_first_poll_outside_tokio_uses_startup_runtime() {
+    let (runtime, _supervisor, handle, waiter, cancellation_seen, release) =
+        served_gated_runtime("shutdown-outside-tokio");
+    let late = handle.clone();
+    let mut shutdown = Box::pin(handle.shutdown());
+
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let first_poll = catch_unwind(AssertUnwindSafe(|| poll_once(shutdown.as_mut())))
+        .expect("first shutdown poll outside Tokio must not panic");
+    assert!(
+        matches!(first_poll, Poll::Pending),
+        "the gated task keeps shutdown pending until cancellation is released"
+    );
+    drop(shutdown);
+
+    finish_detached_shutdown(&runtime, late, waiter, cancellation_seen, release);
+}
+
+#[test]
+fn shutdown_owner_is_not_bound_to_temporary_polling_runtime() {
+    let (runtime, _supervisor, handle, waiter, cancellation_seen, release) =
+        served_gated_runtime("shutdown-temporary-runtime");
+    let late = handle.clone();
+    let mut shutdown = Box::pin(handle.shutdown());
+    let polling_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("temporary polling runtime");
+
+    let first_poll = {
+        let _entered = polling_runtime.enter();
+        catch_unwind(AssertUnwindSafe(|| poll_once(shutdown.as_mut())))
+            .expect("first shutdown poll on another runtime must not panic")
+    };
+    assert!(
+        matches!(first_poll, Poll::Pending),
+        "the gated task keeps shutdown pending until cancellation is released"
+    );
+    drop(shutdown);
+    drop(polling_runtime);
+
+    finish_detached_shutdown(&runtime, late, waiter, cancellation_seen, release);
+}
+
+#[test]
+fn shutdown_after_startup_runtime_drop_returns_shutting_down_without_panic() {
+    let startup_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("startup runtime");
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let handle = {
+        let _entered = startup_runtime.enter();
+        supervisor.serve().expect("runtime startup")
+    };
+    drop(startup_runtime);
+
+    let caller_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("caller runtime");
+    let result = caller_runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("shutdown on a closed startup runtime must not hang")
+    });
+    assert!(matches!(result, Err(RuntimeError::ShuttingDown)));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -700,6 +1074,7 @@ async fn run_joins_shutdown_that_started_first() {
                 Arc::clone(&release),
             ),
         ))
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -734,6 +1109,7 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
     let (stubborn, started) = make_stubborn();
     handle
         .add(TaskSpec::once("stubborn", stubborn))
+        .execute()
         .await
         .unwrap();
     wait_for_start("stubborn", &started).await;
@@ -763,6 +1139,7 @@ async fn blocking_task_destructor_cannot_extend_public_shutdown() {
 
     handle
         .add(TaskSpec::once("blocking-task-drop", task))
+        .execute()
         .await
         .expect("the blocking-drop task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -840,6 +1217,7 @@ async fn panicking_error_source_destructor_child() {
 
     handle
         .add(TaskSpec::once("panicking-source-drop", task))
+        .execute()
         .await
         .expect("the source-drop task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -894,9 +1272,14 @@ async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
     let (stuck, stuck_started) = make_stubborn();
     handle
         .add(TaskSpec::restartable("coop", coop))
+        .execute()
         .await
         .unwrap();
-    handle.add(TaskSpec::once("stuck", stuck)).await.unwrap();
+    handle
+        .add(TaskSpec::once("stuck", stuck))
+        .execute()
+        .await
+        .unwrap();
     wait_for_start("coop", &coop_started).await;
     wait_for_start("stuck", &stuck_started).await;
 
@@ -918,7 +1301,11 @@ async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
 async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
     let (handle, collector) = served(Duration::ZERO);
     let (stubborn, started) = make_stubborn();
-    handle.add(TaskSpec::once("z", stubborn)).await.unwrap();
+    handle
+        .add(TaskSpec::once("z", stubborn))
+        .execute()
+        .await
+        .unwrap();
     wait_for_start("z", &started).await;
 
     match with_timeout(5, handle.shutdown()).await {

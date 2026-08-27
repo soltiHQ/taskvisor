@@ -1,8 +1,8 @@
 //! Identity operations across controller and runtime ownership.
 //!
 //! The controller loop first looks for a queued or capacity-waiting submission in its reverse indexes.
-//! Other identities are passed to a bounded runtime registry operation. Queue lookup stays ordered
-//! with submissions, while the registry operation can finish alongside later controller work.
+//! Queue lookup remains ordered with submissions.
+//! Other identities pass to a bounded runtime registry operation that may finish alongside later controller work.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::{
 use super::{Controller, IdentityOperation, IdentityReply, TrackedOperations};
 
 impl Controller {
-    /// Applies one accepted identity command to controller or runtime work.
+    /// Ordered routing for one accepted identity command.
     ///
     /// Once accepted, the operation continues if the caller drops its future.
     pub(super) async fn handle_identity_operation(
@@ -75,9 +75,9 @@ impl Controller {
         });
     }
 
-    /// Removes one queued, not-yet-admitted submission by identity.
+    /// Exclusive claim of one queued submission before registry admission.
     ///
-    /// Returns `true` only when this call claimed the queued submission.
+    /// `true` means this call acquired the claim.
     /// A claimed watcher receives `TaskOutcome::Rejected` with `RejectionKind::RemovedFromQueue` because its task never ran.
     pub(super) async fn remove_queued_submission(
         &self,

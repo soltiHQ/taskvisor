@@ -1,8 +1,7 @@
 //! Controls whether Taskvisor starts another attempt and when it starts.
 //!
-//! Applications normally select policies through [`TaskSpec`](crate::TaskSpec) or supervisor-wide
-//! [`TaskDefaults`](crate::TaskDefaults). Admission resolves those choices once.
-//! Taskvisor then applies them after every attempt.
+//! Applications normally select policies through [`TaskSpec`](crate::TaskSpec) or supervisor-wide [`TaskDefaults`](crate::TaskDefaults).
+//! Admission resolves those choices once. Taskvisor then applies them after every attempt.
 //!
 //! ```text
 //! TaskSpec + TaskDefaults

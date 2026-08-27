@@ -1,11 +1,12 @@
 //! Guards task and outcome ownership before admission commits.
 //!
-//! `submission` creates this guard with local `ControllerSpec` ownership and an optional watched-outcome sender.
-//! Parking moves the sender into controller state. Committing disarms the guard after queue or admission ownership
-//! becomes authoritative.
+//! The guard starts with local task ownership and an optional watched-outcome sender.
+//! Parking transfers the sender to controller state.
+//! Committing disarms the guard after a slot queue, capacity wait, or registry command owns the task.
 //!
-//! Rejection resolves the sender once. Dropping an uncommitted guard reports an
-//! interrupted admission and routes any local task value through reserved cleanup.
+//! Rejection resolves the sender once.
+//! Dropping an uncommitted guard reports interrupted admission and routes any local task value
+//! through reserved cleanup.
 
 use std::sync::Arc;
 
@@ -44,7 +45,6 @@ enum AdmissionWatcherState {
 }
 
 impl<'a> AdmissionWatcher<'a> {
-    /// Creates a guard with local task and outcome ownership.
     pub(super) fn new(
         controller: &'a Controller,
         id: TaskId,
@@ -61,7 +61,7 @@ impl<'a> AdmissionWatcher<'a> {
         }
     }
 
-    /// Converts the guarded `ControllerSpec` into pending `TaskSpec` ownership.
+    /// Transfer of local task ownership into a pending submission.
     pub(super) fn take_pending(&mut self, id: TaskId, task_name: Arc<str>) -> PendingSubmission {
         let owned = self
             .owned
@@ -71,7 +71,7 @@ impl<'a> AdmissionWatcher<'a> {
         PendingSubmission::new(id, task_name, owned)
     }
 
-    /// Sends still-local user ownership to reserved cleanup.
+    /// Reserved cleanup for user ownership that never committed.
     fn dispose_owned(&mut self, terminal: Option<TaskOutcome>) {
         let Some(owned) = self.owned.take() else {
             return;
@@ -84,7 +84,7 @@ impl<'a> AdmissionWatcher<'a> {
         cleanup.submit();
     }
 
-    /// Moves the optional outcome sender into the controller watcher index.
+    /// Transfer of the optional outcome sender into controller state.
     pub(super) fn park(&mut self) {
         let state = std::mem::replace(&mut self.state, AdmissionWatcherState::Committed);
         match state {
@@ -102,7 +102,7 @@ impl<'a> AdmissionWatcher<'a> {
         }
     }
 
-    /// Disarms fallback after queue or admission ownership commits.
+    /// Fallback disarm after queue or admission ownership commits.
     pub(super) fn commit(&mut self) {
         debug_assert!(
             !matches!(self.state, AdmissionWatcherState::Local(Some(_))),
@@ -111,9 +111,9 @@ impl<'a> AdmissionWatcher<'a> {
         self.state = AdmissionWatcherState::Committed;
     }
 
-    /// Resolves one rejection and disarms fallback.
+    /// Single terminal rejection and fallback disarm.
     ///
-    /// Returns an undelivered outcome after task ownership has moved from the guard.
+    /// An undelivered outcome remains caller-owned after task ownership leaves the guard.
     fn reject(&mut self, kind: RejectionKind, reason: &str) -> Option<TaskOutcome> {
         let state = std::mem::replace(&mut self.state, AdmissionWatcherState::Committed);
         let undelivered = match state {
@@ -136,7 +136,7 @@ impl<'a> AdmissionWatcher<'a> {
         }
     }
 
-    /// Reports and resolves one controller-side rejection at most once.
+    /// Idempotent reporting and resolution of one controller-side rejection.
     pub(super) fn reject_with_event(
         &mut self,
         kind: RejectionKind,

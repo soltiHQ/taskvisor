@@ -1,7 +1,8 @@
 //! Turns add commands into committed registry entries.
 //!
-//! The registry listener calls this package for single adds and static batches. Admission checks label
-//! ownership and the registration limit. It builds actors outside the state write lock.
+//! The registry listener calls this package for single adds and static batches.
+//! Admission checks name ownership and the registration limit.
+//! Actor construction stays outside the state write lock.
 //! It repeats the checks after acquiring the write lock because preparation did not hold registry state.
 //!
 //! ```text
@@ -45,8 +46,8 @@ mod single;
 struct PreparedRegistration {
     /// Stable identity assigned to the task.
     id: TaskId,
-    /// Label reserved by the registry entry.
-    label: Arc<str>,
+    /// Name reserved by the registry entry.
+    name: Arc<str>,
     /// Actor handle retained by the registry entry.
     join: ActorHandle,
     /// Token used to stop the actor.
@@ -82,13 +83,13 @@ fn deliver_or_attach_rejection(
 }
 
 impl Registry {
-    /// Resolves task defaults and builds an actor outside the state lock.
+    /// Prepared actor outside the state lock and behind its start gate.
     ///
     /// The actor is not spawned and remains behind `start`.
     fn prepare_registration(
         &self,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
@@ -104,7 +105,7 @@ impl Registry {
 
         let actor = TaskActor::new(
             self.bus.clone(),
-            Arc::clone(&label),
+            Arc::clone(&name),
             task,
             TaskActorParams {
                 restart: spec.restart(),
@@ -135,7 +136,7 @@ impl Registry {
         let (scheduled, join) = ScheduledActor::new(
             ActorRegistration {
                 id,
-                label: Arc::clone(&label),
+                name: Arc::clone(&name),
                 activity: Arc::clone(&activity),
                 cleanup_poisoned,
                 physical_release: completion.clone(),
@@ -147,7 +148,7 @@ impl Registry {
 
         PreparedRegistration {
             id,
-            label,
+            name,
             join,
             cancel: task_token,
             done,
@@ -158,7 +159,7 @@ impl Registry {
         }
     }
 
-    /// Returns the registration limit when an incoming set would exceed it.
+    /// Configured registration limit when an incoming set would exceed it.
     ///
     /// Force-aborted attempts remain counted while registry ownership is being removed.
     /// This keeps the bound strict without sharing registry and cleanup locks.

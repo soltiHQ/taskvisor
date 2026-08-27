@@ -7,6 +7,60 @@ use crate::controller::engine::{
 };
 
 #[tokio::test]
+async fn buffered_identity_paths_receive_explicit_shutdown_reply() {
+    let config = ControllerConfig::default();
+    let queue_capacity = config.queue_capacity().get();
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = make_controller(config, bus);
+    let waiting_handle = ctrl.handle();
+    let fail_fast_handle = waiting_handle.clone();
+    let late_handle = waiting_handle.clone();
+    let mut waiting = Box::pin(waiting_handle.remove(TaskId::next()));
+    let mut fail_fast = Box::pin(fail_fast_handle.try_cancel(TaskId::next()));
+
+    std::future::poll_fn(|context| match waiting.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("waiting identity command must await its reply, got {result:?}")
+        }
+    })
+    .await;
+    std::future::poll_fn(|context| match fail_fast.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("fail-fast identity command must await its reply, got {result:?}")
+        }
+    })
+    .await;
+    assert_eq!(ctrl.tx.capacity(), queue_capacity - 2);
+
+    let mut rx = ctrl.take_command_receiver().expect("receiver present");
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
+
+    assert!(matches!(waiting.await, Err(RuntimeError::ShuttingDown)));
+    assert!(matches!(fail_fast.await, Err(RuntimeError::ShuttingDown)));
+    assert!(matches!(
+        late_handle.remove(TaskId::next()).await,
+        Err(RuntimeError::ShuttingDown)
+    ));
+    assert!(matches!(
+        late_handle.try_cancel(TaskId::next()).await,
+        Err(RuntimeError::ShuttingDown)
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    assert!(
+        drain_events(&mut events)
+            .iter()
+            .all(|event| event.kind != EventKind::ControllerRejected),
+        "identity shutdown replies must not publish submission rejection events"
+    );
+}
+
+#[tokio::test]
 async fn aborted_identity_operation_sends_explicit_shutdown_reply() {
     let (reply, reply_rx) = oneshot::channel();
     let (started, started_rx) = oneshot::channel();
@@ -138,6 +192,7 @@ async fn accepted_cancel_continues_after_caller_future_is_dropped() {
     let runtime_handle = sup.serve().expect("runtime startup");
     let id = runtime_handle
         .add(waiting_spec("dropped-cancel-caller"))
+        .execute()
         .await
         .expect("the direct task must register");
 
@@ -145,7 +200,7 @@ async fn accepted_cancel_continues_after_caller_future_is_dropped() {
     let handle = crate::core::SupervisorHandle::new(Arc::clone(sup.owner()))
         .with_controller(Some(Arc::clone(&ctrl)));
 
-    let mut cancel = Box::pin(handle.cancel(id));
+    let mut cancel = Box::pin(handle.cancel(id).execute());
     std::future::poll_fn(|cx| match cancel.as_mut().poll(cx) {
         std::task::Poll::Pending => std::task::Poll::Ready(()),
         std::task::Poll::Ready(result) => {
@@ -196,21 +251,24 @@ async fn try_identity_operations_report_full_controller_command_queue() {
         .expect("the filler must occupy the controller command queue");
 
     assert!(matches!(
-        handle.try_remove(TaskId::next()).await,
+        handle.remove(TaskId::next()).fail_fast().execute().await,
         Err(RuntimeError::CommandQueueFull)
     ));
     assert!(matches!(
-        handle.try_cancel(TaskId::next()).await,
+        handle.cancel(TaskId::next()).fail_fast().execute().await,
         Err(RuntimeError::CommandQueueFull)
     ));
     assert!(matches!(
         handle
-            .try_cancel_with_timeout(TaskId::next(), Duration::from_secs(1))
+            .cancel(TaskId::next())
+            .fail_fast()
+            .termination_timeout(Duration::from_secs(1))
+            .execute()
             .await,
         Err(RuntimeError::CommandQueueFull)
     ));
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
     let _ = runtime_handle.shutdown().await;
@@ -242,7 +300,7 @@ async fn try_identity_operations_propagate_full_registry_queue_after_controller_
     let runner = start_controller_loop(&ctrl, &token).await;
 
     assert!(matches!(
-        handle.try_remove(TaskId::next()).await,
+        handle.remove(TaskId::next()).fail_fast().execute().await,
         Err(RuntimeError::CommandQueueFull)
     ));
     assert_eq!(
@@ -251,12 +309,15 @@ async fn try_identity_operations_propagate_full_registry_queue_after_controller_
         "a rejected fallback must not consume or replace the queued registry command"
     );
     assert!(matches!(
-        handle.try_cancel(TaskId::next()).await,
+        handle.cancel(TaskId::next()).fail_fast().execute().await,
         Err(RuntimeError::CommandQueueFull)
     ));
     assert!(matches!(
         handle
-            .try_cancel_with_timeout(TaskId::next(), Duration::from_secs(1))
+            .cancel(TaskId::next())
+            .fail_fast()
+            .termination_timeout(Duration::from_secs(1))
+            .execute()
             .await,
         Err(RuntimeError::CommandQueueFull)
     ));
@@ -297,6 +358,7 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
     });
     let owner_id = runtime_handle
         .add(TaskSpec::once("bounded-identity-owner", task))
+        .execute()
         .await
         .expect("the direct task must register");
     assert!(
@@ -322,7 +384,9 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
     let cancel_handle = handle.clone();
     let cancel = tokio::spawn(async move {
         cancel_handle
-            .cancel_with_timeout(owner_id, Duration::from_secs(10))
+            .cancel(owner_id)
+            .termination_timeout(Duration::from_secs(10))
+            .execute()
             .await
     });
     assert!(
@@ -334,7 +398,7 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
     );
 
     assert!(matches!(
-        handle.remove(TaskId::next()).await,
+        handle.remove(TaskId::next()).execute().await,
         Err(RuntimeError::ResourceLimitReached {
             resource: "controller_identity_operations",
             limit: 1,
@@ -355,6 +419,7 @@ async fn identity_operation_limit_rejects_excess_fallback_without_blocking_submi
             ControllerSpec::queue(TaskSpec::once("buffered-after-identity", buffered))
                 .with_slot("buffered"),
         )
+        .execute()
         .await
         .expect("a later submission must cross the independent command budget");
     assert!(
@@ -386,6 +451,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
 
     let owner_id = handle
         .submit(ControllerSpec::queue(waiting_spec("cancel-owner")).with_slot("s"))
+        .execute()
         .await
         .expect("the owner submission must enter the controller");
     assert!(
@@ -409,12 +475,13 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
             Ok(())
         }
     });
-    let (victim_id, waiter) = handle
-        .submit_and_watch(
-            ControllerSpec::queue(TaskSpec::once("cancel-victim", victim)).with_slot("s"),
-        )
+    let waiter = handle
+        .submit(ControllerSpec::queue(TaskSpec::once("cancel-victim", victim)).with_slot("s"))
+        .watch()
+        .execute()
         .await
         .expect("the queued submission must enter the controller channel");
+    let victim_id = waiter.id();
     assert!(
         poll_until(Duration::from_secs(2), || async {
             ctrl.state()
@@ -429,6 +496,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
     assert!(
         handle
             .cancel(victim_id)
+            .execute()
             .await
             .expect("ordered queued cancellation must succeed"),
         "the first cancellation caller must claim the queued submission"
@@ -449,15 +517,20 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
             Ok(())
         }
     });
-    let (try_id, try_waiter) = handle
-        .submit_and_watch(
+    let try_waiter = handle
+        .submit(
             ControllerSpec::queue(TaskSpec::once("try-remove-victim", try_victim)).with_slot("s"),
         )
+        .watch()
+        .execute()
         .await
         .expect("the second queued submission must enter the controller channel");
+    let try_id = try_waiter.id();
     assert!(
         handle
-            .try_remove(try_id)
+            .remove(try_id)
+            .fail_fast()
+            .execute()
             .await
             .expect("the ordered controller channel has capacity"),
         "try_remove must claim queued controller work"
@@ -480,16 +553,21 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
             Ok(())
         }
     });
-    let (try_cancel_id, try_cancel_waiter) = handle
-        .submit_and_watch(
+    let try_cancel_waiter = handle
+        .submit(
             ControllerSpec::queue(TaskSpec::once("try-cancel-victim", try_cancel_victim))
                 .with_slot("s"),
         )
+        .watch()
+        .execute()
         .await
         .expect("the try-cancel victim must enter the controller channel");
+    let try_cancel_id = try_cancel_waiter.id();
     assert!(
         handle
-            .try_cancel(try_cancel_id)
+            .cancel(try_cancel_id)
+            .fail_fast()
+            .execute()
             .await
             .expect("the ordered controller channel has capacity"),
         "try_cancel must claim queued controller work"
@@ -507,6 +585,7 @@ async fn queued_cancel_is_ordered_without_runtime_bus_events() {
     assert!(
         handle
             .cancel(owner_id)
+            .execute()
             .await
             .expect("the admitted owner must be cancelled")
     );

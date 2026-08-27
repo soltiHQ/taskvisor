@@ -1,12 +1,12 @@
 //! # Outcomes: wait for the final result
 //!
-//! Use `add_and_watch` when application logic must know how one task ended.
+//! Use `add(...).watch().execute()` when application logic must know how one task ended.
 //! Its `TaskWaiter` uses a dedicated terminal channel, separate from best-effort events.
 //!
 //! ```text
-//! add_and_watch ──────► TaskId + TaskWaiter
-//! managed lifecycle ──► terminal outcome ────► TaskWaiter
-//! lifecycle events ───► event bus ───────────► subscribers (best-effort)
+//! add + watch + execute ──► TaskWaiter
+//! managed lifecycle ──────► terminal outcome ────► TaskWaiter
+//! lifecycle events ───────► event bus ───────────► subscribers (best-effort)
 //! ```
 //!
 //! | Task behavior             | Final outcome |
@@ -50,7 +50,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     });
-    let (_id, waiter) = handle.add_and_watch(TaskSpec::once("import", job)).await?;
+    let waiter = handle
+        .add(TaskSpec::once("import", job))
+        .watch()
+        .execute()
+        .await?;
     println!("  import -> {:?}\n", waiter.wait().await?);
 
     // 2) A task that always fails, with a bounded retry budget -> Failed.
@@ -68,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = TaskSpec::restartable("sync", flaky)
         .with_backoff(BackoffPolicy::constant(Duration::from_millis(20)))
         .with_max_retries(NonZeroU32::new(2).unwrap());
-    match handle.add_and_watch(spec).await?.1.wait().await? {
+    match handle.add(spec).watch().execute().await?.wait().await? {
         TaskOutcome::Failed {
             reason, exit_code, ..
         } => {
@@ -84,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     });
     let timed = TaskSpec::once("slow-report", slow).with_timeout(Duration::from_millis(20));
-    match handle.add_and_watch(timed).await?.1.wait().await? {
+    match handle.add(timed).watch().execute().await?.wait().await? {
         TaskOutcome::Failed { reason, .. } => {
             println!("  slow-report -> Failed: {reason}\n");
         }
@@ -97,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err::<(), TaskError>(TaskError::fatal("credentials rejected").with_exit_code(78))
     });
     let fatal = TaskSpec::restartable("credential-check", permanent);
-    match handle.add_and_watch(fatal).await?.1.wait().await? {
+    match handle.add(fatal).watch().execute().await?.wait().await? {
         TaskOutcome::Fatal {
             reason, exit_code, ..
         } => {
@@ -120,13 +124,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("worker", worker))
+    let waiter = handle
+        .add(TaskSpec::restartable("worker", worker))
+        .watch()
+        .execute()
         .await?;
+    let id = waiter.id();
     // The task body, rather than a timer, confirms that the worker started.
     started.notified().await;
     println!("  cancelling worker...");
-    handle.cancel(id).await?;
+    handle.cancel(id).execute().await?;
     println!("  worker -> {:?}\n", waiter.wait().await?);
 
     handle.shutdown().await?;

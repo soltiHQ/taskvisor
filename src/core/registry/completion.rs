@@ -2,7 +2,8 @@
 //!
 //! Natural actor exit, remove, cancel, and shutdown all enter the same removal path.
 //! [`RemovalCompletion`] lets other components observe that path without owning the actor join.
-//! Public cancellation waits for logical completion. The controller also waits for physical completion before it reuses a slot.
+//! Public cancellation waits for logical completion.
+//! The controller also waits for physical completion before it reuses a slot.
 //!
 //! ```text
 //! registered ───────────► removing ──────────────────────────► membership and reporting ──► logical
@@ -31,7 +32,7 @@ pub(crate) struct RemovalCompletion {
 }
 
 impl RemovalCompletion {
-    /// Creates a new incomplete terminal-cleanup signal.
+    /// New incomplete logical and physical completion pair.
     pub(crate) fn new() -> Self {
         Self {
             logical: CancellationToken::new(),
@@ -39,19 +40,19 @@ impl RemovalCompletion {
         }
     }
 
-    /// Waits for logical completion without owning the removal operation.
+    /// Logical completion without ownership of the removal operation.
     pub(crate) async fn wait(&self) {
         self.logical.cancelled().await;
     }
 
-    /// Waits for both logical and physical completion.
+    /// Logical and physical completion for controller slot reuse.
     #[cfg(feature = "controller")]
     pub(crate) async fn wait_physical(&self) {
         self.logical.cancelled().await;
         self.physical.cancelled().await;
     }
 
-    /// Returns `true` when terminal registry cleanup has been committed.
+    /// Whether terminal registry cleanup has been committed.
     pub(super) fn is_complete(&self) -> bool {
         self.logical.is_cancelled()
     }
@@ -62,17 +63,17 @@ impl RemovalCompletion {
         self.physical.is_cancelled()
     }
 
-    /// Marks the bounded logical terminal transition complete.
+    /// Bounded logical terminal transition marked complete.
     pub(super) fn complete_logical(&self) {
         self.logical.cancel();
     }
 
-    /// Marks the physical attempt as fully released.
+    /// Physical attempt marked fully released.
     pub(super) fn complete_physical(&self) {
         self.physical.cancel();
     }
 
-    /// Returns whether both values observe the same physical-release latch.
+    /// Whether both values observe the same physical-release latch.
     pub(super) fn shares_physical_latch(&self, other: &Self) -> bool {
         self.physical == other.physical
     }

@@ -1,15 +1,16 @@
 //! Stores the registry's authoritative membership and removal phase.
 //!
-//! Admission inserts one [`Entry`] into the identity map and label index while holding a single write lock.
+//! Admission inserts one [`Entry`] into the identity map and name index while holding a single write lock.
 //! Remove, cancel, natural completion, and shutdown compete for the same transition:
 //!
 //! ```text
 //! registered ──► removing ──► absent
 //! ```
 //!
-//! The winning claim moves the only [`ActorHandle`] out of the entry. Both indexes remain until terminal
-//! commit finishes the removing phase. Activity bits serve physical-attempt queries. [`HandleCleanup`] is
-//! a fallback that keeps user values on the reserved cleanup path if normal removal does not extract them.
+//! The winning claim moves the only [`ActorHandle`] out of the entry.
+//! Both indexes remain until terminal commit finishes the removing phase.
+//! Activity bits serve physical-attempt queries.
+//! [`HandleCleanup`] keeps user values on the reserved cleanup path if normal removal does not extract them.
 
 use std::{
     collections::HashMap,
@@ -55,7 +56,7 @@ impl Handle {
         }
     }
 
-    /// Returns whether the actor result is ready without waiting.
+    /// Whether the actor result is ready without waiting.
     pub(super) fn result_ready(&mut self) -> bool {
         self.join.result_ready()
     }
@@ -64,7 +65,7 @@ impl Handle {
         &mut self.join
     }
 
-    /// Transfers physical ownership to the reaper and requests abort.
+    /// Physical ownership transferred to the reaper before abort is requested.
     pub(super) fn abort(&mut self) {
         self.join.abort();
     }
@@ -114,7 +115,7 @@ impl HandleCleanup {
         }
     }
 
-    /// Extracts the reserved cleanup bundle for normal removal.
+    /// Reserved cleanup bundle for normal removal.
     pub(super) fn into_bundle(mut self) -> DropBundle {
         self.bundle
             .take()
@@ -146,8 +147,8 @@ pub(super) enum EntryState {
 
 /// Authoritative membership record kept until terminal join cleanup finishes.
 pub(super) struct Entry {
-    /// Canonical task label reserved by this entry.
-    pub(super) label: Arc<str>,
+    /// Canonical task name reserved by this entry.
+    pub(super) name: Arc<str>,
     /// Authoritative indication that this task is currently inside an attempt.
     pub(super) activity: Arc<AtomicBool>,
     /// Current membership and actor-ownership phase.
@@ -156,7 +157,7 @@ pub(super) struct Entry {
 
 /// Registry indexes guarded by one lock.
 ///
-/// Keeping both maps under the same lock keeps identity and label lookup in sync.
+/// Keeping both maps under the same lock keeps identity and name lookup in sync.
 #[derive(Default)]
 pub(super) struct Inner {
     /// Canonical task map keyed by runtime identity.
@@ -164,6 +165,6 @@ pub(super) struct Inner {
     /// Entries stay here in both `Registered` and `Removing` phases.
     pub(super) tasks: HashMap<TaskId, Entry>,
 
-    /// Label lookup used for conflict checks and label-based operations.
-    pub(super) by_label: HashMap<Arc<str>, TaskId>,
+    /// Name lookup used for conflict checks and name-based operations.
+    pub(super) by_name: HashMap<Arc<str>, TaskId>,
 }

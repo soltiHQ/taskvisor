@@ -1,163 +1,384 @@
-//! # Cold single-task lifecycle benchmarks
-//!
-//! Measures one fresh supervisor from construction through one final task outcome and shared cleanup.
-//! Task construction and Tokio runtime construction stay outside the stopwatch.
-//!
-//! Run with `cargo bench --bench lifecycle`.
+//! Benchmarks cold startup and steady lifecycle operations.
 
 mod support;
 
-use std::time::Duration;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
-use taskvisor::TaskContext;
-use tokio::runtime::Runtime;
-
 use taskvisor::{
-    BackoffPolicy, RestartPolicy, Supervisor, SupervisorConfig, TaskFn, TaskRef, TaskSpec,
+    BackoffPolicy, EventKind, RuntimeError, Subscribe, Supervisor, TaskContext, TaskError, TaskFn,
+    TaskOutcome, TaskSpec,
 };
 
+use support::fixtures::{
+    AsyncCounter, EventCounter, RUNTIMES, bench_config, expect_canceled, expect_completed,
+    expect_within, wait_for_ownership, warm_runtime,
+};
 use support::{CaseFamily, print_suite_header, record_case};
 
-const INSTANT: CaseFamily = CaseFamily::lifecycle(
-    "lifecycle/cold/full_run/instant",
-    "COLD SINGLE TASK · INSTANT",
+const GRACE_EXCEEDED_DURATION: Duration = Duration::from_millis(10);
+
+const COLD: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/cold/verified_run",
+    "COLD SUPERVISOR · ONE TASK",
     "completed task",
     "completed tasks",
-    "fresh Supervisor construction through one final task outcome and shared cleanup",
-    "TaskSpec and Tokio runtime construction",
+    "fresh Supervisor construction through one successful task body and run's shared shutdown cleanup",
+    "Tokio runtime and TaskSpec construction",
 );
 
-const CPU_WORK: CaseFamily = CaseFamily::lifecycle(
-    "lifecycle/cold/full_run/cpu_work",
-    "COLD SINGLE TASK · CPU WORK",
+const COMPLETION: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/steady/watched_completion",
+    "STEADY SINGLE-TASK COMPLETION",
     "completed task",
     "completed tasks",
-    "fresh Supervisor construction through one CPU task outcome and shared cleanup",
-    "TaskSpec and Tokio runtime construction",
+    "watched add through Completed; the retry variant fails twice before succeeding with zero-delay failure backoff",
+    "runtime and Supervisor startup, warmup, TaskSpec construction, ownership reset, and shutdown",
 );
 
-fn rt_current_thread() -> Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
+const CANCEL_BACKOFF: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/steady/cancel_scheduled_backoff",
+    "CANCEL A SCHEDULED RETRY",
+    "canceled task",
+    "canceled tasks",
+    "cancel after observing BackoffScheduled for a 60s retry delay through the Canceled outcome",
+    "startup, warmup, first failure and backoff observation, task construction, ownership reset, and shutdown; the 60s delay is not awaited",
+)
+.without_lifecycle_interpretation();
 
-fn rt_multi_thread() -> Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap()
-}
+const REQUESTED_SHUTDOWN: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/shutdown/requested_cooperative",
+    "REQUESTED SHUTDOWN · COOPERATIVE TASKS",
+    "completed shutdown",
+    "completed shutdowns",
+    "one SupervisorHandle::shutdown call from request through complete shared cleanup with 0 or 32 already-started cooperative tasks",
+    "Tokio runtime and Supervisor startup, task construction and admission, started-task handshakes, waiter verification, and post-shutdown value disposal",
+)
+.without_lifecycle_interpretation();
 
-type RtFactory = fn() -> Runtime;
+const GRACE_EXCEEDED: CaseFamily = CaseFamily::lifecycle(
+    "lifecycle/shutdown/grace_exceeded",
+    "REQUESTED SHUTDOWN · EXCESS OVER TASK GRACE",
+    "grace-expired shutdown",
+    "grace-expired shutdowns",
+    "one SupervisorHandle::shutdown call through GraceExceeded and force-abort commitment with 1 or 32 already-started non-cooperative tasks under one shared 10ms grace; the displayed estimate subtracts that configured grace, but still includes work before the internal grace clock and the shared cleanup tail",
+    "Tokio runtime and Supervisor startup, task construction and admission, started-task handshakes, waiter verification, and post-shutdown value disposal",
+)
+.without_lifecycle_interpretation()
+.display_excess_over(
+    GRACE_EXCEEDED_DURATION,
+    "shutdown wall-clock estimate minus configured 10 ms task grace",
+);
 
-const RUNTIMES: [(&str, RtFactory); 2] = [
-    ("current_thread", rt_current_thread as RtFactory),
-    ("multi_thread", rt_multi_thread as RtFactory),
-];
-
-fn bench_config() -> SupervisorConfig {
-    SupervisorConfig::default()
-        .with_bus_capacity(std::num::NonZeroUsize::new(16384).unwrap())
-        .with_grace(Duration::from_secs(5))
-}
-
-fn instant_task(name: &str) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
-    TaskSpec::new(
-        name,
-        task,
-        RestartPolicy::Never,
-        BackoffPolicy::default(),
-        None,
-    )
-}
-
-fn work_task(name: &str, iterations: u64) -> TaskSpec {
-    let task: TaskRef = TaskFn::arc(move |_ctx: TaskContext| async move {
-        let mut x = 0u64;
-        for i in 0..iterations {
-            x = std::hint::black_box(x.wrapping_add(i));
+fn retry_task(name: &str, failures: usize) -> (TaskSpec, Arc<AtomicUsize>) {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&attempts);
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
+        let attempts = Arc::clone(&observed);
+        async move {
+            if attempts.fetch_add(1, Ordering::Relaxed) < failures {
+                Err(TaskError::fail("benchmark retry"))
+            } else {
+                Ok(())
+            }
         }
-        std::hint::black_box(x);
-        Ok(())
     });
-    TaskSpec::new(
-        name,
-        task,
-        RestartPolicy::Never,
-        BackoffPolicy::default(),
-        None,
-    )
+    let spec = TaskSpec::restartable(name, task)
+        .with_backoff(BackoffPolicy::constant(Duration::ZERO))
+        .with_max_retries(NonZeroU32::new(2));
+    (spec, attempts)
 }
 
-fn bench_instant(c: &mut Criterion) {
+fn cooperative_shutdown_task(name: String, started: Arc<AsyncCounter>) -> TaskSpec {
+    let task = TaskFn::arc(move |ctx: TaskContext| {
+        let started = Arc::clone(&started);
+        async move {
+            started.increment();
+            ctx.cancelled().await;
+            Err(TaskError::Canceled)
+        }
+    });
+    TaskSpec::once(name, task)
+}
+
+fn stubborn_shutdown_task(name: String, started: Arc<AsyncCounter>) -> TaskSpec {
+    let task = TaskFn::arc(move |_ctx: TaskContext| {
+        let started = Arc::clone(&started);
+        async move {
+            started.increment();
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    });
+    TaskSpec::once(name, task)
+}
+
+fn bench_cold(c: &mut Criterion) {
     print_suite_header("lifecycle");
-    let mut group = c.benchmark_group(INSTANT.group_id);
-    group.sample_size(50);
-    group.measurement_time(Duration::from_secs(10));
+    let mut group = c.benchmark_group(COLD.group_id);
     group.throughput(Throughput::Elements(1));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
         group.bench_function(rt_name, |b| {
-            record_case(INSTANT, rt_name, None);
+            record_case(COLD, rt_name, None);
+            let rt = rt_fn();
             b.iter_custom(|iters| {
-                let mut total = Duration::ZERO;
-                for i in 0..iters {
-                    let rt = rt_fn();
-                    total += rt.block_on(async {
-                        let task = instant_task(&format!("lc-{i}"));
-                        let start = std::time::Instant::now();
-                        let sup = Supervisor::new(bench_config(), vec![]);
-                        sup.run(vec![task]).await.expect("cold lifecycle failed");
-                        start.elapsed()
-                    });
-                }
-                total
+                rt.block_on(async {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let (task, attempts) = retry_task("cold", 0);
+                        let start = Instant::now();
+                        Supervisor::new(bench_config(), vec![])
+                            .run(vec![task])
+                            .await
+                            .expect("cold lifecycle failed");
+                        total += start.elapsed();
+                        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+                    }
+                    total
+                })
             });
         });
     }
     group.finish();
 }
 
-fn bench_with_work(c: &mut Criterion) {
-    let mut group = c.benchmark_group(CPU_WORK.group_id);
-    group.sample_size(30);
-    group.measurement_time(Duration::from_secs(10));
+fn bench_completion(c: &mut Criterion) {
+    let mut group = c.benchmark_group(COMPLETION.group_id);
+    group.throughput(Throughput::Elements(1));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
-        for n in [100, 1_000, 10_000] {
-            group.throughput(Throughput::Elements(1));
-            group.bench_with_input(
-                BenchmarkId::new(rt_name, format!("{n}_iterations")),
-                &n,
-                |b, &iterations| {
-                    record_case(CPU_WORK, rt_name, Some(format!("{iterations}_iterations")));
-                    b.iter_custom(|iters| {
+        for (label, failures) in [("first_attempt", 0), ("after_two_retries", 2)] {
+            group.bench_function(BenchmarkId::new(rt_name, label), |b| {
+                record_case(COMPLETION, rt_name, Some(label.to_owned()));
+                let rt = rt_fn();
+                b.iter_custom(|iters| {
+                    rt.block_on(async {
+                        let handle = Supervisor::new(bench_config(), vec![])
+                            .serve()
+                            .expect("runtime startup");
+                        warm_runtime(&handle, 0).await;
                         let mut total = Duration::ZERO;
-                        for i in 0..iters {
-                            let rt = rt_fn();
-                            total += rt.block_on(async {
-                                let task = work_task(&format!("w-{i}"), iterations);
-                                let start = std::time::Instant::now();
-                                let sup = Supervisor::new(bench_config(), vec![]);
-                                sup.run(vec![task]).await.expect("CPU lifecycle failed");
-                                start.elapsed()
-                            });
+
+                        for _ in 0..iters {
+                            let (task, attempts) = retry_task("watched", failures);
+                            let start = Instant::now();
+                            let waiter = expect_within(
+                                "watched admission",
+                                handle.add(task).watch().execute(),
+                            )
+                            .await
+                            .expect("watched admission failed");
+                            expect_completed(waiter).await;
+                            total += start.elapsed();
+
+                            assert_eq!(attempts.load(Ordering::Relaxed), failures + 1);
+                            wait_for_ownership(&handle, 0).await;
                         }
+
+                        handle.shutdown().await.expect("shutdown failed");
                         total
-                    });
-                },
-            );
+                    })
+                });
+            });
         }
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_instant, bench_with_work);
+fn bench_cancel_backoff(c: &mut Criterion) {
+    let mut group = c.benchmark_group(CANCEL_BACKOFF.group_id);
+    group.throughput(Throughput::Elements(1));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        group.bench_function(rt_name, |b| {
+            record_case(CANCEL_BACKOFF, rt_name, None);
+            let rt = rt_fn();
+            b.iter_custom(|iters| {
+                rt.block_on(async {
+                    let observer = EventCounter::new("backoff", EventKind::BackoffScheduled);
+                    let subscribers: Vec<Arc<dyn Subscribe>> = vec![observer.clone()];
+                    let handle = Supervisor::new(bench_config(), subscribers)
+                        .serve()
+                        .expect("runtime startup");
+                    warm_runtime(&handle, 1).await;
+                    let mut total = Duration::ZERO;
+
+                    for _ in 0..iters {
+                        let (task, attempts) = retry_task("backoff", 2);
+                        let task =
+                            task.with_backoff(BackoffPolicy::constant(Duration::from_secs(60)));
+                        let expected_events = observer.count() + 1;
+                        let waiter = expect_within(
+                            "retry task admission",
+                            handle.add(task).watch().execute(),
+                        )
+                        .await
+                        .expect("retry task admission failed");
+                        let id = waiter.id();
+                        observer.wait_for_count(expected_events).await;
+                        observer.assert_healthy();
+
+                        let start = Instant::now();
+                        let claimed =
+                            expect_within("backoff cancellation", handle.cancel(id).execute())
+                                .await
+                                .expect("backoff cancellation failed");
+                        expect_canceled(waiter).await;
+                        total += start.elapsed();
+
+                        assert!(claimed, "cancel did not claim the retrying task");
+                        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+                        assert_eq!(observer.count(), expected_events);
+                        wait_for_ownership(&handle, 1).await;
+                    }
+
+                    observer.assert_healthy();
+                    handle.shutdown().await.expect("shutdown failed");
+                    total
+                })
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_requested_shutdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group(REQUESTED_SHUTDOWN.group_id);
+    group.throughput(Throughput::Elements(1));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        for task_count in [0usize, 32] {
+            let parameter = format!("{task_count}_started_tasks");
+            group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
+                record_case(REQUESTED_SHUTDOWN, rt_name, Some(parameter.clone()));
+                let rt = rt_fn();
+                b.iter_custom(|iters| {
+                    rt.block_on(async {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let supervisor = Supervisor::new(bench_config(), vec![]);
+                            let handle = supervisor.serve().expect("runtime startup");
+                            let started = AsyncCounter::new();
+                            let mut waiters = Vec::with_capacity(task_count);
+                            for i in 0..task_count {
+                                let waiter = expect_within(
+                                    "cooperative shutdown task admission",
+                                    handle
+                                        .add(cooperative_shutdown_task(
+                                            format!("shutdown-cooperative-{iteration}-{i}"),
+                                            Arc::clone(&started),
+                                        ))
+                                        .watch()
+                                        .execute(),
+                                )
+                                .await
+                                .expect("cooperative shutdown task admission failed");
+                                waiters.push(waiter);
+                            }
+                            started.wait_for(task_count).await;
+
+                            let start = Instant::now();
+                            let result =
+                                expect_within("cooperative requested shutdown", handle.shutdown())
+                                    .await;
+                            total += start.elapsed();
+                            result.expect("cooperative requested shutdown failed");
+
+                            for waiter in waiters {
+                                expect_canceled(waiter).await;
+                            }
+                        }
+                        total
+                    })
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+fn bench_grace_exceeded(c: &mut Criterion) {
+    let mut group = c.benchmark_group(GRACE_EXCEEDED.group_id);
+    group.throughput(Throughput::Elements(1));
+
+    for &(rt_name, rt_fn) in &RUNTIMES[..1] {
+        for task_count in [1usize, 32] {
+            let parameter = format!("{task_count}_started_tasks_10ms_grace");
+            group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
+                record_case(GRACE_EXCEEDED, rt_name, Some(parameter.clone()));
+                let rt = rt_fn();
+                b.iter_custom(|iters| {
+                    rt.block_on(async {
+                        let mut total = Duration::ZERO;
+                        for iteration in 0..iters {
+                            let config = bench_config().with_grace(GRACE_EXCEEDED_DURATION);
+                            let supervisor = Supervisor::new(config, vec![]);
+                            let handle = supervisor.serve().expect("runtime startup");
+                            let started = AsyncCounter::new();
+                            let mut waiters = Vec::with_capacity(task_count);
+                            for i in 0..task_count {
+                                let waiter = expect_within(
+                                    "stubborn shutdown task admission",
+                                    handle
+                                        .add(stubborn_shutdown_task(
+                                            format!("shutdown-stubborn-{iteration}-{i}"),
+                                            Arc::clone(&started),
+                                        ))
+                                        .watch()
+                                        .execute(),
+                                )
+                                .await
+                                .expect("stubborn shutdown task admission failed");
+                                waiters.push(waiter);
+                            }
+                            started.wait_for(task_count).await;
+
+                            let start = Instant::now();
+                            let result = expect_within(
+                                "grace-expired requested shutdown",
+                                handle.shutdown(),
+                            )
+                            .await;
+                            total += start.elapsed();
+                            assert!(
+                                matches!(result, Err(RuntimeError::GraceExceeded { .. })),
+                                "stubborn tasks must exceed the shared grace, got {result:?}"
+                            );
+
+                            for waiter in waiters {
+                                let outcome =
+                                    expect_within("force-aborted shutdown outcome", waiter.wait())
+                                        .await
+                                        .expect("force-aborted outcome channel closed");
+                                assert!(
+                                    matches!(outcome, TaskOutcome::ForceAborted),
+                                    "stubborn shutdown task must be force-aborted, got {outcome:?}"
+                                );
+                            }
+                        }
+                        total
+                    })
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group! {
+    name = benches;
+    config = support::fixtures::criterion();
+    targets =
+        bench_cold,
+        bench_completion,
+        bench_cancel_backoff,
+        bench_requested_shutdown,
+        bench_grace_exceeded
+}
 
 fn main() {
     support::benchmark_main("lifecycle", benches);

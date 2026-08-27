@@ -1,11 +1,10 @@
 //! Resumes admissions waiting for registry command capacity.
 //!
-//! When the registry channel is full and admission limits allow a wait, `handoff` stores the task
-//! in `ControllerState::capacity_pending`. The controller driver later passes the reserved permit
-//! or reservation error here.
+//! When the registry channel is full, controller state retains the task and its slot ownership.
+//! The bounded capacity pump owns the matching permit wait.
 //!
 //! A permit is committed only while the same [`TaskId`] still owns the slot.
-//! A failed matching commit clears that admission, resolves any watcher, and may advance the slot queue.
+//! A failed or stale result cannot transfer the retained task to the registry.
 
 use std::sync::Arc;
 
@@ -23,7 +22,7 @@ use super::super::{
 };
 
 impl Controller {
-    /// Removes one capacity waiter and its watched sender in one state update.
+    /// Atomic claim of one capacity waiter and its watched sender.
     pub(in crate::controller::engine) fn claim_capacity_pending(
         &self,
         id: TaskId,
@@ -60,7 +59,7 @@ impl Controller {
         self.drop_pending_submission(waiting.pending, terminal);
     }
 
-    /// Commits a matching capacity waiter or rejects it before registry handoff.
+    /// Matching capacity-wait result at the registry handoff boundary.
     ///
     /// A successful commit starts direct registry Add-result tracking.
     pub(in crate::controller::engine) async fn handle_registry_capacity_result(
@@ -125,14 +124,14 @@ impl Controller {
                 }
                 None => Err(Box::new(crate::core::UncommittedWatchedAdd {
                     error: RuntimeError::ShuttingDown,
-                    label: task_name,
+                    name: task_name,
                     owned,
                     done,
                 })),
             },
             Err(error) => Err(Box::new(crate::core::UncommittedWatchedAdd {
                 error,
-                label: task_name,
+                name: task_name,
                 owned,
                 done,
             })),

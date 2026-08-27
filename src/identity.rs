@@ -16,17 +16,17 @@
 //! The same ID follows queued work, every retry, terminal cleanup, and controller rejection.
 //! Several task names may use the same controller slot.
 //!
-//! A name can be reused after registry membership ends and Taskvisor has observed the physical
-//! exit of any force-aborted actor with that name. Reuse allocates a new [`TaskId`].
-//! IDs come from a process-local `u64` sequence, are not persisted, and cannot be reconstructed through the public API.
-//! Returned IDs are never zero and never wrap. The next allocation after exhaustion panics.
+//! A name becomes reusable after registry membership ends and any force-aborted actor with that name exits physically.
+//! Reuse allocates a new [`TaskId`].
+//! IDs come from a process-local `u64` sequence.
+//! They are not persisted and cannot be reconstructed through the public API.
+//! Returned IDs are never zero and never wrap.
+//! The next allocation after exhaustion panics.
 //! Store a separate application ID when identity must survive a process restart.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Process-local sequence used for every task identity.
-///
-/// Starts at `1`; zero is the exhausted sentinel and is never returned.
+/// Process-local identity source with zero reserved as the exhaustion sentinel.
 static TASK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[inline]
@@ -44,15 +44,14 @@ fn advance(current: u64) -> Option<u64> {
 /// An admitted task keeps the same value through every attempt and terminal cleanup.
 /// Controller rejection also keeps the submitted value even though no task body runs.
 ///
-/// `Display` writes `#` followed by the numeric value. Do not parse that output;
-/// use [`get`](Self::get). Numeric order records allocation order only.
+/// `Display` writes `#` followed by the numeric value.
+/// Do not parse that output; use [`get`](Self::get).
+/// Numeric order records allocation order only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskId(u64);
 
 impl TaskId {
-    /// Allocates the next submission identity.
-    ///
-    /// Taskvisor owns the single sequence used by direct, static-run, and controller paths.
+    /// Unique identity from the sequence shared by direct, static-run, and controller paths.
     #[inline]
     pub(crate) fn next() -> Self {
         let id = TASK_ID_SEQ
@@ -61,9 +60,8 @@ impl TaskId {
         TaskId(id)
     }
 
-    /// Returns the process-local numeric value.
+    /// Process-local numeric value for logs and metrics.
     ///
-    /// The number is useful for logs and metrics in the current process.
     /// It is not persistent and cannot reconstruct a `TaskId` through the public API.
     #[inline]
     #[must_use]

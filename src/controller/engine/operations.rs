@@ -1,7 +1,6 @@
 //! In-loop operations tracked by the controller driver.
 //!
-//! The lifecycle driver polls registry capacity, admission replies, completion,
-//! removal, and identity work inside the serialized controller task.
+//! The lifecycle driver owns registry-capacity waits, admission replies, physical completion, removal, and identity work.
 //! This keeps state transitions in one loop without spawning a Tokio task per operation.
 
 use std::{
@@ -54,7 +53,7 @@ impl TrackedOperations {
         }
     }
 
-    /// Adds one panic-contained future to a tracked operation set.
+    /// Panic-contained registration for one in-loop future.
     pub(super) fn push<T>(set: &OperationSet<T>, future: impl Future<Output = T> + Send + 'static)
     where
         T: 'static,
@@ -108,7 +107,9 @@ impl CapacityAdmissionPump {
         self.active.is_none() && self.queued.is_empty()
     }
 
-    /// Enqueues one identity without exceeding the configured admission budget.
+    /// Bounded FIFO admission for one registry-capacity waiter.
+    ///
+    /// A full pump leaves its state unchanged and reports the configured limit.
     pub(super) fn enqueue(&mut self, id: TaskId) -> Result<(), usize> {
         if self.len() >= self.limit {
             return Err(self.limit);
@@ -123,10 +124,10 @@ impl CapacityAdmissionPump {
         Ok(())
     }
 
-    /// Cancels a queued or active identity.
+    /// Cancellation of one queued or active capacity waiter.
     ///
-    /// Dropping an active reservation future is the cancellation acknowledgement;
-    /// no ghost waiter remains in the registry command channel.
+    /// Dropping an active reservation future acknowledges cancellation.
+    /// No ghost waiter remains in the registry command channel.
     pub(super) fn cancel(&mut self, id: TaskId) -> bool {
         if self
             .active
@@ -175,7 +176,7 @@ impl CapacityAdmissionPump {
 }
 
 impl Controller {
-    /// Tracks a registration command until its direct registry reply arrives.
+    /// Direct registry-decision tracking for one committed Add command.
     pub(super) fn track_admission(
         admissions: &OperationSet<AdmissionResult>,
         id: TaskId,
@@ -197,7 +198,7 @@ impl Controller {
         });
     }
 
-    /// Tracks one accepted task through logical registry cleanup and physical actor release.
+    /// Physical-completion tracking for one accepted task.
     pub(super) fn track_completion(
         completions: &OperationSet<CompletionResult>,
         id: TaskId,
@@ -210,7 +211,7 @@ impl Controller {
         });
     }
 
-    /// Orders one runtime removal without blocking the controller loop on registry backpressure.
+    /// Non-blocking runtime-removal tracking for one slot owner.
     pub(super) fn track_removal(
         removals: &OperationSet<RemovalResult>,
         supervisor: Arc<SupervisorCore>,
@@ -227,10 +228,10 @@ impl Controller {
         });
     }
 
-    /// Reports a failed removal request for the current slot owner.
+    /// Failure reporting for a matching current-owner removal.
     ///
     /// Stale results are ignored.
-    /// A successful request also leaves ownership in place; physical completion releases the slot.
+    /// Success leaves slot ownership in place until physical completion.
     pub(super) async fn handle_removal_result(&self, result: RemovalResult) {
         let Some(slot) = self.slot(&result.slot_name) else {
             return;

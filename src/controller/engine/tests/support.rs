@@ -17,7 +17,7 @@ pub(super) use std::{
     time::Duration,
 };
 pub(super) use tokio::{
-    sync::{Mutex, RwLock, mpsc, oneshot},
+    sync::{Mutex, mpsc, oneshot},
     time::Instant,
 };
 pub(super) use tokio_util::sync::CancellationToken;
@@ -318,7 +318,7 @@ pub(super) fn make_controller_with_domain(
         shutdown_token: CancellationToken::new(),
         state: StdMutex::new(ControllerState::default()),
         tx,
-        rx: RwLock::new(Some(rx)),
+        rx: StdMutex::new(Some(rx)),
         shutting_down: AtomicBool::new(false),
         task: OnceLock::new(),
     }
@@ -336,21 +336,12 @@ pub(super) async fn start_controller_loop(
     ctrl: &Arc<Controller>,
     token: &CancellationToken,
 ) -> tokio::task::JoinHandle<Result<(), &'static str>> {
+    let receiver = ctrl
+        .take_command_receiver()
+        .expect("controller loop receiver present");
     let runner_ctrl = Arc::clone(ctrl);
     let runner_token = token.clone();
-    let runner = tokio::spawn(async move { runner_ctrl.run_inner(runner_token).await });
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if ctrl.rx.read().await.is_none() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("controller loop must take its command receiver");
-    runner
+    tokio::spawn(async move { runner_ctrl.run_inner(runner_token, receiver).await })
 }
 
 pub(super) async fn stop_controller_loop(

@@ -17,7 +17,7 @@ impl DropStartError {
         Self { worker, source }
     }
 
-    /// Returns the failed worker index, or zero for invalid configuration.
+    /// Failed worker index, or zero for invalid configuration.
     pub(crate) const fn worker(&self) -> usize {
         self.worker
     }
@@ -28,12 +28,12 @@ impl DropStartError {
         self.source
     }
 
-    /// Returns the category of the underlying startup error.
+    /// Category of the underlying startup error.
     pub(crate) fn source_kind(&self) -> io::ErrorKind {
         self.source.kind()
     }
 
-    /// Returns the operating-system error code when one is available.
+    /// Operating-system error code when one is available.
     pub(crate) fn raw_os_error(&self) -> Option<i32> {
         self.source.raw_os_error()
     }
@@ -68,7 +68,7 @@ impl DropCapacityError {
         Self { limit }
     }
 
-    /// Returns the configured ownership limit.
+    /// Configured ownership limit.
     ///
     /// `None` means an unlimited domain rejected admission because it closed.
     pub(crate) const fn limit(self) -> Option<NonZeroUsize> {

@@ -2,11 +2,12 @@
 //!
 //! The registry listener calls this module after a management command reaches its ordering point.
 //! Identity commands inspect one entry.
-//! Label commands resolve the current identity and make the claim under the same state lock.
+//! Name commands resolve the current identity and make the claim under the same state lock.
 //!
-//! Remove returns only whether this command won the actor handle. It does not wait for terminal cleanup.
-//! Cancel returns the logical completion latch. A later cancel of an entry already being removed
-//! joins the same completion instead of starting another actor join.
+//! Remove returns only whether this command won the actor handle.
+//! It does not wait for terminal cleanup.
+//! Cancel returns the logical completion latch.
+//! A later cancel of an entry already being removed joins the same completion instead of starting another actor join.
 
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ struct CancelAction {
 }
 
 impl Registry {
-    /// Removes a task by identity.
+    /// Identity removal claim and cancellation decision.
     ///
     /// `Ok(true)` means this command claimed the actor and triggered cancellation.
     /// Membership remains until terminal join cleanup.
@@ -44,7 +45,7 @@ impl Registry {
         id: TaskId,
         reply: oneshot::Sender<RemoveReply>,
     ) {
-        if let Some((_label, handle, completion)) = self.claim_task(id).await {
+        if let Some((_name, handle, completion)) = self.claim_task(id).await {
             handle.cancel.cancel();
             let _ = reply.send(Ok(true));
             self.spawn_join_report(id, handle, Some(self.grace), completion);
@@ -53,20 +54,20 @@ impl Registry {
         }
     }
 
-    /// Resolves a label and claims its current owner under one state lock.
+    /// Atomic name resolution and removal claim.
     ///
-    /// A missing label returns `Ok(false)` without a request event.
+    /// A missing name returns `Ok(false)` without a request event.
     /// An entry already being removed gets another request event and returns `Ok(false)`.
-    pub(in crate::core::registry) async fn remove_task_by_label(
+    pub(in crate::core::registry) async fn remove_task_by_name(
         &self,
-        label: Arc<str>,
+        name: Arc<str>,
         reply: oneshot::Sender<RemoveReply>,
     ) {
         let resolved = {
             let mut st = self.state.write().await;
-            st.by_label.get(label.as_ref()).copied().map(|id| {
+            st.by_name.get(name.as_ref()).copied().map(|id| {
                 let claimed = Self::claim_registered(&mut st, &self.pending_joins, id)
-                    .map(|(_entry_label, handle, completion)| (handle, completion));
+                    .map(|(_entry_name, handle, completion)| (handle, completion));
                 (id, claimed)
             })
         };
@@ -76,7 +77,7 @@ impl Registry {
         };
         self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskRemoveRequested)
-                .with_task(Arc::clone(&label))
+                .with_task(Arc::clone(&name))
                 .with_id(id)
         });
 
@@ -89,7 +90,7 @@ impl Registry {
         }
     }
 
-    /// Claims or joins cancellation by identity and returns its terminal decision.
+    /// Identity cancellation claim or join decision.
     pub(in crate::core::registry) async fn cancel_task(
         &self,
         id: TaskId,
@@ -113,15 +114,15 @@ impl Registry {
         self.resolve_cancel_action(action, reply);
     }
 
-    /// Resolves a label and claims or joins cancellation under one state lock.
-    pub(in crate::core::registry) async fn cancel_task_by_label(
+    /// Atomic name resolution and cancellation claim or join decision.
+    pub(in crate::core::registry) async fn cancel_task_by_name(
         &self,
-        label: Arc<str>,
+        name: Arc<str>,
         reply: oneshot::Sender<CancelReply>,
     ) {
         let resolved = {
             let mut st = self.state.write().await;
-            st.by_label.get(label.as_ref()).copied().map(|id| {
+            st.by_name.get(name.as_ref()).copied().map(|id| {
                 let action = Self::cancel_action(&mut st, &self.pending_joins, id);
                 (id, action)
             })
@@ -132,7 +133,7 @@ impl Registry {
         };
         self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskRemoveRequested)
-                .with_task(Arc::clone(&label))
+                .with_task(Arc::clone(&name))
                 .with_id(id)
                 .with_reason("manual_cancel")
         });
@@ -163,7 +164,7 @@ impl Registry {
             });
         }
 
-        let (_label, handle, completion) = Self::claim_registered(st, pending_joins, id)
+        let (_name, handle, completion) = Self::claim_registered(st, pending_joins, id)
             .expect("a registered entry must be claimable while state is locked");
         Some(CancelAction {
             decision: CancelDecision {

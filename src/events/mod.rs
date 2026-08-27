@@ -28,10 +28,10 @@
 //! Bus overflow and subscriber queue pressure can drop events.
 //! Missing an event does not mean the action did not happen, and runtime state never depends on delivery.
 //!
-//! [`EventKind`] identifies what happened. [`Event`] carries its metadata.
-//! [`TaskOutcomeKind`](crate::TaskOutcomeKind), [`BackoffSource`], and [`RejectionKind`] provide
-//! typed details for outcomes, backoff, and rejection events. Implement [`Subscribe`](crate::Subscribe)
-//! for custom handling, or use the feature-gated `LogWriter` and `TracingBridge` subscribers for ready-made output.
+//! [`EventKind`] identifies what happened.
+//! [`Event`] carries its metadata.
+//! [`TaskOutcomeKind`](crate::TaskOutcomeKind), [`BackoffSource`], and [`RejectionKind`] provide typed details for outcomes, backoff, and rejection events.
+//! Implement [`Subscribe`](crate::Subscribe) for custom handling, or use the feature-gated `LogWriter` and `TracingBridge` subscribers for ready-made output.
 //!
 //! Important stream rules:
 //!

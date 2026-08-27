@@ -1,7 +1,10 @@
 //! Creates one cancellation-safe shutdown operation shared by every runtime caller.
 //!
 //! Explicit requests, static-run triggers, and natural registry completion enter [`ShutdownCoordinator`].
-//! The first trigger installs a detached owner. Canceling the initiating future does not cancel that owner.
+//! The first trigger installs a detached owner.
+//! After successful startup, that owner is scheduled on the startup Tokio runtime.
+//! Canceling the initiating future does not cancel that owner.
+//! Polling shutdown from another runtime does not transfer cleanup ownership to it.
 //! Concurrent and later callers join the same operation and receive its cached result.
 //!
 //! ```text
@@ -11,10 +14,10 @@
 //!                         └── mandatory cleanup tail ──► cached result
 //! ```
 //!
-//! The cleanup submodule owns the ordered drain and cleanup phases. A signal setup failure skips
-//! the normal task drain but still closes admission, attempts the registry fence, and runs the common tail.
-//! Dropping the last runtime owner before an operation exists can only close admission and cancel runtime tokens;
-//! that synchronous fallback cannot await or report cleanup.
+//! The cleanup submodule owns the ordered drain and cleanup phases.
+//! A signal setup failure skips the normal task drain but still closes admission, attempts the registry fence, and runs the common tail.
+//! Dropping the last runtime owner before an operation exists can only close admission and cancel runtime tokens.
+//! That synchronous fallback cannot await or report cleanup.
 
 mod cleanup;
 
@@ -46,7 +49,7 @@ pub(super) struct ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
-    /// Creates a coordinator with no installed operation.
+    /// Coordinator with no installed operation.
     pub(super) fn new() -> Self {
         Self {
             started: CancellationToken::new(),
@@ -63,7 +66,7 @@ struct ShutdownOperation {
 }
 
 impl ShutdownOperation {
-    /// Waits for the cached result and maps unexpected owner loss to shutdown failure.
+    /// Cached result with unexpected owner loss mapped to shutdown failure.
     async fn wait(&self) -> ShutdownOutcome {
         let mut outcome = self.outcome.clone();
         loop {
@@ -109,7 +112,7 @@ enum ShutdownOutcome {
     GraceExceeded {
         /// Configured task cleanup deadline.
         grace: Duration,
-        /// Task labels and join reporters pending at the deadline.
+        /// Task names and join reporters pending at the deadline.
         stuck: Vec<Arc<str>>,
     },
     /// Operating-system signal setup failed before normal task drain.
@@ -170,7 +173,7 @@ pub(super) enum ShutdownTrigger {
 }
 
 impl SupervisorCore {
-    /// Applies the synchronous last-owner fallback when no cleanup owner exists.
+    /// Synchronous last-owner fallback when no cleanup owner exists.
     ///
     /// An installed detached operation retains cleanup ownership.
     /// Otherwise, this closes admission and cancels the shutdown-start and runtime tokens.
@@ -184,7 +187,7 @@ impl SupervisorCore {
         self.runtime_token.cancel();
     }
 
-    /// Returns the installed operation or installs the first trigger's detached owner.
+    /// Installed operation or the first trigger's new detached owner.
     fn begin_shutdown(self: &Arc<Self>, trigger: ShutdownTrigger) -> Arc<ShutdownOperation> {
         let mut operation = self
             .shutdown
@@ -194,6 +197,12 @@ impl SupervisorCore {
         if let Some(operation) = operation.as_ref() {
             return Arc::clone(operation);
         }
+
+        let owner_runtime = self
+            .startup_runtime
+            .get()
+            .cloned()
+            .or_else(|| tokio::runtime::Handle::try_current().ok());
 
         let (outcome_tx, outcome_rx) = watch::channel(None);
         let shared = Arc::new(ShutdownOperation {
@@ -213,27 +222,39 @@ impl SupervisorCore {
         drop(operation);
 
         let core = Arc::clone(self);
-        tokio::spawn(async move {
-            let outcome =
-                match crate::core::panic_guard::guarded(core.perform_shutdown(trigger)).await {
-                    Ok(outcome) => outcome,
-                    Err(panic) => {
-                        core.report_shutdown_panic("owner", panic);
-                        let _ = core.finish_shutdown_cleanup().await;
-                        ShutdownOutcome::ShuttingDown
-                    }
-                };
-            outcome_tx.send_replace(Some(outcome));
-        });
+        if let Some(runtime) = owner_runtime {
+            runtime.spawn(async move {
+                let outcome =
+                    match crate::core::panic_guard::guarded(core.perform_shutdown(trigger)).await {
+                        Ok(outcome) => outcome,
+                        Err(panic) => {
+                            core.report_shutdown_panic("owner", panic);
+                            let _ = core.finish_shutdown_cleanup().await;
+                            ShutdownOutcome::ShuttingDown
+                        }
+                    };
+                outcome_tx.send_replace(Some(outcome));
+            });
+        } else {
+            core.runtime_token.cancel();
+            outcome_tx.send_replace(Some(ShutdownOutcome::ShuttingDown));
+        }
 
         shared
     }
 
-    /// Starts or joins shutdown and converts its cached outcome for this caller.
+    /// Shared shutdown operation with a caller-owned result.
     ///
     /// # Errors
     ///
-    /// Returns the cached error when grace is exceeded, signal setup fails, or internal cleanup cannot finish cleanly.
+    /// - [`RuntimeError::SignalSetupFailed`] when the shared signal trigger cannot install its listeners;
+    /// - [`RuntimeError::GraceExceeded`] when task cleanup remains pending after the shutdown grace period;
+    /// - [`RuntimeError::ShuttingDown`] when the registry cannot acknowledge the shutdown fence;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown outcome is lost before publication;
+    /// - [`RuntimeError::ShuttingDown`] when shutdown trigger handling panics;
+    /// - [`RuntimeError::ShuttingDown`] when the detached shutdown owner panics;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase reports failure;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase panics.
     pub(super) async fn join_shutdown(
         self: &Arc<Self>,
         trigger: ShutdownTrigger,
@@ -241,11 +262,18 @@ impl SupervisorCore {
         self.begin_shutdown(trigger).wait().await.into_result()
     }
 
-    /// Joins an operation after its reliable shutdown-start signal fires.
+    /// Existing operation after its reliable shutdown-start signal fires.
     ///
     /// # Errors
     ///
-    /// Returns the cached shutdown error from the shared operation.
+    /// - [`RuntimeError::SignalSetupFailed`] when the shared signal trigger cannot install its listeners;
+    /// - [`RuntimeError::GraceExceeded`] when task cleanup remains pending after the shutdown grace period;
+    /// - [`RuntimeError::ShuttingDown`] when the registry cannot acknowledge the shutdown fence;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown outcome is lost before publication;
+    /// - [`RuntimeError::ShuttingDown`] when shutdown trigger handling panics;
+    /// - [`RuntimeError::ShuttingDown`] when the detached shutdown owner panics;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase reports failure;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase panics.
     pub(super) async fn wait_started_shutdown(&self) -> Result<(), RuntimeError> {
         self.shutdown.started.cancelled().await;
         let operation = self
@@ -263,9 +291,14 @@ impl SupervisorCore {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::SignalSetupFailed`] when this call joins an operation started by failed operating-system signal setup.
-    /// Returns [`RuntimeError::GraceExceeded`] when tasks remain after the grace window.
-    /// Returns [`RuntimeError::ShuttingDown`] when internal cleanup cannot finish cleanly.
+    /// - [`RuntimeError::SignalSetupFailed`] when a joined signal-triggered shutdown cannot install its listeners;
+    /// - [`RuntimeError::GraceExceeded`] when task cleanup remains pending after the shutdown grace period;
+    /// - [`RuntimeError::ShuttingDown`] when the registry cannot acknowledge the shutdown fence;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown outcome is lost before publication;
+    /// - [`RuntimeError::ShuttingDown`] when shutdown trigger handling panics;
+    /// - [`RuntimeError::ShuttingDown`] when the detached shutdown owner panics;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase reports failure;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase panics.
     pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), RuntimeError> {
         self.join_shutdown(ShutdownTrigger::Requested).await
     }

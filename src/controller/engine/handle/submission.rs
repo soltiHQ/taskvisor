@@ -1,8 +1,9 @@
 //! Builds submission commands for the controller queue.
 //!
 //! Ordinary and prepared paths differ only in where the [`TaskId`] is allocated.
-//! Watched paths attach an outcome sender. Waiting methods wait for command capacity,
-//! while fail-fast methods reserve command capacity before taking ownership of the task.
+//! Watched paths attach an outcome sender.
+//! Waiting methods apply command-queue backpressure.
+//! Fail-fast methods reserve command capacity before taking ownership of the task.
 
 use std::time::Duration;
 
@@ -22,12 +23,15 @@ use super::{
 impl ControllerHandle {
     /// Allocates an identity and sends a submission through the waiting path.
     #[cfg(test)]
-    pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
+    pub(in crate::controller::engine) async fn submit(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.submit_prepared(id, spec).await
     }
 
-    /// Waits for ownership and command capacity, then sends a prepared submission.
+    /// Waiting command intake for a prepared submission.
     ///
     /// Success confirms command intake, not slot or registry admission.
     pub(crate) async fn submit_prepared(
@@ -39,7 +43,7 @@ impl ControllerHandle {
         self.send_owned_prepared(id, owned, None).await
     }
 
-    /// Bounds ownership admission, then waits normally for controller command capacity.
+    /// Ownership-only deadline before ordinary command-queue backpressure.
     pub(crate) async fn submit_prepared_with_ownership_timeout(
         &self,
         id: TaskId,
@@ -70,12 +74,15 @@ impl ControllerHandle {
 
     /// Allocates an identity and sends a submission through the fail-fast path.
     #[cfg(test)]
-    pub fn try_submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
+    pub(in crate::controller::engine) fn try_submit(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.try_submit_prepared(id, spec)
     }
 
-    /// Sends a prepared submission only when intake resources are available now.
+    /// Immediate command intake for a prepared submission.
     ///
     /// `ControllerError::Full` refers to command intake, not the target slot.
     pub(crate) fn try_submit_prepared(
@@ -98,7 +105,7 @@ impl ControllerHandle {
 
     /// Allocates an identity and sends a watched submission through the waiting path.
     #[cfg(test)]
-    pub async fn submit_and_watch(
+    pub(in crate::controller::engine) async fn submit_and_watch(
         &self,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
@@ -106,7 +113,7 @@ impl ControllerHandle {
         self.submit_prepared_and_watch(id, spec).await
     }
 
-    /// Waits for ownership and command capacity, then sends a watched submission.
+    /// Waiting command intake with a terminal outcome receiver.
     ///
     /// The receiver reports controller rejection or the runtime task outcome.
     pub(crate) async fn submit_prepared_and_watch(
@@ -118,7 +125,7 @@ impl ControllerHandle {
         self.send_owned_prepared_and_watch(id, owned).await
     }
 
-    /// Bounds ownership admission for a watched prepared submission.
+    /// Ownership-only deadline before watched command-queue backpressure.
     pub(crate) async fn submit_prepared_and_watch_with_ownership_timeout(
         &self,
         id: TaskId,
@@ -142,7 +149,7 @@ impl ControllerHandle {
 
     /// Allocates an identity and sends a watched submission through the fail-fast path.
     #[cfg(test)]
-    pub fn try_submit_and_watch(
+    pub(in crate::controller::engine) fn try_submit_and_watch(
         &self,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
@@ -150,7 +157,7 @@ impl ControllerHandle {
         self.try_submit_prepared_and_watch(id, spec)
     }
 
-    /// Sends a watched submission only when intake resources are available now.
+    /// Immediate watched command intake.
     ///
     /// The receiver has the same result contract as [`Self::submit_prepared_and_watch`].
     pub(crate) fn try_submit_prepared_and_watch(

@@ -231,7 +231,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
         TaskSpec::restartable("rerun", task).with_restart(RestartPolicy::Always { interval: None });
 
     with_timeout(15, async {
-        handle.add(spec).await.expect("add ok");
+        handle.add(spec).execute().await.expect("add ok");
         assert!(
             collector
                 .wait_until(Duration::from_secs(5), |events| {
@@ -271,7 +271,7 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
     });
 
     with_timeout(15, async {
-        handle.add(spec).await.expect("add ok");
+        handle.add(spec).execute().await.expect("add ok");
         assert!(
             collector
                 .wait_until(Duration::from_secs(5), |events| {
@@ -322,7 +322,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
         .with_backoff(fast_backoff());
 
     with_timeout(15, async {
-        handle.add(spec).await.expect("add ok");
+        handle.add(spec).execute().await.expect("add ok");
         assert!(
             collector
                 .wait_until(Duration::from_secs(5), |events| {
@@ -362,18 +362,18 @@ async fn static_run_multiple_oneshots_all_complete_run_returns_ok() {
     assert_eq!(collector.count(EventKind::TaskFinished), 3);
     assert_eq!(collector.count(EventKind::TaskRemoved), 3);
 
-    for label in ["a", "b", "c"] {
-        let evs = collector.by_label(label);
+    for name in ["a", "b", "c"] {
+        let evs = collector.by_name(name);
         assert!(
             evs.iter().any(|e| e.kind == EventKind::AttemptStarting),
-            "missing AttemptStarting for {label}"
+            "missing AttemptStarting for {name}"
         );
         assert!(
             evs.iter().any(|e| {
                 e.kind == EventKind::TaskFinished
                     && e.outcome_kind == Some(TaskOutcomeKind::Completed)
             }),
-            "missing completed TaskFinished for {label}"
+            "missing completed TaskFinished for {name}"
         );
     }
 }
@@ -384,13 +384,13 @@ async fn duplicate_static_batch_starts_no_task_body() {
     let runs = Arc::new(AtomicU32::new(0));
     let specs = ["unique", "duplicate", "duplicate"]
         .into_iter()
-        .map(|label| {
+        .map(|name| {
             let runs = Arc::clone(&runs);
             let task = TaskFn::arc(move |_ctx: TaskContext| {
                 runs.fetch_add(1, Ordering::SeqCst);
                 async { Ok(()) }
             });
-            TaskSpec::once(label, task)
+            TaskSpec::once(name, task)
         })
         .collect();
 
@@ -401,7 +401,7 @@ async fn duplicate_static_batch_starts_no_task_body() {
             Err(RuntimeError::TaskAlreadyExists { ref name, .. })
                 if name.as_ref() == "duplicate"
         ),
-        "the duplicate label must reject the full batch: {result:?}"
+        "the duplicate name must reject the full batch: {result:?}"
     );
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     assert!(matches!(
@@ -412,6 +412,7 @@ async fn duplicate_static_batch_starts_no_task_body() {
     let handle = supervisor.serve().expect("runtime startup");
     handle
         .add(TaskSpec::restartable("after-batch-error", make_coop()))
+        .execute()
         .await
         .expect("a rejected batch must leave the runtime open");
     handle
@@ -425,8 +426,8 @@ async fn duplicate_static_batch_starts_no_task_body() {
     assert_eq!(collector.count(EventKind::ShutdownRequested), 1);
     assert_eq!(collector.count(EventKind::AllStoppedWithinGrace), 1);
 
-    for label in ["unique", "duplicate"] {
-        assert!(collector.by_label(label).iter().all(|event| {
+    for name in ["unique", "duplicate"] {
+        assert!(collector.by_name(name).iter().all(|event| {
             !matches!(
                 event.kind,
                 EventKind::TaskAdded | EventKind::AttemptStarting
@@ -435,7 +436,7 @@ async fn duplicate_static_batch_starts_no_task_body() {
     }
 
     let unique_failure = collector
-        .by_label("unique")
+        .by_name("unique")
         .into_iter()
         .find(|event| event.kind == EventKind::TaskAddFailed)
         .expect("unique item must receive its batch rejection event");
@@ -445,7 +446,7 @@ async fn duplicate_static_batch_starts_no_task_body() {
     );
     assert_eq!(unique_failure.outcome_kind, Some(TaskOutcomeKind::Rejected));
     let duplicate_kinds: Vec<_> = collector
-        .by_label("duplicate")
+        .by_name("duplicate")
         .into_iter()
         .filter(|event| event.kind == EventKind::TaskAddFailed)
         .filter_map(|event| event.rejection_kind)

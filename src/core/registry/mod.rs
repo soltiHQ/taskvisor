@@ -1,7 +1,7 @@
 //! Owns the supervisor's authoritative task membership.
 //!
-//! Runtime management, static runs, and controller admission send commands here through
-//! [`SupervisorCore`](super::runtime::SupervisorCore). The listener gives each command a registry decision.
+//! Runtime management, static runs, and controller admission send commands here through [`SupervisorCore`](super::runtime::SupervisorCore).
+//! The listener gives each command a registry decision.
 //! It also receives actor completion signals.
 //!
 //! ```text
@@ -11,17 +11,24 @@
 //! listener ───────────────────► removal ───────────► terminal state ──► outcome and cleanup
 //! ```
 //!
-//! `state` maps each [`TaskId`](crate::TaskId) and label to one lifecycle entry. An entry moves from
-//! registered to removing before it disappears. The winning removal claim owns the actor handle.
+//! `state` maps each [`TaskId`](crate::TaskId) and name to one lifecycle entry.
+//! An entry moves from registered to removing before it disappears.
+//! The winning removal claim owns the actor handle.
 //! Joins may run outside the listener, but terminal removal always returns to the shared state.
 //!
-//! Management commands, actor completion, and control use separate channels. A full management queue
-//! does not discard actor completion or control input. A shutdown fence replies after the listener
-//! processes commands committed before admission closed. Lifecycle events are observations.
+//! Management commands, actor completion, and control use separate channels.
+//! A full management queue does not discard actor completion or control input.
+//! A shutdown fence replies after the listener processes commands committed before admission closed.
+//! Lifecycle events are observations.
 //! Direct replies, completion latches, and watched outcomes carry registry results.
+//! The completion, control, and reaper channels are intentionally unbounded.
+//! Each accepted actor emits at most one completion identity.
+//! Each force-abort transfer emits one reaper future.
+//! The shared shutdown path emits at most one fence and one reaper close.
+//! Configured limits bound live ownership rather than channel capacity.
 //!
 //! A force-aborted attempt can outlive membership.
-//! `scheduler` keeps its label, activity, and user values until the physical attempt exits.
+//! `scheduler` keeps its name, activity, and user values until the physical attempt exits.
 
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -40,11 +47,9 @@ mod scheduler;
 mod state;
 
 pub(crate) use completion::{OutcomeTx, RemovalCompletion};
-#[allow(unused_imports)]
 /// Wire types shared with runtime management.
 pub(crate) use protocol::{
-    AddBatchItem, AddReply, AddReplyRx, CancelDecision, CancelReply, CancelReplyRx,
-    RegistryCommand, RemoveReply, RemoveReplyRx,
+    AddBatchItem, AddReplyRx, CancelDecision, CancelReplyRx, RegistryCommand, RemoveReplyRx,
 };
 
 use listener::ListenerState;
@@ -61,33 +66,33 @@ use state::{Entry, EntryState, Handle, HandleCleanup};
 pub(crate) struct Registry {
     /// Shared membership indexes and entry state.
     state: Arc<RwLock<Inner>>,
-    /// Publishes task lifecycle events.
+    /// Best-effort task lifecycle event bus.
     bus: Bus,
-    /// Cancels registry work when the supervisor runtime stops.
+    /// Supervisor-wide registry cancellation token.
     runtime_token: CancellationToken,
-    /// Limits concurrent task attempts when configured.
+    /// Optional concurrent-attempt limit.
     semaphore: Option<Arc<Semaphore>>,
-    /// Bounds graceful actor joins during removal.
+    /// Graceful actor-join deadline during removal.
     grace: Duration,
-    /// Supplies defaults for accepted task specifications.
+    /// Defaults for accepted task specifications.
     task_defaults: TaskDefaults,
-    /// Limits registered and physically reaping tasks when configured.
+    /// Optional limit for registered and physically reaping tasks.
     max_registered_tasks: Option<NonZeroUsize>,
-    /// Wakes callers waiting for the membership state to become empty.
+    /// Notification for empty registry membership.
     empty_notify: Arc<Notify>,
-    /// Tracks removal claims whose terminal commits are pending.
+    /// Removal claims with pending terminal commits.
     pending_joins: Arc<PendingJoins>,
-    /// Schedules accepted actors and owns physical reaping.
+    /// Accepted-actor scheduler and physical reaper.
     actors: ActorRuntime,
-    /// Owns registry channel endpoints and the listener task.
+    /// Registry channel endpoints and listener task.
     listener: ListenerState,
 }
 
 impl Registry {
-    /// Builds a dormant registry.
+    /// Dormant registry whose listener and reaper have not started.
     ///
     /// [`spawn_listener`](Self::spawn_listener) starts its listener and reaper.
-    pub fn new(
+    pub(super) fn new(
         bus: Bus,
         runtime_token: CancellationToken,
         semaphore: Option<Arc<Semaphore>>,

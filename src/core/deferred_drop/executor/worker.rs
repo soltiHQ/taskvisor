@@ -1,11 +1,8 @@
 //! Owns the worker-thread queue for isolated user destruction.
 //!
-//! [`WorkerQueue`] accepts charged [`DropBatch`] values. Persistent core workers wait for work.
-//! The queue attempts to start a temporary elastic worker when queued work has no idle worker.
-//! Started elastic workers exit after an idle timeout.
-//!
-//! Worker creation happens outside the queue mutex.
-//! A worker removes one batch under the mutex, releases it, then runs user destructors.
+//! [`WorkerQueue`] accepts charged [`DropBatch`] values. A production domain starts up to three persistent core workers.
+//! It accounts at most 16 live-or-starting workers. A finite ownership capacity can lower both counts.
+//! Queued work with no idle worker can start an elastic worker. Elastic workers use a one-second idle timeout.
 
 use std::{
     collections::VecDeque,
@@ -70,7 +67,7 @@ pub(in crate::core::deferred_drop) struct WorkerQueue {
     state: Mutex<WorkerState>,
     /// Wakes idle workers after queue and lifecycle changes.
     ready: Condvar,
-    /// Creates operating-system cleanup threads.
+    /// Operating-system cleanup-thread factory.
     spawner: Arc<WorkerSpawner>,
     /// Persistent workers created transactionally at domain startup.
     core_workers: usize,
@@ -81,7 +78,6 @@ pub(in crate::core::deferred_drop) struct WorkerQueue {
 }
 
 impl WorkerQueue {
-    /// Creates an empty queue with worker limits and no started threads.
     pub(super) fn new(
         core_workers: usize,
         max_workers: usize,
@@ -104,11 +100,12 @@ impl WorkerQueue {
         })
     }
 
-    /// Activates the complete core set before external submission can begin.
+    /// All-or-nothing startup of the complete persistent worker set.
     ///
     /// # Errors
     ///
-    /// Returns an error when a core thread cannot be created or does not finish its startup handshake.
+    /// - [`DropStartError`] when a core worker thread cannot be created;
+    /// - [`DropStartError`] when a core worker exits before completing its startup handshake.
     pub(super) fn start_core(self: &Arc<Self>, count: usize) -> Result<(), DropStartError> {
         let mut launchers = Vec::with_capacity(count);
         for worker in 0..count {
@@ -163,11 +160,11 @@ impl WorkerQueue {
         Ok(())
     }
 
-    /// Enqueues one charged batch and reserves at most one elastic startup.
+    /// Charged-batch intake with elastic-worker expansion.
     ///
     /// # Errors
     ///
-    /// Returns the unchanged batch when the worker queue is closed.
+    /// - The unchanged [`DropBatch`] when the worker queue is closed.
     pub(super) fn submit(self: &Arc<Self>, batch: DropBatch) -> Result<(), DropBatch> {
         let spawn_worker = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -333,7 +330,7 @@ impl WorkerQueue {
         }
     }
 
-    /// Rejects new batches and wakes workers to drain the queue and exit.
+    /// Closed intake with previously queued batches still eligible for cleanup.
     ///
     /// Workers process batches already queued before they observe closure.
     pub(super) fn close(&self) {
@@ -352,7 +349,7 @@ impl WorkerQueue {
         state.running_batches = state.running_batches.saturating_sub(1);
     }
 
-    /// Copies queued and running cleanup counts under the worker mutex.
+    /// Point-in-time queued and running cleanup counts.
     pub(super) fn snapshot(&self) -> CleanupSnapshot {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         CleanupSnapshot {
@@ -408,7 +405,7 @@ impl Drop for RunningBatchGuard<'_> {
     }
 }
 
-/// Creates named operating-system threads for the production domain.
+/// Named operating-system thread factory for the production domain.
 pub(in crate::core::deferred_drop) fn system_spawner() -> Arc<WorkerSpawner> {
     Arc::new(|index, launcher| {
         std::thread::Builder::new()
@@ -421,7 +418,7 @@ pub(in crate::core::deferred_drop) fn system_spawner() -> Arc<WorkerSpawner> {
     })
 }
 
-/// Runs one worker under an outer boundary for unexpected internal panics.
+/// Outer panic boundary for one cleanup worker.
 ///
 /// An unexpected panic payload is retained permanently before queue accounting replaces the worker when needed.
 pub(in crate::core::deferred_drop) fn worker_loop(launch: WorkerLaunch) {
@@ -451,7 +448,7 @@ pub(in crate::core::deferred_drop) fn worker_loop(launch: WorkerLaunch) {
     }
 }
 
-/// Caps workers by both domain capacity and the global worker limit.
+/// Effective worker ceiling from domain capacity and the global limit.
 pub(super) fn max_worker_count(capacity: Option<NonZeroUsize>) -> usize {
     capacity.map_or(MAX_WORKER_COUNT, |capacity| {
         capacity.get().min(MAX_WORKER_COUNT)

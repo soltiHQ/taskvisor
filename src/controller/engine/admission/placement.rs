@@ -1,8 +1,8 @@
 //! Applies admission policy to the selected slot.
 //!
-//! This module is the policy decision point between `submission` preflight and queue or registry ownership.
-//! An idle slot tries runtime handoff. For an occupied slot, `Replace` updates the queue head and records
-//! owner retirement, `Queue` appends work, and `DropIfRunning` rejects the submission.
+//! This is the ownership boundary between submission preflight and a slot queue or registry handoff.
+//! An idle slot attempts registry handoff regardless of policy.
+//! An occupied slot applies `Replace`, `Queue`, or `DropIfRunning`.
 //!
 //! Placement records durable controller ownership before it reports acceptance.
 //! Rejected and displaced values are returned to the caller for cleanup after the slot is unlocked.

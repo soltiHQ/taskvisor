@@ -1,7 +1,7 @@
 //! Keeps slot queues and controller indexes consistent.
 //!
-//! Admission code uses these helpers to update a slot queue and its reverse task index in the same serialized transition.
-//! This module also enforces slot and pending limits, replaces queue heads, and removes unused slots.
+//! Slot queues and their reverse [`TaskId`] index change in the same serialized transition.
+//! This boundary also enforces slot and aggregate pending limits.
 
 use std::sync::Arc;
 
@@ -48,7 +48,7 @@ impl Controller {
         self.index_queued(id, slot_name);
     }
 
-    /// Appends one submission when the aggregate pending budget has capacity.
+    /// Aggregate-budgeted admission to one slot queue.
     #[inline]
     pub(super) fn try_push_queued(
         &self,
@@ -106,9 +106,9 @@ impl Controller {
             .clone()
     }
 
-    /// Returns an existing slot or creates one without exceeding the aggregate slot budget.
+    /// Atomic slot lookup or bounded creation.
     ///
-    /// The serialized controller loop performs the limit check and insertion as one controller-state transition.
+    /// The serialized controller loop keeps the limit check and insertion in one state transition.
     #[inline]
     pub(super) fn try_get_or_create_slot(
         &self,
@@ -131,9 +131,6 @@ impl Controller {
             .clone())
     }
 
-    /// Removes an idle, empty slot from the slot map.
-    ///
-    /// The slot lock is released before removing from the map.
     #[inline]
     pub(super) fn gc_if_idle(
         &self,
@@ -147,9 +144,7 @@ impl Controller {
         }
     }
 
-    /// Builds the rejection reason when the per-slot queue is already full.
-    ///
-    /// `slot_len` is the current pending queue depth and does not include the current slot owner.
+    /// Per-slot queue-limit rejection detail excluding the current owner.
     #[inline]
     pub(super) fn queue_full_reason(&self, slot_len: usize) -> Option<String> {
         if slot_len >= self.config.max_slot_queue() {
@@ -164,7 +159,7 @@ impl Controller {
         }
     }
 
-    /// Atomically validates and indexes one registry-capacity waiter under the aggregate budget.
+    /// Aggregate-budgeted index for one registry-capacity waiter.
     #[inline]
     pub(super) fn try_index_capacity_pending(
         &self,
@@ -182,7 +177,7 @@ impl Controller {
         Ok(())
     }
 
-    /// Rolls back a capacity index before the controller transition becomes externally visible.
+    /// Capacity-index rollback before external visibility.
     #[inline]
     pub(super) fn unindex_capacity_pending(&self, id: TaskId) -> CapacityPending {
         self.state()
@@ -208,10 +203,11 @@ impl Controller {
         }
     }
 
-    /// Replaces the queue head with the latest submission.
+    /// Latest replacement at the queue head.
     ///
     /// An existing head is rejected with [`RejectionKind::SupersededByReplace`].
-    /// The remaining queue keeps its order. An empty queue receives the new head without applying `max_slot_queue`.
+    /// The remaining queue keeps its order.
+    /// An empty queue receives the new head without applying `max_slot_queue`.
     pub(super) fn replace_head_or_push(
         &self,
         slot: &mut SlotState,

@@ -1,12 +1,13 @@
 //! Commits one add command or returns its rejection.
 //!
 //! The registry listener calls this module after it receives [`RegistryCommand::Add`](crate::core::registry::RegistryCommand::Add).
-//! Label conflicts include current membership and force-aborted attempts that have not physically exited.
+//! Name conflicts include current membership and force-aborted attempts that have not physically exited.
 //! The configured registration limit includes both groups.
 //!
 //! Validation runs before actor preparation and again under the state write lock.
 //! On success, both indexes are updated before the `TaskAdded` event, the direct reply, actor spawn, and start-gate release.
-//! On rejection, no task body starts. A watched rejection is delivered or moved to deferred cleanup.
+//! On rejection, no task body starts.
+//! A watched rejection is delivered or moved to deferred cleanup.
 
 use std::sync::Arc;
 
@@ -32,11 +33,11 @@ use crate::{
 };
 
 impl Registry {
-    /// Applies the authoritative decision for one add command.
+    /// Authoritative decision for one add command.
     pub(in crate::core::registry) async fn spawn_and_register(
         &self,
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         owned: OwnedTask<TaskSpec>,
         done: Option<OutcomeTx>,
         completion: Option<RemovalCompletion>,
@@ -45,9 +46,9 @@ impl Registry {
         let reaper = self.actors.attempt_reaper();
         let validation = {
             let st = self.state.read().await;
-            if st.by_label.contains_key(&label) || reaper.reserves_label(&label) {
+            if st.by_name.contains_key(&name) || reaper.reserves_name(&name) {
                 Err(RuntimeError::TaskAlreadyExists {
-                    name: Arc::clone(&label),
+                    name: Arc::clone(&name),
                 })
             } else if let Some(limit) = self.registered_limit_exceeded(st.tasks.len(), 1) {
                 Err(RuntimeError::ResourceLimitReached {
@@ -81,7 +82,7 @@ impl Registry {
             cleanup.submit();
             self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskAddFailed)
-                    .with_task(Arc::clone(&label))
+                    .with_task(Arc::clone(&name))
                     .with_id(id)
                     .with_rejection_kind(kind)
                     .with_reason(reason)
@@ -90,13 +91,13 @@ impl Registry {
         }
 
         let (start_tx, start_rx) = watch::channel(false);
-        let mut prepared = self.prepare_registration(id, label, owned, done, completion, start_rx);
+        let mut prepared = self.prepare_registration(id, name, owned, done, completion, start_rx);
 
         let mut st = self.state.write().await;
-        if st.by_label.contains_key(&prepared.label) || reaper.reserves_label(&prepared.label) {
+        if st.by_name.contains_key(&prepared.name) || reaper.reserves_name(&prepared.name) {
             drop(st);
             let _ = reply.send(Err(RuntimeError::TaskAlreadyExists {
-                name: Arc::clone(&prepared.label),
+                name: Arc::clone(&prepared.name),
             }));
             let outcome = TaskOutcome::Rejected {
                 kind: RejectionKind::AlreadyExists,
@@ -105,7 +106,7 @@ impl Registry {
             deliver_or_attach_rejection(prepared.done.take(), outcome, &mut prepared.cleanup);
             self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskAddFailed)
-                    .with_task(Arc::clone(&prepared.label))
+                    .with_task(Arc::clone(&prepared.name))
                     .with_id(id)
                     .with_rejection_kind(RejectionKind::AlreadyExists)
                     .with_reason(reasons::ALREADY_EXISTS)
@@ -127,7 +128,7 @@ impl Registry {
             deliver_or_attach_rejection(prepared.done.take(), outcome, &mut prepared.cleanup);
             self.bus.publish_lazy(|| {
                 Event::new(EventKind::TaskAddFailed)
-                    .with_task(Arc::clone(&prepared.label))
+                    .with_task(Arc::clone(&prepared.name))
                     .with_id(id)
                     .with_rejection_kind(RejectionKind::ResourceLimit)
                     .with_reason(reason)
@@ -137,7 +138,7 @@ impl Registry {
 
         let PreparedRegistration {
             id,
-            label,
+            name,
             join,
             cancel,
             done,
@@ -147,7 +148,7 @@ impl Registry {
             activity,
         } = prepared;
         let entry = Entry {
-            label: Arc::clone(&label),
+            name: Arc::clone(&name),
             activity,
             state: EntryState::Registered(Box::new(Handle::new(
                 join,
@@ -158,12 +159,12 @@ impl Registry {
             ))),
         };
         st.tasks.insert(id, entry);
-        st.by_label.insert(label.clone(), id);
+        st.by_name.insert(name.clone(), id);
         drop(st);
 
         self.bus.publish_lazy(|| {
             Event::new(EventKind::TaskAdded)
-                .with_task(Arc::clone(&label))
+                .with_task(Arc::clone(&name))
                 .with_id(id)
         });
         let _ = reply.send(Ok(()));

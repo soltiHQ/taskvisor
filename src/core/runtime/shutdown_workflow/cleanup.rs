@@ -1,12 +1,10 @@
 //! Runs trigger-specific task drain logic and the mandatory cleanup tail.
 //!
 //! The detached shutdown owner calls this package after the coordinator chooses the first trigger.
-//! Explicit and natural shutdown close command admission and require a registry fence before draining
-//! tasks within the configured grace period. A signal setup failure closes admission and attempts the
-//! same fence, but skips that normal drain.
+//! Explicit and natural shutdown close command admission and require a registry fence before draining tasks within the configured grace period.
+//! A signal setup failure closes admission and attempts the same fence but skips that normal drain.
 //!
-//! Every trigger then attempts the same cleanup order: join the optional controller, cancel runtime
-//! listeners, join the registry listener, join the event relay, and close subscriber callback workers.
+//! Every trigger then attempts the same cleanup order: join the optional controller, cancel runtime listeners, join the registry listener, join the event relay, and close subscriber callback workers.
 //! Later phases still run after a failure or panic.
 //! Subscriber cleanup has its own timeout and is not part of the task grace period.
 
@@ -18,7 +16,6 @@ use crate::{
 };
 
 impl SupervisorCore {
-    /// Selects the normal drain, signal-failure, or injected test-panic branch.
     async fn resolve_shutdown(&self, trigger: ShutdownTrigger) -> ShutdownOutcome {
         match trigger {
             ShutdownTrigger::Requested => {
@@ -36,7 +33,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Produces the trigger outcome and then runs the common cleanup tail.
+    /// Trigger outcome followed by the common cleanup tail.
     ///
     /// A panic in trigger handling is reported and converted to an unclean outcome.
     pub(super) async fn perform_shutdown(&self, trigger: ShutdownTrigger) -> ShutdownOutcome {
@@ -56,9 +53,9 @@ impl SupervisorCore {
         }
     }
 
-    /// Attempts every cleanup phase even when an earlier phase fails or panics.
+    /// Every cleanup phase attempted after earlier failure or panic.
     ///
-    /// Returns whether all phases finished cleanly.
+    /// The result reports whether all phases finished cleanly.
     pub(super) async fn finish_shutdown_cleanup(&self) -> bool {
         let mut clean = true;
 
@@ -110,12 +107,13 @@ impl SupervisorCore {
     /// Fences prior registry commands and spends one grace window on task cleanup.
     ///
     /// `cancel_all_within` spends the shared deadline on newly claimed actors and removal owners already in progress.
-    /// The follow-up wait receives only the unused part. Forced actors and owners still pending form `stuck`.
+    /// The follow-up wait receives only the unused part.
+    /// Forced actors and owners still pending form `stuck`.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::GraceExceeded`] when work remains at the deadline.
-    /// Returns a shutdown error when registry admission cannot be fenced.
+    /// - [`RuntimeError::GraceExceeded`] when task cleanup remains pending after the grace period;
+    /// - [`RuntimeError::ShuttingDown`] when the registry cannot acknowledge the shutdown fence.
     async fn drain_with_grace(&self) -> Result<(), RuntimeError> {
         self.close_admission_and_fence_registry().await?;
         let grace = self.settings.runtime.grace();

@@ -5,19 +5,19 @@
 //!
 //! ```text
 //! application ──► serve ──► SupervisorHandle
-//!                                 ├── add ───────► registry ──► task attempts
-//!                                 ├── remove ────► claim a stop and return
-//!                                 ├── cancel ────► wait for cleanup
+//!                                 ├── add(...).await ─────► registry ──► task attempts
+//!                                 ├── remove(...).execute ► claim a stop and return
+//!                                 ├── cancel(...).execute ► wait for cleanup
 //!                                 └── shutdown ──► close admission and wait
 //! ```
 //!
-//! `add` confirms registry admission.
+//! `add(...).await` confirms registry admission.
 //! It does not confirm that an attempt started or finished.
 //! `list` reads registry membership. `is_alive` reads physical attempt activity directly.
 //! Neither query depends on lifecycle-event delivery.
 //!
-//! `remove` returns after it claims a stop, before registered-task cleanup finishes.
-//! `cancel` waits for bounded logical cleanup. Here, `cancel` follows an earlier `remove`.
+//! `remove(...).execute().await` returns after it claims a stop, before registered-task cleanup finishes.
+//! `cancel(...).execute().await` waits for bounded logical cleanup. Here, cancellation follows an earlier removal.
 //! It joins that stop or observes completed cleanup.
 //! It returns `false` in either case because it did not create the original claim.
 //!
@@ -64,18 +64,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id_a = handle.add(make_worker("worker-a")).await?;
     let id_b = handle.add(make_worker("worker-b")).await?;
 
-    // Demo pacing only: add() has already confirmed registration.
+    // Demo pacing only: direct await has already confirmed registration.
     tokio::time::sleep(Duration::from_secs(1)).await;
     println!("Registered: {:?}", handle.list().await);
 
-    // remove() claims the stop but returns before registered-task cleanup ends.
+    // remove(...).execute().await claims the stop but returns before registered-task cleanup ends.
     println!("\nRemoving worker-a...");
-    let removed = handle.remove(id_a).await?;
+    let removed = handle.remove(id_a).execute().await?;
     println!("worker-a removal claimed: {removed}");
 
     // Join the same removal before reading authoritative registry state.
-    // This returns false because remove() already claimed the stop (or cleanup finished first).
-    let second_claim = handle.cancel(id_a).await?;
+    // This returns false because the removal already claimed the stop (or cleanup finished first).
+    let second_claim = handle.cancel(id_a).execute().await?;
     println!("worker-a second cancellation claimed: {second_claim}");
     println!("Registered: {:?}", handle.list().await);
 
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cancel worker-b
     println!("Cancelling worker-b...");
-    let cancelled = handle.cancel(id_b).await?;
+    let cancelled = handle.cancel(id_b).execute().await?;
     println!("worker-b cancelled: {cancelled}");
     // This direct query reads physical attempt activity. It does not consume lifecycle events.
     println!(

@@ -2,7 +2,143 @@
 
 use super::support::*;
 use crate::controller::engine::state::SlotPhase;
-use crate::controller::engine::{CompletionResult, Controller, RemovalResult};
+use crate::controller::engine::{CompletionResult, Controller, RemovalResult, Submission};
+
+async fn ordinary_completed_slot_waits_for_controller_completion_dispatch() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let supervisor = Supervisor::new(crate::SupervisorConfig::default(), vec![]);
+        let handle = supervisor.serve().expect("runtime startup");
+        let bus = Bus::new(64);
+        let mut events = bus.subscribe();
+        let ctrl = Controller::new(ControllerConfig::default(), supervisor.core(), bus);
+        let mut operations = tracked_operations(&ctrl);
+        let owner = TaskId::next();
+        let candidate = TaskId::next();
+        let (release, released) = oneshot::channel();
+        let released = Arc::new(StdMutex::new(Some(released)));
+        let task_release = Arc::clone(&released);
+        let owner_task: TaskRef = TaskFn::arc(move |_ctx| {
+            let released = task_release
+                .lock()
+                .expect("release lock")
+                .take()
+                .expect("the ordinary owner runs once");
+            async move {
+                let _ = released.await;
+                Ok(())
+            }
+        });
+        let (owner_done, owner_outcome) = oneshot::channel();
+        ctrl.handle_submission(
+            Submission {
+                id: owner,
+                owned: owned_controller_spec(
+                    ControllerSpec::drop_if_running(TaskSpec::once("ordinary-owner", owner_task))
+                        .with_slot("ordinary-slot"),
+                ),
+                done: Some(owner_done),
+            },
+            &mut operations,
+        )
+        .await;
+        let admission = operations
+            .admissions
+            .next()
+            .await
+            .expect("one real registry admission")
+            .expect("admission operation did not panic");
+        let completion = admission
+            .decision
+            .as_ref()
+            .expect("the registry admitted the owner")
+            .clone();
+        ctrl.handle_admission_result(admission, &mut operations)
+            .await;
+        release.send(()).expect("the ordinary owner is waiting");
+        assert!(matches!(
+            owner_outcome.await.expect("ordinary owner outcome"),
+            TaskOutcome::Completed
+        ));
+        completion.wait_physical().await;
+
+        let slot = ctrl.slot("ordinary-slot").expect("owner remains in controller state");
+        {
+            let slot = slot.lock().await;
+            assert_eq!(slot.owner_id(), Some(owner));
+            assert!(matches!(slot.phase(), SlotPhase::Running { .. }));
+            assert!(slot.queue.is_empty());
+        }
+        let candidate_starts = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::clone(&candidate_starts);
+        let candidate_task: TaskRef = TaskFn::arc(move |_ctx| {
+            starts.fetch_add(1, Ordering::AcqRel);
+            async { Ok(()) }
+        });
+        let (candidate_done, candidate_outcome) = oneshot::channel();
+        ctrl.handle_submission(
+            Submission {
+                id: candidate,
+                owned: owned_controller_spec(
+                    ControllerSpec::drop_if_running(TaskSpec::once(
+                        "ordinary-candidate",
+                        candidate_task,
+                    ))
+                    .with_slot("ordinary-slot"),
+                ),
+                done: Some(candidate_done),
+            },
+            &mut operations,
+        )
+        .await;
+        let candidate_outcome = candidate_outcome.await.expect("candidate rejection");
+        assert!(matches!(
+            candidate_outcome,
+            TaskOutcome::Rejected {
+                kind: crate::RejectionKind::SlotBusy,
+                ..
+            }
+        ));
+        assert_eq!(candidate_starts.load(Ordering::Acquire), 0);
+        let rejected = drain_events(&mut events)
+            .into_iter()
+            .find(|event| event.id == Some(candidate))
+            .expect("typed candidate rejection event");
+        assert_rejection_parity(&rejected, candidate, &candidate_outcome);
+
+        let completed = operations
+            .completions
+            .next()
+            .await
+            .expect("one ready physical completion")
+            .expect("completion operation did not panic");
+        assert_eq!(completed.id, owner);
+        assert_eq!(completed.slot_name.as_ref(), "ordinary-slot");
+        assert_eq!(slot.lock().await.owner_id(), Some(owner));
+        ctrl.handle_completion_result(completed, &mut operations)
+            .await;
+        assert!(ctrl.slot("ordinary-slot").is_none());
+        assert!(operations.completions.is_empty());
+        assert!(operations.admissions.is_empty());
+        assert!(ctrl.state().watchers.is_empty());
+        assert_eq!(candidate_starts.load(Ordering::Acquire), 0);
+        eprintln!(
+            "ordinary completion dispatch: Completed -> wait_physical ready -> Running(owner={owner:?}) -> Drop rejected(candidate={candidate:?}, starts=0) -> handle_completion_result -> slot absent"
+        );
+        handle.shutdown().await.expect("runtime shutdown");
+    })
+    .await
+    .expect("ordinary completion dispatch test timed out");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_completed_slot_waits_for_dispatch_current_thread() {
+    ordinary_completed_slot_waits_for_controller_completion_dispatch().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_completed_slot_waits_for_dispatch_multi_thread() {
+    ordinary_completed_slot_waits_for_controller_completion_dispatch().await;
+}
 
 #[tokio::test]
 async fn stale_completion_does_not_free_current_owner() {

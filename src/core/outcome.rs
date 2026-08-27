@@ -1,9 +1,8 @@
 //! Delivers the final result of watched work outside the best-effort event bus.
 //!
-//! A [`TaskWaiter`] follows one [`TaskId`] through a direct one-shot channel. For admitted work,
-//! the registry delivers a [`TaskOutcome`] after the managed actor produces a terminal result
-//! and registry membership is removed. Controller submissions can instead resolve
-//! as [`TaskOutcome::Rejected`] before the task body starts.
+//! A [`TaskWaiter`] follows one [`TaskId`] through a direct one-shot channel.
+//! For admitted work, the registry delivers a [`TaskOutcome`] after the managed actor produces a terminal result and registry membership is removed.
+//! Controller submissions can resolve as [`TaskOutcome::Rejected`] before the task body starts.
 //!
 //! ```text
 //! watched work
@@ -15,10 +14,11 @@
 //! ```
 //!
 //! Except for [`TaskOutcome::ForceAborted`], the registry joins the managed actor before delivering the outcome.
-//! A force-aborted actor can remain physically active after the waiter resolves. Dropping the waiter does not
-//! cancel the work. Final destruction of the retained task object happens later on deferred-cleanup workers.
+//! A force-aborted actor can remain physically active after the waiter resolves.
+//! Dropping the waiter does not cancel the work.
+//! Final destruction of the retained task object happens later on deferred-cleanup workers.
 //! A panic during that later destruction is a runtime diagnostic and cannot revise an outcome already delivered.
-//! This path is reliable while the process and runtime are alive; it is not durable storage across process termination.
+//! This path is reliable while the process and runtime are alive but is not durable storage across process termination.
 
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ pub enum TaskOutcomeKind {
 }
 
 impl TaskOutcomeKind {
-    /// Returns the stable machine-readable label used by events, logs, and metrics.
+    /// Stable machine-readable label used by events, logs, and metrics.
     #[must_use]
     pub const fn as_label(self) -> &'static str {
         match self {
@@ -79,13 +79,12 @@ impl TaskOutcomeKind {
 /// This enum and its data-carrying variants are non-exhaustive.
 /// Use a fallback arm and `..` when matching fields.
 ///
-/// Watched work is created by:
-/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
-/// - [`SupervisorHandle::add_and_watch_with_ownership_timeout`](crate::SupervisorHandle::add_and_watch_with_ownership_timeout)
-/// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
+/// Direct watched work is created by adding `watch()` to the operation returned by
+/// [`SupervisorHandle::add`](crate::SupervisorHandle::add).
+/// The same operation can also select an ownership timeout or fail-fast admission before `execute().await`.
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch), [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout), and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
+    doc = "Controller watched work is created by adding `watch()` to the [`Submit`](crate::Submit) operation returned by [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) or [`PreparedSubmission::submit`](crate::PreparedSubmission::submit)."
 )]
 ///
 /// Events carry [`TaskOutcomeKind`] for best-effort observation.
@@ -157,7 +156,7 @@ pub enum TaskOutcome {
 }
 
 impl TaskOutcome {
-    /// Returns the machine-readable category of this outcome.
+    /// Machine-readable category of this outcome.
     #[must_use]
     pub const fn kind(&self) -> TaskOutcomeKind {
         match self {
@@ -171,7 +170,7 @@ impl TaskOutcome {
         }
     }
 
-    /// Returns whether the task reached [`Completed`](Self::Completed).
+    /// Whether the task reached [`Completed`](Self::Completed).
     ///
     /// Cancellation, rejection, and every failure category return `false`.
     #[must_use]
@@ -229,9 +228,9 @@ impl TaskOutcome {
         }
     }
 
-    /// Returns the original error source for [`Failed`](Self::Failed) or [`Fatal`](Self::Fatal).
+    /// Original error source for [`Failed`](Self::Failed) or [`Fatal`](Self::Fatal).
     ///
-    /// Returns `None` when the outcome has no source error.
+    /// Outcomes without a source error produce `None`.
     ///
     /// Callers can use `downcast_ref` or pass the source to an error reporter.
     #[must_use]
@@ -247,9 +246,7 @@ impl TaskOutcome {
         }
     }
 
-    /// Returns a stable machine-readable label.
-    ///
-    /// Useful for logs, metrics, and telemetry.
+    /// Stable machine-readable label for logs, metrics, and telemetry.
     #[must_use]
     pub fn as_label(&self) -> &'static str {
         self.kind().as_label()
@@ -258,16 +255,17 @@ impl TaskOutcome {
 
 /// One-shot receiver that follows one identity to its final [`TaskOutcome`].
 ///
-/// Created by:
-/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
-/// - [`SupervisorHandle::add_and_watch_with_ownership_timeout`](crate::SupervisorHandle::add_and_watch_with_ownership_timeout)
-/// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
+/// Created by adding `watch()` to the operation returned by
+/// [`SupervisorHandle::add`](crate::SupervisorHandle::add), then finishing it with
+/// `execute().await`.
+/// Ownership-bounded and fail-fast watched adds use the same operation.
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)\n- [`PreparedSubmission::submit_and_watch`](crate::PreparedSubmission::submit_and_watch)\n- [`PreparedSubmission::submit_and_watch_with_ownership_timeout`](crate::PreparedSubmission::submit_and_watch_with_ownership_timeout)\n- [`PreparedSubmission::try_submit_and_watch`](crate::PreparedSubmission::try_submit_and_watch)"
+    doc = "Controller submissions create a waiter by adding `watch()` to the [`Submit`](crate::Submit) operation returned by [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) or [`PreparedSubmission::submit`](crate::PreparedSubmission::submit), then finishing it with `execute().await` or `try_intake()`."
 )]
 ///
-/// [`wait`](Self::wait) consumes the waiter. Dropping it does not cancel the task or submission.
+/// [`wait`](Self::wait) consumes the waiter.
+/// Dropping it does not cancel the task or submission.
 /// Keep the waiter when application behavior depends on the result; use events only for best-effort observation.
 ///
 /// # Examples
@@ -281,9 +279,12 @@ impl TaskOutcome {
 ///     Ok(())
 /// });
 ///
-/// let (id, waiter) = handle
-///     .add_and_watch(TaskSpec::once("job", job))
+/// let waiter = handle
+///     .add(TaskSpec::once("job", job))
+///     .watch()
+///     .execute()
 ///     .await?;
+/// let id = waiter.id();
 ///
 /// match waiter.wait().await? {
 ///     TaskOutcome::Completed => println!("{id} completed"),
@@ -299,26 +300,26 @@ pub struct TaskWaiter {
 }
 
 impl TaskWaiter {
-    /// Creates a waiter for one task identity.
     pub(crate) fn new(id: TaskId, rx: oneshot::Receiver<TaskOutcome>) -> Self {
         Self { id, rx }
     }
 
-    /// Returns the task or submission identity followed by this waiter.
+    /// Task or submission identity followed by this waiter.
     #[must_use]
     pub fn id(&self) -> TaskId {
         self.id
     }
 
-    /// Waits for the final outcome.
+    /// Final outcome for this identity.
     ///
-    /// For admitted work, this normally resolves after registry membership is removed. Controller rejection
-    /// can resolve without starting the task. Shutdown does not replace an outcome already owned by terminal cleanup.
+    /// For admitted work, this normally resolves after registry membership is removed.
+    /// Controller rejection can resolve without starting the task.
+    /// Shutdown does not replace an outcome already owned by terminal cleanup.
     /// Resolution does not mean that deferred destruction of the retained task object has finished.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::OutcomeUnavailable`] if the sender closes before producing an outcome.
+    /// - [`RuntimeError::OutcomeUnavailable`] when the sender closes without an outcome.
     pub async fn wait(self) -> Result<TaskOutcome, RuntimeError> {
         let id = self.id;
         self.rx

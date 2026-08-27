@@ -34,7 +34,6 @@ pub(in crate::core::deferred_drop) struct DropBatch {
 }
 
 impl DropBatch {
-    /// Accepts all values collected by one terminal bundle.
     pub(in crate::core::deferred_drop) fn new(
         permit: OwnershipPermit,
         retained: DropJob,
@@ -53,9 +52,10 @@ impl DropBatch {
         }
     }
 
-    /// Runs every present destructor even when an earlier destructor panics.
+    /// Every present destructor is attempted even when an earlier one panics.
     ///
-    /// Each job has its own panic boundary. The first panic may use the diagnostic callback.
+    /// Each job has its own panic boundary.
+    /// The first panic may use the diagnostic callback.
     /// Every panic payload is retained permanently before execution continues.
     /// Clean, unpoisoned completion returns the permit; any panic or poison retires it.
     pub(super) fn run(mut self) {
@@ -87,7 +87,6 @@ impl DropBatch {
     }
 }
 
-/// Extracts a string message without consuming the panic payload.
 fn panic_message(payload: &Box<dyn Any + Send>) -> String {
     payload
         .downcast_ref::<&'static str>()
@@ -97,7 +96,7 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 }
 
 impl Drop for DropBatch {
-    /// Closes admission and permanently retains every unexecuted job.
+    /// Unexecuted jobs are retained permanently to avoid uncontrolled user destruction.
     fn drop(&mut self) {
         if let Some(permit) = self.permit.take() {
             permit.close_without_release();

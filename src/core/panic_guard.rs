@@ -1,9 +1,9 @@
 //! Contains panics from internal asynchronous operations.
 //!
 //! [`guarded`] catches panics while polling or destroying a future and returns readable panic text.
-//! Registry, controller, and shutdown loops use this boundary to report one failed work unit and
-//! continue their own recovery. It does not roll back state. User task attempts use
-//! the separate boundary in the attempt runner.
+//! Registry, controller, and shutdown loops use this boundary to report one failed work unit and continue their own recovery.
+//! The boundary does not roll back state.
+//! User task attempts use the separate boundary in the attempt runner.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -86,7 +86,7 @@ impl<F: Future> Drop for Guarded<F> {
     }
 }
 
-/// Returns a future that converts polling and cleanup panics into error text.
+/// Panic-contained future with readable polling and cleanup failures.
 pub(crate) fn guarded<F: Future>(fut: F) -> impl Future<Output = Result<F::Output, String>> {
     Guarded::new(fut)
 }

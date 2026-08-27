@@ -1,6 +1,6 @@
 //! Stores the controller task and its shared join result.
 //!
-//! Runtime shutdown and other join callers use the same value.
+//! Runtime shutdown and other join callers share the same stored result.
 //! A canceled join wait leaves the `JoinHandle` in place for the next caller.
 
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -22,17 +22,17 @@ enum ControllerTaskState {
 }
 
 impl ControllerTask {
-    /// Stores the spawned controller task for cancellation-safe joining.
+    /// Cancellation-safe shared ownership of the spawned controller task.
     pub(in crate::controller::engine) fn new(handle: JoinHandle<()>) -> Self {
         Self {
             state: Mutex::new(ControllerTaskState::Running(handle)),
         }
     }
 
-    /// Joins the stored task without taking it out of shared state before awaiting it.
+    /// Shared join state retained across canceled waits.
     ///
     /// If this future is dropped, a later caller can continue polling the same `JoinHandle`.
-    /// Returns `false` when Tokio reports that the controller task did not join cleanly.
+    /// `false` means Tokio reported that the controller task did not join cleanly.
     pub(in crate::controller::engine) async fn join(&self, bus: &Bus) -> bool {
         let mut state = self.state.lock().await;
         if let ControllerTaskState::Joined(clean) = &*state {

@@ -6,4 +6,4 @@
 //! ```text
 //! async closure ──► TaskFn ──► impl Task ──► TaskRef
 //! ```
-pub mod func;
+pub(super) mod func;

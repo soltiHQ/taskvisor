@@ -21,7 +21,7 @@ async fn try_submit_and_watch_is_fail_fast_and_preserves_watched_outcome() {
         Err(ControllerError::Full)
     ));
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
 
@@ -29,6 +29,42 @@ async fn try_submit_and_watch_is_fail_fast_and_preserves_watched_outcome() {
         tokio::time::timeout(Duration::from_secs(1), waiter).await,
         Ok(Ok(TaskOutcome::Rejected { .. }))
     ));
+}
+
+#[tokio::test]
+async fn closed_channel_wins_before_submission_reservation() {
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = make_controller(ControllerConfig::default(), bus);
+    let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    let id = TaskId::next();
+    let handle = ctrl.handle().with_reservation_source(source.clone());
+
+    let mut rx = ctrl.take_command_receiver().expect("receiver present");
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
+
+    let result = handle.try_submit_prepared_and_watch(
+        id,
+        ControllerSpec::queue(waiting_spec("closed-before-reservation"))
+            .with_slot("closed-before-reservation-slot"),
+    );
+    assert!(matches!(result, Err(ControllerError::Closed)));
+    assert_eq!(rx.len(), 0);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    assert!(
+        drain_events(&mut events)
+            .iter()
+            .all(|event| event.id != Some(id)),
+        "a submission rejected before reservation must not publish a controller event"
+    );
+
+    assert!(
+        source.try_reserve().is_ok(),
+        "channel closure must win before ownership is reserved"
+    );
 }
 
 #[tokio::test]
@@ -54,7 +90,7 @@ async fn ownership_wait_returns_closed_when_controller_receiver_closes() {
     })
     .await;
 
-    let receiver = ctrl.rx.write().await.take().expect("receiver present");
+    let receiver = ctrl.take_command_receiver().expect("receiver present");
     drop(receiver);
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(1), submission).await,
@@ -170,7 +206,7 @@ async fn positive_controller_ownership_deadline_expires_and_release_before_retry
         retry_id
     );
 
-    let mut receiver = ctrl.rx.write().await.take().expect("receiver present");
+    let mut receiver = ctrl.take_command_receiver().expect("receiver present");
     drop(
         receiver
             .recv()
@@ -188,7 +224,7 @@ async fn controller_close_wins_when_ownership_deadline_is_also_ready() {
         .try_reserve()
         .expect("the isolated ownership slot starts available");
     let handle = ctrl.handle().with_reservation_source(source);
-    let receiver = ctrl.rx.write().await.take().expect("receiver present");
+    let receiver = ctrl.take_command_receiver().expect("receiver present");
     drop(receiver);
 
     let error = handle
@@ -234,7 +270,7 @@ async fn ownership_timeout_stops_before_controller_queue_wait() {
     })
     .await;
 
-    let mut receiver = ctrl.rx.write().await.take().expect("receiver present");
+    let mut receiver = ctrl.take_command_receiver().expect("receiver present");
     drop(
         receiver
             .recv()
@@ -332,6 +368,7 @@ async fn minimum_queue_capacity_is_supported() {
             "minimum-capacity",
             task,
         )))
+        .execute()
         .await
         .expect("submission must work with the minimum non-zero capacity");
 

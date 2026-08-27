@@ -4,14 +4,14 @@
 //!
 //! ```text
 //! prepare_submission ──► known TaskId; no command sent yet
-//!          │ submit_and_watch
+//!          │ submit + watch + execute
 //!          ▼
 //! controller intake ──► slot decision
 //!                           ├── admitted ──► registry ──► task ──► final TaskOutcome
 //!                           └── rejected ──► TaskOutcome::Rejected; task never starts
 //! ```
 //!
-//! The returned `(TaskId, TaskWaiter)` confirms command intake, not positive admission.
+//! The returned `TaskWaiter` confirms command intake, not positive admission.
 //! The waiter resolves to the admitted task's final outcome or a typed rejection.
 //!
 //! This example produces `TaskOutcome::Completed` for `deploy-v1`.
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_slot("deploy"),
     )?;
     println!("    reserved task id {} before intake", prepared.id());
-    let (_id, v1) = prepared.submit_and_watch().await?;
+    let v1 = prepared.submit().watch().execute().await?;
     started.notified().await;
     println!("    deploy-v1 admitted, now running\n");
 
@@ -94,14 +94,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 2) While deploy-v1 holds the slot, a DropIfRunning submission is refused.
-    //     submit() would only report rejection on the best-effort event path;
-    //     submit_and_watch() gives this submission a dedicated outcome channel.
+    //     An unwatched execute reports only command intake; a later rejection then appears only
+    //     on the best-effort event path. watch().execute() adds a dedicated outcome channel.
     println!("2) submit deploy-v2 (DropIfRunning) while the slot is busy");
-    let (_id, v2) = handle
-        .submit_and_watch(
+    let v2 = handle
+        .submit(
             ControllerSpec::drop_if_running(job("deploy-v2", Duration::from_millis(200)))
                 .with_slot("deploy"),
         )
+        .watch()
+        .execute()
         .await?;
     match v2.wait().await? {
         TaskOutcome::Rejected {

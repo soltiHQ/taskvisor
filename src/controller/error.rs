@@ -7,8 +7,10 @@ use thiserror::Error;
 /// A failure before controller slot admission.
 ///
 /// [`NotConfigured`](Self::NotConfigured) can come from preparation or submission.
-/// The active variants below describe submission command intake; [`AlreadyStarted`](Self::AlreadyStarted) remains only for compatibility.
-/// `Ok` from preparation creates a local prepared value. `Ok` from a submit method confirms command intake. Neither result confirms slot admission.
+/// Other variants describe submission command intake.
+/// `Ok` from preparation creates a local prepared value.
+/// `Ok` from a submission terminal confirms command intake.
+/// Neither result confirms slot admission.
 ///
 /// Use the error variants as follows:
 ///
@@ -31,8 +33,9 @@ pub enum ControllerError {
 
     /// The ordered controller command queue has no capacity now.
     ///
-    /// Only fail-fast `try_submit*` methods return this variant.
-    /// It describes command intake, not a full per-slot queue. The corresponding async method waits for command capacity.
+    /// This variant is limited to fail-fast [`Submit::try_intake`](crate::Submit::try_intake).
+    /// It describes command intake, not a full per-slot queue.
+    /// `execute().await` waits for command capacity instead.
     #[error("submission queue full")]
     Full,
 
@@ -51,7 +54,8 @@ pub enum ControllerError {
     /// The caller's bounded wait for cleanup ownership expired before command intake.
     ///
     /// No controller command was committed.
-    /// The timeout covers only ownership admission; it does not bound a later wait for controller command capacity.
+    /// The timeout covers only ownership admission.
+    /// It does not bound a later wait for controller command capacity.
     #[error("timeout waiting for ownership admission after {timeout:?}")]
     #[non_exhaustive]
     OwnershipAdmissionTimeout {
@@ -82,17 +86,10 @@ pub enum ControllerError {
     /// The controller loop is stopping or has stopped.
     #[error("controller channel closed")]
     Closed,
-
-    /// A compatibility variant for the former fallible controller-start guard.
-    ///
-    /// Current controller startup does not return this variant.
-    /// It remains available for source compatibility.
-    #[error("controller already started")]
-    AlreadyStarted,
 }
 
 impl ControllerError {
-    /// Returns the stable variant label for logs and metrics.
+    /// Stable variant label for logs and metrics.
     ///
     /// The label is distinct from the human-readable [`Display`](std::fmt::Display) message.
     #[must_use]
@@ -103,7 +100,6 @@ impl ControllerError {
             ControllerError::OwnershipAdmissionTimeout { .. } => {
                 "controller_ownership_admission_timeout"
             }
-            ControllerError::AlreadyStarted => "controller_already_started",
             ControllerError::NotConfigured => "controller_not_configured",
             ControllerError::Closed => "controller_closed",
             ControllerError::Full => "controller_full",
@@ -146,10 +142,6 @@ mod tests {
                 "controller_thread_start_failed",
             ),
             (ControllerError::Closed, "controller_closed"),
-            (
-                ControllerError::AlreadyStarted,
-                "controller_already_started",
-            ),
         ] {
             assert_eq!(error.as_label(), expected);
         }

@@ -540,6 +540,7 @@ async fn duplicate_reply_frees_slot_without_task_add_failed() {
     let handle = sup.serve().expect("runtime startup");
     handle
         .add(waiting_spec("duplicate-reply"))
+        .execute()
         .await
         .expect("the existing task must register");
 
@@ -583,6 +584,7 @@ async fn queued_admission_skips_registry_rejected_head() {
     let handle = sup.serve().expect("runtime startup");
     handle
         .add(waiting_spec("queued-duplicate"))
+        .execute()
         .await
         .expect("the existing task must register");
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(1));

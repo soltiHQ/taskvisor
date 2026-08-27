@@ -1,8 +1,9 @@
 //! Defines messages between runtime management and the registry.
 //!
 //! [`SupervisorCore`](crate::core::runtime::SupervisorCore) commits ordered management commands to a bounded queue.
-//! The registry listener returns its decision through the command's one-shot sender. These direct replies are the
-//! source of truth for add, remove, and cancel calls. Lifecycle events are not part of the reply path.
+//! The registry listener returns its decision through the command's one-shot sender.
+//! These direct replies are the source of truth for add, remove, and cancel calls.
+//! Lifecycle events are not part of the reply path.
 //!
 //! [`RegistryControl`] uses a separate channel.
 //! Its fence can drain commands that passed shutdown admission without waiting for management queue capacity.
@@ -25,7 +26,7 @@ pub(crate) type AddReplyRx = oneshot::Receiver<AddReply>;
 /// One task owned by the atomic static-run registration command.
 pub(crate) struct AddBatchItem {
     pub(crate) id: TaskId,
-    pub(crate) label: Arc<str>,
+    pub(crate) name: Arc<str>,
     pub(crate) owned: OwnedTask<TaskSpec>,
 }
 
@@ -52,12 +53,12 @@ pub(crate) struct CancelDecision {
 }
 
 impl CancelDecision {
-    /// Waits until terminal membership and reporting are committed.
+    /// Terminal membership and reporting commit.
     pub(crate) async fn wait(&self) {
         self.completion.wait().await;
     }
 
-    /// Returns true when terminal cleanup has already been committed.
+    /// Whether terminal cleanup has already been committed.
     pub(crate) fn is_complete(&self) -> bool {
         self.completion.is_complete()
     }
@@ -77,20 +78,20 @@ pub(crate) enum RegistryCommand {
     /// Register one task under an assigned runtime identity.
     Add {
         id: TaskId,
-        label: Arc<str>,
+        name: Arc<str>,
         /// Keeps destructor capacity reserved after command handoff.
         owned: Box<OwnedTask<TaskSpec>>,
         /// Direct path for a watched terminal or rejected outcome.
         outcome: Option<OutcomeTx>,
         /// Lets controller admission track physical release when present.
         completion: Option<RemovalCompletion>,
-        /// Returns the decision before the actor start gate opens.
+        /// Decision sent before the actor start gate opens.
         reply: oneshot::Sender<AddReply>,
     },
     /// Validate and register every static-run task as one operation.
     AddBatch {
         items: Vec<AddBatchItem>,
-        /// Returns the decision before the shared start gate opens.
+        /// Decision sent before the shared start gate opens.
         reply: oneshot::Sender<AddReply>,
     },
     /// Remove a task by runtime identity.
@@ -98,27 +99,27 @@ pub(crate) enum RegistryCommand {
     /// The identity caller publishes `TaskRemoveRequested` before sending this.
     Remove {
         id: TaskId,
-        /// Reports the claim without waiting for terminal cleanup.
+        /// Claim decision without waiting for terminal cleanup.
         reply: oneshot::Sender<RemoveReply>,
     },
-    /// Resolve a label and claim its current owner in one registry operation.
+    /// Resolve a name and claim its current owner in one registry operation.
     ///
     /// The registry claims under the state lock, then publishes `TaskRemoveRequested` with the resolved identity.
-    RemoveByLabel {
-        label: Arc<str>,
-        /// Reports the claim without waiting for terminal cleanup.
+    RemoveByName {
+        name: Arc<str>,
+        /// Claim decision without waiting for terminal cleanup.
         reply: oneshot::Sender<RemoveReply>,
     },
     /// Start cancellation or join an existing removal by runtime identity.
     Cancel {
         id: TaskId,
-        /// Returns the resolved identity, claim result, and logical latch.
+        /// Resolved identity, claim result, and logical latch.
         reply: oneshot::Sender<CancelReply>,
     },
-    /// Resolve a label and start or join its cancellation atomically.
-    CancelByLabel {
-        label: Arc<str>,
-        /// Returns the resolved identity, claim result, and logical latch.
+    /// Resolve a name and start or join its cancellation atomically.
+    CancelByName {
+        name: Arc<str>,
+        /// Resolved identity, claim result, and logical latch.
         reply: oneshot::Sender<CancelReply>,
     },
 }
