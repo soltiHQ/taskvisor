@@ -92,6 +92,10 @@ name    = "dynamic"
 harness = false
 
 [[bench]]
+name    = "memory"
+harness = false
+
+[[bench]]
 name              = "controller"
 harness           = false
 required-features = ["controller"]

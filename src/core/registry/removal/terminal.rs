@@ -1,13 +1,13 @@
 //! Commits final registry state after the actor join produces a result.
 //!
-//! Every removal source reaches this module with one [`RemovalReport`]. The join result is first
-//! mapped to its public outcome. Terminal commit then removes the identity and name indexes under
-//! the state lock. After the lock is released, it publishes terminal events, resolves a watched outcome,
-//! and transfers user values with their capacity reservation to physical and deferred cleanup.
+//! Every removal source reaches this module with one [`RemovalReport`].
+//! The join result is first mapped to its public outcome.
+//! Terminal commit then removes the identity and name indexes under the state lock.
+//! After the lock is released, it publishes terminal events, resolves a watched outcome, and transfers user values with their capacity reservation to physical and deferred cleanup.
 //!
 //! Logical completion, pending-join release, and empty-registry notification form a guarded tail.
-//! They still run if reporting unwinds. If a future waiting for the state lock is cancelled,
-//! its report moves to a detached continuation when a Tokio runtime is available.
+//! They still run if reporting unwinds.
+//! If a future waiting for the state lock is cancelled, its report moves to a detached continuation when a Tokio runtime is available.
 //! No user-owned terminal value is dropped on the listener or actor task by this module.
 
 use std::sync::Arc;
@@ -42,7 +42,6 @@ struct OutcomeDropGuard<'a> {
 }
 
 impl<'a> OutcomeDropGuard<'a> {
-    /// Creates a guard for one classified terminal outcome.
     fn new(outcome: TaskOutcome, cleanup: &'a mut DropBundle) -> Self {
         Self {
             outcome: Some(outcome),
@@ -50,14 +49,12 @@ impl<'a> OutcomeDropGuard<'a> {
         }
     }
 
-    /// Borrows the outcome while the guard retains ownership.
     fn get(&self) -> &TaskOutcome {
         self.outcome
             .as_ref()
             .expect("the terminal outcome remains guarded until delivery")
     }
 
-    /// Transfers the outcome to its watched channel at most once.
     fn take(&mut self) -> TaskOutcome {
         self.outcome
             .take()
@@ -66,7 +63,7 @@ impl<'a> OutcomeDropGuard<'a> {
 }
 
 impl Drop for OutcomeDropGuard<'_> {
-    /// Moves an undelivered outcome into the cleanup bundle.
+    /// Undelivered outcome moved into the cleanup bundle.
     fn drop(&mut self) {
         if let Some(outcome) = self.outcome.take() {
             self.cleanup.attach_outcome(outcome);
@@ -117,7 +114,7 @@ impl PendingTerminalReport {
         )
     }
 
-    /// Removes membership and commits terminal side effects without another await.
+    /// Membership removal and terminal side effects under one commit owner.
     ///
     /// Completion waiters wake only after both indexes are updated, reporting is attempted, and the state lock is released.
     async fn commit(&mut self) {
@@ -188,7 +185,7 @@ impl PendingTerminalReport {
         }
     }
 
-    /// Transfers terminal ownership without completing registry barriers.
+    /// Terminal ownership transfer without registry barrier completion.
     fn retain_terminal(&mut self) -> bool {
         let Some(mut cleanup) = self.cleanup.take() else {
             return false;
@@ -208,7 +205,7 @@ impl PendingTerminalReport {
         true
     }
 
-    /// Moves an interrupted commit into a non-detaching continuation guard.
+    /// Non-detaching continuation for an interrupted commit.
     fn take_continuation(&mut self) -> Self {
         Self {
             state: Arc::clone(&self.state),
@@ -234,7 +231,7 @@ impl PendingTerminalReport {
 }
 
 impl Drop for PendingTerminalReport {
-    /// Continues an interrupted commit or retains its physical ownership.
+    /// Interrupted commit continuation or retained physical ownership.
     fn drop(&mut self) {
         if self.cleanup.is_none() {
             return;
@@ -273,7 +270,7 @@ pub(in crate::core::registry) struct TerminalFinalizer<'a> {
 }
 
 impl Drop for TerminalFinalizer<'_> {
-    /// Transfers terminal ownership and completes every logical barrier.
+    /// Terminal ownership transfer and completion of every logical barrier.
     fn drop(&mut self) {
         if let Some((reaper, bundle)) = self.terminal.take() {
             reaper.attach_terminal(
@@ -295,7 +292,7 @@ impl Drop for TerminalFinalizer<'_> {
 }
 
 impl Registry {
-    /// Commits terminal cleanup for one removing entry.
+    /// Terminal cleanup commit for one removing entry.
     ///
     /// Membership removal, reporting, and pending-join accounting finish before an empty-registry waiter can continue.
     pub(in crate::core::registry) async fn finish_removal(
@@ -333,7 +330,7 @@ impl Registry {
         pending_report.commit().await;
     }
 
-    /// Publishes terminal events and delivers the watched outcome.
+    /// Terminal events and watched outcome from one shared classification.
     ///
     /// The event and waiter use the same [`TaskOutcome`] classification.
     fn report_outcome(

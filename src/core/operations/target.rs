@@ -4,16 +4,16 @@ use std::sync::Arc;
 
 use crate::TaskId;
 
-/// Selects a task by controller-aware identity or by registered name.
+/// Task selected by controller-aware identity or registered name.
 ///
 /// Identity operations can address controller work that has not reached the registry yet.
 /// Name operations resolve only current registry membership because queued controller work does not own a registered name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TaskTarget {
-    /// Selects one task or controller submission by its process-local identity.
+    /// One task or controller submission by its process-local identity.
     Id(TaskId),
-    /// Selects the current registered owner of a task name.
+    /// Current registered owner of a task name.
     Name(Arc<str>),
 }
 

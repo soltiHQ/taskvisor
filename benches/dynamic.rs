@@ -1,6 +1,4 @@
-//! Dynamic admission, cancellation, registry queries, and ownership recovery.
-//!
-//! Cases keep setup and physical ownership reset outside their stated boundaries.
+//! Measures dynamic task admission, cancellation, queries, and ownership recovery.
 
 mod support;
 
@@ -17,8 +15,9 @@ use taskvisor::{
 };
 
 use support::fixtures::{
-    self, AsyncFlag, BlockingGate, RUNTIMES, ReleaseOnDrop, bench_config, expect_canceled,
-    expect_completed, expect_within, instant_task, wait_for_ownership, warm_runtime,
+    self, AsyncCounter, AsyncFlag, BlockingGate, OWNERSHIP_CAPACITY, RUNTIMES, ReleaseOnDrop,
+    bench_config, expect_canceled, expect_completed, expect_within, instant_task,
+    wait_for_ownership, warm_runtime,
 };
 use support::{CaseFamily, print_suite_header, record_case};
 
@@ -61,13 +60,22 @@ const CANCEL_STARTED: CaseFamily = CaseFamily::lifecycle(
 )
 .without_lifecycle_interpretation();
 
+const ADD_AT_OCCUPANCY: CaseFamily = CaseFamily::intake(
+    "dynamic/latency/registry_add_at_occupancy",
+    "REGISTRY ADD · OCCUPANCY",
+    "accepted add",
+    "accepted adds",
+    "one add call through its authoritative registry decision with 0 or 1023 already-started tasks held; the near-limit case fills the configured 1024-task registry",
+    "TaskSpec construction, Supervisor startup and warmup, registry prepopulation and started-task handshakes, result validation, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
+);
+
 const LIST: CaseFamily = CaseFamily::query(
     "dynamic/steady/list_held_tasks",
     "HELD-TASK REGISTRY SNAPSHOT",
     "snapshot call",
     "snapshot calls",
-    "one complete registry snapshot while the named number of cooperative tasks remains registered",
-    "Supervisor startup and warmup, registry prepopulation, result validation, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
+    "one complete registry snapshot while the named number of already-started cooperative tasks remains registered",
+    "Supervisor startup and warmup, registry prepopulation and started-task handshakes, result validation, cancellation, physical ownership reset, shutdown, and Tokio runtime construction",
 );
 
 const OWNERSHIP_RELEASE: CaseFamily = CaseFamily::intake(
@@ -87,6 +95,30 @@ fn cooperative_task(name: impl Into<Arc<str>>, started: Option<Arc<AsyncFlag>>) 
                 started.mark();
             }
             ctx.cancelled().await;
+            Ok(())
+        }
+    });
+    TaskSpec::once(name, task)
+}
+
+fn counted_cooperative_task(name: impl Into<Arc<str>>, started: Arc<AsyncCounter>) -> TaskSpec {
+    let task: TaskRef = TaskFn::arc(move |ctx: TaskContext| {
+        let started = Arc::clone(&started);
+        async move {
+            let cancelled = ctx.cancelled();
+            tokio::pin!(cancelled);
+            let mut announced = false;
+            poll_fn(|cx| match cancelled.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => {
+                    if !announced {
+                        announced = true;
+                        started.increment();
+                    }
+                    Poll::Pending
+                }
+            })
+            .await;
             Ok(())
         }
     });
@@ -368,12 +400,88 @@ fn bench_cancel_started(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_add_at_occupancy(c: &mut Criterion) {
+    let mut group = c.benchmark_group(ADD_AT_OCCUPANCY.group_id);
+    group.throughput(Throughput::Elements(1));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        for held_count in [0, OWNERSHIP_CAPACITY - 1] {
+            let parameter = format!("{held_count}_held_tasks");
+            group.bench_with_input(
+                BenchmarkId::new(rt_name, &parameter),
+                &held_count,
+                |b, &held_count| {
+                    record_case(ADD_AT_OCCUPANCY, rt_name, Some(parameter.clone()));
+                    b.iter_custom(|iters| {
+                        let rt = rt_fn();
+                        rt.block_on(async {
+                            let supervisor = Supervisor::new(bench_config(), vec![]);
+                            let handle = supervisor.serve().expect("runtime startup");
+                            warm_runtime(&handle, 0).await;
+
+                            let started = AsyncCounter::new();
+                            let mut held_ids = Vec::with_capacity(held_count);
+                            for i in 0..held_count {
+                                let id = expect_within(
+                                    "occupancy prepopulation",
+                                    handle
+                                        .add(counted_cooperative_task(
+                                            format!("occupancy-held-{i}"),
+                                            Arc::clone(&started),
+                                        ))
+                                        .execute(),
+                                )
+                                .await
+                                .expect("occupancy prepopulation failed");
+                                held_ids.push(id);
+                            }
+                            started.wait_for(held_count).await;
+                            wait_for_ownership(&handle, held_count).await;
+
+                            let mut total = Duration::ZERO;
+                            for iteration in 0..iters {
+                                let spec =
+                                    cooperative_task(format!("occupancy-probe-{iteration}"), None);
+                                let start = Instant::now();
+                                let id = handle
+                                    .add(spec)
+                                    .execute()
+                                    .await
+                                    .expect("occupancy probe admission failed");
+                                total += start.elapsed();
+
+                                assert!(
+                                    expect_within(
+                                        "occupancy probe cancellation",
+                                        handle.cancel(id).execute(),
+                                    )
+                                    .await
+                                    .expect("occupancy probe cancellation failed"),
+                                    "benchmark must claim its occupancy probe",
+                                );
+                                wait_for_ownership(&handle, held_count).await;
+                            }
+
+                            cancel_held(&handle, held_ids).await;
+                            expect_within("runtime shutdown", handle.shutdown())
+                                .await
+                                .expect("runtime shutdown failed");
+                            total
+                        })
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn bench_list(c: &mut Criterion) {
     let mut group = c.benchmark_group(LIST.group_id);
     group.throughput(Throughput::Elements(1));
 
     for &(rt_name, rt_fn) in &RUNTIMES {
-        for count in [32, 256] {
+        for count in [32, 256, OWNERSHIP_CAPACITY] {
             group.bench_with_input(
                 BenchmarkId::new(rt_name, format!("{count}_held_tasks")),
                 &count,
@@ -385,9 +493,13 @@ fn bench_list(c: &mut Criterion) {
                             let supervisor = Supervisor::new(bench_config(), vec![]);
                             let handle = supervisor.serve().expect("runtime startup");
                             warm_runtime(&handle, 0).await;
+                            let started = AsyncCounter::new();
                             let mut ids = Vec::with_capacity(count);
                             for i in 0..count {
-                                let spec = cooperative_task(format!("list-{i}"), None);
+                                let spec = counted_cooperative_task(
+                                    format!("list-{i}"),
+                                    Arc::clone(&started),
+                                );
                                 let id = expect_within(
                                     "snapshot prepopulation",
                                     handle.add(spec).execute(),
@@ -396,6 +508,7 @@ fn bench_list(c: &mut Criterion) {
                                 .expect("snapshot prepopulation failed");
                                 ids.push(id);
                             }
+                            started.wait_for(count).await;
                             wait_for_ownership(&handle, count).await;
 
                             let mut total = Duration::ZERO;
@@ -518,7 +631,12 @@ fn bench_ownership_release(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = fixtures::criterion();
-    targets = bench_registry_add, bench_cancel_started, bench_list, bench_ownership_release
+    targets =
+        bench_registry_add,
+        bench_cancel_started,
+        bench_add_at_occupancy,
+        bench_list,
+        bench_ownership_release
 }
 
 fn main() {

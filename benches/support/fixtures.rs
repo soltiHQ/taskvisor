@@ -1,6 +1,4 @@
-//! Common runtime, admission, and synchronization fixtures for benchmark workloads.
-//!
-//! Keep setup and ownership reset outside measured sections unless the case names them explicitly.
+//! Shared fixtures for benchmark workloads.
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -176,7 +174,6 @@ impl AsyncFlag {
     }
 }
 
-/// An observable monotonic counter for benchmark setup and finite task loops.
 pub struct AsyncCounter {
     value: AtomicUsize,
     changed: Notify,
@@ -216,7 +213,6 @@ impl AsyncCounter {
     }
 }
 
-/// Blocks only a dedicated callback or destructor worker, never a Tokio worker.
 pub struct BlockingGate {
     released: Mutex<bool>,
     changed: Condvar,
@@ -278,7 +274,6 @@ impl BlockingGate {
     }
 }
 
-/// Releases a worker even when a benchmark assertion unwinds.
 pub struct ReleaseOnDrop(Arc<BlockingGate>);
 
 impl ReleaseOnDrop {
@@ -293,7 +288,6 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-/// Counts the named event and exposes loss/failure diagnostics to the benchmark.
 pub struct EventCounter {
     name: &'static str,
     kind: EventKind,

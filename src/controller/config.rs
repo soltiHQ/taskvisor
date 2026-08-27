@@ -12,9 +12,10 @@
 //!      └── task management ───► registry-backed identity operations
 //! ```
 //!
-//! Command-queue pressure is visible at intake. Most other admission limits are checked after intake
-//! and appear as a watched rejection or best-effort event. The identity-operation limit is returned
-//! by the ID-based remove or cancel call that needs registry fallback.
+//! Command-queue pressure is visible at intake.
+//! Most other admission limits are checked after intake.
+//! They appear as a watched rejection or best-effort event.
+//! Only registry-backed ID removal and cancellation can hit the identity-operation limit.
 
 use std::num::NonZeroUsize;
 
@@ -25,8 +26,8 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 
 /// Resource limits for one supervisor's controller.
 ///
-/// Pass this value to [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller)
-/// before building the supervisor. [`Default`] configures every limit to a finite value and can be used without further changes.
+/// Pass this value to [`SupervisorBuilder::with_controller`](crate::SupervisorBuilder::with_controller) before building the supervisor.
+/// [`Default`] gives every limit a finite value.
 ///
 /// # What each limit controls
 ///
@@ -47,7 +48,8 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 /// The admission, slot-count, and total-pending budgets use [`RejectionKind::ResourceLimit`](crate::RejectionKind::ResourceLimit).
 ///
 /// A remove or cancel operation that must reach the registry returns [`RuntimeError::ResourceLimitReached`](crate::RuntimeError::ResourceLimitReached)
-/// from `execute().await` when this operation budget is exhausted. Controller-local queued removal is handled before this limit.
+/// from `execute().await` when the identity-operation budget is exhausted.
+/// Controller-local queued removal is handled before this limit.
 ///
 /// # Examples
 ///
@@ -69,7 +71,8 @@ pub struct ControllerConfig {
     /// Capacity of the ordered controller command channel.
     ///
     /// The channel orders submissions with task-ID remove and cancel commands.
-    /// Async methods wait when it is full. Fail-fast methods return a queue-full error.
+    /// Async methods wait when it is full.
+    /// Fail-fast methods return a queue-full error.
     queue_capacity: NonZeroUsize,
 
     /// Maximum active and queued reservations for registry command capacity.
@@ -82,7 +85,8 @@ pub struct ControllerConfig {
 
     /// Pending-depth limit checked by new `Queue` submissions in one busy slot.
     ///
-    /// The owner is excluded. A replacement at the queue head is included.
+    /// The owner is excluded.
+    /// A replacement at the queue head is included.
     /// `Replace` does not use this per-slot limit.
     max_slot_queue: usize,
 
@@ -94,12 +98,14 @@ pub struct ControllerConfig {
 }
 
 impl ControllerConfig {
-    /// Creates a configuration from command capacity and per-slot queue depth.
+    /// Controller limits initialized from command capacity and per-slot queue depth.
     ///
-    /// The admission budget, identity-operation budget, slot limit, and total pending limit all start at `queue_capacity`.
+    /// The admission and identity-operation budgets start at `queue_capacity`.
+    /// The optional slot and total-pending limits also start at `queue_capacity`.
     /// Configuration methods can tune them independently.
     ///
-    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) rejects a command capacity above the async implementation limit.
+    /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build) rejects a command
+    /// capacity above the async implementation limit.
     /// A `max_slot_queue` value of `0` rejects every `Queue` submission behind a busy slot.
     /// `Replace` can still create or replace the queue head.
     pub const fn new(queue_capacity: NonZeroUsize, max_slot_queue: usize) -> Self {
@@ -113,12 +119,12 @@ impl ControllerConfig {
         }
     }
 
-    /// Creates a configuration from a raw command-queue capacity.
+    /// Validated controller limits from a raw command-queue capacity.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `queue_capacity` is zero, or
-    /// [`ConfigError::TooLarge`] above the bounded async implementation limit.
+    /// - [`ConfigError::Zero`] when `queue_capacity` is zero;
+    /// - [`ConfigError::TooLarge`] when `queue_capacity` exceeds the bounded async implementation limit.
     pub fn try_new(queue_capacity: usize, max_slot_queue: usize) -> Result<Self, ConfigError> {
         let queue_capacity = NonZeroUsize::new(queue_capacity).ok_or(ConfigError::Zero {
             field: "controller_queue_capacity",
@@ -127,34 +133,35 @@ impl ControllerConfig {
         Ok(Self::new(queue_capacity, max_slot_queue))
     }
 
-    /// Returns the ordered controller command-channel capacity.
+    /// Ordered controller command-channel capacity.
     #[must_use]
     pub const fn queue_capacity(&self) -> NonZeroUsize {
         self.queue_capacity
     }
 
-    /// Returns the number of registry-capacity reservations allowed at once.
+    /// Maximum simultaneous registry-capacity reservations.
     #[must_use]
     pub const fn admission_capacity(&self) -> NonZeroUsize {
         self.admission_capacity
     }
 
-    /// Returns the concurrent registry-backed remove and cancel budget.
+    /// Concurrent registry-backed remove and cancel budget.
     #[must_use]
     pub const fn identity_operation_capacity(&self) -> NonZeroUsize {
         self.identity_operation_capacity
     }
 
-    /// Returns the per-slot pending limit checked by `Queue` submissions.
+    /// Per-slot pending limit checked by `Queue` submissions.
     ///
-    /// The owner is excluded. A replacement head is included.
+    /// The owner is excluded.
+    /// A replacement head is included.
     /// `Replace` does not use this limit.
     #[must_use]
     pub const fn max_slot_queue(&self) -> usize {
         self.max_slot_queue
     }
 
-    /// Returns the tracked-slot limit, or `None` if it is disabled.
+    /// Optional tracked-slot limit.
     ///
     /// The default equals the command capacity passed to [`new`](Self::new).
     #[must_use]
@@ -162,7 +169,7 @@ impl ControllerConfig {
         self.max_controller_slots
     }
 
-    /// Returns the total pending-submission limit, or `None` if disabled.
+    /// Optional total pending-submission limit.
     ///
     /// Slot queues and waits for registry command capacity are included.
     /// Buffered controller commands and tasks already handed to the registry are excluded.
@@ -172,7 +179,7 @@ impl ControllerConfig {
         self.max_total_pending
     }
 
-    /// Sets the command-channel capacity without changing the other limits.
+    /// Command-channel capacity with all other limits unchanged.
     ///
     /// [`SupervisorBuilder::try_build`](crate::SupervisorBuilder::try_build)
     /// rejects values above the bounded async implementation limit.
@@ -181,12 +188,12 @@ impl ControllerConfig {
         self
     }
 
-    /// Sets and validates a raw command-queue capacity.
+    /// Validated command-queue capacity from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `queue_capacity` is zero, or
-    /// [`ConfigError::TooLarge`] above the bounded async implementation limit.
+    /// - [`ConfigError::Zero`] when `queue_capacity` is zero;
+    /// - [`ConfigError::TooLarge`] when `queue_capacity` exceeds the bounded async implementation limit.
     pub fn try_with_queue_capacity(self, queue_capacity: usize) -> Result<Self, ConfigError> {
         let queue_capacity = NonZeroUsize::new(queue_capacity).ok_or(ConfigError::Zero {
             field: "controller_queue_capacity",
@@ -195,17 +202,17 @@ impl ControllerConfig {
         Ok(self.with_queue_capacity(queue_capacity))
     }
 
-    /// Sets the number of registry-capacity reservations allowed at once.
+    /// Registry-capacity reservation budget.
     pub const fn with_admission_capacity(mut self, admission_capacity: NonZeroUsize) -> Self {
         self.admission_capacity = admission_capacity;
         self
     }
 
-    /// Sets the registry-capacity wait budget from a raw integer.
+    /// Registry-capacity reservation budget from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `admission_capacity` is zero.
+    /// - [`ConfigError::Zero`] when `admission_capacity` is zero.
     pub fn try_with_admission_capacity(
         self,
         admission_capacity: usize,
@@ -217,7 +224,7 @@ impl ControllerConfig {
         Ok(self.with_admission_capacity(admission_capacity))
     }
 
-    /// Sets the concurrent registry-backed remove and cancel budget.
+    /// Concurrent registry-backed remove and cancel budget.
     pub const fn with_identity_operation_capacity(
         mut self,
         identity_operation_capacity: NonZeroUsize,
@@ -226,11 +233,11 @@ impl ControllerConfig {
         self
     }
 
-    /// Sets the identity-operation budget from a raw integer.
+    /// Registry-backed identity-operation budget from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `identity_operation_capacity` is zero.
+    /// - [`ConfigError::Zero`] when `identity_operation_capacity` is zero.
     pub fn try_with_identity_operation_capacity(
         self,
         identity_operation_capacity: usize,
@@ -242,7 +249,7 @@ impl ControllerConfig {
         Ok(self.with_identity_operation_capacity(identity_operation_capacity))
     }
 
-    /// Sets the per-slot pending limit checked by `Queue` submissions.
+    /// Per-slot pending limit checked by `Queue` submissions.
     ///
     /// `0` rejects `Queue` submissions behind a busy slot.
     /// `Replace` may still create or replace the queue head.
@@ -251,7 +258,7 @@ impl ControllerConfig {
         self
     }
 
-    /// Sets the tracked-slot limit, or disables it with `None`.
+    /// Optional tracked-slot limit.
     pub const fn with_max_controller_slots(
         mut self,
         max_controller_slots: Option<NonZeroUsize>,
@@ -260,11 +267,11 @@ impl ControllerConfig {
         self
     }
 
-    /// Sets the aggregate controller-slot limit from a raw integer.
+    /// Tracked-slot limit from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_controller_slots` is zero.
+    /// - [`ConfigError::Zero`] when `max_controller_slots` is zero.
     pub fn try_with_max_controller_slots(
         self,
         max_controller_slots: usize,
@@ -275,17 +282,17 @@ impl ControllerConfig {
         Ok(self.with_max_controller_slots(Some(value)))
     }
 
-    /// Sets the total pending-submission limit, or disables it with `None`.
+    /// Optional total pending-submission limit.
     pub const fn with_max_total_pending(mut self, max_total_pending: Option<NonZeroUsize>) -> Self {
         self.max_total_pending = max_total_pending;
         self
     }
 
-    /// Sets the aggregate pending-submission limit from a raw integer.
+    /// Total pending-submission limit from a raw integer.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_total_pending` is zero.
+    /// - [`ConfigError::Zero`] when `max_total_pending` is zero.
     pub fn try_with_max_total_pending(self, max_total_pending: usize) -> Result<Self, ConfigError> {
         let value = NonZeroUsize::new(max_total_pending).ok_or(ConfigError::Zero {
             field: "max_total_pending",
@@ -293,14 +300,13 @@ impl ControllerConfig {
         Ok(self.with_max_total_pending(Some(value)))
     }
 
-    /// Validates capacities accepted through infallible `NonZeroUsize` setters.
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         validate_async_capacity("controller_queue_capacity", self.queue_capacity)
     }
 }
 
 impl Default for ControllerConfig {
-    /// Returns the default controller configuration.
+    /// Default bounded controller limits.
     ///
     /// Defaults:
     ///

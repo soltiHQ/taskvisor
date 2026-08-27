@@ -1,11 +1,10 @@
 //! Moves an idle slot into runtime registry admission.
 //!
-//! `placement` and `advance` call this module after selecting the next slot owner.
-//! It tries to commit the task's stable identity, name, specification, and optional outcome sender to the registry Add command.
+//! The selected slot owner crosses this boundary with its stable identity, name, task value, and optional outcome sender intact.
 //!
 //! A full registry queue starts a controller-owned capacity wait when admission limits allow it.
 //! The controller retains the task and watcher and keeps the slot `Admitting`.
-//! Limit failures and other errors before commit return the intact handoff for rejection and cleanup.
+//! Any other pre-commit failure returns task ownership for rejection and cleanup.
 
 use std::sync::Arc;
 
@@ -22,9 +21,10 @@ use super::{
 };
 
 impl Controller {
-    /// Starts registry admission for one pending task in an idle slot.
+    /// Registry handoff for one pending task in an idle slot.
     ///
-    /// The slot becomes `Admitting` after the Add command commits or after the capacity wait is stored.
+    /// The slot becomes `Admitting` after the Add command commits.
+    /// A stored capacity wait has the same slot state.
     /// A different pre-commit failure returns ownership.
     pub(super) fn start_in_slot(
         &self,

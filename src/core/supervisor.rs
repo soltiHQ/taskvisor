@@ -1,8 +1,7 @@
-//! Builds the application-facing lifecycle around one Taskvisor runtime.
+//! Defines the public owner and lifecycle entry points for one Taskvisor runtime.
 //!
-//! [`SupervisorBuilder`] creates a stopped [`Supervisor`]. A static run or [`Supervisor::serve`]
-//! starts the same shared workers. Runtime state remains behind this owner while public methods
-//! select admission and shutdown paths.
+//! [`SupervisorBuilder`] creates a stopped [`Supervisor`].
+//! Static and dynamic lifecycles share the same runtime workers.
 //!
 //! ```text
 //! stopped Supervisor
@@ -14,8 +13,8 @@
 //!
 //! [`serve`](Supervisor::serve) can return multiple handles to the same running runtime.
 //! The static `run*` lifecycle can be committed once and may be used after `serve`.
-//! Natural shutdown starts when the entire registry becomes empty, including tasks already
-//! registered through a handle.
+//! Natural shutdown starts when the entire registry becomes empty.
+//! Tasks already registered through a handle participate in that boundary.
 //!
 //! [`Supervisor`] and all [`SupervisorHandle`](crate::SupervisorHandle) values share public ownership.
 //! Dropping the last owner requests best-effort cancellation without waiting.
@@ -37,8 +36,8 @@ use crate::{error::RuntimeError, subscribers::Subscribe, tasks::TaskSpec};
 /// - [`run`](Self::run) for an initial batch that ends naturally;
 /// - [`serve`](Self::serve) for dynamic task management through a handle.
 ///
-/// Use [`new`](Self::new) for default task settings. Use [`builder`](Self::builder) to configure
-/// task defaults, subscribers, controller admission, or fallible construction.
+/// Use [`new`](Self::new) for default task settings.
+/// Use [`builder`](Self::builder) to configure task defaults, subscribers, controller admission, or fallible construction.
 /// Starting the runtime requires an active Tokio runtime.
 pub struct Supervisor {
     owner: Arc<RuntimeOwner>,
@@ -56,7 +55,6 @@ impl std::fmt::Debug for Supervisor {
 }
 
 impl Supervisor {
-    /// Creates a supervisor from already-built runtime parts.
     pub(super) fn from_parts(
         core: Arc<SupervisorCore>,
         #[cfg(feature = "controller")] controller: Option<Arc<crate::controller::Controller>>,
@@ -68,25 +66,25 @@ impl Supervisor {
         })
     }
 
-    /// Creates a stopped supervisor with runtime config and subscribers.
+    /// Stopped supervisor with runtime configuration and best-effort subscribers.
     ///
     /// Task specs use [`TaskDefaults::default`](crate::TaskDefaults::default).
     /// Use [`builder`](Self::builder) and [`with_task_defaults`](crate::SupervisorBuilder::with_task_defaults) to replace those defaults.
     ///
-    /// This method does not start Tokio tasks.
-    /// Call [`run`](Self::run) or [`serve`](Self::serve) later.
+    /// This method does not start Tokio tasks. A non-empty subscriber list starts native cleanup workers during construction.
+    /// Subscriber callback workers start only with the supervisor runtime. Call [`run`](Self::run) or [`serve`](Self::serve) later.
     /// Use [`SupervisorBuilder::try_build`] when construction failure must be handled instead of converted to a panic.
     ///
     /// # Panics
     ///
-    /// With configured subscribers, panics when background cleanup workers cannot start or the configured ownership
-    /// limit cannot admit every subscriber. It also panics when a channel or semaphore capacity is too large or
-    /// subscriber metadata panics. Use [`SupervisorBuilder::try_build`] for typed build errors.
+    /// With configured subscribers, panics when background cleanup workers cannot start or the configured ownership limit cannot admit every subscriber.
+    /// It also panics when a channel or semaphore capacity is too large or subscriber metadata panics.
+    /// Use [`SupervisorBuilder::try_build`] for typed build errors.
     pub fn new(cfg: SupervisorConfig, subscribers: Vec<Arc<dyn Subscribe>>) -> Arc<Self> {
         Self::builder(cfg).with_subscribers(subscribers).build()
     }
 
-    /// Creates a builder for custom supervisor settings.
+    /// Builder for custom supervisor settings.
     ///
     /// # Examples
     ///
@@ -101,15 +99,17 @@ impl Supervisor {
         SupervisorBuilder::new(cfg)
     }
 
-    /// Starts dynamic management and returns a [`SupervisorHandle`](crate::SupervisorHandle).
+    /// Dynamic runtime management through a [`SupervisorHandle`](crate::SupervisorHandle).
     ///
     /// Use this path when tasks are added, queried, or stopped while the application is running.
-    /// It installs no process signal listeners. Call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown)
-    /// to close admission and wait for bounded cleanup.
+    /// It installs no process signal listeners.
+    /// Call [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown) to close admission and wait for bounded cleanup.
     ///
-    /// This method may be called more than once. Runtime workers start once. After successful startup,
-    /// each call returns another handle to the same runtime. Shutdown is terminal: a later call does
-    /// not restart workers or reopen admission.
+    /// This method may be called more than once.
+    /// Runtime workers start once.
+    /// After successful startup, each call returns another handle to the same runtime.
+    /// Shutdown is terminal.
+    /// A later call does not restart workers or reopen admission.
     ///
     /// # Examples
     ///
@@ -131,12 +131,13 @@ impl Supervisor {
     /// # Ok(()) }
     /// ```
     ///
+    /// Failed startup may be retried.
+    /// After startup, later calls only create another handle.
+    ///
     /// # Errors
     ///
-    /// - [`RuntimeError::TokioRuntimeUnavailable`] when first startup is requested outside a Tokio runtime.
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] when first startup is requested outside a Tokio runtime;
     /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber worker thread cannot be created.
-    ///
-    /// Failed startup is transactional and may be retried. After startup, later calls only create another handle.
     #[must_use = "use the returned runtime handle to manage or shut down the supervisor"]
     pub fn serve(&self) -> Result<super::handle::SupervisorHandle, RuntimeError> {
         self.owner.core().start()?;
@@ -146,10 +147,11 @@ impl Supervisor {
         Ok(handle)
     }
 
-    /// Runs an initial task batch and shuts down when registry membership becomes empty.
+    /// Static lifecycle ending when registry membership becomes empty.
     ///
-    /// Use this path when every managed task has a natural stopping condition. The registry accepts
-    /// the full batch or rejects it. If a name is repeated or already registered, no task from the batch starts.
+    /// Use this path when every managed task has a natural stopping condition.
+    /// The registry accepts the full batch or rejects it.
+    /// If a name is repeated or already registered, no task from the batch starts.
     /// Tasks already registered through [`serve`](Self::serve) also keep the registry non-empty and participate in this lifecycle.
     ///
     /// Static run methods share one committed lifecycle.
@@ -158,9 +160,8 @@ impl Supervisor {
     ///
     /// `Ok(())` means the bounded supervisor lifecycle and cleanup workflow completed successfully.
     /// It does not prove physical exit of force-aborted task code, detached subscriber callbacks, or isolated user destructors.
-    /// It also does not mean every task completed successfully. Add `watch()` to the operation
-    /// returned by [`SupervisorHandle::add`](crate::SupervisorHandle::add) when application logic
-    /// needs one task's final outcome.
+    /// It also does not mean every task completed successfully.
+    /// Add `watch()` to [`SupervisorHandle::add`](crate::SupervisorHandle::add) when application logic needs one task's final outcome.
     ///
     /// # Examples
     ///
@@ -180,27 +181,33 @@ impl Supervisor {
     ///
     /// # Errors
     ///
-    /// - [`RuntimeError::ResourceLimitReached`] when the initial batch exceeds the registry limit or the configured ownership limit.
-    /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber or background cleanup worker thread cannot be created.
-    /// - [`RuntimeError::AlreadyRunning`] when another static run owns the lifecycle or a previous call committed it.
-    /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already in use or repeated in the batch.
-    /// - [`RuntimeError::TokioRuntimeUnavailable`] when startup is requested outside a Tokio runtime.
-    /// - [`RuntimeError::ShuttingDown`] when shutdown has started or cleanup cannot finish normally.
+    /// - [`RuntimeError::ResourceLimitReached`] when existing registrations leave insufficient registry capacity for the complete initial batch;
+    /// - [`RuntimeError::ResourceLimitReached`] when the complete initial batch exceeds the effective ownership capacity available after existing charges and permanent retirement;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber worker thread cannot be created;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required cleanup worker thread cannot be created;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required cleanup worker exits before completing its startup handshake;
+    /// - [`RuntimeError::AlreadyRunning`] when another static run currently owns the lifecycle;
+    /// - [`RuntimeError::AlreadyRunning`] when an earlier static run committed the lifecycle;
+    /// - [`RuntimeError::TaskAlreadyExists`] when an initial task name is already reserved;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the initial batch repeats a task name;
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] when startup is requested outside a Tokio runtime;
+    /// - [`RuntimeError::ShuttingDown`] when closed runtime intake prevents the initial batch from committing;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown workflow cannot publish a clean terminal outcome;
     /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
     ///
     /// # Cancel safety
     ///
-    /// Keep this future alive until it returns. Dropping it after the static lifecycle commits does not stop admitted
-    /// tasks or start shutdown. A handle from [`serve`](Self::serve) can still request shutdown.
+    /// Keep this future alive until it returns.
+    /// Dropping it after the static lifecycle commits does not stop admitted tasks or start shutdown.
+    /// A handle from [`serve`](Self::serve) can still request shutdown.
     pub async fn run(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.owner.core().run(tasks).await
     }
 
-    /// Runs an initial batch with an application-owned shutdown future.
+    /// Static lifecycle with an application-owned shutdown future.
     ///
-    /// The shutdown future participates in the shutdown races before registry command commit and after
-    /// successful batch admission. When it wins a polled race, taskvisor starts the same graceful
-    /// shutdown used by [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
+    /// The shutdown future can win before registry command commit or after successful batch admission.
+    /// A win at either point uses the graceful shutdown of [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
     /// The initial batch may not start when the future wins before registry admission commits.
     ///
     /// The future must resolve to `()`.
@@ -235,7 +242,19 @@ impl Supervisor {
     ///
     /// # Errors
     ///
-    /// Returns the same runtime and batch errors as [`run`](Self::run).
+    /// - [`RuntimeError::ResourceLimitReached`] when existing registrations leave insufficient registry capacity for the complete initial batch;
+    /// - [`RuntimeError::ResourceLimitReached`] when the complete initial batch exceeds the effective ownership capacity available after existing charges and permanent retirement;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber worker thread cannot be created;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required cleanup worker thread cannot be created;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required cleanup worker exits before completing its startup handshake;
+    /// - [`RuntimeError::AlreadyRunning`] when another static run currently owns the lifecycle;
+    /// - [`RuntimeError::AlreadyRunning`] when an earlier static run committed the lifecycle;
+    /// - [`RuntimeError::TaskAlreadyExists`] when an initial task name is already reserved;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the initial batch repeats a task name;
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] when startup is requested outside a Tokio runtime;
+    /// - [`RuntimeError::ShuttingDown`] when closed runtime intake prevents the initial batch from committing;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown workflow cannot publish a clean terminal outcome;
+    /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period.
     pub async fn run_until<F>(&self, tasks: Vec<TaskSpec>, shutdown: F) -> Result<(), RuntimeError>
     where
         F: Future<Output = ()>,
@@ -243,18 +262,19 @@ impl Supervisor {
         self.owner.core().run_until(tasks, shutdown).await
     }
 
-    /// Runs an initial task batch with explicit operating-system signal handling.
+    /// Static lifecycle with Taskvisor-owned operating-system signal handling.
     ///
-    /// On Unix this waits for SIGINT, SIGTERM, or SIGQUIT. On other platforms it waits for
-    /// Tokio's Ctrl-C signal. A received signal starts graceful shutdown.
+    /// On Unix this waits for SIGINT, SIGTERM, or SIGQUIT.
+    /// Other platforms use Tokio's Ctrl-C signal.
+    /// A received signal starts graceful shutdown.
     /// Failure to install a listener closes admission and runs the common
     /// cleanup tail without the normal task grace drain.
     ///
     /// # Process-wide side effect
     ///
-    /// Calling this method explicitly installs process-global Tokio signal handlers. On Unix, dropping
-    /// the signal listeners does not restore the default signal disposition. The application remains
-    /// responsible for signal handling after this method returns.
+    /// Calling this method explicitly installs process-global Tokio signal handlers.
+    /// On Unix, dropping the signal listeners does not restore the default signal disposition.
+    /// The application remains responsible for signal handling after this method returns.
     ///
     /// Use [`run`](Self::run) or [`run_until`](Self::run_until) when the surrounding application owns process signals.
     ///
@@ -262,19 +282,31 @@ impl Supervisor {
     ///
     /// # Errors
     ///
-    /// Returns the errors from [`run`](Self::run).
-    /// It also returns [`RuntimeError::SignalSetupFailed`] when the signal handlers cannot be installed.
+    /// - [`RuntimeError::ResourceLimitReached`] when existing registrations leave insufficient registry capacity for the complete initial batch;
+    /// - [`RuntimeError::ResourceLimitReached`] when the complete initial batch exceeds the effective ownership capacity available after existing charges and permanent retirement;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required subscriber worker thread cannot be created;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required cleanup worker thread cannot be created;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required cleanup worker exits before completing its startup handshake;
+    /// - [`RuntimeError::AlreadyRunning`] when another static run currently owns the lifecycle;
+    /// - [`RuntimeError::AlreadyRunning`] when an earlier static run committed the lifecycle;
+    /// - [`RuntimeError::TaskAlreadyExists`] when an initial task name is already reserved;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the initial batch repeats a task name;
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] when startup is requested outside a Tokio runtime;
+    /// - [`RuntimeError::ShuttingDown`] when closed runtime intake prevents the initial batch from committing;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown workflow cannot publish a clean terminal outcome;
+    /// - [`RuntimeError::GraceExceeded`] when some tasks did not stop within the grace period;
+    /// - [`RuntimeError::SignalSetupFailed`] when the signal handlers cannot be installed.
     pub async fn run_with_os_signals(&self, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.owner.core().run_with_os_signals(tasks).await
     }
 
-    /// Returns the immutable runtime configuration.
+    /// Immutable runtime configuration.
     #[must_use = "use the returned runtime configuration"]
     pub fn runtime_config(&self) -> &SupervisorConfig {
         self.owner.core().runtime_config()
     }
 
-    /// Returns ownership-admission and deferred-cleanup state.
+    /// Point-in-time ownership-admission and deferred-cleanup state.
     ///
     /// Calling this on a stopped supervisor does not start destructor workers.
     /// Configured subscribers are already reflected because their ownership is reserved during construction.
@@ -284,7 +316,7 @@ impl Supervisor {
         self.owner.core().ownership_snapshot()
     }
 
-    /// Returns the immutable task defaults applied during registry admission.
+    /// Immutable task defaults applied during registry admission.
     #[must_use = "use the returned task defaults"]
     pub fn task_defaults(&self) -> &crate::TaskDefaults {
         self.owner.core().task_defaults()

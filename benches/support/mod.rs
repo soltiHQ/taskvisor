@@ -1,4 +1,4 @@
-//! Shared benchmark presentation and result reporting.
+//! Shared benchmark reporting support.
 
 #![allow(dead_code)]
 
@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anstream::{AutoStream, ColorChoice};
 use anstyle::{AnsiColor, Style};
@@ -50,6 +50,12 @@ impl Scope {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct DisplayBaseline {
+    duration: Duration,
+    label: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct CaseFamily {
     pub group_id: &'static str,
     pub title: &'static str,
@@ -59,6 +65,7 @@ pub struct CaseFamily {
     pub boundary: &'static str,
     pub outside: &'static str,
     pub interpretation: Interpretation,
+    display_baseline: Option<DisplayBaseline>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +92,7 @@ impl CaseFamily {
             boundary,
             outside,
             interpretation: Interpretation::ManagedTaskLifecycle,
+            display_baseline: None,
         }
     }
 
@@ -105,6 +113,7 @@ impl CaseFamily {
             boundary,
             outside,
             interpretation: Interpretation::Neutral,
+            display_baseline: None,
         }
     }
 
@@ -125,6 +134,7 @@ impl CaseFamily {
             boundary,
             outside,
             interpretation: Interpretation::Neutral,
+            display_baseline: None,
         }
     }
 
@@ -145,6 +155,7 @@ impl CaseFamily {
             boundary,
             outside,
             interpretation: Interpretation::Neutral,
+            display_baseline: None,
         }
     }
 
@@ -165,11 +176,17 @@ impl CaseFamily {
             boundary,
             outside,
             interpretation: Interpretation::Neutral,
+            display_baseline: None,
         }
     }
 
     pub const fn without_lifecycle_interpretation(mut self) -> Self {
         self.interpretation = Interpretation::Neutral;
+        self
+    }
+
+    pub const fn display_excess_over(mut self, duration: Duration, label: &'static str) -> Self {
+        self.display_baseline = Some(DisplayBaseline { duration, label });
         self
     }
 }
@@ -269,7 +286,7 @@ fn write_header_bottom(out: &mut AutoStream<std::io::Stdout>, accent: Style) {
     writeln!(out, "{accent}╰{}╯{accent:#}", "─".repeat(REPORT_WIDTH - 2),).ok();
 }
 
-fn display_os(os: &str) -> &str {
+pub(crate) fn display_os(os: &str) -> &str {
     match os {
         "linux" => "Linux",
         "macos" => "macOS",
@@ -384,6 +401,9 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     if observations.is_empty() {
         return;
     }
+    let has_display_baseline = observations
+        .iter()
+        .any(|observation| observation.case.family.display_baseline.is_some());
     let groups = group_observations(&observations);
 
     let cyan = style(AnsiColor::BrightCyan, true);
@@ -398,7 +418,11 @@ fn print_performance_snapshot(suite: &str, saved_estimates: &HashMap<PathBuf, Sa
     write_header_row(
         &mut out,
         "Source",
-        "absolute estimates from this benchmark invocation",
+        if has_display_baseline {
+            "Criterion estimates from this invocation; labeled baseline subtraction is display-only"
+        } else {
+            "absolute estimates from this benchmark invocation"
+        },
         cyan,
     );
     write_header_bottom(&mut out, cyan);
@@ -560,14 +584,13 @@ fn print_observation_group(out: &mut AutoStream<std::io::Stdout>, group: &Observ
     let family = group.family;
     let accent = style(family.scope.color(), true);
     let dim = Style::new().dimmed();
+    let heading = if family.display_baseline.is_some() {
+        format!("◆ DERIVED DURATION · {}", family.title)
+    } else {
+        format!("● MEASURED · {} · {}", family.scope.badge(), family.title,)
+    };
 
-    writeln!(
-        out,
-        "{accent}┌─ ● MEASURED · {} · {}{accent:#}",
-        family.scope.badge(),
-        family.title,
-    )
-    .ok();
+    writeln!(out, "{accent}┌─ {heading}{accent:#}").ok();
     writeln!(out, "{accent}│{accent:#}").ok();
 
     for (index, observation) in group.observations.iter().enumerate() {
@@ -611,6 +634,44 @@ fn print_observation_result(
     let accent = style(family.scope.color(), true);
     let branch = if is_last { "└─" } else { "├─" };
     let connector = if is_last { " " } else { "│" };
+    let details = observation_details(observation);
+
+    writeln!(out, "{accent}│ {branch} {details}{accent:#}").ok();
+    if let Some(baseline) = family.display_baseline {
+        let time = subtract_display_baseline(observation.time, baseline.duration);
+        write_observation_line(
+            out,
+            accent,
+            connector,
+            &format!(
+                "{} {}",
+                format_duration(time.point_estimate),
+                baseline.label,
+            ),
+            Some(accent),
+        );
+        write_observation_line(
+            out,
+            accent,
+            connector,
+            &format!(
+                "{:.0}% CI after the same subtraction: {}–{}",
+                time.confidence_interval.confidence_level * 100.0,
+                format_duration(time.confidence_interval.lower_bound),
+                format_duration(time.confidence_interval.upper_bound),
+            ),
+            None,
+        );
+        write_observation_line(
+            out,
+            accent,
+            connector,
+            "display-only adjustment; Criterion JSON and HTML retain the absolute estimate",
+            None,
+        );
+        return;
+    }
+
     let point_rate = rate(observation.units, observation.time.point_estimate);
     let low_rate = rate(
         observation.units,
@@ -621,9 +682,6 @@ fn print_observation_result(
         observation.time.confidence_interval.lower_bound,
     );
     let unit_ns = observation.time.point_estimate / observation.units as f64;
-    let details = observation_details(observation);
-
-    writeln!(out, "{accent}│ {branch} {details}{accent:#}").ok();
     write_observation_line(
         out,
         accent,
@@ -692,6 +750,20 @@ fn print_observation_result(
     );
 }
 
+fn subtract_display_baseline(time: Estimate, baseline: Duration) -> Estimate {
+    let baseline_ns = baseline.as_nanos() as f64;
+    let shifted = |value: f64| (value - baseline_ns).max(0.0);
+
+    Estimate {
+        point_estimate: shifted(time.point_estimate),
+        confidence_interval: ConfidenceInterval {
+            confidence_level: time.confidence_interval.confidence_level,
+            lower_bound: shifted(time.confidence_interval.lower_bound),
+            upper_bound: shifted(time.confidence_interval.upper_bound),
+        },
+    }
+}
+
 fn observation_details(observation: &Observation) -> String {
     observation.value_str.as_deref().map_or_else(
         || display_runtime(&observation.function_id),
@@ -724,7 +796,9 @@ fn write_observation_line(
 }
 
 fn scope_description(family: CaseFamily) -> String {
-    if family.interpretation == Interpretation::ManagedTaskLifecycle {
+    if let Some(baseline) = family.display_baseline {
+        format!("DERIVED DURATION · {}", baseline.label.to_ascii_uppercase())
+    } else if family.interpretation == Interpretation::ManagedTaskLifecycle {
         "COMPLETE MANAGED-TASK LIFECYCLE".to_owned()
     } else if family.scope == Scope::Drain {
         format!(
@@ -999,7 +1073,7 @@ fn cpu_model() -> Option<String> {
     std::env::var("PROCESSOR_IDENTIFIER").ok()
 }
 
-fn git_revision() -> Option<String> {
+pub fn git_revision() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -1022,7 +1096,7 @@ fn git_revision() -> Option<String> {
     Some(format!("{revision}{}", if dirty { "-dirty" } else { "" }))
 }
 
-fn enabled_features() -> String {
+pub fn enabled_features() -> String {
     let mut features = Vec::new();
     if cfg!(feature = "controller") {
         features.push("controller");

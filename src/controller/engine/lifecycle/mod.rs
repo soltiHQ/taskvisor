@@ -1,7 +1,7 @@
 //! Controller loop lifecycle and shutdown.
 //!
-//! One task owns the ordered command receiver and polls all tracked operations.
-//! It applies commands and authoritative runtime results to controller state.
+//! One task owns the ordered command receiver and all tracked operations.
+//! Only this task applies command and runtime-result transitions to controller state.
 //!
 //! ```text
 //! command intake  ──► controller loop ──► state transitions
@@ -9,8 +9,8 @@
 //! shutdown signal ──► controller loop
 //! ```
 //!
-//! Shutdown closes intake, drains accepted commands, resolves pending replies,
-//! and clears controller-owned state before the task reports completion.
+//! Shutdown closes intake and drains accepted commands.
+//! It resolves pending replies and clears controller-owned state before the task reports completion.
 
 mod driver;
 mod shutdown;

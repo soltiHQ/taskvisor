@@ -1,7 +1,7 @@
 //! Maps internal slot state to the public snapshot API.
 //!
-//! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot) calls [`Controller::snapshot`] on the configured controller.
-//! The mapping exposes public status values without exposing slot locks or internal phases.
+//! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot) reads the configured controller through this boundary.
+//! Public values expose no slot locks or private state-machine phases.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,6 @@ use crate::controller::{ControllerSnapshot, SlotStatusKind, SlotView};
 use super::{Controller, state::SlotPhase};
 
 impl Controller {
-    /// Captures tracked slots and returns their public views in slot-key order.
     pub(crate) async fn snapshot(&self) -> ControllerSnapshot {
         let tracked_slots: Vec<_> = {
             let state = self.state();

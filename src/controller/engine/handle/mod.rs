@@ -1,7 +1,7 @@
 //! Owns the command-side boundary of the controller engine.
 //!
-//! Submission methods first reserve safe cleanup ownership for the user task.
-//! They then send the task through the same ordered channel used by task-ID remove and cancel operations.
+//! Submission intake reserves cleanup ownership before the user task crosses the command boundary.
+//! Task-ID remove and cancel operations use the same ordered channel.
 //!
 //! ```text
 //! caller

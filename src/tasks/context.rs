@@ -4,9 +4,10 @@
 //! Await [`TaskContext::cancelled`] in a `tokio::select!`, check [`TaskContext::is_cancelled`]
 //! between units of work, or wrap a drop-safe future with [`TaskContext::run_until_cancelled`].
 //!
-//! Task removal and runtime shutdown cancel the active attempt. A configured timeout cancels only that attempt,
-//! then drops its future. Cancellation is cooperative: it cannot interrupt synchronous code, and timeout
-//! does not poll the future again to run application cleanup after setting the signal.
+//! Task removal and runtime shutdown cancel the active attempt.
+//! A configured timeout cancels only that attempt and then drops its future.
+//! Cancellation is cooperative and cannot interrupt synchronous code.
+//! After setting the signal, timeout does not poll the future again to run application cleanup.
 //!
 //! ```text
 //! registry removal or runtime shutdown
@@ -80,7 +81,7 @@ impl TaskContext {
         Self::from_token(token)
     }
 
-    /// Waits until cancellation is requested.
+    /// Cancellation signal for use with `.await` or `tokio::select!`.
     ///
     /// Returns immediately after the signal has been set.
     /// The same context may be awaited more than once or used in `tokio::select!`.
@@ -88,13 +89,13 @@ impl TaskContext {
         self.cancel.cancelled().await;
     }
 
-    /// Returns whether cancellation has been requested.
+    /// Current cancellation state.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
 
-    /// Polls `fut` until it completes or cancellation wins.
+    /// Completion-or-cancellation boundary for a drop-safe future.
     ///
     /// Returns `Ok(output)` when `fut` finishes first.
     /// Cancellation wins a tie and returns [`TaskError::Canceled`].
@@ -123,7 +124,7 @@ impl TaskContext {
         }
     }
 
-    /// Creates a child cancellation scope.
+    /// Child cancellation scope.
     ///
     /// Parent cancellation reaches the child.
     /// Cancelling the child through an interop API does not cancel this context.
@@ -134,7 +135,7 @@ impl TaskContext {
         }
     }
 
-    /// Returns a [`CancellationToken`] that shares this context's state.
+    /// Interop handle that shares this context's cancellation state.
     ///
     /// This interop method requires the `tokio-util-interop` feature.
     #[cfg(feature = "tokio-util-interop")]

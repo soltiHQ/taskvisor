@@ -1,4 +1,4 @@
-//! Builds one direct registry-add operation.
+//! Defines direct task registration before registry admission.
 
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
@@ -11,11 +11,10 @@ use crate::core::SupervisorCore;
 
 /// A direct task-registration operation with typed outcome and admission policy.
 ///
-/// Await the default waiting, unwatched operation directly, or call `execute` explicitly to
-/// commit any configured operation.
-/// Direct await creates one boxed `Send` future; `execute` avoids that shorthand wrapper.
+/// The default waiting, unwatched operation can be awaited directly.
+/// Configured operations require `execute`.
 /// APIs that accept a [`Future`] require `execute()` or [`IntoFuture::into_future`].
-/// Dropping the builder starts no work.
+/// Dropping the operation starts no work.
 /// [`watch`](Self::watch) changes the terminal result from [`TaskId`] to [`TaskWaiter`].
 /// [`ownership_timeout`](Self::ownership_timeout) and [`fail_fast`](Self::fail_fast) are mutually exclusive and therefore cannot both be selected.
 #[must_use = "await the default add operation or call and await `.execute()`"]
@@ -55,7 +54,7 @@ impl<'a> AddOperation<'a, Unwatched, Waiting> {
 }
 
 impl<'a, Admission> AddOperation<'a, Unwatched, Admission> {
-    /// Returns the final-outcome waiter instead of returning the task identity directly.
+    /// Final-outcome delivery through [`TaskWaiter`] instead of [`TaskId`].
     #[inline]
     pub fn watch(self) -> AddOperation<'a, Watched, Admission> {
         AddOperation {
@@ -68,7 +67,7 @@ impl<'a, Admission> AddOperation<'a, Unwatched, Admission> {
 }
 
 impl<'a, Watch> AddOperation<'a, Watch, Waiting> {
-    /// Bounds only cleanup-ownership admission before registry command commit.
+    /// Deadline for cleanup-ownership admission before registry command commit.
     ///
     /// Once ownership is available, command-queue admission and the registry decision have no deadline from this setting.
     #[inline]
@@ -81,7 +80,7 @@ impl<'a, Watch> AddOperation<'a, Watch, Waiting> {
         }
     }
 
-    /// Uses immediate ownership and registry-queue admission.
+    /// Immediate cleanup-ownership and registry-command admission.
     ///
     /// Execution still waits for the authoritative registry decision after command commit.
     #[inline]
@@ -96,9 +95,17 @@ impl<'a, Watch> AddOperation<'a, Watch, Waiting> {
 }
 
 impl AddOperation<'_, Unwatched, Waiting> {
-    /// Waits for admission and returns the identity after registry registration succeeds.
+    /// Task identity after waiting admission and successful registry registration.
     ///
     /// Awaiting the default operation directly is equivalent to calling this method.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`RuntimeError::ResourceLimitReached`] when ownership capacity is exhausted;
+    /// - [`RuntimeError::ResourceLimitReached`] when registry capacity is exhausted;
+    /// - [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already reserved.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, RuntimeError> {
         self.core.add_task(self.spec).await
@@ -109,7 +116,6 @@ impl<'a> IntoFuture for AddOperation<'a, Unwatched, Waiting> {
     type Output = Result<TaskId, RuntimeError>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
-    /// Executes the default waiting, unwatched add operation.
     #[inline]
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.execute())
@@ -117,7 +123,16 @@ impl<'a> IntoFuture for AddOperation<'a, Unwatched, Waiting> {
 }
 
 impl AddOperation<'_, Unwatched, OwnershipTimed> {
-    /// Bounds ownership admission, then returns the identity after registry registration succeeds.
+    /// Task identity after bounded ownership admission and successful registry registration.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`RuntimeError::ResourceLimitReached`] when ownership capacity is exhausted;
+    /// - [`RuntimeError::ResourceLimitReached`] when registry capacity is exhausted;
+    /// - [`RuntimeError::OwnershipAdmissionTimeout`] when ownership remains unavailable for the configured duration;
+    /// - [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already reserved.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, RuntimeError> {
         self.core
@@ -127,7 +142,16 @@ impl AddOperation<'_, Unwatched, OwnershipTimed> {
 }
 
 impl AddOperation<'_, Unwatched, FailFast> {
-    /// Uses fail-fast bounded admission, then returns the registry's decision.
+    /// Task identity after immediate bounded admission and successful registry registration.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`RuntimeError::ResourceLimitReached`] when ownership capacity is unavailable;
+    /// - [`RuntimeError::ResourceLimitReached`] when registry capacity is exhausted;
+    /// - [`RuntimeError::CommandQueueFull`] when registry command capacity is not immediately available;
+    /// - [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already reserved.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, RuntimeError> {
         self.core.try_add_task(self.spec).await
@@ -135,7 +159,15 @@ impl AddOperation<'_, Unwatched, FailFast> {
 }
 
 impl AddOperation<'_, Watched, Waiting> {
-    /// Waits for admission and returns a waiter after registry registration succeeds.
+    /// Final-outcome waiter after waiting admission and successful registry registration.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`RuntimeError::ResourceLimitReached`] when ownership capacity is exhausted;
+    /// - [`RuntimeError::ResourceLimitReached`] when registry capacity is exhausted;
+    /// - [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already reserved.
     #[inline]
     pub async fn execute(self) -> Result<TaskWaiter, RuntimeError> {
         let (id, receiver) = self.core.add_task_watched(self.spec).await?;
@@ -144,7 +176,16 @@ impl AddOperation<'_, Watched, Waiting> {
 }
 
 impl AddOperation<'_, Watched, OwnershipTimed> {
-    /// Bounds ownership admission and returns a waiter after registry registration succeeds.
+    /// Final-outcome waiter after bounded ownership admission and successful registry registration.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`RuntimeError::ResourceLimitReached`] when ownership capacity is exhausted;
+    /// - [`RuntimeError::ResourceLimitReached`] when registry capacity is exhausted;
+    /// - [`RuntimeError::OwnershipAdmissionTimeout`] when ownership remains unavailable for the configured duration;
+    /// - [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already reserved.
     #[inline]
     pub async fn execute(self) -> Result<TaskWaiter, RuntimeError> {
         let (id, receiver) = self
@@ -156,7 +197,16 @@ impl AddOperation<'_, Watched, OwnershipTimed> {
 }
 
 impl AddOperation<'_, Watched, FailFast> {
-    /// Uses fail-fast bounded admission and returns a waiter after registration succeeds.
+    /// Final-outcome waiter after immediate bounded admission and successful registry registration.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`RuntimeError::ResourceLimitReached`] when ownership capacity is unavailable;
+    /// - [`RuntimeError::ResourceLimitReached`] when registry capacity is exhausted;
+    /// - [`RuntimeError::CommandQueueFull`] when registry command capacity is not immediately available;
+    /// - [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the task name is already reserved.
     #[inline]
     pub async fn execute(self) -> Result<TaskWaiter, RuntimeError> {
         let (id, receiver) = self.core.try_add_task_watched(self.spec).await?;

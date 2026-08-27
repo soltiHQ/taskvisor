@@ -33,7 +33,7 @@ pub enum ControllerError {
 
     /// The ordered controller command queue has no capacity now.
     ///
-    /// Only a fail-fast [`Submit`](crate::Submit) operation finished with `try_intake()` returns this variant.
+    /// This variant is limited to fail-fast [`Submit::try_intake`](crate::Submit::try_intake).
     /// It describes command intake, not a full per-slot queue.
     /// `execute().await` waits for command capacity instead.
     #[error("submission queue full")]
@@ -54,7 +54,8 @@ pub enum ControllerError {
     /// The caller's bounded wait for cleanup ownership expired before command intake.
     ///
     /// No controller command was committed.
-    /// The timeout covers only ownership admission; it does not bound a later wait for controller command capacity.
+    /// The timeout covers only ownership admission.
+    /// It does not bound a later wait for controller command capacity.
     #[error("timeout waiting for ownership admission after {timeout:?}")]
     #[non_exhaustive]
     OwnershipAdmissionTimeout {
@@ -88,7 +89,7 @@ pub enum ControllerError {
 }
 
 impl ControllerError {
-    /// Returns the stable variant label for logs and metrics.
+    /// Stable variant label for logs and metrics.
     ///
     /// The label is distinct from the human-readable [`Display`](std::fmt::Display) message.
     #[must_use]

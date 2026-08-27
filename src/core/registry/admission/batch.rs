@@ -1,13 +1,13 @@
 //! Commits a static task batch as one registry decision.
 //!
-//! Static run sends one [`RegistryCommand::AddBatch`](crate::core::registry::RegistryCommand::AddBatch)
-//! to the listener. This module rejects duplicate names inside the batch and conflicts with
-//! registry ownership or force-aborted attempts that have not physically exited.
+//! Static run sends one [`RegistryCommand::AddBatch`](crate::core::registry::RegistryCommand::AddBatch) to the listener.
+//! This module rejects duplicate names inside the batch and conflicts with registry ownership or force-aborted attempts that have not physically exited.
 //! It also checks the registration limit for the complete batch.
 //!
-//! Validation runs before actor preparation and again under the state write lock. Rejection inserts no entries
-//! and starts no task bodies. Acceptance indexes every item first. It then attempts every `TaskAdded` event and
-//! the direct batch reply before spawning the actors and opening their shared gate.
+//! Validation runs before actor preparation and again under the state write lock.
+//! Rejection inserts no entries and starts no task bodies.
+//! Acceptance indexes every item first.
+//! It then attempts every `TaskAdded` event and the direct batch reply before spawning the actors and opening their shared gate.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -26,7 +26,7 @@ use crate::{
 };
 
 impl Registry {
-    /// Applies the all-or-nothing decision for one batch command.
+    /// All-or-nothing decision for one batch command.
     pub(in crate::core::registry) async fn spawn_and_register_batch(
         &self,
         items: Vec<AddBatchItem>,

@@ -36,6 +36,21 @@ description: Understand Taskvisor durability, cancellation, observability, sched
 - A controller slot is not a cancellation key.
 - Supervisor-local budgets do not isolate operating-system CPU, memory, or thread limits.
 
+## Taskvisor-owned native threads
+
+Taskvisor can create native operating-system threads in addition to the application's Tokio runtime.
+These counts apply to each supervisor separately.
+
+- Deferred cleanup starts on the first valid non-empty ownership reservation. With configured subscribers, startup is attempted during supervisor construction. Without subscribers, it starts on the first task or controller ownership reservation.
+- With the default `ownership_capacity = 1024`, deferred cleanup starts three persistent core workers. When cleanup is queued and no worker is idle, it can add temporary elastic workers up to 16 accounted live-or-starting workers. Elastic workers exit after one idle second.
+- For a finite ownership capacity `C`, the persistent and maximum cleanup counts are `min(3, C)` and `min(16, C)`. Disabling the ownership limit keeps the cleanup counts at 3 and 16. These worker counts have no direct public configuration setting.
+- Subscriber callback workers start with the supervisor runtime. At least one `Shared` subscriber creates one fixed worker for all shared lanes. Each `Dedicated` subscriber creates one additional fixed worker. No subscriber means no callback worker.
+- [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html) is read once during supervisor construction. [`TracingBridge`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/struct.TracingBridge.html), its `with_reasons` variant, and [`LogWriter`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/struct.LogWriter.html) select `Dedicated`.
+
+A started supervisor with default ownership capacity and one `TracingBridge` as its only subscriber therefore owns four Taskvisor native threads: three cleanup workers and one callback worker.
+Cleanup can temporarily expand toward its separate ceiling of 16.
+A finite ownership capacity bounds how many subscribers Taskvisor can own, but it is not a separate callback-thread limit.
+
 ## Owned user values
 
 The [deferred cleanup domain](../src/core/deferred_drop/mod.rs) destroys retained task and subscriber values on dedicated threads.
@@ -71,6 +86,7 @@ A runtime may still exist elsewhere in the process. Its destruction is not a pre
 - Make retryable operations safe to repeat or protect them with an application-owned idempotency or acknowledgement protocol.
 - Use watched outcomes when application correctness depends on a final task result.
 - Choose retry, concurrency, registration, ownership, command-queue, subscriber-queue, and controller limits deliberately.
+- Account for Taskvisor-owned native threads under container CPU and process-thread limits.
 - Decide whether the application or Taskvisor owns operating-system signal handling.
 - Join shutdown from a caller that can report cleanup errors.
 - Test cooperative cancellation, grace expiry, and application shutdown behavior.

@@ -1,7 +1,6 @@
 //! Internal slot admission engine.
 //!
-//! One loop owns the ordered command receiver.
-//! It applies commands, registry replies, runtime completion, and shutdown to controller state.
+//! One loop owns the ordered command receiver and all controller state transitions.
 //!
 //! ```text
 //! handle ───────────► command queue ──► lifecycle driver
@@ -66,8 +65,7 @@ mod snapshot;
 pub(crate) struct Controller {
     /// Static controller configuration.
     config: ControllerConfig,
-    /// Runtime control surface.
-    /// `Weak` avoids extending the runtime core's lifetime during teardown.
+    /// Runtime control surface that does not extend the core lifetime during teardown.
     supervisor: Weak<SupervisorCore>,
     /// Supervisor-local ownership capacity and background cleanup workers.
     drop_domain: DropDomain,
@@ -91,17 +89,17 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
-    /// Locks consolidated controller state, recovering after an internal panic.
+    /// Poison-recovering access to consolidated controller state.
     fn state(&self) -> StdMutexGuard<'_, ControllerState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    /// Clones a slot reference without keeping the controller-state lock.
+    /// Slot access without retaining the controller-state lock.
     fn slot(&self, name: &str) -> Option<Arc<Mutex<SlotState>>> {
         self.state().slots.get(name).cloned()
     }
 
-    /// Creates a controller and its bounded ordered command channel.
+    /// Bounded controller state with an inert command receiver.
     ///
     /// The controller is inert until [`run`](Self::run) is called.
     pub(crate) fn new(
@@ -126,9 +124,9 @@ impl Controller {
         })
     }
 
-    /// Resolves a parked watched submission as `Rejected`.
+    /// Terminal rejection for a parked watched submission.
     ///
-    /// This is a no-op for unwatched submissions and for watched submissions already handed to the runtime registry.
+    /// Unwatched submissions and registry-owned watchers are unchanged.
     fn finalize_rejected(
         &self,
         id: TaskId,
@@ -139,7 +137,6 @@ impl Controller {
         Self::send_rejected(Some(tx), kind, reason)
     }
 
-    /// Sends a controller rejection and returns it if the receiver is gone.
     fn send_rejected(
         done: Option<OutcomeTx>,
         kind: RejectionKind,
@@ -153,7 +150,7 @@ impl Controller {
             .err()
     }
 
-    /// Marks the controller as no longer admitting or advancing queued work.
+    /// Admission fence before command-queue shutdown drain.
     ///
     /// The command receiver closes later during shutdown drain.
     /// Commands that enter before then are rejected or resolved by that drain.
@@ -161,12 +158,11 @@ impl Controller {
         self.shutting_down.store(true, Ordering::Release);
     }
 
-    /// Returns `true` when the shutdown signal has fired or the loop set its local shutdown flag.
     fn is_shutting_down(&self) -> bool {
         self.shutdown_token.is_cancelled() || self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Rejects any watcher retained after normal or abnormal loop exit.
+    /// Terminal rejection for every watcher retained after loop exit.
     fn finalize_remaining_watchers(&self) {
         let pending: Vec<TaskId> = self.state().watchers.keys().copied().collect();
         for id in pending {

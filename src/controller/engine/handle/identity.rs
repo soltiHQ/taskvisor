@@ -1,7 +1,9 @@
 //! Sends task removal and cancellation through the controller queue.
 //!
-//! Waiting variants use normal channel intake. Fail-fast variants use immediate intake.
-//! After acceptance, queued-task lookup remains ordered with submissions; other identities are handled by the runtime registry.
+//! Waiting variants apply command-queue backpressure.
+//! Fail-fast variants require immediate queue capacity.
+//! After intake, queued-task lookup remains ordered with submissions.
+//! Other identities are handled by a bounded runtime registry operation.
 
 use tokio::sync::oneshot;
 
@@ -13,7 +15,6 @@ use super::{
 };
 
 impl ControllerHandle {
-    /// Sends an identity command and waits for its result.
     async fn manage_identity(
         &self,
         id: TaskId,
@@ -31,7 +32,7 @@ impl ControllerHandle {
         reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)?
     }
 
-    /// Enqueues an identity command without waiting for command queue capacity.
+    /// Fail-fast controller intake for an identity operation.
     ///
     /// Registry fallback and runtime cleanup may still wait.
     async fn try_manage_identity(

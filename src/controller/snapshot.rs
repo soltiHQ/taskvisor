@@ -1,8 +1,9 @@
 //! Provides an operational view of current controller slots.
 //!
-//! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot) reads slot owners,
-//! states, queue depths, and state ages directly from the admission engine. Use the result for status pages,
-//! metrics collection, diagnostics, and tests. It does not control admission or consume events.
+//! [`SupervisorHandle::controller_snapshot`](crate::SupervisorHandle::controller_snapshot) reads
+//! slot owners, states, queue depths, and state ages directly from the admission engine.
+//! Use the result for status pages, metrics collection, diagnostics, and tests.
+//! It does not control admission or consume events.
 //!
 //! ```text
 //! controller admission engine
@@ -14,7 +15,8 @@
 //! ControllerSnapshot ──► status, metrics, and diagnostics
 //! ```
 //!
-//! Each slot is internally consistent. The full collection is a rolling view because slots are read one at a time.
+//! Each slot is internally consistent.
+//! The full collection is a rolling view because slots are read one at a time.
 //! It is not an atomic snapshot of the whole controller.
 //! Use [`TaskWaiter`](crate::TaskWaiter) for a reliable final result of one watched submission.
 
@@ -28,36 +30,42 @@ use crate::identity::TaskId;
 /// This status describes admission and ownership.
 /// It does not always describe what the task body is doing at that moment.
 ///
-/// This enum is non-exhaustive. Use a wildcard arm when matching it.
+/// This enum is non-exhaustive.
+/// Use a wildcard arm when matching it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SlotStatusKind {
     /// The slot had no owner when it was read.
     Idle,
 
-    /// The owner is waiting for a runtime registry admission decision.
+    /// The controller has not applied the runtime registry admission decision for the owner.
     ///
-    /// The controller may be waiting for space in the runtime command queue or for the registration result.
+    /// The controller may still be waiting for runtime command capacity.
+    /// It may instead be waiting to receive or apply the registration result.
     Admitting,
 
     /// The runtime registry accepted the owner with no replacement retirement pending.
     ///
     /// The task body may be waiting, sleeping between attempts, or finishing cleanup.
-    /// A later `Replace` request changes this status to `Terminating` before the current owner is released.
+    /// A later `Replace` request changes this status to `Terminating`.
+    /// The current owner remains until physical release.
     Running,
 
     /// The current owner is being retired after a replacement request.
     ///
-    /// The controller may still be waiting for the owner's registration result, registry cleanup, or physical release.
+    /// The controller may still be waiting for the owner's registration result.
+    /// It may instead be waiting for registry cleanup or physical release.
     /// The replacement that triggered this state may already have been removed from the queue.
     Terminating,
 }
 
 /// One controller slot captured at a single point during collection.
 ///
-/// All fields come from one locked slot state. Another slot may be read at a different time.
+/// All fields come from one locked slot state.
+/// Another slot may be read at a different time.
 ///
-/// This struct is non-exhaustive. Use `..` when matching it.
+/// This struct is non-exhaustive.
+/// Use `..` when matching it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SlotView {
@@ -70,7 +78,7 @@ pub struct SlotView {
     /// Task ID that owns the captured slot state.
     ///
     /// This is `None` for [`SlotStatusKind::Idle`].
-    /// During [`SlotStatusKind::Admitting`], the runtime has not accepted the task yet.
+    /// During [`SlotStatusKind::Admitting`], the controller has not applied a successful registry decision yet.
     pub owner_id: Option<TaskId>,
 
     /// Number of submissions waiting behind the current owner.
@@ -93,10 +101,11 @@ pub struct SlotView {
 /// # Consistency
 ///
 /// The controller does not read every slot at one exact moment. A slot created during collection may be absent.
-/// A removed slot may still appear. Any state can change after this value is returned.
-/// Commands still waiting in the controller command queue do not appear until the controller processes them.
+/// A removed slot may still appear. Any state can change after this value is returned. Buffered controller commands do not appear.
+/// A command can affect this view only after the controller processes it.
 ///
-/// This struct is non-exhaustive. Use `..` when matching it.
+/// This struct is non-exhaustive.
+/// Use `..` when matching it.
 ///
 /// # Examples
 ///
@@ -130,9 +139,10 @@ pub struct ControllerSnapshot {
 }
 
 impl ControllerSnapshot {
-    /// Counts captured slots in the exact [`SlotStatusKind::Running`] state.
+    /// Captured slots in the exact [`SlotStatusKind::Running`] state.
     ///
-    /// This excludes `Admitting` and `Terminating`, including runtime-accepted owners already being retired.
+    /// This excludes `Admitting` and `Terminating`.
+    /// Runtime-accepted owners already being retired are also excluded.
     /// It is not a count of task bodies polling at this exact moment.
     #[must_use]
     pub fn running_count(&self) -> usize {
@@ -142,7 +152,7 @@ impl ControllerSnapshot {
             .count()
     }
 
-    /// Counts pending submissions across all captured slot queues.
+    /// Pending submissions across all captured slot queues.
     ///
     /// This includes replacements waiting at the front of a queue and excludes current owners.
     #[must_use]
@@ -150,19 +160,19 @@ impl ControllerSnapshot {
         self.slots.iter().map(|s| s.queue_depth).sum()
     }
 
-    /// Finds a captured slot by its exact effective admission key.
+    /// Captured slot for an exact effective admission key.
     #[must_use]
     pub fn slot(&self, name: &str) -> Option<&SlotView> {
         self.slots.iter().find(|s| &*s.slot == name)
     }
 
-    /// Returns the number of captured slots.
+    /// Number of captured slots.
     #[must_use]
     pub fn len(&self) -> usize {
         self.slots.len()
     }
 
-    /// Returns `true` when no slots were captured.
+    /// Whether no slots were captured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()

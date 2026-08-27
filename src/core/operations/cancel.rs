@@ -1,4 +1,4 @@
-//! Builds one terminal task-cancellation operation.
+//! Defines task cancellation with optional admission and termination deadlines.
 
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ impl<'a, Target> CancelOperation<'a, Waiting, TerminationUnbounded, Target> {
 }
 
 impl<'a, Termination, Target> CancelOperation<'a, Waiting, Termination, Target> {
-    /// Uses immediate admission to the required management queue.
+    /// Immediate admission to the required management queue.
     #[inline]
     pub fn fail_fast(self) -> CancelOperation<'a, FailFast, Termination, Target> {
         CancelOperation {
@@ -68,7 +68,7 @@ impl<'a, Termination, Target> CancelOperation<'a, Waiting, Termination, Target> 
 }
 
 impl<'a, Admission, Target> CancelOperation<'a, Admission, TerminationUnbounded, Target> {
-    /// Limits only this caller's wait for logical terminal cleanup.
+    /// Deadline for this caller's logical terminal-cleanup wait.
     ///
     /// Queue admission and the cancellation claim are outside this deadline.
     /// A timeout does not undo an already committed cancellation.
@@ -90,7 +90,12 @@ impl<Target> CancelOperation<'_, Waiting, TerminationUnbounded, Target>
 where
     Target: Into<TaskTarget>,
 {
-    /// Waits for queue capacity, the cancellation decision, and logical terminal cleanup.
+    /// Cancellation claim after waiting queue admission and logical terminal cleanup.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::ResourceLimitReached`] when the controller identity-operation budget is exhausted.
     #[inline]
     pub async fn execute(self) -> Result<bool, RuntimeError> {
         match self.target.into() {
@@ -110,7 +115,13 @@ impl<Target> CancelOperation<'_, FailFast, TerminationUnbounded, Target>
 where
     Target: Into<TaskTarget>,
 {
-    /// Uses immediate queue admission, then waits without a termination deadline.
+    /// Cancellation claim after immediate queue admission and unbounded terminal cleanup.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::CommandQueueFull`] when the required management queue has no capacity;
+    /// - [`RuntimeError::ResourceLimitReached`] when the controller identity-operation budget is exhausted.
     #[inline]
     pub async fn execute(self) -> Result<bool, RuntimeError> {
         match self.target.into() {
@@ -130,7 +141,13 @@ impl<Target> CancelOperation<'_, Waiting, TerminationTimed, Target>
 where
     Target: Into<TaskTarget>,
 {
-    /// Waits for queue admission and bounds only the later terminal-cleanup wait.
+    /// Cancellation claim after waiting queue admission and bounded terminal cleanup.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::TaskTerminationTimeout`] when registered task cleanup exceeds this caller's deadline;
+    /// - [`RuntimeError::ResourceLimitReached`] when the controller identity-operation budget is exhausted.
     #[inline]
     pub async fn execute(self) -> Result<bool, RuntimeError> {
         let wait_for = self.termination.0;
@@ -156,7 +173,14 @@ impl<Target> CancelOperation<'_, FailFast, TerminationTimed, Target>
 where
     Target: Into<TaskTarget>,
 {
-    /// Combines immediate queue admission with a bounded terminal-cleanup wait.
+    /// Cancellation claim after immediate queue admission and bounded terminal cleanup.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::CommandQueueFull`] when the required management queue has no capacity;
+    /// - [`RuntimeError::TaskTerminationTimeout`] when registered task cleanup exceeds this caller's deadline;
+    /// - [`RuntimeError::ResourceLimitReached`] when the controller identity-operation budget is exhausted.
     #[inline]
     pub async fn execute(self) -> Result<bool, RuntimeError> {
         let wait_for = self.termination.0;

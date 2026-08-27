@@ -1,8 +1,8 @@
 //! Resolves controller-owned work when the loop stops.
 //!
-//! After tracked operations are dropped, the driver drains buffered commands, queued submissions,
-//! capacity waiters, and controller-owned outcome senders. Pending identity calls and watched
-//! controller-owned submissions receive an explicit shutdown or rejection result.
+//! Tracked operations are dropped before buffered commands and controller-owned work are resolved.
+//! Pending identity calls receive an explicit shutdown result.
+//! Watched controller-owned submissions receive an explicit rejection.
 //! Submissions already handed to the registry remain runtime-owned.
 
 use std::sync::Arc;
@@ -16,7 +16,9 @@ use crate::events::{Event, EventKind, RejectionKind};
 use super::super::{Controller, ControllerCommand, Submission};
 
 impl Controller {
-    /// Closes sender admission. Receiver draining waits for outstanding channel permits.
+    /// Sender-admission fence for controller shutdown.
+    ///
+    /// Receiver draining waits for outstanding channel permits.
     pub(in crate::controller::engine) fn close_command_intake(
         &self,
         rx: &mut mpsc::Receiver<ControllerCommand>,
@@ -38,7 +40,7 @@ impl Controller {
         self.drain_pending_on_shutdown(rx).await;
     }
 
-    /// Resolves buffered commands until the closed channel has no outstanding permits.
+    /// Resolution of buffered commands and outstanding channel permits.
     pub(in crate::controller::engine) async fn drain_pending_on_shutdown(
         &self,
         rx: &mut mpsc::Receiver<ControllerCommand>,
@@ -81,7 +83,7 @@ impl Controller {
         }
     }
 
-    /// Rejects queued slot work, resolves remaining watchers, and clears indexes.
+    /// Terminal cleanup of queued work, retained watchers, and controller indexes.
     pub(in crate::controller::engine) async fn finalize_slot_state_on_shutdown(&self) {
         let mut pending_to_drop = Vec::new();
         let capacity_waiting: Vec<_> = {

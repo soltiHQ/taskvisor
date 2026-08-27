@@ -1,12 +1,4 @@
-//! # Steady task completion throughput
-//!
-//! Measures watched batches on a prewarmed supervisor without subscribers.
-//! Every task must complete; deferred ownership cleanup finishes between batches outside the timer.
-//! The steady families include admission. The drain families admit every task before the timer,
-//! observe their case-specific initial readiness, then release cooperative CPU work or a saturated
-//! concurrency limit.
-//!
-//! Run with cargo bench --bench throughput.
+//! Benchmarks steady task completion throughput.
 
 mod support;
 
@@ -58,7 +50,7 @@ const MAX_CONCURRENT_ENABLED_OVERHEAD: CaseFamily = CaseFamily::lifecycle(
     "MAX_CONCURRENT · ENABLED-PATH OVERHEAD",
     "completed task",
     "completed tasks",
-    "first watched add through 256 Completed outcomes for instant tasks with max_concurrent disabled or set to 1, 4, or 256; no pre-timer saturation state is established",
+    "first watched add through 256 Completed outcomes for instant tasks with max_concurrent disabled or set to 256, which enables semaphore bookkeeping without constraining a 256-task batch",
     "runtime and Supervisor startup, warmup, TaskSpec construction, ownership reset between batches, shutdown, Tokio runtime construction, and any assertion about concurrent task-body entry",
 );
 
@@ -67,7 +59,7 @@ const COOPERATIVE_DRAIN: CaseFamily = CaseFamily::drain(
     "PRE-ADMITTED COOPERATIVE CPU WORK · DRAIN",
     "drained task",
     "drained tasks",
-    "one shared release through all Completed outcomes for 64 already-admitted tasks whose bodies have reached the release gate; each task performs 16 CPU chunks separated by cooperative yields",
+    "one shared release through all Completed outcomes for 64 already-admitted tasks whose bodies have reached the release gate; each task performs 16 CPU chunks and yields after every chunk",
     "runtime and Supervisor startup, warmup, TaskSpec construction, admission, task-body entry handshake, outcome-vector allocation, watchdog registration, result validation, ownership reset, and shutdown",
 );
 
@@ -234,14 +226,17 @@ fn bench_completion(c: &mut Criterion) {
     const COUNT: usize = 256;
     print_suite_header("throughput");
 
-    for (family, yields, deadline) in [
-        (COMPLETED, false, None),
-        (YIELDING, true, None),
-        (WITH_DEADLINE, true, Some(Duration::from_secs(60))),
+    for (family, yields, deadline, current_thread_only) in [
+        (COMPLETED, false, None, false),
+        (YIELDING, true, None, true),
+        (WITH_DEADLINE, true, Some(Duration::from_secs(60)), true),
     ] {
         let mut group = c.benchmark_group(family.group_id);
         group.throughput(Throughput::Elements(COUNT as u64));
         for &(rt_name, rt_fn) in &RUNTIMES {
+            if current_thread_only && rt_name != "current_thread" {
+                continue;
+            }
             let parameter = format!("{COUNT}_completed_tasks");
             group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
                 record_case(family, rt_name, Some(parameter.clone()));
@@ -295,13 +290,8 @@ fn bench_max_concurrent(c: &mut Criterion) {
     let mut group = c.benchmark_group(MAX_CONCURRENT_ENABLED_OVERHEAD.group_id);
     group.throughput(Throughput::Elements(COUNT as u64));
 
-    for &(rt_name, rt_fn) in &RUNTIMES {
-        for (limit_name, limit) in [
-            ("unlimited", None),
-            ("limit_1", Some(1usize)),
-            ("limit_4", Some(4usize)),
-            ("limit_256", Some(COUNT)),
-        ] {
+    for &(rt_name, rt_fn) in &RUNTIMES[..1] {
+        for (limit_name, limit) in [("unlimited", None), ("limit_256", Some(COUNT))] {
             let parameter = format!("{COUNT}_completed_tasks_{limit_name}");
             group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
                 record_case(

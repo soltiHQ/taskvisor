@@ -1,16 +1,16 @@
-//! Forwards best-effort runtime events from the bus into subscriber queues.
+//! Connects the best-effort event bus to subscriber queues.
 //!
-//! Runtime components publish to [`Bus`](crate::events::Bus). When that bus is enabled, lifecycle
-//! startup takes its single receiver and starts this relay, which feeds [`SubscriberSet`] queues.
-//! Shutdown cancels the relay and later joins it from the common cleanup tail.
+//! Runtime components publish to [`Bus`](crate::events::Bus).
+//! One relay owns the bus receiver when subscribers are enabled.
 //!
 //! ```text
 //! runtime components ──► Bus ──► event relay ──► subscriber queues
 //! ```
 //!
-//! Delivery is intentionally lossy. Lag becomes a subscriber-overflow diagnostic. Shutdown forwards
-//! only a bounded retained tail before it closes publication. It then detaches and drops every
-//! remaining event outside the event-ring lock.
+//! Delivery is intentionally lossy.
+//! Lag is reported through a best-effort subscriber-overflow diagnostic.
+//! Shutdown forwards only a bounded retained tail.
+//! Events beyond that tail are discarded.
 
 use std::sync::Arc;
 
@@ -26,10 +26,9 @@ use crate::{
 pub(super) const SHUTDOWN_RELAY_DRAIN_LIMIT: usize = 1024;
 
 impl SupervisorCore {
-    /// Forwards one bounded retained tail and closes the event receiver.
+    /// Bounded retained tail before event publication closes.
     ///
-    /// Pending events beyond the limit are detached under the ring lock and dropped after the lock
-    /// is released. One overflow diagnostic reports the combined lag and discarded count.
+    /// The relay attempts one overflow diagnostic for combined lag and discarded events.
     pub(super) fn drain_pending(rx: &mut BusReceiver, set: &SubscriberSet) {
         let mut dropped = 0_u64;
         for _ in 0..rx.retained_capacity().min(SHUTDOWN_RELAY_DRAIN_LIMIT) {
@@ -57,7 +56,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Takes the bus receiver and starts the relay task.
+    /// Single-receiver relay task for enabled subscribers.
     ///
     /// After a lag gap, the retained event enters subscriber queues before its overflow diagnostic.
     /// Runtime cancellation runs the bounded tail drain.
@@ -107,9 +106,8 @@ impl SupervisorCore {
             .unwrap_or_else(|error| error.into_inner()) = Some(handle);
     }
 
-    /// Joins the relay and reports a runtime event when the join fails.
+    /// Relay join status with a best-effort diagnostic on failure.
     ///
-    /// Returns whether the relay joined cleanly.
     /// A disabled or unstarted relay counts as clean.
     pub(super) async fn join_subscriber_listener(&self) -> bool {
         let handle = self

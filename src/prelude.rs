@@ -15,7 +15,8 @@
 //!                              └── cancellation token ────► tokio-util-interop feature
 //! ```
 //!
-//! This module only shortens imports. It creates no runtime state and changes no behavior.
+//! This module only shortens imports.
+//! It creates no runtime state and changes no behavior.
 //! Prefer explicit crate-root imports when a smaller local namespace or clearer dependencies matter.
 
 /// Supervisor construction, control, configuration, and final outcomes.

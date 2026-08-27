@@ -1,7 +1,8 @@
 //! Limits how many user-owned values one supervisor can retain.
 //!
 //! [`CapacityBroker`] sits between a started cleanup executor and [`DropReservation`](super::bundle::DropReservation) creation.
-//! Waiting admission requests one unit in FIFO order. Fail-fast batches receive every requested unit or none.
+//! Waiting admission requests one unit in FIFO order.
+//! Fail-fast batches receive every requested unit or none.
 //! Dropping a healthy [`OwnershipPermit`] returns its units.
 //! Cleanup that panics or is marked poisoned retires them.
 
@@ -135,14 +136,14 @@ struct CapacityRequest {
 }
 
 impl CapacityRequest {
-    /// Converts a complete asynchronous grant into a permit.
+    /// Cancellation-safe conversion of one complete asynchronous grant into a permit.
     ///
     /// The notification is enabled before reading the atomic state.
     /// This keeps a concurrent grant or close from being missed.
     ///
     /// # Errors
     ///
-    /// Returns an error when admission closes before the complete grant is taken.
+    /// - [`DropCapacityError`] when admission closes before the complete grant is taken.
     async fn wait(mut self) -> Result<OwnershipPermit, DropCapacityError> {
         loop {
             let changed = self.signal.changed.notified();
@@ -172,7 +173,7 @@ impl CapacityRequest {
 }
 
 impl Drop for CapacityRequest {
-    /// Returns any grant that was not transferred into a permit.
+    /// Unobserved grant returned to the broker.
     fn drop(&mut self) {
         if self.active {
             self.broker.cancel(&self.signal);
@@ -181,7 +182,7 @@ impl Drop for CapacityRequest {
 }
 
 impl CapacityBroker {
-    /// Opens a broker in finite or unlimited admission mode.
+    /// Broker in finite or unlimited admission mode.
     pub(super) fn new(limit: Option<NonZeroUsize>) -> Arc<Self> {
         let mode = match limit {
             Some(limit) => CapacityMode::Limited(LimitedCapacityState {
@@ -201,7 +202,7 @@ impl CapacityBroker {
         })
     }
 
-    /// Installs or replaces the best-effort retirement callback.
+    /// Best-effort callback for committed retirement.
     pub(super) fn set_retirement_reporter(&self, reporter: RetirementReporter) {
         *self
             .retirement_reporter
@@ -209,16 +210,17 @@ impl CapacityBroker {
             .unwrap_or_else(|error| error.into_inner()) = Some(reporter);
     }
 
-    /// Builds the typed rejection for this broker's admission mode.
     fn error(&self) -> DropCapacityError {
         DropCapacityError::new(self.limit)
     }
 
-    /// Waits until one unit can move into a permit.
+    /// One ownership unit after cancellation-safe FIFO admission.
     ///
     /// # Errors
     ///
-    /// Returns an error for a closed broker, exhausted effective capacity, or a full waiter queue.
+    /// - [`DropCapacityError`] when the broker closes before the request receives its grant;
+    /// - [`DropCapacityError`] when all effective capacity has been retired;
+    /// - [`DropCapacityError`] when the bounded waiter queue is full.
     pub(super) async fn acquire_one(
         self: &Arc<Self>,
     ) -> Result<OwnershipPermit, DropCapacityError> {
@@ -228,12 +230,16 @@ impl CapacityBroker {
         }
     }
 
-    /// Grants the complete request only when it can proceed immediately.
+    /// Complete request admitted only when it can proceed immediately.
     ///
     /// # Errors
     ///
-    /// Returns an error when the request is invalid, admission is closed, an
-    /// older request is waiting, or the complete capacity is unavailable.
+    /// - [`DropCapacityError`] when `units` is zero;
+    /// - [`DropCapacityError`] when `units` exceeds the configured capacity;
+    /// - [`DropCapacityError`] when the broker is closed;
+    /// - [`DropCapacityError`] when `units` exceeds the effective capacity;
+    /// - [`DropCapacityError`] when an older waiter exists;
+    /// - [`DropCapacityError`] when available capacity is smaller than `units`.
     pub(super) fn try_acquire(
         self: &Arc<Self>,
         units: usize,
@@ -258,13 +264,15 @@ impl CapacityBroker {
         Ok(OwnershipPermit::new(Arc::clone(self), units))
     }
 
-    /// Chooses immediate admission or registers one cancellation-safe waiter.
+    /// Immediate admission or one cancellation-safe waiter for a single unit.
     ///
     /// Pending request metadata is limited to the original broker capacity.
     ///
     /// # Errors
     ///
-    /// Returns an error for a closed broker, exhausted effective capacity, or a full waiter queue.
+    /// - [`DropCapacityError`] when the broker is closed;
+    /// - [`DropCapacityError`] when all effective capacity has been retired;
+    /// - [`DropCapacityError`] when the bounded waiter queue is full.
     fn start_acquire_one(self: &Arc<Self>) -> Result<CapacityStart, DropCapacityError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed {
@@ -304,7 +312,7 @@ impl CapacityBroker {
         }))
     }
 
-    /// Returns healthy units and dispatches newly feasible requests.
+    /// Healthy units returned before newly feasible requests are dispatched.
     fn release(&self, units: usize) {
         if units == 0 {
             return;
@@ -367,7 +375,7 @@ impl CapacityBroker {
         }
     }
 
-    /// Invokes the diagnostic callback outside broker accounting locks.
+    /// Diagnostic callback invoked outside broker accounting locks.
     fn report_retirement(&self, retirement: CapacityRetirement) {
         let reporter = self
             .retirement_reporter
@@ -513,7 +521,7 @@ impl CapacityBroker {
         }
     }
 
-    /// Copies current admission accounting under the broker mutex.
+    /// Point-in-time admission accounting copied under the broker mutex.
     pub(super) fn snapshot(&self) -> CapacitySnapshot {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         match &state.mode {
@@ -574,12 +582,11 @@ pub(super) struct OwnershipPermit {
 }
 
 impl OwnershipPermit {
-    /// Records an all-or-nothing grant from the broker.
     fn new(broker: Arc<CapacityBroker>, units: usize) -> Self {
         Self { broker, units }
     }
 
-    /// Moves one unit into an independent permit.
+    /// One unit split into an independent permit.
     pub(super) fn split_one(&mut self) -> Option<Self> {
         if self.units == 0 {
             return None;
@@ -588,13 +595,13 @@ impl OwnershipPermit {
         Some(Self::new(Arc::clone(&self.broker), 1))
     }
 
-    /// Retires every remaining unit in this permit.
+    /// Permanent retirement of every remaining unit in this permit.
     pub(super) fn retire(mut self) {
         let units = std::mem::take(&mut self.units);
         self.broker.retire(units);
     }
 
-    /// Closes admission when this permit cannot reach a cleanup worker.
+    /// Admission closure when this permit cannot reach a cleanup worker.
     pub(super) fn close_without_release(mut self) {
         self.units = 0;
         self.broker.close();
@@ -602,7 +609,7 @@ impl OwnershipPermit {
 }
 
 impl Drop for OwnershipPermit {
-    /// Returns every remaining healthy unit to the broker.
+    /// Remaining healthy units returned to the broker.
     fn drop(&mut self) {
         let units = std::mem::take(&mut self.units);
         self.broker.release(units);

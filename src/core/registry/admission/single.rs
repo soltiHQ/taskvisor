@@ -6,7 +6,8 @@
 //!
 //! Validation runs before actor preparation and again under the state write lock.
 //! On success, both indexes are updated before the `TaskAdded` event, the direct reply, actor spawn, and start-gate release.
-//! On rejection, no task body starts. A watched rejection is delivered or moved to deferred cleanup.
+//! On rejection, no task body starts.
+//! A watched rejection is delivered or moved to deferred cleanup.
 
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ use crate::{
 };
 
 impl Registry {
-    /// Applies the authoritative decision for one add command.
+    /// Authoritative decision for one add command.
     pub(in crate::core::registry) async fn spawn_and_register(
         &self,
         id: TaskId,

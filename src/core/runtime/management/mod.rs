@@ -15,8 +15,9 @@
 //!
 //! A direct add reserves cleanup ownership before the runtime accepts its task value.
 //! Controller admission can reserve registry queue capacity while the controller still owns that value.
-//! Every mutating path performs its final shutdown check at commit. Registry reply channels carry authoritative decisions;
-//! best-effort events do not replace them.
+//! Every mutating path performs its final shutdown check at commit.
+//! Registry reply channels carry authoritative decisions.
+//! Best-effort events do not replace them.
 
 mod add;
 mod cancel;

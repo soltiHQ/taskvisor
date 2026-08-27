@@ -62,9 +62,9 @@ impl OwnershipSnapshot {
         }
     }
 
-    /// Returns units permanently removed from a finite configured limit.
+    /// Units permanently removed from a finite configured limit.
     ///
-    /// Returns `None` for unlimited admission.
+    /// Unlimited admission produces `None`.
     #[must_use]
     pub fn retired(&self) -> Option<usize> {
         self.configured_limit
@@ -72,10 +72,10 @@ impl OwnershipSnapshot {
             .map(|(configured, effective)| configured.saturating_sub(effective))
     }
 
-    /// Returns finite units currently held by permits or unobserved grants.
+    /// Finite units currently held by permits or unobserved grants.
     ///
     /// This includes accepted task and subscriber ownership as well as queued or running deferred cleanup.
-    /// Returns `None` for unlimited admission.
+    /// Unlimited admission produces `None`.
     #[must_use]
     pub fn in_use(&self) -> Option<usize> {
         self.effective_limit

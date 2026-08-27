@@ -2,7 +2,8 @@
 //!
 //! [`ControllerSpec`] combines the work described by [`TaskSpec`] with a slot and a busy-slot [`AdmissionPolicy`].
 //! [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) consumes this value.
-//! [`SupervisorHandle::add`](crate::SupervisorHandle::add) accepts `TaskSpec` instead and bypasses keyed admission.
+//! [`SupervisorHandle::add`](crate::SupervisorHandle::add) accepts `TaskSpec` instead.
+//! Direct adds bypass keyed admission.
 //!
 //! See the [`controller`](crate::controller) module for the complete user flow.
 
@@ -19,8 +20,8 @@ use crate::TaskSpec;
 /// - an [`AdmissionPolicy`] for a busy slot;
 /// - an optional slot that groups work which must not overlap.
 ///
-/// Pass the request to [`SupervisorHandle::submit`](crate::SupervisorHandle::submit), then add `watch()` before the terminal
-/// operation when application logic needs to know whether work was rejected or how an admitted task ended.
+/// Pass the request to [`SupervisorHandle::submit`](crate::SupervisorHandle::submit).
+/// Add `watch()` before the terminal operation to observe rejection or the final task outcome.
 /// Use the default unwatched operation when command intake alone is enough.
 /// Allocate its task ID before intake with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
 ///
@@ -41,11 +42,15 @@ use crate::TaskSpec;
 ///
 /// # Task name and slot
 ///
-/// A task name is a unique registry key and diagnostic label. A slot groups work for controller admission.
-/// Different task names can share a slot. Without an explicit slot, the task name is used for both roles.
+/// A task name is a unique registry key.
+/// A slot groups work for controller admission.
+/// Different task names can share a slot.
+/// Without an explicit slot, the task name is used for both roles.
 ///
-/// Slots do not create a second task namespace. A task name stays reserved while it belongs to the registry
-/// or to Taskvisor's cleanup of a force-aborted task. The name can be admitted again after that ownership ends.
+/// Slots do not create a second task namespace.
+/// A task name stays reserved while the registry owns it.
+/// Cleanup of a force-aborted task can also retain the name.
+/// The name can be admitted again after that ownership ends.
 ///
 /// # Examples
 ///
@@ -72,7 +77,9 @@ pub struct ControllerSpec {
     /// Task passed to the runtime registry after controller admission.
     task_spec: TaskSpec,
 
-    /// Explicit admission slot. `None` groups the submission by task name.
+    /// Explicit admission slot.
+    ///
+    /// `None` groups the submission by task name.
     slot: Option<Arc<str>>,
 }
 
@@ -88,10 +95,11 @@ impl std::fmt::Debug for ControllerSpec {
 }
 
 impl ControllerSpec {
-    /// Creates a request from an explicit policy and task specification.
+    /// Controller request from an explicit policy and task specification.
     ///
     /// The task name is the effective slot until [`with_slot`](Self::with_slot) sets a separate key.
-    /// Prefer [`queue`](Self::queue), [`replace`](Self::replace), or [`drop_if_running`](Self::drop_if_running) when the policy is known at the call site.
+    /// Prefer [`queue`](Self::queue), [`replace`](Self::replace), or
+    /// [`drop_if_running`](Self::drop_if_running) when the policy is known at the call site.
     pub fn new(admission: AdmissionPolicy, task_spec: TaskSpec) -> Self {
         Self {
             admission,
@@ -100,42 +108,40 @@ impl ControllerSpec {
         }
     }
 
-    /// Returns the admission policy.
+    /// Busy-slot admission policy.
     #[must_use]
     pub fn admission(&self) -> AdmissionPolicy {
         self.admission
     }
 
-    /// Replaces the busy-slot policy without changing the task or slot.
+    /// Busy-slot policy replacement that preserves the task and slot.
     pub fn with_admission(mut self, admission: AdmissionPolicy) -> Self {
         self.admission = admission;
         self
     }
 
-    /// Returns the contained task specification.
+    /// Borrowed runtime task specification.
     #[must_use = "use the returned task specification"]
     pub fn task_spec(&self) -> &TaskSpec {
         &self.task_spec
     }
 
-    /// Replaces the contained task specification.
+    /// Runtime task-spec replacement that preserves any explicit slot.
     ///
-    /// An explicit slot stays unchanged.
     /// Without one, [`slot_name`](Self::slot_name) uses the name of the new task.
     pub fn with_task_spec(mut self, task_spec: TaskSpec) -> Self {
         self.task_spec = task_spec;
         self
     }
 
-    /// Removes controller settings and returns the runtime task specification.
+    /// Runtime task specification without controller settings.
     ///
-    /// The returned value can be passed to [`SupervisorHandle::add`](crate::SupervisorHandle::add)
-    /// when the caller decides to bypass slot admission.
+    /// Pass this value to [`SupervisorHandle::add`](crate::SupervisorHandle::add) to bypass slot admission.
     pub fn into_task_spec(self) -> TaskSpec {
         self.task_spec
     }
 
-    /// Groups this task under an admission key separate from its task name.
+    /// Explicit admission key separate from the task name.
     ///
     /// Tasks with the same effective slot cannot own that slot together.
     /// The task name remains unchanged and is still checked by the runtime registry.
@@ -144,13 +150,13 @@ impl ControllerSpec {
         self
     }
 
-    /// Clears the slot override and groups this request by task name again.
+    /// Task-name admission with no explicit slot override.
     pub fn without_slot(mut self) -> Self {
         self.slot = None;
         self
     }
 
-    /// Returns the effective slot: the explicit slot or the task name.
+    /// Effective admission key from the explicit slot or task name.
     #[must_use]
     pub fn slot_name(&self) -> &str {
         self.slot
@@ -158,18 +164,17 @@ impl ControllerSpec {
             .unwrap_or_else(|| self.task_spec.name())
     }
 
-    /// Returns the explicit slot override, or `None` when task name is the slot.
+    /// Explicit slot override when configured.
     #[must_use]
     pub fn slot_override(&self) -> Option<&str> {
         self.slot.as_deref()
     }
 
-    /// Clones the shared explicit slot value.
     pub(crate) fn shared_slot_override(&self) -> Option<Arc<str>> {
         self.slot.as_ref().map(Arc::clone)
     }
 
-    /// Creates a request that queues behind older work in a busy slot.
+    /// FIFO admission behind older work in a busy slot.
     ///
     /// Use this when incoming work should join the FIFO order.
     /// Queue limits can still reject the submission after command intake.
@@ -178,7 +183,7 @@ impl ControllerSpec {
         Self::new(AdmissionPolicy::Queue, task_spec)
     }
 
-    /// Creates a request that becomes the newest queue head in a busy slot.
+    /// Newest-head admission in a busy slot.
     ///
     /// Use this when the next item should carry the newest value.
     /// This retires the current owner but does not clear older FIFO entries behind the head.
@@ -187,7 +192,7 @@ impl ControllerSpec {
         Self::new(AdmissionPolicy::Replace, task_spec)
     }
 
-    /// Creates a request that runs only when the slot is idle.
+    /// Idle-only admission for incoming work.
     ///
     /// A busy slot rejects the request without starting its task body.
     /// Add `watch()` to the submission operation when the caller must observe that decision.

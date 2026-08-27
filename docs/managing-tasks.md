@@ -104,7 +104,7 @@ startup of dormant cleanup workers.
 
 Regular stop operations wait for the required management intake resources, while the `fail_fast()` modifier rejects unavailable command capacity immediately.
 Later registry or controller decisions can still reject work after command intake.
-The exact boundary and error are documented on each method in the [API reference](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html).
+The exact terminal boundaries and operation-specific errors are documented with the [add](../src/core/operations/add.rs), [remove](../src/core/operations/remove.rs), [cancel](../src/core/operations/cancel.rs), and [controller submission](../src/controller/prepared.rs) terminal methods.
 
 ## Run the management example
 

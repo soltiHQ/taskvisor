@@ -7,9 +7,11 @@
 //! ```
 //!
 //! Each line starts with the event sequence and the stable [`EventKind::as_label`] value.
-//! Event-specific fields follow as `key=value`. Free-form text is quoted, escaped, and truncated after 4096 characters.
+//! Event-specific fields follow as `key=value`.
+//! Free-form text is quoted, escaped, and truncated after 4096 characters.
 //! The complete line format is intended for people and is not a stable data format.
-//! It is not a complete serialization of [`Event`]; use a custom subscriber or `TracingBridge` when every typed field is needed.
+//! It is not a complete serialization of [`Event`].
+//! Use a custom subscriber or `TracingBridge` when every typed field is needed.
 
 use crate::events::{Event, EventKind};
 use crate::subscribers::{Subscribe, SubscriberExecution};
@@ -25,13 +27,14 @@ fn format_value(value: &str) -> String {
     format!("{value:?}")
 }
 
-/// Prints each received event as one readable line on standard output.
+/// Human-readable standard-output subscriber.
 ///
 /// This type uses the queue, loss, panic, and shutdown contract defined by [`Subscribe`].
 /// It selects [`SubscriberExecution::Dedicated`] because writing to standard output can block.
 ///
-/// The output is designed for local visibility. Do not parse it as an API or rely on its field
-/// set for task correlation. It omits some [`Event`] fields, including `id` and `at`.
+/// The output is designed for local visibility.
+/// Do not parse it as an API or rely on its field set for task correlation.
+/// It omits some [`Event`] fields, including `id` and `at`.
 ///
 /// # Examples
 ///

@@ -1,8 +1,8 @@
 //! Reserves supervisor-owned cleanup capacity for submissions.
 //!
-//! Submission methods wrap each [`ControllerSpec`] in an `OwnedTask` before command intake.
+//! Each [`ControllerSpec`] receives a cleanup reservation before command intake.
 //! Waiting stops if the controller channel closes.
-//! Fail-fast reservation converts capacity and worker-start failures into controller errors.
+//! Capacity, timeout, and cleanup-worker failures remain pre-intake controller errors.
 
 use std::{future::Future, time::Duration};
 
@@ -18,7 +18,7 @@ use crate::{
 use super::ControllerHandle;
 
 impl ControllerHandle {
-    /// Waits for ownership or reports that controller intake has closed.
+    /// Cleanup-ownership reservation canceled when controller intake closes.
     async fn reserve_or_closed(
         &self,
         reservation: impl Future<Output = Result<DropReservation, DropAdmissionError>>,
@@ -31,7 +31,7 @@ impl ControllerHandle {
         }
     }
 
-    /// Bounds only ownership admission and preserves controller-closure precedence.
+    /// Ownership-only deadline with controller closure taking precedence.
     async fn reserve_or_closed_with_timeout(
         &self,
         reservation: impl Future<Output = Result<DropReservation, DropAdmissionError>>,
@@ -172,7 +172,7 @@ impl ControllerHandle {
         Ok(self.attach_ownership(spec, reservation?))
     }
 
-    /// Attaches a completed reservation and the controller cleanup diagnostic.
+    /// Task ownership coupled to its cleanup reservation and panic diagnostic.
     fn attach_ownership(
         &self,
         spec: ControllerSpec,

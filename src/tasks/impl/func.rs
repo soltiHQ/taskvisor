@@ -17,11 +17,12 @@ use crate::{
 
 /// A reusable [`Task`] backed by an async closure.
 ///
-/// [`Task::spawn`] invokes the closure once for each attempt. The closure must create a fresh future on every call.
+/// [`Task::spawn`] invokes the closure once for each attempt.
+/// The closure must create a fresh future on every call.
 /// Captured state lives in the reusable closure; clone owned state into each returned future when needed.
 ///
-/// One registration runs attempts sequentially. Reusing the same task under several [`TaskSpec`](crate::TaskSpec)
-/// names can invoke the closure from separate actors.
+/// One registration runs attempts sequentially.
+/// Reusing the same task under several [`TaskSpec`](crate::TaskSpec) names can invoke the closure from separate actors.
 ///
 /// # Long-running worker
 ///
@@ -85,7 +86,7 @@ where
     F: Fn(TaskContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), TaskError>> + Send + 'static,
 {
-    /// Wraps `f` as a concrete [`TaskFn`].
+    /// Concrete closure-backed task without type erasure.
     ///
     /// Use this form when code needs the concrete adapter type.
     /// Use [`arc`](Self::arc) when the task will go directly into a [`TaskSpec`](crate::TaskSpec).
@@ -93,7 +94,7 @@ where
         Self { f }
     }
 
-    /// Wraps `f` in a task shared through [`Arc`].
+    /// Shared closure-backed task ready for coercion to [`TaskRef`](crate::TaskRef).
     ///
     /// This is the shortest path from an async closure to a [`TaskSpec`](crate::TaskSpec).
     /// The returned `Arc<Self>` can coerce to [`TaskRef`](crate::TaskRef).

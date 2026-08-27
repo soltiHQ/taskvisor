@@ -4,9 +4,10 @@
 //! The loop dispatches bounded management commands to admission or removal.
 //! It receives actor completion identities and shutdown fences on separate channels.
 //!
-//! Completion cleanup gets bounded bursts. The listener then gives command and control input an explicit turn.
-//! Runtime cancellation closes intake, drains buffered commands to direct decisions, claims remaining registered
-//! actors, and waits for removal owners. Joining the listener also closes the force-abort cleanup coordinator.
+//! Completion cleanup gets bounded bursts.
+//! The listener then gives command and control input an explicit turn.
+//! Runtime cancellation closes intake, drains buffered commands to direct decisions, claims remaining registered actors, and waits for removal owners.
+//! Joining the listener also closes the force-abort cleanup coordinator.
 
 use std::{
     future::Future,
@@ -36,7 +37,7 @@ pub(super) struct ListenerState {
     control_tx: mpsc::UnboundedSender<RegistryControl>,
     /// Receives reliable control messages after startup.
     control_rx: Mutex<Option<mpsc::UnboundedReceiver<RegistryControl>>>,
-    /// Reports actor identities whose result is ready.
+    /// Ready actor-identity sender.
     pub(super) completion_tx: mpsc::UnboundedSender<TaskId>,
     /// Receives reliable actor completion identities after startup.
     completion_rx: Mutex<Option<mpsc::UnboundedReceiver<TaskId>>>,
@@ -45,7 +46,7 @@ pub(super) struct ListenerState {
 }
 
 impl ListenerState {
-    /// Creates listener channels around the configured management receiver.
+    /// Listener channels around the configured management receiver.
     pub(super) fn new(cmd_rx: mpsc::Receiver<RegistryCommand>) -> Self {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -61,15 +62,15 @@ impl ListenerState {
 }
 
 impl Registry {
-    /// Waits for decisions on commands committed before the fence.
+    /// Decisions for commands committed before the fence.
     ///
     /// This does not wait for actor joins or terminal membership cleanup.
     /// The control channel is independent of bounded management queue capacity.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::ShuttingDown`] when the listener no longer
-    /// accepts control messages or cannot return the acknowledgement.
+    /// - [`RuntimeError::ShuttingDown`] when the registry control channel is closed;
+    /// - [`RuntimeError::ShuttingDown`] when the fence acknowledgement sender is dropped before replying.
     pub(crate) async fn fence(&self) -> Result<(), RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.listener
@@ -79,7 +80,7 @@ impl Registry {
         reply_rx.await.map_err(|_| RuntimeError::ShuttingDown)
     }
 
-    /// Starts the listener and force-abort cleanup coordinator once.
+    /// Single start of the listener and force-abort cleanup coordinator.
     ///
     /// # Panics
     ///
@@ -217,7 +218,7 @@ impl Registry {
         }
     }
 
-    /// Drains commands already visible at the admission ordering point, then replies.
+    /// Fence acknowledgement after commands visible at its ordering point are drained.
     async fn handle_control(
         &self,
         control: RegistryControl,
@@ -233,10 +234,11 @@ impl Registry {
         }
     }
 
-    /// Waits for the registry listener task to finish.
+    /// Registry listener and actor-runtime completion.
     ///
-    /// Safe to call after shutdown has started. If the listener was never started, this is a no-op.
-    /// Returns `false` when Tokio reports that the listener did not join cleanly.
+    /// This is safe after shutdown starts.
+    /// A listener that never started is a no-op.
+    /// Tokio join failure produces `false`.
     pub(in crate::core) async fn join_listener(&self) -> bool {
         let handle = self
             .listener
@@ -279,9 +281,10 @@ impl Registry {
         }
     }
 
-    /// Runs one listener operation under a panic boundary.
+    /// Panic-contained listener operation.
     ///
-    /// A processing panic becomes a diagnostic event. The registry listener remains available.
+    /// A processing panic becomes a diagnostic event.
+    /// The registry listener remains available.
     async fn guarded(&self, who: &'static str, fut: impl Future<Output = ()>) {
         if let Err(msg) = crate::core::panic_guard::guarded(fut).await {
             self.bus

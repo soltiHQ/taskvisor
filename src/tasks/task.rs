@@ -1,7 +1,8 @@
 //! Defines the executable side of a supervised task.
 //!
-//! [`Task`] is a factory for attempt futures. Application code usually creates one with [`TaskFn`](crate::TaskFn),
-//! or implements the trait for a named type. [`TaskRef`] erases that concrete type for [`TaskSpec`](crate::TaskSpec).
+//! [`Task`] is a factory for attempt futures.
+//! Application code usually creates one with [`TaskFn`](crate::TaskFn) or implements the trait for a named type.
+//! [`TaskRef`] erases that concrete type for [`TaskSpec`](crate::TaskSpec).
 //! After admission, Taskvisor calls [`Task::spawn`] once for each attempt and polls the returned [`BoxTaskFuture`].
 //!
 //! ```text
@@ -35,8 +36,10 @@ pub type TaskRef = Arc<dyn Task>;
 ///
 /// # Attempt contract
 ///
-/// The actor reuses the task object. Its attempt runner calls [`spawn`](Task::spawn) once per attempt.
-/// Each call must return a new future. Fields in the task object may keep state across retries;
+/// The actor reuses the task object.
+/// Its attempt runner calls [`spawn`](Task::spawn) once per attempt.
+/// Each call must return a new future.
+/// Fields in the task object may keep state across retries;
 /// values owned by the returned future belong only to that attempt.
 ///
 /// ```text
@@ -65,12 +68,15 @@ pub type TaskRef = Arc<dyn Task>;
 /// # Cancellation
 ///
 /// Long-running tasks must observe [`TaskContext`] and return [`TaskError::Canceled`] after a cooperative stop.
-/// Cancellation is never retried. A task that does not stop within the removal or shutdown grace window may be aborted.
-/// Timeout drops the future inside the attempt runner. Abort asks Tokio to drop it after the current poll returns.
+/// Cancellation is never retried.
+/// A task that does not stop within the removal or shutdown grace window may be aborted.
+/// Timeout drops the future inside the attempt runner.
+/// Abort asks Tokio to drop it after the current poll returns.
 /// Neither action rolls back external side effects or interrupts synchronous code inside a poll.
 ///
-/// Taskvisor drops every attempt future synchronously on its Tokio worker. Keep destructors for future-owned values
-/// short and non-blocking. A blocking destructor delays attempt release and holds any concurrency permit until it returns.
+/// Taskvisor drops every attempt future synchronously on its Tokio worker.
+/// Keep destructors for future-owned values short and non-blocking.
+/// A blocking destructor delays attempt release and holds any concurrency permit until it returns.
 ///
 /// # Attempt results
 ///
@@ -91,7 +97,7 @@ pub type TaskRef = Arc<dyn Task>;
 /// - [`TaskFn`](crate::TaskFn) adapts an async closure.
 /// - [`TaskSpec`](crate::TaskSpec) adds identity and execution settings.
 pub trait Task: Send + Sync + 'static {
-    /// Creates a fresh future for one attempt.
+    /// Fresh future for one attempt.
     ///
     /// This method runs synchronously before the attempt timeout starts.
     /// Return the future quickly and perform task work inside it.

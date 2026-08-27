@@ -20,8 +20,9 @@
 //!
 //! Fan-out performs one bounded enqueue attempt per subscriber and never waits for callbacks.
 //! Each lane preserves FIFO order.
-//! Shared lanes avoid per-subscriber thread wakeups; a subscriber that requires blocking isolation can select a dedicated worker.
-//! Ordinary drops in one full lane are counted and coalesced into a direct overflow callback after that lane catches up.
+//! Shared lanes avoid one worker thread per subscriber.
+//! A subscriber that requires blocking isolation can select a dedicated worker.
+//! Ordinary drops in one full lane are counted and coalesced into a direct overflow callback after that lane catches up while it remains active.
 //!
 //! Callback unwinding is isolated with `catch_unwind`.
 //! Taskvisor transfers its retained subscriber `Arc` to the supervisor's deferred-drop domain.
@@ -134,7 +135,8 @@ fn spawn_subscriber_worker(
         })
 }
 
-/// Contains escaping panic payloads on their own OS thread, never in a detached handle's packet.
+/// Contains an escaping panic payload on its callback worker thread.
+/// A nested panic payload from its destructor is leaked instead of entering the detached thread handle.
 fn contain_thread_unwind(run: impl FnOnce()) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
         && let Err(nested) =
@@ -494,7 +496,7 @@ fn run_dedicated_lane(lane: &SubscriberJob) {
     }
 }
 
-/// Runs one fixed fairness quantum from a lane on the shared callback worker.
+/// A busy shared lane yields after at most `SHARED_CALLBACK_QUANTUM` callbacks.
 fn run_shared_quantum(lane: &SubscriberJob, shared: &Arc<SharedQueue>) {
     let mut owned = {
         let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -662,7 +664,7 @@ impl SubscriberSet {
         )
     }
 
-    /// Creates an inactive set from a complete ownership reservation batch.
+    /// Inactive set backed by a complete ownership-reservation batch.
     ///
     /// The caller acquires one reservation per subscriber before this method reads
     /// [`Subscribe::name`], [`Subscribe::queue_capacity`], or [`Subscribe::execution`].
@@ -670,11 +672,11 @@ impl SubscriberSet {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::CapacityTooLarge`] when a subscriber queue exceeds Tokio's structural bounded-channel limit.
+    /// - [`BuildError::CapacityTooLarge`] when a subscriber queue exceeds Taskvisor's structural async-capacity limit.
     ///
     /// # Panics
     ///
-    /// Panics when the reservation count differs from the subscriber count.
+    /// Reservation-count mismatch.
     /// A panic from any metadata method reaches the caller with ownership already transferred to deferred-drop isolation.
     pub(crate) fn from_reserved(
         subs: Vec<Arc<dyn Subscribe>>,
@@ -744,19 +746,20 @@ impl SubscriberSet {
         })
     }
 
-    /// Returns the number of ownership slots charged to these subscribers.
+    /// Ownership slots charged to these subscribers.
     pub(crate) fn ownership_slots(&self) -> usize {
         self.ownership_slots
     }
 
-    /// Creates subscriber lanes, one fixed shared worker, and any selected dedicated workers.
+    /// Callback-lane startup with a shared worker when needed and one worker per dedicated lane.
     ///
-    /// This operation is idempotent. A closed set cannot be started again.
+    /// This operation is idempotent.
+    /// A closed set cannot be started again.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::TokioRuntimeUnavailable`] outside a Tokio runtime.
-    /// Returns [`RuntimeError::ThreadStartFailed`] if any callback worker cannot start.
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] outside a Tokio runtime;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required callback worker cannot start.
     pub(crate) fn start(&self) -> Result<(), RuntimeError> {
         self.start_with(spawn_subscriber_worker)
     }
@@ -890,7 +893,7 @@ impl SubscriberSet {
         Ok(())
     }
 
-    /// Attempts to enqueue one shared event into every subscriber lane.
+    /// One non-blocking fan-out attempt to every active subscriber lane.
     ///
     /// The method does not wait for callbacks.
     /// A call before startup or after closure has no effect.
@@ -920,7 +923,7 @@ impl SubscriberSet {
         }
     }
 
-    /// Closes all lanes and drains them within one shared deadline.
+    /// Shared-deadline drain and closure for every subscriber lane.
     ///
     /// At the deadline, queued events are dropped.
     /// A callback already running can continue on its worker after this method returns.
@@ -1004,7 +1007,7 @@ impl Drop for SubscriberSet {
     }
 }
 
-/// Destroys a caught panic payload only on the active callback worker.
+/// Panic-payload destruction stays on the active callback worker.
 ///
 /// A blocking payload destructor keeps that callback worker and its ownership reservation alive.
 /// It cannot extend the public shutdown deadline or become uncharged.
@@ -1021,10 +1024,10 @@ fn destroy_worker_panic_payload(
     true
 }
 
-/// Calls user subscriber code behind its panic boundary.
+/// Panic boundary for one subscriber callback.
 ///
-/// Returns `false` when destroying a caught panic payload itself panics.
-/// That lane then stops permanently.
+/// `false` means destruction of the caught panic payload also panicked.
+/// The caller then stops that lane permanently.
 /// This prevents one subscriber from retaining a new nested panic payload for every later event.
 fn invoke_subscriber(
     subscriber: &Arc<dyn Subscribe>,

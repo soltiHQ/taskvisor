@@ -1,7 +1,7 @@
-//! Runs the restart loop for one registered task.
+//! Owns restart policy and physical-attempt boundaries for one registered task.
 //!
-//! Registry admission creates one [`TaskActor`] for a [`TaskId`]. The actor runs attempts sequentially,
-//! applies restart and backoff policy, and returns one [`ActorExitReason`] to registry cleanup.
+//! One [`TaskActor`] represents one [`TaskId`].
+//! Attempts for that identity never overlap.
 //!
 //! ```text
 //! registry admission ──► TaskActor
@@ -14,9 +14,11 @@
 //!                            └── fatal or canceled ──► stop
 //! ```
 //!
-//! [`run_once`] owns timeout, panic capture, and terminal events for one attempt. The actor owns
-//! the retry counter and delays between attempts. A concurrency permit and activity flag remain
-//! held until the physical attempt exits. A success resets the failure retry counter.
+//! [`run_once`] owns the physical boundary of one attempt.
+//! A concurrency permit and activity flag remain held until that boundary exits.
+//! A successful attempt resets the failure retry counter.
+//! Successful `Always` restarts keep attempt starts at least one millisecond apart.
+//! A configured interval still applies after successful completion.
 
 use std::{
     num::NonZeroU32,
@@ -40,7 +42,7 @@ use crate::{
     tasks::Task,
 };
 
-/// Minimum interval between immediate successful `Always` attempts.
+/// Minimum start-to-start spacing for successful `Always` attempts.
 const IMMEDIATE_RESTART_FLOOR: Duration = Duration::from_millis(1);
 
 /// Returns the delay after a successful `Always` attempt.
@@ -133,8 +135,9 @@ fn classify_attempt(
     }
 }
 
-/// Marks the exact physical lifetime of one attempt, including the interval
-/// between Tokio abort being requested and a blocked poll actually returning.
+/// Guard for the exact physical lifetime of one attempt.
+///
+/// The boundary includes the interval between Tokio abort being requested and a blocked poll returning.
 struct AttemptActivity(Arc<AtomicBool>);
 
 impl AttemptActivity {
@@ -170,7 +173,7 @@ pub(crate) struct TaskActorResources {
     pub(crate) semaphore: Option<Arc<Semaphore>>,
     /// Registry activity flag for this task entry.
     pub(crate) activity: Arc<AtomicBool>,
-    /// Records an unrecoverable nested cleanup panic.
+    /// Unrecoverable nested-cleanup panic state.
     pub(crate) cleanup_poisoned: Arc<AtomicBool>,
 }
 
@@ -188,11 +191,12 @@ pub(crate) struct TaskActor {
     bus: Bus,
     /// Optional global limiter for concurrently running attempts.
     ///
-    /// Held only while `run_once` is executing. Retry/backoff sleeps do not hold it.
+    /// Held only while `run_once` is executing.
+    /// Retry and backoff sleeps do not hold it.
     semaphore: Option<Arc<Semaphore>>,
     /// Authoritative per-entry attempt activity bit.
     activity: Arc<AtomicBool>,
-    /// Records a nested cleanup panic whose payload had to be retained.
+    /// Nested-cleanup panic state for a payload retained permanently.
     cleanup_poisoned: Arc<AtomicBool>,
 }
 

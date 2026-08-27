@@ -25,8 +25,10 @@
 //! `results` and `advance` apply authoritative results and continue queued work.
 //! `watcher` and `cleanup` protect outcome and user-value ownership.
 //!
-//! Slot changes run in the serialized controller loop. A registry reply confirms or rejects admission.
-//! Physical completion releases an accepted owner. Events only report these decisions.
+//! Slot changes run in the serialized controller loop.
+//! A registry reply confirms or rejects admission.
+//! Physical completion releases an accepted owner.
+//! Events only report these decisions.
 //!
 //! Rejected user values leave slot locks before destructor cleanup starts.
 

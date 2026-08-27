@@ -5,10 +5,12 @@
 //! A command resolves an identity or name and claims removal at one registry ordering point.
 //! Unlike `remove`, cancellation then waits for the registry's shared completion signal.
 //!
-//! The returned boolean records whether this call made the stop claim. A caller that joins an existing claim
-//! waits for the same completion and returns `false`. A missing task returns `false` without a completion wait.
-//! Timeout variants start their timer after the registry decision. A timeout ends only that caller's wait;
-//! removal continues. Completion is logical registry cleanup.
+//! The returned boolean records whether this call made the stop claim.
+//! A caller that joins an existing claim waits for the same completion and returns `false`.
+//! A missing task returns `false` without a completion wait.
+//! Timeout variants start their timer after the registry decision.
+//! A timeout ends only that caller's wait while removal continues.
+//! Completion is logical registry cleanup.
 //! A force-aborted attempt can remain physically active afterward.
 
 use std::{sync::Arc, time::Duration};
@@ -116,20 +118,20 @@ impl SupervisorCore {
         reply_rx
     }
 
-    /// Waits without a deadline for identity cancellation and terminal completion.
+    /// Identity cancellation with unbounded logical completion wait.
     pub(crate) async fn cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let reply = self.enqueue_cancel_wait(id).await?;
         let decision = Self::await_cancel_reply(reply).await?;
         Self::wait_cancel_decision(decision, None).await
     }
 
-    /// Uses immediate queue admission, then waits for identity cancellation to complete.
+    /// Identity cancellation with fail-fast queue admission and unbounded logical completion wait.
     pub(crate) async fn try_cancel(&self, id: TaskId) -> Result<bool, RuntimeError> {
         let decision = Self::await_cancel_reply(self.enqueue_cancel(id)?).await?;
         Self::wait_cancel_decision(decision, None).await
     }
 
-    /// Bounds the terminal wait after an identity cancellation decision.
+    /// Identity cancellation with bounded logical completion wait.
     pub(crate) async fn cancel_with_timeout(
         &self,
         id: TaskId,
@@ -140,7 +142,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
-    /// Combines immediate queue admission with a bounded terminal wait by identity.
+    /// Identity cancellation with fail-fast queue admission and bounded logical completion wait.
     pub(crate) async fn try_cancel_with_timeout(
         &self,
         id: TaskId,
@@ -150,7 +152,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
-    /// Resolves and cancels the current owner of `name`, then waits for completion.
+    /// Atomic name cancellation with unbounded logical completion wait.
     pub(in crate::core) async fn cancel_by_name(
         &self,
         name: Arc<str>,
@@ -160,7 +162,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, None).await
     }
 
-    /// Uses immediate queue admission for cancellation and completion by name.
+    /// Atomic name cancellation with fail-fast queue admission and unbounded logical completion wait.
     pub(in crate::core) async fn try_cancel_by_name(
         &self,
         name: Arc<str>,
@@ -169,7 +171,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, None).await
     }
 
-    /// Bounds the terminal wait after an atomic name cancellation decision.
+    /// Atomic name cancellation with bounded logical completion wait.
     pub(in crate::core) async fn cancel_by_name_with_timeout(
         &self,
         name: Arc<str>,
@@ -180,7 +182,7 @@ impl SupervisorCore {
         Self::wait_cancel_decision(decision, Some(wait_for)).await
     }
 
-    /// Combines immediate queue admission with a bounded terminal wait by name.
+    /// Atomic name cancellation with fail-fast queue admission and bounded logical completion wait.
     pub(in crate::core) async fn try_cancel_by_name_with_timeout(
         &self,
         name: Arc<str>,
@@ -200,7 +202,7 @@ impl SupervisorCore {
         }
     }
 
-    /// Waits on a known task's shared completion and preserves claim ownership.
+    /// Shared completion wait that preserves whether this caller owned the claim.
     ///
     /// A deadline is checked again against completion to avoid reporting a timeout when completion won at the same boundary.
     async fn wait_cancel_decision(

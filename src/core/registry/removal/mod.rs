@@ -10,9 +10,10 @@
 //! shutdown ───────────────► claim remaining entries ──► actor joins ──► terminal commit
 //! ```
 //!
-//! `commands` defines remove and cancel decisions. `join` waits for actors outside the listener and
-//! handles the shared shutdown deadline. `terminal` removes both indexes, reports the outcome,
-//! and completes logical waiters. `pending` tracks every claimed removal owner for shutdown.
+//! `commands` defines remove and cancel decisions.
+//! `join` waits for actors outside the listener and handles the shared shutdown deadline.
+//! `terminal` removes both indexes, reports the outcome, and completes logical waiters.
+//! `pending` tracks every claimed removal owner for shutdown.
 //! Force-aborted physical ownership continues in `scheduler` until it can enter deferred cleanup.
 
 use crate::{

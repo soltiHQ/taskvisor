@@ -1,14 +1,14 @@
 //! Retains force-aborted attempts until physical ownership is safe to release.
 //!
-//! Logical removal can finish when a grace deadline aborts an actor, but Tokio abort is not proof that the actor
-//! has physically exited. [`AttemptReaper`] registers the task name and activity before abort.
+//! Logical removal can finish when a grace deadline aborts an actor, but Tokio abort is not proof that the actor has physically exited.
+//! [`AttemptReaper`] registers the task name and activity before abort.
 //! Admission and activity queries consult those reservations after registry membership is gone.
 //!
 //! Physical actor output and the terminal [`DropBundle`] can arrive in either order.
-//! Reaper records join them by task identity and physical latch. When both are present,
-//! the record releases its name reservation. Outside the lock, the actor output is attached
-//! to the bundle with reserved cleanup capacity. The bundle is sent for deferred destruction,
-//! then physical waiters are released.
+//! Reaper records join them by task identity and physical latch.
+//! When both are present, the record releases its name reservation.
+//! Outside the lock, the actor output is attached to the bundle with reserved cleanup capacity.
+//! The bundle is sent for deferred destruction before physical waiters are released.
 //!
 //! [`ActorRuntime`](super::runtime::ActorRuntime) polls reaper futures in one coordinator.
 //! A closed coordinator uses a detached fallback when a Tokio runtime exists.
@@ -41,7 +41,7 @@ use super::actor::ActorResult;
 /// Type-erased reaper operation owned by the coordinator.
 pub(super) type ReapFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// Starts a detached physical owner when a Tokio runtime is available.
+/// Detached physical owner when a Tokio runtime is available.
 ///
 /// It uses the current Tokio runtime after the coordinator closes.
 /// Without a runtime, the future is retained to avoid dropping user values in place.
@@ -57,9 +57,9 @@ where
 
 /// Coordinator input for physical reaping.
 pub(super) enum ReaperCommand {
-    /// Adds one physical owner to the coordinator.
+    /// Physical owner accepted by the coordinator.
     Reap(ReapFuture),
-    /// Closes coordinator admission.
+    /// Coordinator admission closure.
     Close,
 }
 
@@ -181,7 +181,7 @@ pub(in crate::core::registry) struct AttemptReservation {
 }
 
 impl AttemptReservation {
-    /// Creates metadata for one possible force-abort transfer.
+    /// Metadata for one possible force-abort transfer.
     pub(in crate::core::registry) fn new(
         id: TaskId,
         name: Arc<str>,
@@ -211,7 +211,7 @@ pub(in crate::core::registry) struct AttemptReaper {
 }
 
 impl AttemptReaper {
-    /// Creates an empty reaper for one coordinator channel.
+    /// Empty reaper for one coordinator channel.
     pub(super) fn new(tx: mpsc::UnboundedSender<ReaperCommand>) -> Self {
         Self {
             tx,
@@ -239,7 +239,7 @@ impl AttemptReaper {
         self.submit_reap(id, release, poison, future);
     }
 
-    /// Registers physical ownership before requesting actor abort.
+    /// Physical ownership registration before actor abort is requested.
     ///
     /// Registration reserves the name before abort can publish logical completion.
     pub(super) fn abort_actor(
@@ -263,7 +263,7 @@ impl AttemptReaper {
         self.submit_reap(id, release, poison, future);
     }
 
-    /// Inserts one reservation and increments physical activity after unlock.
+    /// Name reservation established before physical activity is incremented after unlock.
     fn register(&self, reservation: AttemptReservation) -> (TaskId, RemovalCompletion) {
         let AttemptReservation {
             id,
@@ -297,7 +297,7 @@ impl AttemptReaper {
         (id, release)
     }
 
-    /// Sends a physical owner to the coordinator or starts its fallback owner.
+    /// Physical owner sent to the coordinator or its fallback owner.
     ///
     /// A closed coordinator falls back to a detached task.
     /// If no Tokio runtime exists, the future and its owned values are retained.
@@ -326,7 +326,7 @@ impl AttemptReaper {
         }
     }
 
-    /// Attaches physical output and returns a complete terminal match.
+    /// Physical output attachment with a complete terminal match when available.
     ///
     /// Missing and duplicate records retain unexpected user values.
     /// They never destroy those values while the reaper lock is held.
@@ -362,7 +362,7 @@ impl AttemptReaper {
         Self::take_ready_record(&mut state, id, index)
     }
 
-    /// Attaches the registry's terminal cleanup bundle.
+    /// Registry terminal bundle attached to the matching physical owner.
     ///
     /// This drop-finalizer path handles missing and duplicate records.
     /// One non-canonical duplicate release set is retained.
@@ -437,7 +437,7 @@ impl AttemptReaper {
         self.submit_ready(ready);
     }
 
-    /// Removes and returns one fully matched record while holding the state lock.
+    /// Fully matched record removed while the caller holds the state lock.
     fn take_ready_record(state: &mut ReaperState, id: TaskId, index: usize) -> Option<ReadyRecord> {
         let is_ready = state.records.get(&id).is_some_and(|records| {
             let Some(record) = records.get(index) else {
@@ -476,7 +476,7 @@ impl AttemptReaper {
         })
     }
 
-    /// Commits one matched record to deferred cleanup and completes its latches.
+    /// Matched record committed to deferred cleanup before its latches complete.
     fn submit_ready(&self, ready: Option<ReadyRecord>) {
         let Some(ReadyRecord {
             mut bundle,
@@ -502,12 +502,12 @@ impl AttemptReaper {
         }
     }
 
-    /// Returns the number of physical attempts not yet handed to cleanup.
+    /// Number of physical attempts not yet handed to cleanup.
     pub(super) fn active(&self) -> usize {
         self.active.load(Ordering::Acquire)
     }
 
-    /// Returns whether physical reaping still reserves a name.
+    /// Whether physical reaping still reserves a name.
     pub(in crate::core::registry) fn reserves_name(&self, name: &str) -> bool {
         self.state
             .lock()
@@ -528,7 +528,7 @@ impl AttemptReaper {
             .collect()
     }
 
-    /// Returns whether any reaped attempt for a name is still active.
+    /// Whether any reaped attempt for a name is still active.
     pub(in crate::core::registry) fn is_alive(&self, name: &str) -> bool {
         self.state
             .lock()
@@ -542,7 +542,7 @@ impl AttemptReaper {
             })
     }
 
-    /// Returns names with at least one reaped attempt still active.
+    /// Names with at least one reaped attempt still active.
     pub(in crate::core::registry) fn alive_names(&self) -> Vec<Arc<str>> {
         self.state
             .lock()
@@ -558,7 +558,7 @@ impl AttemptReaper {
             .collect()
     }
 
-    /// Closes admission to the coordinator.
+    /// Admission closure for the coordinator.
     pub(super) fn close(&self) {
         let _ = self.tx.send(ReaperCommand::Close);
     }

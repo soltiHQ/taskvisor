@@ -42,7 +42,7 @@ impl DropReservation {
         }
     }
 
-    /// Binds this reservation to the value retained across the hand-off.
+    /// Reservation bound to the value retained across the hand-off.
     pub(crate) fn bundle<T>(self, retained: T) -> DropBundle
     where
         T: Send + 'static,
@@ -124,7 +124,8 @@ impl DropBundle {
 
     /// Stores a final outcome that its watcher did not accept.
     ///
-    /// A duplicate poisons the bundle. An outcome received after storage is unavailable is retained permanently.
+    /// A duplicate poisons the bundle.
+    /// An outcome received after storage is unavailable is retained permanently.
     /// Both paths avoid caller-context destruction.
     pub(crate) fn attach_outcome(&mut self, outcome: TaskOutcome) {
         let Some(inner) = self.inner_mut() else {
@@ -139,12 +140,12 @@ impl DropBundle {
         inner.undelivered_outcome = Some(Box::new(move || drop(outcome)));
     }
 
-    /// Uses the auxiliary slot to retain a caught panic payload.
+    /// Caught panic payload retained in the single auxiliary slot.
     pub(crate) fn attach_panic_payload(&mut self, payload: Box<dyn Any + Send>) {
         self.attach_auxiliary(payload);
     }
 
-    /// Sets one diagnostic callback for the first destructor panic.
+    /// Diagnostic callback for the first destructor panic.
     ///
     /// A second reporter is retained permanently and poisons the bundle.
     pub(crate) fn set_panic_reporter<F>(&mut self, reporter: F)
@@ -164,7 +165,7 @@ impl DropBundle {
         inner.panic_reporter = Some(reporter);
     }
 
-    /// Uses the auxiliary slot after logical terminal commit to retain the physical result.
+    /// Physical result retained in the single auxiliary slot after logical terminal commit.
     pub(crate) fn attach_physical<T>(&mut self, value: T)
     where
         T: Send + 'static,
@@ -192,14 +193,14 @@ impl DropBundle {
         inner.auxiliary = Some(Box::new(move || drop(value)));
     }
 
-    /// Marks the charged unit for retirement after worker cleanup.
+    /// Charged unit marked for retirement after worker cleanup.
     pub(crate) fn poison(&mut self) {
         if let Some(inner) = self.inner_mut() {
             inner.poisoned = true;
         }
     }
 
-    /// Consumes the bundle and schedules all collected jobs.
+    /// Collected jobs scheduled for isolated destruction.
     pub(crate) fn submit(self) {
         self.submit_inner();
     }
@@ -225,13 +226,12 @@ impl DropBundle {
 }
 
 impl Drop for DropBundle {
-    /// Uses the same one-shot path when normal terminal code releases the bundle.
     fn drop(&mut self) {
         self.submit_inner();
     }
 }
 
-/// Moves task data together with its reserved cleanup ownership.
+/// Task data carried with its reserved cleanup ownership.
 ///
 /// `value` is declared first.
 /// Defensive field destruction releases its task reference while `cleanup` still retains the final reference.
@@ -243,7 +243,7 @@ pub(crate) struct OwnedTask<T> {
 }
 
 impl<T> OwnedTask<T> {
-    /// Establishes cleanup ownership before the task data is handed off.
+    /// Cleanup ownership established before the task data hand-off.
     pub(crate) fn new(value: T, retained: TaskRef, reservation: DropReservation) -> Self {
         Self {
             value,
@@ -261,7 +261,7 @@ impl<T> OwnedTask<T> {
         }
     }
 
-    /// Transfers task data and cleanup ownership to their next internal owners.
+    /// Task data and cleanup ownership for the next internal owners.
     pub(crate) fn into_parts(self) -> (T, DropBundle) {
         let Self { value, cleanup } = self;
         (value, cleanup)

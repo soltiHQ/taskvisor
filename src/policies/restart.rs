@@ -1,8 +1,8 @@
 //! Defines whether Taskvisor may start another attempt.
 //!
 //! The registry resolves this policy from [`TaskSpec`](crate::TaskSpec) and [`TaskDefaults`](crate::TaskDefaults).
-//! Taskvisor checks it after each attempt. Most applications select a policy with [`TaskSpec::once`](crate::TaskSpec::once),
-//! [`TaskSpec::restartable`](crate::TaskSpec::restartable), or [`TaskSpec::periodic`](crate::TaskSpec::periodic).
+//! Taskvisor checks it after each attempt.
+//! Most applications select a policy with [`TaskSpec::once`](crate::TaskSpec::once), [`TaskSpec::restartable`](crate::TaskSpec::restartable), or [`TaskSpec::periodic`](crate::TaskSpec::periodic).
 //! Use [`TaskSpec::with_restart`](crate::TaskSpec::with_restart) to override that choice.
 //!
 //! | Policy      | After success               | After retryable failure |
@@ -13,7 +13,8 @@
 //!
 //! Failure timing belongs to [`BackoffPolicy`](crate::BackoffPolicy).
 //! The retry limit can stop an otherwise eligible failure retry.
-//! It does not limit successful repeats under `Always`. Fatal errors, task cancellation, and runtime cancellation always stop the task.
+//! It does not limit successful repeats under `Always`.
+//! Fatal errors, task cancellation, and runtime cancellation always stop the task.
 
 /// Restart eligibility applied after one task attempt.
 ///
@@ -24,14 +25,14 @@
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum RestartPolicy {
-    /// Never schedules another attempt after the current one.
+    /// No attempt after the current one.
     Never,
-    /// Allows another attempt only after a retryable failure.
+    /// Another attempt only after a retryable failure.
     ///
     /// The configured retry limit can still stop the task.
     /// Success, fatal failure, and cancellation stop it.
     OnFailure,
-    /// Allows another attempt after success or a retryable failure.
+    /// Another attempt after success or a retryable failure.
     ///
     /// `interval` applies only after a successful attempt:
     ///
@@ -39,8 +40,8 @@ pub enum RestartPolicy {
     /// - `None` adds no configured interval.
     ///
     /// After success, Taskvisor keeps consecutive attempt starts at least one millisecond apart.
-    /// When the attempt runtime plus `interval` is shorter, Taskvisor extends the wait by the
-    /// remaining time. This guard also applies when `interval` is `None` or zero.
+    /// When the attempt runtime plus `interval` is shorter, Taskvisor extends the wait by the remaining time.
+    /// This guard also applies when `interval` is `None` or zero.
     ///
     /// Retryable failures ignore `interval` and use [`BackoffPolicy`](crate::BackoffPolicy).
     /// The retry limit applies to a failure streak, not to successful repeats.
@@ -48,13 +49,14 @@ pub enum RestartPolicy {
     Always {
         /// Configured wait after success and before the next attempt.
         ///
-        /// `None` adds no configured interval. The one-millisecond start-spacing guard still applies.
+        /// `None` adds no configured interval.
+        /// The one-millisecond start-spacing guard still applies.
         interval: Option<std::time::Duration>,
     },
 }
 
 impl Default for RestartPolicy {
-    /// Returns [`RestartPolicy::OnFailure`].
+    /// Default restart behavior: [`RestartPolicy::OnFailure`].
     fn default() -> Self {
         RestartPolicy::OnFailure
     }

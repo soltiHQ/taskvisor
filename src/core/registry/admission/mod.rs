@@ -1,7 +1,8 @@
 //! Turns add commands into committed registry entries.
 //!
-//! The registry listener calls this package for single adds and static batches. Admission checks name
-//! ownership and the registration limit. It builds actors outside the state write lock.
+//! The registry listener calls this package for single adds and static batches.
+//! Admission checks name ownership and the registration limit.
+//! Actor construction stays outside the state write lock.
 //! It repeats the checks after acquiring the write lock because preparation did not hold registry state.
 //!
 //! ```text
@@ -82,7 +83,7 @@ fn deliver_or_attach_rejection(
 }
 
 impl Registry {
-    /// Resolves task defaults and builds an actor outside the state lock.
+    /// Prepared actor outside the state lock and behind its start gate.
     ///
     /// The actor is not spawned and remains behind `start`.
     fn prepare_registration(
@@ -158,7 +159,7 @@ impl Registry {
         }
     }
 
-    /// Returns the registration limit when an incoming set would exceed it.
+    /// Configured registration limit when an incoming set would exceed it.
     ///
     /// Force-aborted attempts remain counted while registry ownership is being removed.
     /// This keeps the bound strict without sharing registry and cleanup locks.

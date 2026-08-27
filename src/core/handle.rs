@@ -1,10 +1,8 @@
-//! Sends management operations to one running supervisor.
+//! Defines management operations for one running supervisor.
 //!
 //! [`Supervisor::serve`](crate::Supervisor::serve) starts the runtime and returns a [`SupervisorHandle`].
-//! State-changing methods create typed operations.
-//! Building or configuring an operation has no effect.
-//! Awaiting a default operation directly, or calling `execute` or `try_intake`, commits the
-//! request.
+//! Typed operations carry configuration without changing runtime state.
+//! Direct await, `execute`, and `try_intake` are terminal operations.
 //!
 //! ```text
 //! application ──► SupervisorHandle
@@ -26,10 +24,10 @@ use crate::tasks::TaskSpec;
 /// Cloneable API for managing one running supervisor.
 ///
 /// `add`, `remove`, `cancel`, and controller `submit` return single-use operation builders.
-/// Their modifiers select watched results, admission behavior, or a cancellation deadline without multiplying methods on this handle.
+/// Their modifiers select watched results, admission behavior, or a cancellation deadline.
 /// Await a default waiting, unwatched `add` or controller `submit` operation directly.
-/// Call `execute().await` for configured operations and for `remove` or `cancel`; controller
-/// submission also offers synchronous `try_intake()`.
+/// Call `execute().await` for configured operations and for `remove` or `cancel`.
+/// Controller submission also offers synchronous `try_intake()`.
 ///
 /// Once a terminal method commits its queue command, the runtime owns that command even if the caller drops the returned future.
 ///
@@ -108,13 +106,13 @@ impl SupervisorHandle {
         self
     }
 
-    /// Creates a direct registry-registration operation.
+    /// Direct registry admission for one task specification.
     ///
     /// The default operation waits for cleanup ownership, registry command capacity, and the authoritative registration decision.
-    /// Awaiting the default operation directly or successfully calling `execute` returns the registered
-    /// [`TaskId`]. Use `watch()` to receive a [`TaskWaiter`](crate::TaskWaiter),
-    /// `ownership_timeout(duration)` to bound only cleanup-ownership admission, or `fail_fast()`
-    /// to require immediately available ownership and command capacity.
+    /// Direct await and `execute` return the registered [`TaskId`].
+    /// Use `watch()` for a [`TaskWaiter`](crate::TaskWaiter).
+    /// Use `ownership_timeout(duration)` to bound only cleanup-ownership admission.
+    /// Use `fail_fast()` when ownership and command capacity must be available immediately.
     ///
     /// Direct adds bypass controller slot admission.
     #[must_use = "await the default add or configure and execute the operation"]
@@ -123,12 +121,13 @@ impl SupervisorHandle {
         AddOperation::new(self.core(), spec)
     }
 
-    /// Creates a non-waiting removal operation for a task identity or registered name.
+    /// Non-waiting removal by task identity or registered name.
     ///
-    /// `target` accepts [`TaskId`], `&str`, `String`, `Arc<str>`, and [`TaskTarget`]. Successful
-    /// `execute` returns whether this call claimed removal. Registered task cleanup may continue
-    /// after return; queued controller work is removed before return. Use `fail_fast()` to require
-    /// immediately available management-queue capacity.
+    /// `target` accepts [`TaskId`], `&str`, `String`, `Arc<str>`, and [`TaskTarget`].
+    /// Successful `execute` reports whether this call claimed removal.
+    /// Registered task cleanup may continue after return.
+    /// Queued controller work is removed before return.
+    /// Use `fail_fast()` when management-queue capacity must be available immediately.
     ///
     /// Identity targets pass through a configured controller and can reach queued submissions.
     /// Name targets resolve only registry membership.
@@ -141,12 +140,13 @@ impl SupervisorHandle {
         RemoveOperation::new(self, target)
     }
 
-    /// Creates a terminal cancellation operation for a task identity or registered name.
+    /// Cancellation by task identity or registered name with logical cleanup confirmation.
     ///
     /// The default `execute` waits for management-queue capacity and logical terminal cleanup.
-    /// Use `fail_fast()` to require immediate queue capacity and `termination_timeout(duration)`
-    /// to limit only this caller's later cleanup wait. The two modifiers are independent and can
-    /// be applied in either order. A termination timeout does not undo cancellation.
+    /// Use `fail_fast()` when queue capacity must be available immediately.
+    /// Use `termination_timeout(duration)` to limit only this caller's later cleanup wait.
+    /// The two modifiers are independent and can be applied in either order.
+    /// A termination timeout does not undo cancellation.
     ///
     /// Identity targets pass through a configured controller and can reach queued submissions.
     /// Name targets resolve only registry membership.
@@ -162,67 +162,67 @@ impl SupervisorHandle {
         CancelOperation::new(self, target)
     }
 
-    /// Returns the authoritative registry view as `(id, name)` pairs.
+    /// Authoritative point-in-time registry view as `(id, name)` pairs.
     ///
-    /// The result is sorted by [`TaskId`] and includes entries that are running, waiting for an
-    /// attempt permit, in retry backoff, or completing cleanup. Concurrent changes can make the
-    /// returned snapshot stale immediately.
+    /// The result is sorted by [`TaskId`] and includes entries that are running, waiting for an attempt permit, in retry backoff, or completing cleanup.
+    /// Concurrent changes can make the returned snapshot stale immediately.
     pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         self.core().list_tasks().await
     }
 
-    /// Returns sorted task names whose physical attempt is still active.
+    /// Sorted task names with a physically active attempt.
     ///
-    /// This includes force-aborted attempts that have left registry membership but have not
-    /// physically exited. Concurrent changes can make the returned snapshot stale immediately.
+    /// This includes force-aborted attempts that have left registry membership but have not physically exited.
+    /// Concurrent changes can make the returned snapshot stale immediately.
     pub async fn alive_snapshot(&self) -> Vec<Arc<str>> {
         self.core().snapshot().await
     }
 
-    /// Returns whether this registered name still has a physical attempt in progress.
+    /// Whether a registered name has a physical attempt in progress.
     ///
-    /// Waiting for a permit, retry backoff, or terminal cleanup is not active work. A
-    /// force-aborted attempt can remain active after registry membership ends.
+    /// Waiting for a permit, retry backoff, or terminal cleanup is not active work.
+    /// A force-aborted attempt can remain active after registry membership ends.
     pub async fn is_alive(&self, name: &str) -> bool {
         self.core().is_alive(name).await
     }
 
-    /// Returns ownership-admission and deferred-cleanup state.
+    /// Point-in-time ownership-admission and deferred-cleanup state.
     ///
-    /// Accepted task or subscriber values remain charged until their final isolated destruction
-    /// finishes, including after registry membership and physical attempts end. The returned
-    /// point-in-time view can become stale immediately.
+    /// Accepted task or subscriber values remain charged until their final isolated destruction finishes.
+    /// This can outlive registry membership and physical attempts.
+    /// The returned point-in-time view can become stale immediately.
     #[must_use = "inspect the returned ownership state"]
     pub fn ownership_snapshot(&self) -> OwnershipSnapshot {
         self.core().ownership_snapshot()
     }
 
-    /// Returns the immutable runtime configuration.
+    /// Immutable runtime configuration.
     #[must_use = "inspect the returned runtime configuration"]
     pub fn runtime_config(&self) -> &crate::SupervisorConfig {
         self.core().runtime_config()
     }
 
-    /// Returns the immutable task defaults applied during registry admission.
+    /// Immutable task defaults applied during registry admission.
     #[must_use = "inspect the returned task defaults"]
     pub fn task_defaults(&self) -> &crate::TaskDefaults {
         self.core().task_defaults()
     }
 
-    /// Closes admission and waits for the shared bounded cleanup workflow.
+    /// Shared bounded shutdown for every handle clone.
     ///
-    /// Shutdown drains accepted controller work when configured, cancels registered tasks, waits
-    /// through the grace window, joins runtime management workers, and drains subscriber queues up
-    /// to their deadline. A force-aborted synchronous task, detached subscriber callback, or
-    /// isolated user destructor may still be active after return.
+    /// The configured grace window bounds registered task cleanup.
+    /// The subscriber drain deadline bounds queued subscriber events.
+    /// A force-aborted synchronous task, detached subscriber callback, or isolated user destructor may still be active after return.
     ///
-    /// This consumes only the current handle value. Shutdown affects the shared runtime and every
-    /// clone. Concurrent or later calls receive the same cached result.
+    /// This consumes only the current handle value.
+    /// Shutdown affects the shared runtime and every clone.
+    /// Concurrent or later calls receive the same cached result.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::GraceExceeded`] when tasks miss the grace deadline and the other
-    /// documented runtime shutdown errors when shared cleanup cannot finish normally.
+    /// - [`RuntimeError::GraceExceeded`] when tasks miss the grace deadline;
+    /// - [`RuntimeError::SignalSetupFailed`] when this call joins a shared shutdown whose operating-system signal setup failed;
+    /// - [`RuntimeError::ShuttingDown`] when shared cleanup cannot finish normally.
     ///
     /// # Cancel safety
     ///
@@ -234,16 +234,15 @@ impl SupervisorHandle {
         self.core().shutdown().await
     }
 
-    /// Allocates a controller submission identity before command intake or events.
+    /// Controller submission identity available before command intake or events.
     ///
-    /// Preparation reserves no task name, slot, queue capacity, or runtime capacity. Record
-    /// [`PreparedSubmission::id`](crate::PreparedSubmission::id), then call `submit()` on the
-    /// prepared value to create the same typed submission operation as [`submit`](Self::submit).
+    /// Preparation reserves no task name, slot, queue capacity, or runtime capacity.
+    /// Record [`PreparedSubmission::id`](crate::PreparedSubmission::id), then call `submit()` on the prepared value.
+    /// The resulting operation has the same contract as [`submit`](Self::submit).
     ///
     /// # Errors
     ///
-    /// Returns [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when
-    /// this supervisor was built without a controller.
+    /// - [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) when this supervisor was built without a controller.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn prepare_submission(
@@ -259,18 +258,17 @@ impl SupervisorHandle {
         }
     }
 
-    /// Creates a controller command-intake operation.
+    /// Controller command intake with optional final-outcome delivery.
     ///
-    /// Awaiting the default operation directly or calling `execute` waits for cleanup ownership
-    /// and controller command capacity, then returns a reserved [`TaskId`]. It confirms command
-    /// intake only; slot and registry admission happen later. Use `watch()` to return a
-    /// final-outcome waiter, `ownership_timeout(duration)` to bound only cleanup-ownership
-    /// admission, or synchronous `try_intake()` to require immediately available ownership and
-    /// command capacity.
+    /// Direct await and `execute` wait for cleanup ownership and controller command capacity.
+    /// Their [`TaskId`] confirms command intake only.
+    /// Slot and registry admission happen later.
+    /// Use `watch()` for a final-outcome waiter.
+    /// Use `ownership_timeout(duration)` to bound only cleanup-ownership admission.
+    /// Use synchronous `try_intake()` when ownership and command capacity must be available immediately.
     ///
-    /// A supervisor without a controller reports
-    /// [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) from the terminal
-    /// method. Building or dropping the operation allocates no task identity and sends no command.
+    /// A supervisor without a controller reports [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured) from the terminal method.
+    /// Building or dropping the operation allocates no task identity and sends no command.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     #[must_use = "await the default submission or configure and execute the operation"]
@@ -279,10 +277,10 @@ impl SupervisorHandle {
         crate::controller::Submit::direct(self.controller.as_deref(), spec)
     }
 
-    /// Returns a best-effort rolling snapshot of controller slots.
+    /// Best-effort rolling snapshot of controller slots.
     ///
-    /// Slots are copied one at a time, so concurrent changes can appear in only part of one
-    /// snapshot. Returns `None` when this supervisor was built without a controller.
+    /// Because slots are copied one at a time, concurrent changes can appear in only part of one snapshot.
+    /// `None` means this supervisor was built without a controller.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub async fn controller_snapshot(&self) -> Option<crate::controller::ControllerSnapshot> {

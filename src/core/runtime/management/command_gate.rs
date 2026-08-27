@@ -1,7 +1,7 @@
 //! Prevents management commands from committing after shutdown closes admission.
 //!
-//! Every mutating management path uses this gate for its last shutdown check. The shutdown workflow
-//! takes the same gate, closes admission, and then asks the registry for an ordering fence.
+//! Every mutating management path uses this gate for its last shutdown check.
+//! The shutdown workflow takes the same gate, closes admission, and then asks the registry for an ordering fence.
 //! Commands already committed are ahead of that fence.
 //! A queue reservation by itself is not a commit.
 
@@ -13,7 +13,7 @@ use super::super::SupervisorCore;
 use crate::{core::registry::RegistryCommand, error::RuntimeError};
 
 impl SupervisorCore {
-    /// Closes command admission after in-progress commits leave the gate.
+    /// Command admission closure after in-progress commits leave the gate.
     pub(in crate::core::runtime) fn mark_shutting_down(&self) {
         let _gate = self
             .admission_gate
@@ -30,7 +30,7 @@ impl SupervisorCore {
 
     /// Holds shutdown ordering across a command's final check and queue commit.
     ///
-    /// Returns `None` after shutdown has closed admission.
+    /// Shutdown closure produces `None`.
     pub(super) fn command_admission(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
         let gate = self
             .admission_gate
@@ -67,7 +67,7 @@ impl SupervisorCore {
         Ok((permit, admission))
     }
 
-    /// Closes admission and waits until the registry reaches every prior commit.
+    /// Admission closure followed by a registry fence for every prior commit.
     ///
     /// Backpressured operations must pass the gate again after they receive capacity.
     pub(in crate::core::runtime) async fn close_admission_and_fence_registry(

@@ -1,12 +1,4 @@
-//! # Subscriber delivery and slow-observer isolation
-//!
-//! Fast cases await every completed-task event at every subscriber on a prewarmed supervisor.
-//! The matched default family uses the shared callback worker; a smaller family exposes the cost of choosing one dedicated
-//! worker per short callback. The overload case holds one dedicated callback behind a gate while tasks and shared
-//! healthy subscribers make progress.
-//! Gate holding and overflow-drain time stay outside its timer.
-//!
-//! Run with cargo bench --bench fanout.
+//! Benchmarks subscriber delivery and slow-observer isolation.
 
 mod support;
 
@@ -40,7 +32,7 @@ const DEDICATED_DELIVERY: CaseFamily = CaseFamily::lifecycle(
     "COMPLETION + DEDICATED SUBSCRIBER DELIVERY",
     "completed task",
     "completed tasks",
-    "first watched add through 256 Completed outcomes and matching TaskFinished delivery at 1 or 8 short-callback subscribers, each with its own dedicated worker",
+    "first watched add through 256 Completed outcomes and matching TaskFinished delivery at 1, 2, 4, or 8 short-callback subscribers, each with its own dedicated worker",
     "startup, warmup, TaskSpec construction, ownership reset between batches, and shutdown",
 );
 
@@ -168,8 +160,13 @@ fn bench_delivery_family(
 
 fn bench_delivery(c: &mut Criterion) {
     print_suite_header("fanout");
-    bench_delivery_family(c, DELIVERY, &[0, 1, 4, 8], CountingExecution::Shared);
-    bench_delivery_family(c, DEDICATED_DELIVERY, &[1, 8], CountingExecution::Dedicated);
+    bench_delivery_family(c, DELIVERY, &[0, 1, 2, 4, 8], CountingExecution::Shared);
+    bench_delivery_family(
+        c,
+        DEDICATED_DELIVERY,
+        &[1, 2, 4, 8],
+        CountingExecution::Dedicated,
+    );
 }
 
 struct HeldSubscriber {

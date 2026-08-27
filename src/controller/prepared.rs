@@ -1,7 +1,7 @@
-//! Builds explicit controller submission operations.
+//! Defines explicit controller submission operations.
 //!
-//! [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) creates a [`Submit`] operation whose terminal method performs controller intake.
-//! [`PreparedSubmission`] first exposes the submission identity, then creates the same operation without changing that identity.
+//! [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) is the direct entry point to a [`Submit`] operation.
+//! [`PreparedSubmission`] provides the same operation with its identity allocated first.
 //!
 //! ```text
 //! ControllerSpec ──► Submit ──► await / execute / try_intake ──► controller intake
@@ -25,15 +25,14 @@ use crate::{
 
 /// An explicit single-use controller submission operation.
 ///
-/// Configure whether the caller needs a final-outcome waiter and whether ownership admission has
-/// a deadline, then finish with `execute` or `try_intake`.
-/// The default waiting, unwatched operation can also be awaited directly.
-/// Direct await creates one boxed `Send` future; `execute` avoids that shorthand wrapper.
+/// Configure final-outcome delivery and an optional ownership-admission deadline.
+/// Finish with `execute` or `try_intake`. The default waiting, unwatched operation can also be awaited directly.
 /// APIs that accept a [`Future`] require `execute()` or [`IntoFuture::into_future`].
 /// Every terminal method consumes the operation, including when intake returns an error.
 ///
-/// `Watch` and `Admission` are type states maintained by [`watch`](Self::watch) and
-/// [`ownership_timeout`](Self::ownership_timeout). Applications do not need to name them.
+/// `Watch` and `Admission` are operation type states.
+/// [`watch`](Self::watch) and [`ownership_timeout`](Self::ownership_timeout) select them.
+/// Applications do not need to name them.
 #[must_use = "await the default submission, call and await `execute`, or call `try_intake`"]
 pub struct Submit<'a, Watch = Unwatched, Admission = Waiting> {
     /// Direct or pre-identified submission payload retained until a terminal method runs.
@@ -65,11 +64,10 @@ enum SubmitRequest<'a> {
 }
 
 impl<'a> Submit<'a> {
-    /// Creates a direct submission without allocating an identity or sending a command.
+    /// Lazy direct submission with no identity or controller command.
     ///
-    /// A missing controller is reported by the terminal method as
-    /// [`ControllerError::NotConfigured`]. Keeping that state in the operation lets
-    /// [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) remain infallible.
+    /// The terminal method reports a missing controller as [`ControllerError::NotConfigured`].
+    /// This keeps [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) infallible.
     #[inline]
     pub(crate) fn direct(controller: Option<&'a Controller>, spec: ControllerSpec) -> Self {
         Self {
@@ -81,7 +79,6 @@ impl<'a> Submit<'a> {
 }
 
 impl Submit<'static> {
-    /// Creates an operation for an identity allocated by [`PreparedSubmission`].
     #[inline]
     fn prepared(controller: ControllerHandle, id: TaskId, spec: ControllerSpec) -> Self {
         Self {
@@ -97,7 +94,7 @@ impl Submit<'static> {
 }
 
 impl SubmitRequest<'_> {
-    /// Resolves configuration and allocates a direct identity at terminal execution.
+    /// Terminal resolution of controller configuration and direct identity allocation.
     #[inline(always)]
     fn into_parts(self) -> Result<(ControllerHandle, TaskId, ControllerSpec), ControllerError> {
         match self {
@@ -178,9 +175,10 @@ fn try_submit_direct_and_watch(
 }
 
 impl<'a, Admission> Submit<'a, Unwatched, Admission> {
-    /// Requests a direct final-outcome waiter.
+    /// Final-outcome delivery through [`TaskWaiter`].
     ///
-    /// Successful intake returns only [`TaskWaiter`]. Its [`TaskWaiter::id`] is the submission identity.
+    /// Successful intake returns only [`TaskWaiter`].
+    /// Its [`TaskWaiter::id`] is the submission identity.
     /// The waiter later reports controller rejection or the admitted task's final outcome.
     #[must_use = "configure or execute the watched submission"]
     #[inline]
@@ -194,9 +192,10 @@ impl<'a, Admission> Submit<'a, Unwatched, Admission> {
 }
 
 impl<'a, Watch> Submit<'a, Watch, Waiting> {
-    /// Bounds only cleanup-ownership admission.
+    /// Cleanup-ownership admission deadline.
     ///
-    /// After ownership succeeds, `execute` waits normally for controller command capacity without this deadline.
+    /// The deadline stops after ownership succeeds.
+    /// `execute` can then wait without a deadline for controller command capacity.
     /// An immediately available permit can succeed when `wait_for` is [`Duration::ZERO`].
     /// A timeout sends no command and publishes no lifecycle event.
     #[inline]
@@ -210,20 +209,37 @@ impl<'a, Watch> Submit<'a, Watch, Waiting> {
 }
 
 impl Submit<'_, Unwatched, Waiting> {
-    /// Waits for ownership and command capacity, then confirms controller command intake.
+    /// Waiting controller command intake with an unwatched [`TaskId`] result.
     ///
-    /// `Ok(id)` confirms only intake. Slot admission and runtime registration happen later.
+    /// `Ok(id)` confirms only command intake.
+    /// Slot admission and runtime registration happen later.
     /// Awaiting the default operation directly is equivalent to calling this method.
+    /// A successful [`PreparedSubmission`] cannot produce `NotConfigured`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ControllerError::NotConfigured`] when a direct submission has no controller;
+    /// - [`ControllerError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`ControllerError::ResourceLimit`] when cleanup ownership is unavailable;
+    /// - [`ControllerError::Closed`] when controller intake is closed.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, ControllerError> {
         let (controller, id, spec) = self.request.into_parts()?;
         controller.submit_prepared(id, spec).await
     }
 
-    /// Submits only when ownership and controller command capacity are available now.
+    /// Fail-fast controller command intake with an unwatched [`TaskId`] result.
     ///
-    /// This synchronous terminal preserves fail-fast intake.
     /// `Ok(id)` has the same intake-only meaning as [`execute`](Self::execute).
+    /// A successful [`PreparedSubmission`] cannot produce `NotConfigured`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ControllerError::NotConfigured`] when a direct submission has no controller;
+    /// - [`ControllerError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`ControllerError::ResourceLimit`] when cleanup ownership is unavailable;
+    /// - [`ControllerError::Full`] when controller command capacity is unavailable;
+    /// - [`ControllerError::Closed`] when controller intake is closed.
     #[inline(always)]
     pub fn try_intake(self) -> Result<TaskId, ControllerError> {
         self.request.try_submit()
@@ -234,7 +250,6 @@ impl<'a> IntoFuture for Submit<'a, Unwatched, Waiting> {
     type Output = Result<TaskId, ControllerError>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
-    /// Executes the default waiting, unwatched controller submission.
     #[inline]
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.execute())
@@ -242,7 +257,17 @@ impl<'a> IntoFuture for Submit<'a, Unwatched, Waiting> {
 }
 
 impl Submit<'_, Unwatched, OwnershipTimed> {
-    /// Bounds ownership admission, then waits normally for controller command capacity.
+    /// Ownership-bounded admission followed by normal command-queue backpressure.
+    ///
+    /// A successful [`PreparedSubmission`] cannot produce `NotConfigured`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ControllerError::NotConfigured`] when a direct submission has no controller;
+    /// - [`ControllerError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`ControllerError::ResourceLimit`] when cleanup ownership cannot be granted;
+    /// - [`ControllerError::OwnershipAdmissionTimeout`] when cleanup ownership remains unavailable at the configured deadline;
+    /// - [`ControllerError::Closed`] when controller intake is closed.
     #[inline]
     pub async fn execute(self) -> Result<TaskId, ControllerError> {
         let wait_for = self._admission.0;
@@ -254,10 +279,19 @@ impl Submit<'_, Unwatched, OwnershipTimed> {
 }
 
 impl Submit<'_, Watched, Waiting> {
-    /// Waits for ownership and command capacity, then returns the final-outcome waiter.
+    /// Waiting controller command intake with a final-outcome waiter.
     ///
     /// Success confirms only controller command intake.
-    /// Use [`TaskWaiter::id`] for the submission identity and [`TaskWaiter::wait`] for rejection or the admitted task's final outcome.
+    /// [`TaskWaiter::id`] is the submission identity.
+    /// [`TaskWaiter::wait`] reports rejection or the admitted task's final outcome.
+    /// A successful [`PreparedSubmission`] cannot produce `NotConfigured`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ControllerError::NotConfigured`] when a direct submission has no controller;
+    /// - [`ControllerError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`ControllerError::ResourceLimit`] when cleanup ownership is unavailable;
+    /// - [`ControllerError::Closed`] when controller intake is closed.
     #[inline]
     pub async fn execute(self) -> Result<TaskWaiter, ControllerError> {
         let (controller, id, spec) = self.request.into_parts()?;
@@ -265,7 +299,17 @@ impl Submit<'_, Watched, Waiting> {
         Ok(TaskWaiter::new(id, receiver))
     }
 
-    /// Returns a final-outcome waiter only when intake resources are available now.
+    /// Fail-fast controller command intake with a final-outcome waiter.
+    ///
+    /// A successful [`PreparedSubmission`] cannot produce `NotConfigured`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ControllerError::NotConfigured`] when a direct submission has no controller;
+    /// - [`ControllerError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`ControllerError::ResourceLimit`] when cleanup ownership is unavailable;
+    /// - [`ControllerError::Full`] when controller command capacity is unavailable;
+    /// - [`ControllerError::Closed`] when controller intake is closed.
     #[inline(always)]
     pub fn try_intake(self) -> Result<TaskWaiter, ControllerError> {
         let (id, receiver) = self.request.try_submit_and_watch()?;
@@ -274,7 +318,17 @@ impl Submit<'_, Watched, Waiting> {
 }
 
 impl Submit<'_, Watched, OwnershipTimed> {
-    /// Bounds ownership admission, then returns the final-outcome waiter after command intake.
+    /// Ownership-bounded admission with a final-outcome waiter after command intake.
+    ///
+    /// A successful [`PreparedSubmission`] cannot produce `NotConfigured`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ControllerError::NotConfigured`] when a direct submission has no controller;
+    /// - [`ControllerError::ThreadStartFailed`] when cleanup workers cannot start;
+    /// - [`ControllerError::ResourceLimit`] when cleanup ownership cannot be granted;
+    /// - [`ControllerError::OwnershipAdmissionTimeout`] when cleanup ownership remains unavailable at the configured deadline;
+    /// - [`ControllerError::Closed`] when controller intake is closed.
     #[inline]
     pub async fn execute(self) -> Result<TaskWaiter, ControllerError> {
         let wait_for = self._admission.0;
@@ -303,9 +357,9 @@ impl<Watch, Admission> std::fmt::Debug for Submit<'_, Watch, Admission> {
 
 /// A controller request with an identity allocated before intake.
 ///
-/// Create this value with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission),
-/// record [`id`](Self::id) if needed, then consume it with [`submit`](Self::submit).
-/// Preparation reserves no task name, slot, queue capacity, or runtime capacity and publishes no event.
+/// Obtain this value from [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
+/// Record [`id`](Self::id) when the identity is needed before intake. Consume the value with [`submit`](Self::submit).
+/// Preparation reserves no task name, slot, queue capacity, or runtime capacity. It publishes no event.
 ///
 /// Dropping this value or the resulting [`Submit`] operation starts no work.
 /// Retrying after any terminal intake error requires a new prepared value and a new task identity.
@@ -322,7 +376,6 @@ pub struct PreparedSubmission {
 }
 
 impl PreparedSubmission {
-    /// Allocates a task identity without sending a controller command.
     pub(crate) fn new(controller: ControllerHandle, spec: ControllerSpec) -> Self {
         Self {
             controller,
@@ -331,25 +384,25 @@ impl PreparedSubmission {
         }
     }
 
-    /// Returns the identity allocated for this submission.
+    /// Preallocated submission identity.
     ///
-    /// No event for this identity is published before the operation returned by [`submit`](Self::submit)
-    /// reaches a successful command intake. The identity does not prove that intake or slot admission occurred.
+    /// No event for this identity is published before the operation returned by [`submit`](Self::submit) reaches successful command intake.
+    /// The identity does not prove that intake or slot admission occurred.
     #[must_use]
     pub fn id(&self) -> TaskId {
         self.id
     }
 
-    /// Returns the submission specification without sending it.
+    /// Borrowed submission specification before intake.
     #[must_use = "use the prepared controller specification"]
     pub fn spec(&self) -> &ControllerSpec {
         &self.spec
     }
 
-    /// Creates the explicit submission operation while preserving this prepared identity.
+    /// Single-use submission operation preserving the prepared identity.
     ///
-    /// Await the default operation directly, or configure it and finish with `execute` or
-    /// `try_intake`.
+    /// Await the default operation directly.
+    /// Configure it before finishing with `execute` or `try_intake` when needed.
     #[must_use = "await, execute, or try the prepared submission operation"]
     #[inline]
     pub fn submit(self) -> Submit<'static> {

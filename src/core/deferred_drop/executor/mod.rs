@@ -1,8 +1,7 @@
 //! Runs isolated user destructors on supervisor-local worker threads.
 //!
-//! [`DropExecutor`] connects the ownership [`CapacityBroker`] to a [`WorkerQueue`].
-//! Reservations keep the executor alive. It routes submitted [`DropBatch`] values from
-//! controller, registry, subscriber, and force-abort terminal paths to the worker queue.
+//! [`DropExecutor`] connects the ownership [`CapacityBroker`] to a [`WorkerQueue`]. Reservations keep the executor alive.
+//! Submitted [`DropBatch`] values move from controller, registry, subscriber, and force-abort terminal paths to the worker queue.
 //!
 //! ```text
 //! DropDomain
@@ -53,11 +52,12 @@ pub(super) struct DropExecutor {
 }
 
 impl DropExecutor {
-    /// Starts the configured core set up to the domain's worker ceiling.
+    /// Started core worker set bounded by the domain's worker ceiling.
     ///
     /// # Errors
     ///
-    /// Returns an error when any required worker cannot be created or report ready.
+    /// - [`DropStartError`] when a required core worker thread cannot be created;
+    /// - [`DropStartError`] when a required core worker exits before reporting ready.
     pub(super) fn try_start_with(
         worker_count: usize,
         capacity: Option<NonZeroUsize>,
@@ -73,11 +73,13 @@ impl DropExecutor {
         }))
     }
 
-    /// Waits for one unit and binds it to this executor.
+    /// One ownership unit bound to this executor after cancellation-safe waiting.
     ///
     /// # Errors
     ///
-    /// Returns an error when admission closes or the unit can no longer be granted.
+    /// - [`DropCapacityError`] when all effective ownership capacity has been retired;
+    /// - [`DropCapacityError`] when the bounded ownership waiter queue is full;
+    /// - [`DropCapacityError`] when the capacity broker closes before granting the request.
     pub(super) async fn reserve(self: &Arc<Self>) -> Result<DropReservation, DropCapacityError> {
         let permit = self.capacity.acquire_one().await?;
         Ok(DropReservation::new(Arc::clone(self), permit))
@@ -87,17 +89,17 @@ impl DropExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error when admission is closed or the unit is not immediately available.
+    /// - [`DropCapacityError`] when one ownership unit cannot be granted immediately.
     pub(super) fn try_reserve(self: &Arc<Self>) -> Result<DropReservation, DropCapacityError> {
         let permit = self.capacity.try_acquire(1)?;
         Ok(DropReservation::new(Arc::clone(self), permit))
     }
 
-    /// Creates one reservation per unit only when the complete batch is available.
+    /// Independent reservations for one complete immediately available batch.
     ///
     /// # Errors
     ///
-    /// Returns an error when the batch is invalid, admission is closed, or the complete batch is not immediately available.
+    /// - [`DropCapacityError`] when the complete non-empty batch cannot be granted atomically.
     pub(super) fn try_reserve_many(
         self: &Arc<Self>,
         count: usize,
@@ -125,7 +127,7 @@ impl DropExecutor {
         reservations
     }
 
-    /// Enqueues one charged batch for isolated destruction.
+    /// Charged batch queued for isolated destruction.
     ///
     /// If the worker queue is closed, this closes capacity admission and retains the batch permanently.
     pub(super) fn submit(&self, batch: DropBatch) {
@@ -135,7 +137,7 @@ impl DropExecutor {
         }
     }
 
-    /// Copies ownership-admission and cleanup-worker state.
+    /// Point-in-time ownership-admission and cleanup-worker state.
     pub(super) fn snapshot(&self) -> ExecutorSnapshot {
         ExecutorSnapshot {
             capacity: self.capacity.snapshot(),

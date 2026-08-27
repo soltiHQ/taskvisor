@@ -97,8 +97,7 @@ Three limits answer different questions:
 
 [`SupervisorConfig::with_ownership_capacity(None)`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.with_ownership_capacity) removes the ownership count bound.
 Cleanup still uses a bounded worker set, but retained values and cleanup backlog can then grow without a count limit.
-Use [`Supervisor::ownership_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.ownership_snapshot) or [SupervisorHandle::ownership_snapshot](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.ownership_snapshot)
-to inspect configured and effective limits, available units, waiting requests, and deferred cleanup.
+Use [`Supervisor::ownership_snapshot`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.ownership_snapshot) or [SupervisorHandle::ownership_snapshot](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.ownership_snapshot) to inspect configured and effective limits, available units, waiting requests, and deferred cleanup.
 
 During cleanup handoff, one task can temporarily consume two [`max_registered_tasks`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorConfig.html#method.max_registered_tasks) units.
 

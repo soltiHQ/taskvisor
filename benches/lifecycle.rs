@@ -1,9 +1,4 @@
-//! # Cold startup and steady lifecycle operations
-//!
-//! Keeps cold Supervisor startup separate from watched task completion, zero-delay retries,
-//! and cancellation after a positive retry backoff is scheduled. No synthetic CPU loop is timed.
-//!
-//! Run with cargo bench --bench lifecycle.
+//! Benchmarks cold startup and steady lifecycle operations.
 
 mod support;
 
@@ -14,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use taskvisor::{
-    BackoffPolicy, EventKind, RestartPolicy, RuntimeError, Subscribe, Supervisor, TaskContext,
-    TaskError, TaskFn, TaskOutcome, TaskRef, TaskSpec,
+    BackoffPolicy, EventKind, RuntimeError, Subscribe, Supervisor, TaskContext, TaskError, TaskFn,
+    TaskOutcome, TaskSpec,
 };
 
 use support::fixtures::{
@@ -23,6 +18,8 @@ use support::fixtures::{
     expect_within, wait_for_ownership, warm_runtime,
 };
 use support::{CaseFamily, print_suite_header, record_case};
+
+const GRACE_EXCEEDED_DURATION: Duration = Duration::from_millis(10);
 
 const COLD: CaseFamily = CaseFamily::lifecycle(
     "lifecycle/cold/verified_run",
@@ -52,16 +49,6 @@ const CANCEL_BACKOFF: CaseFamily = CaseFamily::lifecycle(
 )
 .without_lifecycle_interpretation();
 
-const PERIODIC: CaseFamily = CaseFamily::lifecycle(
-    "lifecycle/steady/finite_periodic_attempts",
-    "FINITE PERIODIC / ALWAYS CYCLE",
-    "observed attempt",
-    "observed attempts",
-    "watched admission through exactly 8 attempts and the terminal Canceled outcome; earlier successful attempts repeat under TaskSpec::periodic or RestartPolicy::Always",
-    "runtime and Supervisor startup, warmup, TaskSpec construction, ownership reset, shutdown, and Tokio runtime construction",
-)
-.without_lifecycle_interpretation();
-
 const REQUESTED_SHUTDOWN: CaseFamily = CaseFamily::lifecycle(
     "lifecycle/shutdown/requested_cooperative",
     "REQUESTED SHUTDOWN · COOPERATIVE TASKS",
@@ -74,13 +61,17 @@ const REQUESTED_SHUTDOWN: CaseFamily = CaseFamily::lifecycle(
 
 const GRACE_EXCEEDED: CaseFamily = CaseFamily::lifecycle(
     "lifecycle/shutdown/grace_exceeded",
-    "REQUESTED SHUTDOWN · GRACE EXCEEDED",
+    "REQUESTED SHUTDOWN · EXCESS OVER TASK GRACE",
     "grace-expired shutdown",
     "grace-expired shutdowns",
-    "one SupervisorHandle::shutdown call through GraceExceeded and force-abort commitment with 1 or 32 already-started non-cooperative tasks under one shared 10ms grace",
+    "one SupervisorHandle::shutdown call through GraceExceeded and force-abort commitment with 1 or 32 already-started non-cooperative tasks under one shared 10ms grace; the displayed estimate subtracts that configured grace, but still includes work before the internal grace clock and the shared cleanup tail",
     "Tokio runtime and Supervisor startup, task construction and admission, started-task handshakes, waiter verification, and post-shutdown value disposal",
 )
-.without_lifecycle_interpretation();
+.without_lifecycle_interpretation()
+.display_excess_over(
+    GRACE_EXCEEDED_DURATION,
+    "shutdown wall-clock estimate minus configured 10 ms task grace",
+);
 
 fn retry_task(name: &str, failures: usize) -> (TaskSpec, Arc<AtomicUsize>) {
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -99,19 +90,6 @@ fn retry_task(name: &str, failures: usize) -> (TaskSpec, Arc<AtomicUsize>) {
         .with_backoff(BackoffPolicy::constant(Duration::ZERO))
         .with_max_retries(NonZeroU32::new(2));
     (spec, attempts)
-}
-
-fn finite_repeat_task(attempts: Arc<AsyncCounter>, stop_after: usize) -> TaskRef {
-    TaskFn::arc(move |_ctx: TaskContext| {
-        let attempts = Arc::clone(&attempts);
-        async move {
-            if attempts.increment() == stop_after {
-                Err(TaskError::Canceled)
-            } else {
-                Ok(())
-            }
-        }
-    })
 }
 
 fn cooperative_shutdown_task(name: String, started: Arc<AsyncCounter>) -> TaskSpec {
@@ -268,68 +246,6 @@ fn bench_cancel_backoff(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_periodic(c: &mut Criterion) {
-    const ATTEMPTS: usize = 8;
-    let mut group = c.benchmark_group(PERIODIC.group_id);
-    group.throughput(Throughput::Elements(ATTEMPTS as u64));
-
-    for &(rt_name, rt_fn) in &RUNTIMES {
-        for policy in ["periodic_2ms", "always_no_interval"] {
-            let parameter = format!("{ATTEMPTS}_attempts_{policy}");
-            group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
-                record_case(PERIODIC, rt_name, Some(parameter.clone()));
-                let rt = rt_fn();
-                b.iter_custom(|iters| {
-                    rt.block_on(async {
-                        let handle = Supervisor::new(bench_config(), vec![])
-                            .serve()
-                            .expect("runtime startup");
-                        warm_runtime(&handle, 0).await;
-                        let mut total = Duration::ZERO;
-
-                        for iteration in 0..iters {
-                            let attempts = AsyncCounter::new();
-                            let task = finite_repeat_task(Arc::clone(&attempts), ATTEMPTS);
-                            let name = format!("finite-periodic-{policy}-{iteration}");
-                            let spec = match policy {
-                                "periodic_2ms" => {
-                                    TaskSpec::periodic(name, task, Duration::from_millis(2))
-                                }
-                                "always_no_interval" => TaskSpec::restartable(name, task)
-                                    .with_restart(RestartPolicy::Always { interval: None }),
-                                _ => unreachable!("the benchmark declares both policies above"),
-                            };
-
-                            let start = Instant::now();
-                            let waiter = expect_within(
-                                "finite periodic task admission",
-                                handle.add(spec).watch().execute(),
-                            )
-                            .await
-                            .expect("finite periodic task admission failed");
-                            let outcome = expect_within("finite periodic outcome", waiter.wait())
-                                .await
-                                .expect("finite periodic outcome channel closed");
-                            total += start.elapsed();
-
-                            assert!(
-                                matches!(outcome, TaskOutcome::Canceled),
-                                "finite periodic task must stop with Canceled, got {outcome:?}"
-                            );
-                            assert_eq!(attempts.load(), ATTEMPTS);
-                            wait_for_ownership(&handle, 0).await;
-                        }
-
-                        handle.shutdown().await.expect("shutdown failed");
-                        total
-                    })
-                });
-            });
-        }
-    }
-    group.finish();
-}
-
 fn bench_requested_shutdown(c: &mut Criterion) {
     let mut group = c.benchmark_group(REQUESTED_SHUTDOWN.group_id);
     group.throughput(Throughput::Elements(1));
@@ -386,11 +302,10 @@ fn bench_requested_shutdown(c: &mut Criterion) {
 }
 
 fn bench_grace_exceeded(c: &mut Criterion) {
-    const GRACE: Duration = Duration::from_millis(10);
     let mut group = c.benchmark_group(GRACE_EXCEEDED.group_id);
     group.throughput(Throughput::Elements(1));
 
-    for &(rt_name, rt_fn) in &RUNTIMES {
+    for &(rt_name, rt_fn) in &RUNTIMES[..1] {
         for task_count in [1usize, 32] {
             let parameter = format!("{task_count}_started_tasks_10ms_grace");
             group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
@@ -400,7 +315,7 @@ fn bench_grace_exceeded(c: &mut Criterion) {
                     rt.block_on(async {
                         let mut total = Duration::ZERO;
                         for iteration in 0..iters {
-                            let config = bench_config().with_grace(GRACE);
+                            let config = bench_config().with_grace(GRACE_EXCEEDED_DURATION);
                             let supervisor = Supervisor::new(config, vec![]);
                             let handle = supervisor.serve().expect("runtime startup");
                             let started = AsyncCounter::new();
@@ -461,7 +376,6 @@ criterion_group! {
         bench_cold,
         bench_completion,
         bench_cancel_backoff,
-        bench_periodic,
         bench_requested_shutdown,
         bench_grace_exceeded
 }

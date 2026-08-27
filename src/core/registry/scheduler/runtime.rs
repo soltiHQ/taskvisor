@@ -1,7 +1,8 @@
 //! Starts accepted actors and polls force-aborted attempts until physical exit.
 //!
-//! The registry listener starts [`ActorRuntime`] during supervisor startup. Admission gives it actors
-//! only after registry commit. Force-abort work enters the shared [`AttemptReaper`] and is polled by one coordinator task.
+//! The registry listener starts [`ActorRuntime`] during supervisor startup.
+//! Admission gives it actors only after registry commit.
+//! Force-abort work enters the shared [`AttemptReaper`] and is polled by one coordinator task.
 //!
 //! Closing the coordinator stops new reaper admission and drains queued work.
 //! The shutdown join waits for the coordinator only when no physical attempt is active.
@@ -28,7 +29,7 @@ pub(in crate::core::registry) struct ActorRuntime {
 }
 
 impl ActorRuntime {
-    /// Creates an actor runtime with an idle reaper coordinator.
+    /// Actor runtime with an idle reaper coordinator.
     pub(in crate::core::registry) fn new() -> Self {
         let (reaper_tx, reaper_rx) = mpsc::unbounded_channel();
         Self {
@@ -38,17 +39,17 @@ impl ActorRuntime {
         }
     }
 
-    /// Returns a shared owner for force-aborted attempts.
+    /// Shared owner for force-aborted attempts.
     pub(in crate::core::registry) fn attempt_reaper(&self) -> AttemptReaper {
         self.attempt_reaper.clone()
     }
 
-    /// Returns attempts that still retain physical ownership.
+    /// Attempts that still retain physical ownership.
     pub(in crate::core::registry) fn reaping_attempts(&self) -> usize {
         self.attempt_reaper.active()
     }
 
-    /// Starts the force-abort cleanup coordinator.
+    /// Single start of the force-abort cleanup coordinator.
     ///
     /// # Panics
     ///
@@ -92,12 +93,12 @@ impl ActorRuntime {
             .unwrap_or_else(|error| error.into_inner()) = Some(handle);
     }
 
-    /// Spawns one actor after registry commit.
+    /// One accepted actor spawned after registry commit.
     pub(in crate::core::registry) fn schedule(&self, actor: ScheduledActor) {
         actor.spawn();
     }
 
-    /// Spawns an accepted actor batch in iterator order.
+    /// Accepted actor batch spawned in iterator order.
     pub(in crate::core::registry) fn schedule_batch(
         &self,
         actors: impl IntoIterator<Item = ScheduledActor>,
@@ -107,7 +108,7 @@ impl ActorRuntime {
         }
     }
 
-    /// Closes the coordinator and performs a best-effort join.
+    /// Coordinator closure with a best-effort join.
     ///
     /// Active reaper attempts skip the join and leave the coordinator handle retained by this runtime.
     /// The method returns `false` only when an idle coordinator task fails while being joined.

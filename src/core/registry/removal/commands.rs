@@ -4,9 +4,10 @@
 //! Identity commands inspect one entry.
 //! Name commands resolve the current identity and make the claim under the same state lock.
 //!
-//! Remove returns only whether this command won the actor handle. It does not wait for terminal cleanup.
-//! Cancel returns the logical completion latch. A later cancel of an entry already being removed
-//! joins the same completion instead of starting another actor join.
+//! Remove returns only whether this command won the actor handle.
+//! It does not wait for terminal cleanup.
+//! Cancel returns the logical completion latch.
+//! A later cancel of an entry already being removed joins the same completion instead of starting another actor join.
 
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ struct CancelAction {
 }
 
 impl Registry {
-    /// Removes a task by identity.
+    /// Identity removal claim and cancellation decision.
     ///
     /// `Ok(true)` means this command claimed the actor and triggered cancellation.
     /// Membership remains until terminal join cleanup.
@@ -53,7 +54,7 @@ impl Registry {
         }
     }
 
-    /// Resolves a name and claims its current owner under one state lock.
+    /// Atomic name resolution and removal claim.
     ///
     /// A missing name returns `Ok(false)` without a request event.
     /// An entry already being removed gets another request event and returns `Ok(false)`.
@@ -89,7 +90,7 @@ impl Registry {
         }
     }
 
-    /// Claims or joins cancellation by identity and returns its terminal decision.
+    /// Identity cancellation claim or join decision.
     pub(in crate::core::registry) async fn cancel_task(
         &self,
         id: TaskId,
@@ -113,7 +114,7 @@ impl Registry {
         self.resolve_cancel_action(action, reply);
     }
 
-    /// Resolves a name and claims or joins cancellation under one state lock.
+    /// Atomic name resolution and cancellation claim or join decision.
     pub(in crate::core::registry) async fn cancel_task_by_name(
         &self,
         name: Arc<str>,

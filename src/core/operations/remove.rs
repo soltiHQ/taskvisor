@@ -1,4 +1,4 @@
-//! Builds one non-waiting task-removal operation.
+//! Defines task removal without a terminal-cleanup wait.
 
 use crate::RuntimeError;
 
@@ -30,7 +30,6 @@ where
 }
 
 impl<'a, Target> RemoveOperation<'a, Waiting, Target> {
-    /// Creates an operation that waits for command-queue capacity.
     #[inline]
     pub(crate) fn new(handle: &'a SupervisorHandle, target: Target) -> Self {
         Self {
@@ -40,7 +39,7 @@ impl<'a, Target> RemoveOperation<'a, Waiting, Target> {
         }
     }
 
-    /// Uses immediate admission to the required management queue.
+    /// Immediate admission to the required management queue.
     #[inline]
     pub fn fail_fast(self) -> RemoveOperation<'a, FailFast, Target> {
         RemoveOperation {
@@ -55,7 +54,12 @@ impl<Target> RemoveOperation<'_, Waiting, Target>
 where
     Target: Into<TaskTarget>,
 {
-    /// Waits for queue capacity and returns whether this call claimed removal.
+    /// Removal-claim result after waiting command-queue admission.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::ResourceLimitReached`] when a [`TaskTarget::Id`] routed through a configured controller exhausts the identity-operation budget.
     #[inline]
     pub async fn execute(self) -> Result<bool, RuntimeError> {
         match self.target.into() {
@@ -75,7 +79,13 @@ impl<Target> RemoveOperation<'_, FailFast, Target>
 where
     Target: Into<TaskTarget>,
 {
-    /// Fails immediately when queue capacity is unavailable, then returns the claim decision.
+    /// Removal-claim result after immediate command-queue admission.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RuntimeError::ShuttingDown`] when runtime intake is closed;
+    /// - [`RuntimeError::CommandQueueFull`] when the required management queue has no capacity;
+    /// - [`RuntimeError::ResourceLimitReached`] when a [`TaskTarget::Id`] routed through a configured controller exhausts the identity-operation budget.
     #[inline]
     pub async fn execute(self) -> Result<bool, RuntimeError> {
         match self.target.into() {

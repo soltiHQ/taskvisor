@@ -8,7 +8,8 @@
 //!
 //! Direct add operations do not report success before the registry's reply.
 //! Controller and static-run workflows receive the same direct reply channel.
-//! Request and result events are observability only. They do not confirm admission.
+//! Request and result events are observability only.
+//! They do not confirm admission.
 
 use std::{sync::Arc, time::Duration};
 
@@ -34,7 +35,7 @@ pub(crate) struct ControllerAddPermit {
 }
 
 impl SupervisorCore {
-    /// Waits for cleanup ownership, queue capacity, and the registry decision.
+    /// Direct add after cleanup ownership, queue capacity, and the registry decision.
     pub(in crate::core) async fn add_task(&self, spec: TaskSpec) -> Result<TaskId, RuntimeError> {
         let (id, reply) = self
             .enqueue_add_task_wait(TaskId::next(), spec, None)
@@ -43,7 +44,7 @@ impl SupervisorCore {
         Self::await_add_reply(id, reply).await
     }
 
-    /// Bounds cleanup ownership admission, then preserves the ordinary add path.
+    /// Ownership-bounded direct add with the ordinary registry path.
     pub(in crate::core) async fn add_task_with_ownership_timeout(
         &self,
         spec: TaskSpec,
@@ -68,7 +69,7 @@ impl SupervisorCore {
         Self::await_add_reply(id, reply).await
     }
 
-    /// Adds a watched task with fail-fast bounded-capacity admission.
+    /// Watched task with fail-fast bounded-capacity admission.
     ///
     /// The returned receiver is available only after the registry accepts the task.
     pub(in crate::core) async fn try_add_task_watched(
@@ -84,7 +85,7 @@ impl SupervisorCore {
         Ok((id, rx))
     }
 
-    /// Attempts registry handoff for a controller-owned task with an assigned identity.
+    /// Registry hand-off for a controller-owned task with an assigned identity.
     ///
     /// The returned completion tracks registry cleanup and full physical-attempt release.
     /// The controller waits for both before reusing the slot.
@@ -108,7 +109,7 @@ impl SupervisorCore {
         Ok((reply, completion))
     }
 
-    /// Waits for registry queue capacity while the controller keeps the task value.
+    /// Registry queue capacity reserved while the controller keeps the task value.
     ///
     /// Shutdown is checked again when the controller commits the permit.
     #[cfg(feature = "controller")]
@@ -125,10 +126,10 @@ impl SupervisorCore {
         Ok(ControllerAddPermit { permit })
     }
 
-    /// Runs the final shutdown check and transfers a controller task into its reserved slot.
+    /// Controller task transfer through a reserved slot after the final shutdown check.
     ///
-    /// The returned completion lets the controller wait for registry cleanup and full physical-attempt
-    /// release before slot reuse. A failed check returns every uncommitted user-owned value to the controller.
+    /// The returned completion covers registry cleanup and full physical-attempt release before slot reuse.
+    /// A failed check returns every uncommitted user-owned value to the controller.
     #[cfg(feature = "controller")]
     pub(crate) fn commit_reserved_controller_add(
         &self,
@@ -165,7 +166,7 @@ impl SupervisorCore {
         Ok((reply_rx, completion))
     }
 
-    /// Waits for bounded capacity and returns a final-outcome receiver after admission.
+    /// Watched task with waiting bounded-capacity admission.
     pub(in crate::core) async fn add_task_watched(
         &self,
         spec: TaskSpec,
@@ -179,7 +180,7 @@ impl SupervisorCore {
         Ok((id, rx))
     }
 
-    /// Bounds cleanup ownership admission for a watched add.
+    /// Ownership-bounded watched add with the ordinary registry path.
     pub(in crate::core) async fn add_task_watched_with_ownership_timeout(
         &self,
         spec: TaskSpec,
@@ -194,7 +195,6 @@ impl SupervisorCore {
         Ok((id, rx))
     }
 
-    /// Maps one registry add reply into the assigned identity or admission error.
     async fn await_add_reply(id: TaskId, reply: AddReplyRx) -> Result<TaskId, RuntimeError> {
         match reply.await {
             Ok(Ok(())) => Ok(id),
@@ -236,7 +236,6 @@ impl SupervisorCore {
         Ok(self.commit_add(permit, id, name, owned, done, None))
     }
 
-    /// Commits an already-owned controller task or returns all uncommitted values.
     #[cfg(feature = "controller")]
     fn enqueue_named_add_task_with_completion_recovering(
         &self,
@@ -260,7 +259,7 @@ impl SupervisorCore {
         Ok(self.commit_add(permit, id, name, owned, done, completion))
     }
 
-    /// Waits for cleanup ownership and queue capacity before the final shutdown gate.
+    /// Cleanup ownership and queue capacity before the final shutdown gate.
     pub(in crate::core::runtime) async fn enqueue_add_task_wait(
         &self,
         id: TaskId,
@@ -270,7 +269,7 @@ impl SupervisorCore {
         self.enqueue_add_task_wait_inner(id, spec, done, None).await
     }
 
-    /// Waits up to `wait_for` for cleanup ownership, then follows ordinary queue admission.
+    /// Cleanup ownership bounded by `wait_for` before ordinary queue admission.
     pub(in crate::core::runtime) async fn enqueue_add_task_wait_with_ownership_timeout(
         &self,
         id: TaskId,
@@ -318,9 +317,10 @@ impl SupervisorCore {
         Ok(self.commit_add(permit, id, name, owned, done, None))
     }
 
-    /// Publishes the request event immediately before an already-reserved add.
+    /// Request event followed immediately by an already-reserved add command.
     ///
-    /// Pre-commit failures stay silent. The registry publishes its result later.
+    /// Pre-commit failures stay silent.
+    /// The registry publishes its result later.
     fn commit_add(
         &self,
         permit: mpsc::Permit<'_, RegistryCommand>,
@@ -347,7 +347,7 @@ impl SupervisorCore {
         (id, reply_rx)
     }
 
-    /// Commits the complete static batch through one queue slot and one gate check.
+    /// Complete static batch committed through one queue slot and one gate check.
     pub(in crate::core::runtime) async fn enqueue_add_batch_wait(
         &self,
         items: Vec<AddBatchItem>,
@@ -377,7 +377,7 @@ impl SupervisorCore {
         Ok(reply_rx)
     }
 
-    /// Returns the registry's all-or-none decision for a static batch.
+    /// Registry all-or-none decision for a static batch.
     pub(in crate::core::runtime) async fn await_add_batch_reply(
         reply: AddReplyRx,
     ) -> Result<(), RuntimeError> {

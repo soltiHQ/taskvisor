@@ -160,6 +160,8 @@ Short callbacks use one fixed library-owned OS worker by default.
 A blocked callback on that shared worker delays the other shared subscriber lanes.
 Override [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html) with `SubscriberExecution::Dedicated` when one subscriber needs blocking isolation.
 Each dedicated subscriber adds one native thread and can run concurrently with the shared worker and other dedicated subscribers.
+Keep short callbacks on `Shared`; reserve `Dedicated` for callbacks that can block and must be isolated.
+Dedicated execution is an isolation choice, not a general throughput default. Use the matched [fan-out cases](../benches/README.md#subscriber-fan-out) to compare completion-and-delivery time for short callbacks on representative hardware.
 Taskvisor does not elastically add callback workers or retire them merely because they are idle.
 A callback still running when the shared shutdown deadline expires may continue on its detached worker after shutdown returns.
 Taskvisor does not wait for callback-worker thread-local destructors; they may also continue after shutdown returns.

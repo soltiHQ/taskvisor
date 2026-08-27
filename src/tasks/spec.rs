@@ -1,8 +1,9 @@
 //! Configures one named task before it enters the runtime.
 //!
-//! [`TaskSpec`] is the value an application passes to Taskvisor. It combines a [`TaskRef`] with
-//! a registration name, restart behavior, retry timing, an optional attempt timeout, and an optional retry limit.
-//! Direct adds send the spec to the registry. Controller submissions first apply slot admission.
+//! [`TaskSpec`] is the value an application passes to Taskvisor.
+//! It combines a [`TaskRef`] with a registration name, restart behavior, retry timing, an optional attempt timeout, and an optional retry limit.
+//! Direct adds send the spec to the registry.
+//! Controller submissions first apply slot admission.
 //! The registry resolves inherited fields from [`TaskDefaults`] before it starts the task.
 //!
 //! ```text
@@ -15,9 +16,9 @@
 //!                     └── resolved task and settings ──► TaskActor
 //! ```
 //!
-//! The name is the registry key, not a controller slot. A second registration with the same name
-//! is rejected while the first registration exists. After a force-abort, the name remains reserved
-//! until Taskvisor has observed the actor's physical exit and collected its terminal state.
+//! The name is the registry key, not a controller slot.
+//! A second registration with the same name is rejected while the first registration exists.
+//! After a force-abort, the name remains reserved until Taskvisor has observed the actor's physical exit and collected its terminal state.
 
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
@@ -28,7 +29,6 @@ use crate::{
     tasks::task::TaskRef,
 };
 
-/// Treats a zero timeout as disabled.
 #[inline]
 fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|d| !d.is_zero())
@@ -37,7 +37,8 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 /// A ready-to-submit task with its name and execution settings.
 ///
 /// Each setting is either explicit or inherited from [`TaskDefaults`].
-/// Resolution happens once during admission. A `with_*` method makes its field explicit for this task only.
+/// Resolution happens once during admission.
+/// A `with_*` method makes its field explicit for this task only.
 ///
 /// ```text
 /// TaskSpec field
@@ -95,7 +96,7 @@ pub struct TaskSpec {
     task: TaskRef,
 }
 
-/// Marks a task setting as explicit or inherited from [`TaskDefaults`].
+/// Explicit or inherited task setting relative to [`TaskDefaults`].
 ///
 /// For optional fields, `TaskSetting<Option<T>>` distinguishes inheritance from an explicit `None`:
 ///
@@ -111,9 +112,9 @@ pub struct TaskSpec {
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskSetting<T> {
-    /// Uses the matching [`TaskDefaults`] field at registry admission.
+    /// Matching [`TaskDefaults`] field at registry admission.
     Inherit,
-    /// Uses this value instead of the matching default.
+    /// Value replacing the matching default.
     Explicit(T),
 }
 
@@ -172,7 +173,7 @@ impl std::fmt::Debug for ResolvedTaskSpec {
 }
 
 impl TaskSpec {
-    /// Creates a named spec that inherits every execution setting.
+    /// Named task with every execution setting inherited.
     ///
     /// Registry admission resolves restart, backoff, timeout, and retry limit from [`TaskDefaults`].
     /// A later `with_*` call makes that field explicit.
@@ -187,7 +188,7 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named spec with explicit restart, backoff, and timeout settings.
+    /// Named task with explicit restart, backoff, and timeout settings.
     ///
     /// Use this constructor when these settings must not inherit supervisor defaults.
     /// The named constructors are shorter for common lifecycles.
@@ -212,7 +213,7 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named task that never starts a second attempt.
+    /// Named task with at most one attempt.
     ///
     /// Restart is explicitly [`Never`](RestartPolicy::Never).
     /// Backoff, timeout, and retry limit remain inherited, although restart never permits a retry.
@@ -227,7 +228,7 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named task that may retry a retryable failure.
+    /// Named task that may retry a retryable failure.
     ///
     /// Restart is explicitly [`OnFailure`](RestartPolicy::OnFailure).
     /// Success, fatal failure, and cancellation stop the actor.
@@ -243,17 +244,20 @@ impl TaskSpec {
         }
     }
 
-    /// Creates a named task that may run again after success or retryable failure.
+    /// Named task that may run again after success or retryable failure.
     ///
     /// After success, the actor waits at least `every` before the next attempt.
-    /// Taskvisor also keeps successive attempt starts at least one millisecond apart, so a fast
-    /// task configured below one millisecond can wait longer than `every`. A zero value removes
-    /// the configured interval; the one-millisecond start-spacing guard still applies.
+    /// Taskvisor also keeps successive attempt starts at least one millisecond apart.
+    /// A fast task configured below one millisecond can wait longer than `every`.
+    /// A zero value removes the configured interval.
+    /// The one-millisecond start-spacing guard still applies.
     ///
-    /// Retryable failures use the backoff policy, not `every`. A retry limit can stop
-    /// the task after repeated failures. Fatal failure and cancellation always stop it.
+    /// Retryable failures use the backoff policy, not `every`.
+    /// A retry limit can stop the task after repeated failures.
+    /// Fatal failure and cancellation always stop it.
     ///
-    /// The delay begins after an attempt completes. This is not a wall-clock schedule.
+    /// The delay begins after an attempt completes.
+    /// This is not a wall-clock schedule.
     ///
     /// ```rust
     /// use std::time::Duration;
@@ -282,36 +286,36 @@ impl TaskSpec {
         }
     }
 
-    /// Returns the shared task object.
+    /// Shared task object reused for this registration's attempts.
     #[must_use]
     pub fn task(&self) -> &TaskRef {
         &self.task
     }
 
-    /// Returns the immutable registration name.
+    /// Immutable registry name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Clones the backing name without allocating or copying the string.
+    /// Shared registry name without another string allocation.
     pub(crate) fn shared_name(&self) -> Arc<str> {
         Arc::clone(&self.name)
     }
 
-    /// Returns the explicit restart policy, or `None` when inherited.
+    /// Explicit restart policy, or `None` when inherited.
     #[must_use]
     pub fn restart_override(&self) -> Option<RestartPolicy> {
         self.restart.value()
     }
 
-    /// Returns the explicit backoff policy, or `None` when inherited.
+    /// Explicit backoff policy, or `None` when inherited.
     #[must_use]
     pub fn backoff_override(&self) -> Option<BackoffPolicy> {
         self.backoff.value()
     }
 
-    /// Returns the unresolved attempt-timeout setting.
+    /// Unresolved attempt-timeout setting.
     ///
     /// - [`TaskSetting::Inherit`] means inherit the default.
     /// - `TaskSetting::Explicit(None)` explicitly disables the timeout.
@@ -321,7 +325,7 @@ impl TaskSpec {
         self.timeout
     }
 
-    /// Returns the unresolved retry-limit setting.
+    /// Unresolved retry-limit setting.
     ///
     /// - [`TaskSetting::Inherit`] means inherit the default.
     /// - `TaskSetting::Explicit(None)` explicitly allows unlimited retries.
@@ -331,9 +335,10 @@ impl TaskSpec {
         self.max_retries
     }
 
-    /// Sets an explicit timeout for each attempt.
+    /// Explicit timeout for each attempt.
     ///
-    /// A [`Duration`] enables the timeout. `None` or zero disables it, including a timeout set in [`TaskDefaults`].
+    /// A [`Duration`] enables the timeout.
+    /// `None` or zero disables it, including a timeout set in [`TaskDefaults`].
     ///
     /// At the deadline, Taskvisor cancels the attempt context and drops the attempt future.
     /// This cannot interrupt synchronous code in a future poll or undo work already performed outside the future.
@@ -345,7 +350,7 @@ impl TaskSpec {
         self
     }
 
-    /// Sets an explicit delay policy for retryable failures.
+    /// Explicit delay policy for retryable failures.
     ///
     /// This delay is not used after success.
     /// See [`BackoffPolicy`] for the calculation and jitter order.
@@ -354,7 +359,7 @@ impl TaskSpec {
         self
     }
 
-    /// Sets the explicit restart policy.
+    /// Explicit restart policy for this task.
     ///
     /// The restart policy decides whether another attempt is eligible.
     /// The retry limit and backoff policy remain separate settings.
@@ -363,7 +368,7 @@ impl TaskSpec {
         self
     }
 
-    /// Sets the maximum number of retries after the first failed attempt in one failure streak.
+    /// Explicit retry budget for one failure streak.
     ///
     /// Pass a [`NonZeroU32`] to set a limit.
     /// Pass `None` for unlimited retries, overriding any default limit.
@@ -376,12 +381,13 @@ impl TaskSpec {
         self
     }
 
-    /// Sets an explicit retry limit from a raw integer.
+    /// Explicit retry budget from a raw integer.
+    ///
+    /// Use [`with_max_retries`](Self::with_max_retries) with `None` for no limit.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_retries` is zero.
-    /// Use [`with_max_retries`](Self::with_max_retries) with `None` for no limit.
+    /// - [`ConfigError::Zero`] when `max_retries` is zero.
     pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
         let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
             field: "max_retries",
@@ -389,7 +395,7 @@ impl TaskSpec {
         Ok(self.with_max_retries(max_retries))
     }
 
-    /// Resolves inherited fields for registry admission.
+    /// Registry-time snapshot of explicit and inherited execution settings.
     pub(crate) fn resolve(self, defaults: &TaskDefaults) -> ResolvedTaskSpec {
         let Self {
             name,

@@ -43,7 +43,7 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
     Cow::Owned(value)
 }
 
-/// Sends runtime events to `tracing` without free-form reason text.
+/// Structured `tracing` subscriber without free-form reason text.
 ///
 /// Register this value with Taskvisor, then configure a `tracing` subscriber in the application.
 /// Filter on target `taskvisor` and the stable `event` field.
@@ -54,9 +54,11 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 /// Event kinds map to tracing levels as follows:
 ///
 /// - `ERROR`: runtime failures, ownership-capacity retirement, subscriber panics, and fatal or panicked final outcomes.
-/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry; overflow; and `AdmissionFailed` or unclassified rejections.
+/// - `WARN`: failed, force-aborted, or unclassified final outcomes; grace expiry; overflow; and
+///   `AdmissionFailed` or unclassified rejections.
 /// - `INFO`: completed or canceled outcomes and shutdown milestones.
-/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, controller submissions, and all other typed rejections.
+/// - `DEBUG`: failed or timed-out attempts, backoff, registration, removal, controller
+///   submissions, and all other typed rejections.
 /// - `TRACE`: attempt transitions, management requests, and controller slot transitions.
 ///
 /// # Examples
@@ -73,7 +75,7 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 pub struct TracingBridge;
 
 impl TracingBridge {
-    /// Creates a tracing subscriber that includes [`Event::reason`].
+    /// Structured `tracing` subscriber that includes [`Event::reason`].
     ///
     /// Task code and runtime errors can supply this free-form text.
     /// Longer reasons keep their first 4096 characters and add a truncation marker.
@@ -83,7 +85,7 @@ impl TracingBridge {
     }
 }
 
-/// Sends runtime events to `tracing` and includes free-form reason text.
+/// Structured `tracing` subscriber with free-form reason text.
 ///
 /// Create this variant with [`TracingBridge::with_reasons`].
 /// It otherwise uses the same fields and level mapping as [`TracingBridge`].

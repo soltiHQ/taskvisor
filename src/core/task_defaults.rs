@@ -1,8 +1,7 @@
-//! Supplies missing task settings when the registry accepts a [`TaskSpec`](crate::TaskSpec).
+//! Defines runtime defaults inherited by a [`TaskSpec`](crate::TaskSpec) at registry admission.
 //!
 //! [`SupervisorBuilder`](crate::SupervisorBuilder) stores one [`TaskDefaults`] value for the runtime.
-//! Registry admission resolves every inherited setting once. The task actor then receives a complete
-//! execution policy. Explicit settings on [`TaskSpec`](crate::TaskSpec) always win.
+//! Explicit settings on [`TaskSpec`](crate::TaskSpec) always win.
 //!
 //! ```text
 //! SupervisorBuilder ──► TaskDefaults
@@ -19,7 +18,6 @@ use std::time::Duration;
 use crate::core::ConfigError;
 use crate::policies::{BackoffPolicy, RestartPolicy};
 
-/// Converts `Some(Duration::ZERO)` to `None`.
 #[inline]
 fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
     timeout.filter(|duration| !duration.is_zero())
@@ -27,8 +25,9 @@ fn normalize_timeout(timeout: Option<Duration>) -> Option<Duration> {
 
 /// Runtime defaults for restart, backoff, timeout, and retry settings.
 ///
-/// An explicit [`TaskSpec`](crate::TaskSpec) setting always wins. The built-in defaults restart
-/// after retryable failures, use exponential backoff with jitter, set no attempt timeout, and allow unlimited retries.
+/// An explicit [`TaskSpec`](crate::TaskSpec) setting always wins.
+/// The built-in settings restart after retryable failures and use exponential backoff with jitter.
+/// Attempts to have no timeout and failure retries are unlimited by default.
 /// Install a value with [`SupervisorBuilder::with_task_defaults`](crate::SupervisorBuilder::with_task_defaults).
 ///
 /// [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults) inherits the restart policy.
@@ -44,19 +43,19 @@ pub struct TaskDefaults {
 }
 
 impl TaskDefaults {
-    /// Returns the default restart policy.
+    /// Default restart policy.
     #[must_use]
     pub fn restart(&self) -> RestartPolicy {
         self.restart
     }
 
-    /// Returns the default backoff policy.
+    /// Default backoff policy.
     #[must_use]
     pub fn backoff(&self) -> BackoffPolicy {
         self.backoff
     }
 
-    /// Returns the default timeout for one task attempt.
+    /// Default timeout for one task attempt.
     ///
     /// `None` means that attempts have no default timeout.
     #[must_use]
@@ -64,7 +63,7 @@ impl TaskDefaults {
         self.timeout
     }
 
-    /// Returns the default number of retries in one failure streak.
+    /// Default retry limit for one failure streak.
     ///
     /// `None` means unlimited retries.
     #[must_use]
@@ -72,7 +71,7 @@ impl TaskDefaults {
         self.max_retries
     }
 
-    /// Sets the restart policy for task specs that inherit it.
+    /// Restart policy for task specs that inherit this setting.
     ///
     /// This affects [`TaskSpec::from_defaults`](crate::TaskSpec::from_defaults).
     /// Named behavior constructors set their own restart policy.
@@ -81,13 +80,13 @@ impl TaskDefaults {
         self
     }
 
-    /// Sets the delay policy inherited by retryable task failures.
+    /// Delay policy inherited by retryable task failures.
     pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
         self.backoff = backoff;
         self
     }
 
-    /// Sets the default timeout for each task attempt.
+    /// Default timeout for each task attempt.
     ///
     /// Pass a [`Duration`] to enable it.
     /// Pass `None` or zero for no timeout.
@@ -96,7 +95,7 @@ impl TaskDefaults {
         self
     }
 
-    /// Sets the default number of retries in one failure streak.
+    /// Default retry limit for one failure streak.
     ///
     /// Pass a [`NonZeroU32`] for a limit or `None` for unlimited retries.
     /// A limit of three allows one failed attempt and three retries.
@@ -106,13 +105,14 @@ impl TaskDefaults {
         self
     }
 
-    /// Sets the default retry limit from a raw integer.
+    /// Default retry limit from a raw integer.
+    ///
+    /// Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
+    /// Use [`RestartPolicy::Never`] to disable retries for specs that inherit their restart policy.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Zero`] when `max_retries` is zero.
-    /// Use [`with_max_retries`](Self::with_max_retries) with `None` for unlimited retries.
-    /// Use [`RestartPolicy::Never`] to disable retries for specs that inherit their restart policy.
+    /// - [`ConfigError::Zero`] when `max_retries` is zero.
     pub fn try_with_max_retries(self, max_retries: u32) -> Result<Self, ConfigError> {
         let max_retries = NonZeroU32::new(max_retries).ok_or(ConfigError::Zero {
             field: "max_retries",
@@ -122,9 +122,10 @@ impl TaskDefaults {
 }
 
 impl Default for TaskDefaults {
-    /// Returns the default task execution settings.
+    /// Built-in task execution settings.
     ///
     /// Defaults:
+    ///
     /// - exponential backoff from 200 ms to 30 seconds with equal jitter,
     /// - unlimited failure retries,
     /// - restart after failure,

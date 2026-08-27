@@ -2,8 +2,8 @@
 //!
 //! A winning claim registers here before its actor handle leaves registry state.
 //! Inline completion, detached joins, and shutdown claims all use the same counter.
-//! Terminal cleanup removes the registration. Shutdown uses the count as a wait barrier
-//! and retains names for grace-expiry diagnostics.
+//! Terminal cleanup removes the registration.
+//! Shutdown uses the count as a wait barrier and retains names for grace-expiry diagnostics.
 //!
 //! This state is not task membership and does not decide removal ownership.
 //! The maps in `state` remain authoritative for both.
@@ -36,7 +36,7 @@ pub(in crate::core::registry) struct PendingJoins {
 }
 
 impl PendingJoins {
-    /// Registers one removal owner and its diagnostic name atomically.
+    /// Atomic registration of one removal owner and its diagnostic name.
     pub(super) fn inc_with_name(&self, id: TaskId, name: Arc<str>) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         *state.counts.entry(id).or_insert(0) += 1;
@@ -59,7 +59,7 @@ impl PendingJoins {
         }
     }
 
-    /// Finishes one removal owner and wakes waiters when none remain.
+    /// One finished removal owner with notification when none remain.
     pub(in crate::core::registry) fn dec(&self, id: TaskId) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(count) = state.counts.get_mut(&id) {
@@ -85,7 +85,7 @@ impl PendingJoins {
             .contains_key(&id)
     }
 
-    /// Returns whether every removal owner finished.
+    /// Whether every removal owner finished.
     pub(in crate::core::registry) fn is_empty(&self) -> bool {
         self.inner
             .lock()
@@ -94,7 +94,7 @@ impl PendingJoins {
             .is_empty()
     }
 
-    /// Returns names for removal owners still active at a shutdown deadline.
+    /// Names of removal owners still active at a shutdown deadline.
     pub(super) fn pending_names(&self) -> Vec<Arc<str>> {
         self.inner
             .lock()
@@ -105,7 +105,7 @@ impl PendingJoins {
             .collect()
     }
 
-    /// Waits until every removal owner finishes.
+    /// Completion of every removal owner.
     ///
     /// Notification registration happens before the empty check.
     /// This prevents a lost wakeup from the final concurrent decrement.

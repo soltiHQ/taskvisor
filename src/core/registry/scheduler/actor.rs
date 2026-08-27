@@ -1,11 +1,11 @@
 //! Splits one actor into a registry-owned handle and a task started after admission.
 //!
-//! [`ScheduledActor`] owns the future before spawn. [`ActorHandle`] is inserted into registry state
-//! first and later owns the spawned Tokio task. A shared slot connects the pair because admission
-//! must commit the handle before the actor can start.
+//! [`ScheduledActor`] owns the future before spawn.
+//! [`ActorHandle`] is inserted into registry state first and later owns the spawned Tokio task.
+//! A shared slot connects the pair because admission must commit the handle before the actor can start.
 //!
-//! The actor wrapper catches outer panics and sends its result through a one-shot before it sends
-//! the completion identity to the registry listener. A normal join resolves that result.
+//! The actor wrapper catches outer panics and sends its result through a one-shot before it sends the completion identity to the registry listener.
+//! A normal join resolves that result.
 //! A forced abort moves the Tokio handle, result receiver, activity reservation, and physical latch to the attempt reaper.
 
 use std::{
@@ -54,12 +54,12 @@ pub(in crate::core::registry) enum ActorJoinError {
 }
 
 impl ActorJoinError {
-    /// Returns whether the actor panicked.
+    /// Whether the actor panicked.
     pub(in crate::core::registry) const fn is_panic(self) -> bool {
         matches!(self, Self::Panicked { .. })
     }
 
-    /// Returns whether panic payload cleanup also failed.
+    /// Whether panic payload cleanup also failed.
     pub(in crate::core::registry) const fn cleanup_poisoned(self) -> bool {
         matches!(
             self,
@@ -97,7 +97,6 @@ pub(in crate::core::registry) struct ActorHandle {
 }
 
 impl ActorHandle {
-    /// Takes the physical handle from the shared spawn slot when available.
     fn load_join(&mut self) {
         if self.join.is_none() {
             self.join = self
@@ -108,7 +107,7 @@ impl ActorHandle {
         }
     }
 
-    /// Transfers physical ownership to the reaper and reports logical abort.
+    /// Physical ownership transfer to the reaper before logical abort.
     pub(in crate::core::registry) fn abort(&mut self) {
         self.load_join();
         let Some(join) = self.join.take() else {
@@ -125,7 +124,7 @@ impl ActorHandle {
         self.logical = Some(Err(ActorJoinError::Aborted));
     }
 
-    /// Tries to receive the reliable actor result without waiting.
+    /// Reliable actor result probe without waiting.
     ///
     /// Genuine completion identifiers are sent only after this channel is ready.
     pub(in crate::core::registry) fn result_ready(&mut self) -> bool {
@@ -146,7 +145,7 @@ impl ActorHandle {
         self.ready.is_some()
     }
 
-    /// Resolves a physical join and preserves a result sent just before join.
+    /// Physical join resolution that preserves a result sent immediately before task exit.
     ///
     /// The wrapper sends its result before it completes.
     /// A final receiver probe closes the race with the probe at the start of [`Future::poll`].
@@ -252,7 +251,7 @@ pub(in crate::core::registry) struct ActorRegistration {
 }
 
 impl ScheduledActor {
-    /// Prepares an actor and its registry-owned handle before commit.
+    /// Actor and registry-owned handle prepared before commit.
     pub(in crate::core::registry) fn new(
         registration: ActorRegistration,
         future: impl Future<Output = ActorExitReason> + Send + 'static,
@@ -297,7 +296,7 @@ impl ScheduledActor {
         )
     }
 
-    /// Spawns the actor and sends its result before its completion identity.
+    /// Actor spawn with result delivery before its completion identity.
     pub(super) fn spawn(self) {
         let Self {
             id,

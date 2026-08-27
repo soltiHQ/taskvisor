@@ -2,9 +2,8 @@
 //!
 //! [`Supervisor::run`](crate::Supervisor::run), [`Supervisor::run_until`](crate::Supervisor::run_until),
 //! and [`Supervisor::run_with_os_signals`](crate::Supervisor::run_with_os_signals) converge here.
-//! A non-empty initial task set reserves cleanup ownership as one batch and reaches the registry
-//! in one atomic command. After successful admission, the workflow joins shared shutdown when its
-//! trigger wins or the registry becomes empty.
+//! A non-empty initial task set reserves cleanup ownership as one batch and reaches the registry in one atomic command.
+//! After successful admission, the workflow joins shared shutdown when its trigger wins or the registry becomes empty.
 //!
 //! Failures before the workflow's explicit commit release the claim.
 //! After that commit, no later static run call can own the lifecycle.
@@ -34,11 +33,12 @@ struct StaticRunClaim<'a> {
 }
 
 impl<'a> StaticRunClaim<'a> {
-    /// Claims the lifecycle without committing it.
+    /// Reversible claim of the single static-run lifecycle.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::AlreadyRunning`] when another call owns the claim or an earlier call committed it.
+    /// - [`RuntimeError::AlreadyRunning`] when another static run owns the lifecycle;
+    /// - [`RuntimeError::AlreadyRunning`] when an earlier static run committed the lifecycle.
     fn acquire(running: &'a AtomicBool) -> Result<Self, RuntimeError> {
         running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -49,14 +49,13 @@ impl<'a> StaticRunClaim<'a> {
         })
     }
 
-    /// Makes this lifecycle claim permanent.
     fn commit(mut self) {
         self.committed = true;
     }
 }
 
 impl Drop for StaticRunClaim<'_> {
-    /// Releases the claim only when the workflow never committed it.
+    /// Uncommitted claim released on scope exit.
     fn drop(&mut self) {
         if !self.committed {
             self.running.store(false, Ordering::Release);
@@ -65,22 +64,16 @@ impl Drop for StaticRunClaim<'_> {
 }
 
 impl SupervisorCore {
-    /// Starts workers without committing the caller's static-run claim.
-    ///
-    /// # Errors
-    ///
-    /// Returns the startup errors from [`SupervisorCore::start`].
-    /// The caller can retry a static run after this method fails.
     fn start_static_run(&self) -> Result<(), RuntimeError> {
         self.start()
     }
 
-    /// Runs without adding an application or operating-system shutdown trigger.
+    /// Static run stopped by registry emptiness or shared shutdown.
     pub(crate) async fn run(self: &Arc<Self>, tasks: Vec<TaskSpec>) -> Result<(), RuntimeError> {
         self.run_until_trigger(tasks, std::future::pending()).await
     }
 
-    /// Adds one application future as a shutdown trigger.
+    /// Static run with one application future as a shutdown trigger.
     pub(crate) async fn run_until<F>(
         self: &Arc<Self>,
         tasks: Vec<TaskSpec>,
@@ -96,7 +89,7 @@ impl SupervisorCore {
         .await
     }
 
-    /// Adds Taskvisor's operating-system signal listener as a shutdown trigger.
+    /// Static run with Taskvisor's operating-system signal listener as a shutdown trigger.
     pub(crate) async fn run_with_os_signals(
         self: &Arc<Self>,
         tasks: Vec<TaskSpec>,
@@ -113,13 +106,30 @@ impl SupervisorCore {
     /// Orders the lifecycle claim, batch admission, and shutdown races.
     ///
     /// Preflight failures and shutdown observed before non-empty ownership reservation release the claim.
-    /// If the caller's trigger wins, this method starts the runtime and commits the claim. After ownership is
-    /// reserved, successful runtime startup or an observed shared shutdown also commits it.
+    /// If the caller's trigger wins, this method starts the runtime and commits the claim.
+    /// After ownership is reserved, successful runtime startup or an observed shared shutdown also commits it.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::AlreadyRunning`] when the lifecycle is already owned or committed.
-    /// It also returns resource, startup, registry, signal-setup, and shared shutdown errors from the selected path.
+    /// - [`RuntimeError::AlreadyRunning`] when another static run owns the lifecycle;
+    /// - [`RuntimeError::AlreadyRunning`] when an earlier static run committed the lifecycle;
+    /// - [`RuntimeError::ResourceLimitReached`] when the initial batch exceeds remaining registry capacity;
+    /// - [`RuntimeError::ResourceLimitReached`] when the initial batch exceeds remaining ownership capacity;
+    /// - [`RuntimeError::TokioRuntimeUnavailable`] when no Tokio runtime is active;
+    /// - [`RuntimeError::ThreadStartFailed`] when a required worker cannot start;
+    /// - [`RuntimeError::TaskAlreadyExists`] when the initial batch repeats a task name;
+    /// - [`RuntimeError::TaskAlreadyExists`] when a task name is already reserved;
+    /// - [`RuntimeError::SignalSetupFailed`] when the selected signal trigger cannot install its listeners;
+    /// - [`RuntimeError::GraceExceeded`] when task cleanup remains pending after the shutdown grace period;
+    /// - [`RuntimeError::ShuttingDown`] when runtime command intake closes before the initial batch is committed;
+    /// - [`RuntimeError::ShuttingDown`] when an unlimited ownership domain closes before granting the initial batch;
+    /// - [`RuntimeError::ShuttingDown`] when the registry batch decision channel closes before replying;
+    /// - [`RuntimeError::ShuttingDown`] when the registry cannot acknowledge the shutdown fence;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown outcome is lost before publication;
+    /// - [`RuntimeError::ShuttingDown`] when shutdown trigger handling panics;
+    /// - [`RuntimeError::ShuttingDown`] when the detached shutdown owner panics;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase reports failure;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase panics.
     async fn run_until_trigger<F>(
         self: &Arc<Self>,
         tasks: Vec<TaskSpec>,
@@ -228,11 +238,18 @@ impl SupervisorCore {
         }
     }
 
-    /// Lets shared shutdown, the caller trigger, or registry emptiness choose the owner.
+    /// Shutdown ownership selected by shared shutdown, the caller trigger, or registry emptiness.
     ///
     /// # Errors
     ///
-    /// Returns the result of the shared shutdown workflow.
+    /// - [`RuntimeError::SignalSetupFailed`] when the shared signal trigger cannot install its listeners;
+    /// - [`RuntimeError::GraceExceeded`] when task cleanup remains pending after the shutdown grace period;
+    /// - [`RuntimeError::ShuttingDown`] when the registry cannot acknowledge the shutdown fence;
+    /// - [`RuntimeError::ShuttingDown`] when the shared shutdown outcome is lost before publication;
+    /// - [`RuntimeError::ShuttingDown`] when shutdown trigger handling panics;
+    /// - [`RuntimeError::ShuttingDown`] when the detached shutdown owner panics;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase reports failure;
+    /// - [`RuntimeError::ShuttingDown`] when a shutdown cleanup phase panics.
     async fn drive_shutdown<F>(self: &Arc<Self>, shutdown: F) -> Result<(), RuntimeError>
     where
         F: Future<Output = ShutdownTrigger>,

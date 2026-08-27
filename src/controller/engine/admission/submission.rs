@@ -1,11 +1,9 @@
 //! Starts admission for each ordered controller submission.
 //!
-//! The lifecycle driver calls this module after a `Submit` command leaves the controller queue.
-//! It reads the immutable task name, admission policy, and effective slot before converting
-//! `ControllerSpec` into pending `TaskSpec` ownership.
-//!
-//! Preflight handles shutdown and immediate rejection. The watched outcome is then parked in controller state
-//! before `placement` applies policy to the locked slot. Local rejection is resolved before user values enter cleanup.
+//! A submission enters with cleanup ownership already reserved.
+//! Preflight resolves shutdown and policy rejections before queue or admission ownership commits.
+//! A watched outcome sender is parked in controller state before the selected slot takes ownership.
+//! Rejected user values leave the slot lock before cleanup starts.
 
 use std::sync::Arc;
 

@@ -7,9 +7,10 @@
 //! registered ──► removing ──► absent
 //! ```
 //!
-//! The winning claim moves the only [`ActorHandle`] out of the entry. Both indexes remain until terminal
-//! commit finishes the removing phase. Activity bits serve physical-attempt queries. [`HandleCleanup`] is
-//! a fallback that keeps user values on the reserved cleanup path if normal removal does not extract them.
+//! The winning claim moves the only [`ActorHandle`] out of the entry.
+//! Both indexes remain until terminal commit finishes the removing phase.
+//! Activity bits serve physical-attempt queries.
+//! [`HandleCleanup`] keeps user values on the reserved cleanup path if normal removal does not extract them.
 
 use std::{
     collections::HashMap,
@@ -55,7 +56,7 @@ impl Handle {
         }
     }
 
-    /// Returns whether the actor result is ready without waiting.
+    /// Whether the actor result is ready without waiting.
     pub(super) fn result_ready(&mut self) -> bool {
         self.join.result_ready()
     }
@@ -64,7 +65,7 @@ impl Handle {
         &mut self.join
     }
 
-    /// Transfers physical ownership to the reaper and requests abort.
+    /// Physical ownership transferred to the reaper before abort is requested.
     pub(super) fn abort(&mut self) {
         self.join.abort();
     }
@@ -114,7 +115,7 @@ impl HandleCleanup {
         }
     }
 
-    /// Extracts the reserved cleanup bundle for normal removal.
+    /// Reserved cleanup bundle for normal removal.
     pub(super) fn into_bundle(mut self) -> DropBundle {
         self.bundle
             .take()

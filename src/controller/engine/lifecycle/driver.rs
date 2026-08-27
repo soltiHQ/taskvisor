@@ -1,6 +1,6 @@
 //! Runs and joins the serialized controller task.
 //!
-//! The driver polls ordered commands, tracked runtime results, and shutdown in one loop.
+//! One task polls ordered commands, authoritative runtime results, and shutdown.
 //! A burst limit gives command intake regular turns when internal results stay ready.
 //! Panic boundaries keep one failed work item from stopping the loop.
 
@@ -22,7 +22,7 @@ use super::ControllerTask;
 /// Maximum internal-result burst before a non-blocking command check.
 pub(super) const INTERNAL_RESULT_BURST_LIMIT: usize = 64;
 
-/// Closes command admission when the receiver leaves the controller lifecycle.
+/// Command receiver whose drop closes controller intake.
 pub(in crate::controller::engine) struct ControllerReceiver {
     inner: mpsc::Receiver<ControllerCommand>,
 }
@@ -68,9 +68,9 @@ impl Controller {
         Ok(ControllerReceiver::new(rx))
     }
 
-    /// Starts the single owned controller loop.
+    /// Idempotent start of the single controller loop.
     ///
-    /// Later calls are no-ops. Runtime shutdown joins this task before cleanup completes.
+    /// Runtime shutdown joins this task before cleanup completes.
     pub(crate) fn run(self: &Arc<Self>) {
         self.task.get_or_init(|| {
             let rx = self
@@ -105,10 +105,10 @@ impl Controller {
         self.finalize_slot_state_on_shutdown().await;
     }
 
-    /// Waits for the owned controller loop exactly once.
+    /// Shared join result for the single controller loop.
     ///
     /// Concurrent and later callers share the stored join state.
-    /// Returns `false` when the controller task did not join cleanly.
+    /// `false` means the controller task did not join cleanly.
     pub(crate) async fn join(&self) -> bool {
         if let Some(task) = self.task.get() {
             task.join(&self.bus).await
@@ -310,7 +310,7 @@ impl Controller {
         }
     }
 
-    /// Runs one controller work unit behind a panic boundary.
+    /// Panic isolation for one controller work unit.
     ///
     /// A panic is converted into a diagnostic `RuntimeFailure` event and the loop continues.
     pub(in crate::controller::engine) async fn guarded<T>(

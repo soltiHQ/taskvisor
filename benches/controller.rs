@@ -1,10 +1,4 @@
-//! # Controller admission and lifecycle benchmarks
-//!
-//! Separates first-use startup, caller-side intake, verified policy decisions, and controller-managed task outcomes.
-//! Steady cases reuse a warmed runtime and supervisor; retained ownership drains outside each measured batch.
-//! Each result is checked at its advertised boundary. Intake acceptance does not imply successful task completion.
-//!
-//! Run with `cargo bench --bench controller --features controller`.
+//! Measures controller intake, policies, and lifecycle outcomes.
 
 mod support;
 
@@ -125,8 +119,6 @@ async fn expect_rejected(waiter: TaskWaiter, expected: RejectionKind) {
 }
 
 async fn drain_controller(handle: &SupervisorHandle) {
-    // An outcome does not imply retained-value destruction or controller slot GC.
-    // With no new submissions, both observations must settle before the next batch.
     wait_for_ownership(handle, 0).await;
     expect_within("controller slots to become idle", async {
         loop {
@@ -157,8 +149,6 @@ async fn warm_controller_slots(handle: &SupervisorHandle, slots: &[&str]) {
             .expect("controller warmup intake failed");
         expect_completed(waiter).await;
     }
-    // Idle slots may be collected. Warm the same admission paths and wait for
-    // their previous owners to leave instead of preserving a stale slot owner.
     drain_controller(handle).await;
 }
 
@@ -481,8 +471,6 @@ fn bench_steady_submit_try_intake(c: &mut Criterion) {
                         }
                         total += start.elapsed();
 
-                        // These units are accepted submissions, not successful tasks.
-                        // Either policy rejection or completion must release ownership.
                         drain_controller(&handle).await;
                     }
                     handle.shutdown().await.expect("shutdown failed");
@@ -543,9 +531,6 @@ fn bench_concurrent_submit_try_intake(c: &mut Criterion) {
                             .collect();
                         producer_pool.prepare(batches);
 
-                        // This is the `Runtime::block_on` root on a current-thread runtime.
-                        // Its synchronous completion wait parks the only runtime thread, so
-                        // the controller cannot process these commands inside the timer.
                         let start = Instant::now();
                         producer_pool.release();
                         let (accepted, first_error) = producer_pool.wait_until_complete();
@@ -695,9 +680,6 @@ fn bench_replace_busy_placement(c: &mut Criterion) {
                         }
                         total += start.elapsed();
 
-                        // Head replacement happens before the displaced waiter is resolved.
-                        // All 31 rejections therefore prove that the newest head was installed.
-                        // Check the held-owner/retained-head state without timing a query.
                         let snapshot = handle
                             .controller_snapshot()
                             .await

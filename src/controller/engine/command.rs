@@ -1,7 +1,7 @@
 //! Messages that cross the controller loop boundary.
 //!
 //! [`ControllerHandle`](super::ControllerHandle) sends [`ControllerCommand`] values through the ordered command queue.
-//! Tracked runtime operations return the result types in this module to the same loop.
+//! Tracked runtime operations return authoritative results to the same loop.
 //! Task and slot identities let the loop discard results that no longer match current state.
 
 use std::sync::Arc;
@@ -41,9 +41,9 @@ pub(super) enum IdentityOperation {
     Cancel,
     /// Cancel the task without waiting for registry command capacity.
     TryCancel,
-    /// Cancel the task and bound runtime cleanup waiting.
+    /// Cancel the task and bound the logical registry-cleanup wait.
     CancelWithTimeout(std::time::Duration),
-    /// Cancel without waiting for registry capacity, then bound cleanup waiting.
+    /// Cancel without waiting for registry capacity, then bound the logical registry-cleanup wait.
     TryCancelWithTimeout(std::time::Duration),
 }
 
@@ -74,7 +74,7 @@ impl IdentityReply {
         }
     }
 
-    /// Sends the operation result once.
+    /// Single explicit delivery that disarms the shutdown fallback.
     pub(super) fn send(mut self, result: Result<bool, RuntimeError>) {
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(result);

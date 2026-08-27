@@ -1,8 +1,7 @@
 //! Coordinates startup, management, events, queries, and shutdown for one supervisor.
 //!
-//! [`SupervisorBuilder`](crate::SupervisorBuilder) creates [`SupervisorCore`] from the registry,
-//! event bus, subscribers, and cleanup ownership domain. Public [`Supervisor`](super::supervisor::Supervisor)
-//! and [`SupervisorHandle`](super::handle::SupervisorHandle) methods then use this core to reach those components.
+//! [`SupervisorBuilder`](crate::SupervisorBuilder) creates [`SupervisorCore`] from the registry, event bus, subscribers, and cleanup ownership domain.
+//! Public [`Supervisor`](super::supervisor::Supervisor) and [`SupervisorHandle`](super::handle::SupervisorHandle) methods use this core to reach those components.
 //!
 //! ```text
 //! Supervisor / SupervisorHandle
@@ -16,9 +15,11 @@
 //!                                                                                worker joins
 //! ```
 //!
-//! The registry owns task membership and management decisions. Those decisions return through direct reply channels.
-//! Events are best-effort and never drive runtime state. Activity queries also include force-aborted attempts that
-//! remain active after registry membership ends. Requested and natural shutdown drain tasks.
+//! The registry owns task membership and management decisions.
+//! Those decisions return through direct reply channels.
+//! Events are best-effort and never drive runtime state.
+//! Activity queries also include force-aborted attempts that remain active after registry membership ends.
+//! Requested and natural shutdown drain tasks.
 //! Signal-setup failure skips that drain and still runs the common worker-cleanup tail.
 
 mod event_relay;
@@ -62,13 +63,13 @@ pub(crate) struct SupervisorCore {
     registry: Arc<Registry>,
     /// Stops runtime listeners during the common cleanup tail.
     runtime_token: CancellationToken,
-    /// Records successful worker startup.
+    /// Successful worker-startup state.
     started: AtomicBool,
     /// Serializes idempotent runtime startup.
     startup_gate: std::sync::Mutex<()>,
     /// Owns the single static-run lifecycle claim.
     running: AtomicBool,
-    /// Records that shutdown closed management admission.
+    /// Management-admission closure state.
     shutting_down: AtomicBool,
     /// Shared shutdown operation and its cached outcome.
     shutdown: ShutdownCoordinator,
@@ -95,7 +96,7 @@ pub(crate) struct CoreSettings {
 }
 
 impl CoreSettings {
-    /// Freezes both settings in one core-owned value.
+    /// Runtime configuration and task defaults fixed for one core.
     pub(crate) fn new(runtime: SupervisorConfig, task_defaults: TaskDefaults) -> Self {
         Self {
             runtime,
@@ -115,7 +116,7 @@ impl std::fmt::Debug for SupervisorCore {
 }
 
 impl SupervisorCore {
-    /// Builds shared coordination state from components wired by the builder.
+    /// Shared coordination state from components wired by the builder.
     pub(crate) fn new_internal(
         settings: CoreSettings,
         bus: Bus,
@@ -147,39 +148,39 @@ impl SupervisorCore {
         })
     }
 
-    /// Reports whether the command-admission fence has closed.
+    /// Whether the command-admission fence has closed.
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Exposes the builder-selected runtime configuration.
+    /// Builder-selected runtime configuration.
     pub(crate) fn runtime_config(&self) -> &SupervisorConfig {
         &self.settings.runtime
     }
 
-    /// Exposes the defaults used at registry admission.
+    /// Defaults used at registry admission.
     pub(crate) fn task_defaults(&self) -> &TaskDefaults {
         &self.settings.task_defaults
     }
 
-    /// Returns ownership admission and deferred-cleanup state.
+    /// Ownership admission and deferred-cleanup state.
     pub(crate) fn ownership_snapshot(&self) -> OwnershipSnapshot {
         self.drop_domain
             .snapshot(!self.is_shutting_down() && !self.cmd_tx.is_closed())
     }
 
-    /// Exposes this supervisor's cleanup ownership domain.
+    /// Cleanup ownership domain for this supervisor.
     pub(crate) fn drop_domain(&self) -> &deferred_drop::DropDomain {
         &self.drop_domain
     }
 
-    /// Returns the reliable shutdown-start signal used by the controller.
+    /// Reliable shutdown-start signal used by the controller.
     #[cfg(feature = "controller")]
     pub(crate) fn shutdown_started_token(&self) -> CancellationToken {
         self.shutdown.started.clone()
     }
 
-    /// Adds one controller to this core's startup and shutdown lifecycle.
+    /// One controller attached to this core's startup and shutdown lifecycle.
     ///
     /// # Panics
     ///
