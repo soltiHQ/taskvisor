@@ -39,14 +39,15 @@ const DEFAULT_MAX_SLOT_QUEUE: usize = 100;
 ///
 /// # How limits appear to callers
 ///
-/// Async submit methods wait when the ordered command queue is full. Their fail-fast `try_*` forms
-/// return [`ControllerError::Full`](crate::ControllerError::Full).  Admission limits are checked later.
-/// A watched submit reports them through [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected). A full slot queue
-/// uses [`RejectionKind::QueueFull`](crate::RejectionKind::QueueFull). The admission, slot-count, and total-pending
-/// budgets use [`RejectionKind::ResourceLimit`](crate::RejectionKind::ResourceLimit).
+/// [`Submit::execute`](crate::Submit::execute) waits when the ordered command queue is full.
+/// [`Submit::try_intake`](crate::Submit::try_intake) instead returns
+/// [`ControllerError::Full`](crate::ControllerError::Full). Admission limits are checked later.
+/// A submission configured with `watch()` reports them through [`TaskOutcome::Rejected`](crate::TaskOutcome::Rejected).
+/// A full slot queue uses [`RejectionKind::QueueFull`](crate::RejectionKind::QueueFull).
+/// The admission, slot-count, and total-pending budgets use [`RejectionKind::ResourceLimit`](crate::RejectionKind::ResourceLimit).
 ///
-/// A remove or cancel call that must reach the registry returns [`RuntimeError::ResourceLimitReached`](crate::RuntimeError::ResourceLimitReached)
-/// when this operation budget is exhausted. Controller-local queued removal is handled before this limit.
+/// A remove or cancel operation that must reach the registry returns [`RuntimeError::ResourceLimitReached`](crate::RuntimeError::ResourceLimitReached)
+/// from `execute().await` when this operation budget is exhausted. Controller-local queued removal is handled before this limit.
 ///
 /// # Examples
 ///

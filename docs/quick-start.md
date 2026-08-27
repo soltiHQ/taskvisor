@@ -6,7 +6,7 @@ description: Run a retrying Taskvisor task and wait for its direct final outcome
 # Quick start
 
 This example runs one task, retries two temporary failures, and waits for the final outcome.
-It uses [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) and [add_and_watch](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) because the caller needs that task's result.
+It uses [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) and `add(spec).watch().execute()` because the caller needs that task's result.
 [`Supervisor::run`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run) would wait for the supervisor lifecycle, not return one task's result.
 
 ## Create a project
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve()?;
 
-    let (_, waiter) = handle.add_and_watch(spec).await?;
+    let waiter = handle.add(spec).watch().execute().await?;
     println!("final outcome: {:?}", waiter.wait().await?);
 
     handle.shutdown().await?;
@@ -88,7 +88,7 @@ accTitle: A watched task and its result
 accDescr: Task settings, supervised attempts, and the waiter connect through a watched registration.
 Task["TaskFn"]
 Spec["TaskSpec"]
-Add["add_and_watch"]
+Add["add(spec).watch().execute()"]
 Attempts["Supervised attempts"]
 Waiter["TaskWaiter"]
 Task --> Spec
@@ -105,7 +105,7 @@ Taskvisor waits for the configured backoff before each retry, and the third atte
 A retry limit counts retries after the first failed attempt.
 The limit of two therefore permits the initial attempt and at most two retries.
 
-[`add_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) returns a [TaskWaiter](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html).
+[`add`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add) starts an operation builder. Its `watch()` modifier makes `execute()` return a [TaskWaiter](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html).
 It delivers the final [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html) through a direct channel. It does not depend on event delivery.
 [`handle.shutdown().await`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.shutdown) then joins the shared shutdown and cleanup workflow.
 

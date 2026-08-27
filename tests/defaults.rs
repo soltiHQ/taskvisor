@@ -28,8 +28,10 @@ async fn dynamic_add_applies_inherited_timeout() {
         .build();
     let handle = supervisor.serve().expect("runtime startup");
 
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once("dynamic-default-timeout", pending()))
+    let waiter = handle
+        .add(TaskSpec::once("dynamic-default-timeout", pending()))
+        .watch()
+        .execute()
         .await
         .expect("dynamic task must be admitted");
     let outcome = with_timeout(2, waiter.wait())
@@ -58,8 +60,10 @@ async fn fully_inherited_spec_uses_default_restart_policy() {
         .with_task_defaults(defaults)
         .build();
     let handle = supervisor.serve().expect("runtime startup");
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::from_defaults("fully-inherited", task))
+    let waiter = handle
+        .add(TaskSpec::from_defaults("fully-inherited", task))
+        .watch()
+        .execute()
         .await
         .expect("fully inherited task must be admitted");
 
@@ -105,8 +109,10 @@ async fn explicit_none_disables_inherited_timeout() {
         }
     });
 
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::once("explicit-no-timeout", task).with_timeout(None))
+    let waiter = handle
+        .add(TaskSpec::once("explicit-no-timeout", task).with_timeout(None))
+        .watch()
+        .execute()
         .await
         .expect("task must be admitted");
     let mut outcome = Box::pin(waiter.wait());
@@ -144,8 +150,10 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
         .with_task_defaults(defaults.clone())
         .build();
     let handle = supervisor.serve().expect("runtime startup");
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("inherited-retry-limit", limited))
+    let waiter = handle
+        .add(TaskSpec::restartable("inherited-retry-limit", limited))
+        .watch()
+        .execute()
         .await
         .expect("limited task must be admitted");
     assert!(matches!(
@@ -171,10 +179,10 @@ async fn retry_default_and_explicit_unlimited_override_are_distinct() {
         .with_task_defaults(defaults)
         .build();
     let handle = supervisor.serve().expect("runtime startup");
-    let (_, waiter) = handle
-        .add_and_watch(
-            TaskSpec::restartable("explicit-unlimited", succeeds_on_third).with_max_retries(None),
-        )
+    let waiter = handle
+        .add(TaskSpec::restartable("explicit-unlimited", succeeds_on_third).with_max_retries(None))
+        .watch()
+        .execute()
         .await
         .expect("unlimited task must be admitted");
     assert!(matches!(
@@ -194,11 +202,13 @@ async fn controller_admission_applies_inherited_timeout() {
         .build();
     let handle = supervisor.serve().expect("runtime startup");
 
-    let (_, waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(TaskSpec::once(
+    let waiter = handle
+        .submit(ControllerSpec::queue(TaskSpec::once(
             "controller-default-timeout",
             pending(),
         )))
+        .watch()
+        .execute()
         .await
         .expect("controller task must be admitted");
     assert!(matches!(

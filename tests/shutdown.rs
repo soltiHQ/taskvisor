@@ -318,6 +318,7 @@ async fn subscriber_deadline_bounds_explicit_shutdown() {
 
     let add_result = handle
         .add(TaskSpec::restartable("subscriber-deadline", make_coop()))
+        .execute()
         .await;
     let callback_entered = wait_for_callback(&gate, |state| state.entered).await;
     let mut shutdown_task = tokio::spawn(async move { handle.shutdown().await });
@@ -481,8 +482,10 @@ fn subscriber_tls_teardown_child() {
             .with_subscribers(subscribers)
             .build();
         let handle = supervisor.serve().expect("runtime startup");
-        let (_, waiter) = handle
-            .add_and_watch(TaskSpec::once("subscriber-tls", make_ok_once()))
+        let waiter = handle
+            .add(TaskSpec::once("subscriber-tls", make_ok_once()))
+            .watch()
+            .execute()
             .await
             .expect("the warmup task must be admitted");
         assert!(matches!(waiter.wait().await, Ok(TaskOutcome::Completed)));
@@ -550,10 +553,12 @@ async fn shutdown_cooperative_returns_ok_emits_all_stopped_within_grace() {
     let (handle, collector) = served(Duration::from_secs(5));
     let id_c1 = handle
         .add(TaskSpec::restartable("c1", make_coop()))
+        .execute()
         .await
         .unwrap();
     let id_c2 = handle
         .add(TaskSpec::restartable("c2", make_coop()))
+        .execute()
         .await
         .unwrap();
 
@@ -600,6 +605,7 @@ async fn concurrent_shutdown_waiters_share_clean_result() {
                 Arc::clone(&release),
             ),
         ))
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -658,6 +664,7 @@ async fn concurrent_shutdown_waiters_share_subscriber_drain() {
             "shared-subscriber-drain",
             make_coop(),
         ))
+        .execute()
         .await
         .expect("the cooperative task must register");
     assert!(
@@ -702,10 +709,12 @@ async fn concurrent_shutdown_waiters_share_grace_exceeded() {
     let (stubborn_b, started_b) = make_stubborn();
     handle
         .add(TaskSpec::once("shared-stuck-a", stubborn_a))
+        .execute()
         .await
         .expect("first stubborn task must register");
     handle
         .add(TaskSpec::once("shared-stuck-b", stubborn_b))
+        .execute()
         .await
         .expect("second stubborn task must register");
     wait_for_start("shared-stuck-a", &started_a).await;
@@ -763,6 +772,7 @@ async fn dropping_first_shutdown_waiter_does_not_cancel_owner() {
                 Arc::clone(&release),
             ),
         ))
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -795,8 +805,8 @@ async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_clean
     let started = Arc::new(tokio::sync::Notify::new());
     let cancellation_seen = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let (_, waiter) = handle
-        .add_and_watch(TaskSpec::restartable(
+    let waiter = handle
+        .add(TaskSpec::restartable(
             "only-dropped-shutdown-waiter",
             make_gated_cancel(
                 Arc::clone(&started),
@@ -804,6 +814,8 @@ async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_clean
                 Arc::clone(&release),
             ),
         ))
+        .watch()
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -907,6 +919,7 @@ async fn run_joins_shutdown_that_started_first() {
                 Arc::clone(&release),
             ),
         ))
+        .execute()
         .await
         .expect("the gated task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -941,6 +954,7 @@ async fn shutdown_stubborn_under_small_grace_returns_grace_exceeded_force_aborts
     let (stubborn, started) = make_stubborn();
     handle
         .add(TaskSpec::once("stubborn", stubborn))
+        .execute()
         .await
         .unwrap();
     wait_for_start("stubborn", &started).await;
@@ -970,6 +984,7 @@ async fn blocking_task_destructor_cannot_extend_public_shutdown() {
 
     handle
         .add(TaskSpec::once("blocking-task-drop", task))
+        .execute()
         .await
         .expect("the blocking-drop task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -1047,6 +1062,7 @@ async fn panicking_error_source_destructor_child() {
 
     handle
         .add(TaskSpec::once("panicking-source-drop", task))
+        .execute()
         .await
         .expect("the source-drop task must register");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -1101,9 +1117,14 @@ async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
     let (stuck, stuck_started) = make_stubborn();
     handle
         .add(TaskSpec::restartable("coop", coop))
+        .execute()
         .await
         .unwrap();
-    handle.add(TaskSpec::once("stuck", stuck)).await.unwrap();
+    handle
+        .add(TaskSpec::once("stuck", stuck))
+        .execute()
+        .await
+        .unwrap();
     wait_for_start("coop", &coop_started).await;
     wait_for_start("stuck", &stuck_started).await;
 
@@ -1125,7 +1146,11 @@ async fn shutdown_mixed_reports_only_stubborn_in_stuck() {
 async fn shutdown_zero_grace_force_terminates_stubborn_immediately() {
     let (handle, collector) = served(Duration::ZERO);
     let (stubborn, started) = make_stubborn();
-    handle.add(TaskSpec::once("z", stubborn)).await.unwrap();
+    handle
+        .add(TaskSpec::once("z", stubborn))
+        .execute()
+        .await
+        .unwrap();
     wait_for_start("z", &started).await;
 
     match with_timeout(5, handle.shutdown()).await {

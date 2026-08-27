@@ -179,7 +179,7 @@ impl BusReceiver {
 
 impl Bus {
     /// Creates a disabled event ring with at least one retained slot.
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         #[cfg(test)]
         let (observers, _unused) = broadcast::channel(capacity);
@@ -206,7 +206,7 @@ impl Bus {
     ///
     /// A disabled or closed bus ignores the event.
     #[cfg(test)]
-    pub fn publish(&self, event: Event) {
+    pub(crate) fn publish(&self, event: Event) {
         if !self.shared.enabled.load(Ordering::Acquire) {
             return;
         }

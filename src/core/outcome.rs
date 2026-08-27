@@ -79,13 +79,12 @@ impl TaskOutcomeKind {
 /// This enum and its data-carrying variants are non-exhaustive.
 /// Use a fallback arm and `..` when matching fields.
 ///
-/// Watched work is created by:
-/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
-/// - [`SupervisorHandle::add_and_watch_with_ownership_timeout`](crate::SupervisorHandle::add_and_watch_with_ownership_timeout)
-/// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
+/// Direct watched work is created by adding `watch()` to the operation returned by
+/// [`SupervisorHandle::add`](crate::SupervisorHandle::add). The same operation can also select an
+/// ownership timeout or fail-fast admission before `execute().await`.
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch), [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout), and [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch) - controller watched submission"
+    doc = "Controller watched work is created by adding `watch()` to the [`Submit`](crate::Submit) operation returned by [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) or [`PreparedSubmission::submit`](crate::PreparedSubmission::submit)."
 )]
 ///
 /// Events carry [`TaskOutcomeKind`] for best-effort observation.
@@ -258,13 +257,12 @@ impl TaskOutcome {
 
 /// One-shot receiver that follows one identity to its final [`TaskOutcome`].
 ///
-/// Created by:
-/// - [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
-/// - [`SupervisorHandle::add_and_watch_with_ownership_timeout`](crate::SupervisorHandle::add_and_watch_with_ownership_timeout)
-/// - [`SupervisorHandle::try_add_and_watch`](crate::SupervisorHandle::try_add_and_watch)
+/// Created by adding `watch()` to the operation returned by
+/// [`SupervisorHandle::add`](crate::SupervisorHandle::add), then finishing it with
+/// `execute().await`. Ownership-bounded and fail-fast watched adds use the same operation.
 #[cfg_attr(
     feature = "controller",
-    doc = "- [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch)\n- [`SupervisorHandle::submit_and_watch_with_ownership_timeout`](crate::SupervisorHandle::submit_and_watch_with_ownership_timeout)\n- [`SupervisorHandle::try_submit_and_watch`](crate::SupervisorHandle::try_submit_and_watch)\n- [`PreparedSubmission::submit_and_watch`](crate::PreparedSubmission::submit_and_watch)\n- [`PreparedSubmission::submit_and_watch_with_ownership_timeout`](crate::PreparedSubmission::submit_and_watch_with_ownership_timeout)\n- [`PreparedSubmission::try_submit_and_watch`](crate::PreparedSubmission::try_submit_and_watch)"
+    doc = "Controller submissions create a waiter by adding `watch()` to the [`Submit`](crate::Submit) operation returned by [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) or [`PreparedSubmission::submit`](crate::PreparedSubmission::submit), then finishing it with `execute().await` or `try_intake()`."
 )]
 ///
 /// [`wait`](Self::wait) consumes the waiter. Dropping it does not cancel the task or submission.
@@ -281,9 +279,12 @@ impl TaskOutcome {
 ///     Ok(())
 /// });
 ///
-/// let (id, waiter) = handle
-///     .add_and_watch(TaskSpec::once("job", job))
+/// let waiter = handle
+///     .add(TaskSpec::once("job", job))
+///     .watch()
+///     .execute()
 ///     .await?;
+/// let id = waiter.id();
 ///
 /// match waiter.wait().await? {
 ///     TaskOutcome::Completed => println!("{id} completed"),

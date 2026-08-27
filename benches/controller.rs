@@ -28,29 +28,29 @@ use support::fixtures::{
 use support::{CaseFamily, print_suite_header, record_case};
 
 const COLD_INTAKE: CaseFamily = CaseFamily::intake(
-    "controller/cold/first_try_submit",
-    "COLD FIRST TRY_SUBMIT",
+    "controller/cold/first_submit_try_intake",
+    "COLD FIRST SUBMIT · TRY_INTAKE",
     "accepted submission",
     "accepted submissions",
-    "first caller-side try_submit on a fresh served supervisor, including lazy cleanup-worker startup",
+    "first caller-side submit(...).try_intake() on a fresh served supervisor, including lazy cleanup-worker startup",
     "Supervisor/controller startup, request construction, controller decision, task outcome, ownership drain, shutdown, and Tokio runtime construction",
 );
 
 const STEADY_INTAKE: CaseFamily = CaseFamily::intake(
-    "controller/reused/intake_try_submit",
-    "STEADY TRY_SUBMIT BURST",
+    "controller/reused/submit_try_intake",
+    "STEADY SUBMIT · TRY_INTAKE BURST",
     "accepted submission",
     "accepted submissions",
-    "64 caller-side try_submit acceptances on a reused supervisor; the multi-thread controller can consume concurrently",
+    "64 caller-side submit(...).try_intake() acceptances on a reused supervisor; the multi-thread controller can consume concurrently",
     "Supervisor/controller startup, named-slot warmup, request construction, waiting for controller decisions and outcomes, post-batch ownership drain, shutdown, and Tokio runtime construction",
 );
 
 const CONCURRENT_INTAKE: CaseFamily = CaseFamily::intake(
-    "controller/reused/parked_controller_concurrent_native_try_submit",
-    "CONCURRENT NATIVE TRY_SUBMIT · PARKED CONTROLLER",
+    "controller/reused/parked_controller_concurrent_native_submit_try_intake",
+    "CONCURRENT NATIVE SUBMIT · TRY_INTAKE · PARKED CONTROLLER",
     "accepted submission",
     "accepted submissions",
-    "start-condvar release through completion-condvar observation for 1, 2, 4, or 8 already-spawned native producer threads making exactly 1024 caller-side try_submit calls while the current-thread runtime is synchronously parked and cannot process controller commands",
+    "start-condvar release through completion-condvar observation for 1, 2, 4, or 8 already-spawned native producer threads making exactly 1024 caller-side submit(...).try_intake() calls while the current-thread runtime is synchronously parked and cannot process controller commands",
     "Supervisor/controller startup, named-slot warmup, producer thread spawn/join, request construction and transfer to workers, start-line readiness wait, acceptance checks, all controller processing and outcomes, post-batch ownership/slot drain, shutdown, and Tokio runtime construction",
 );
 
@@ -149,10 +149,10 @@ async fn drain_controller(handle: &SupervisorHandle) {
 
 async fn warm_controller_slots(handle: &SupervisorHandle, slots: &[&str]) {
     for slot in slots {
-        let (_, waiter) = handle
-            .submit_and_watch(
-                ControllerSpec::queue(instant_task(format!("warm-{slot}"))).with_slot(*slot),
-            )
+        let waiter = handle
+            .submit(ControllerSpec::queue(instant_task(format!("warm-{slot}"))).with_slot(*slot))
+            .watch()
+            .execute()
             .await
             .expect("controller warmup intake failed");
         expect_completed(waiter).await;
@@ -296,7 +296,7 @@ impl NativeProducerPool {
                         let mut accepted = 0usize;
                         let mut first_error = None;
                         for request in requests {
-                            match producer_handle.try_submit(request) {
+                            match producer_handle.submit(request).try_intake() {
                                 Ok(id) => {
                                     accepted += 1;
                                     black_box(id);
@@ -362,8 +362,8 @@ async fn start_held_owner(
 ) -> (TaskId, TaskWaiter, Arc<AsyncFlag>) {
     let started = AsyncFlag::new();
     let release = AsyncFlag::new();
-    let (_, waiter) = handle
-        .submit_and_watch(
+    let waiter = handle
+        .submit(
             ControllerSpec::queue(held_owner_task(
                 name,
                 Arc::clone(&started),
@@ -371,6 +371,8 @@ async fn start_held_owner(
             ))
             .with_slot(slot),
         )
+        .watch()
+        .execute()
         .await
         .expect("held owner intake failed");
     let id = waiter.id();
@@ -396,7 +398,7 @@ async fn start_held_owner(
     (id, waiter, release)
 }
 
-fn bench_cold_first_try_submit(c: &mut Criterion) {
+fn bench_cold_first_submit_try_intake(c: &mut Criterion) {
     print_suite_header("controller");
     let mut group = c.benchmark_group(COLD_INTAKE.group_id);
     group.throughput(Throughput::Elements(1));
@@ -418,7 +420,8 @@ fn bench_cold_first_try_submit(c: &mut Criterion) {
 
                         let start = Instant::now();
                         let id = handle
-                            .try_submit(request)
+                            .submit(request)
+                            .try_intake()
                             .expect("first controller intake failed");
                         let elapsed = start.elapsed();
                         black_box(id);
@@ -435,7 +438,7 @@ fn bench_cold_first_try_submit(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_steady_try_submit(c: &mut Criterion) {
+fn bench_steady_submit_try_intake(c: &mut Criterion) {
     const COUNT: usize = 64;
     const VALUE: &str = "64_accepted_submissions";
 
@@ -471,8 +474,9 @@ fn bench_steady_try_submit(c: &mut Criterion) {
                         let start = Instant::now();
                         for request in requests.drain(..) {
                             let id = handle
-                                .try_submit(request)
-                                .expect("steady try_submit intake failed");
+                                .submit(request)
+                                .try_intake()
+                                .expect("steady try_intake failed");
                             black_box(id);
                         }
                         total += start.elapsed();
@@ -490,7 +494,7 @@ fn bench_steady_try_submit(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_concurrent_try_submit(c: &mut Criterion) {
+fn bench_concurrent_submit_try_intake(c: &mut Criterion) {
     const COUNT: usize = 1_024;
 
     let mut group = c.benchmark_group(CONCURRENT_INTAKE.group_id);
@@ -550,7 +554,7 @@ fn bench_concurrent_try_submit(c: &mut Criterion) {
                         assert_eq!(accepted, COUNT);
                         assert!(
                             first_error.is_none(),
-                            "concurrent try_submit intake failed: {first_error:?}"
+                            "concurrent try_intake failed: {first_error:?}"
                         );
                         total += elapsed;
 
@@ -602,8 +606,10 @@ fn bench_drop_busy_rejection(c: &mut Criterion) {
 
                         let start = Instant::now();
                         for request in requests.drain(..) {
-                            let (_, waiter) = handle
-                                .submit_and_watch(request)
+                            let waiter = handle
+                                .submit(request)
+                                .watch()
+                                .execute()
                                 .await
                                 .expect("DropIfRunning intake failed");
                             waiters.push(waiter);
@@ -618,7 +624,11 @@ fn bench_drop_busy_rejection(c: &mut Criterion) {
 
                     release.mark();
                     assert!(
-                        handle.cancel(owner_id).await.expect("owner cancel failed"),
+                        handle
+                            .cancel(owner_id)
+                            .execute()
+                            .await
+                            .expect("owner cancel failed"),
                         "benchmark must claim the held owner"
                     );
                     expect_canceled(owner_waiter).await;
@@ -671,8 +681,10 @@ fn bench_replace_busy_placement(c: &mut Criterion) {
 
                         let start = Instant::now();
                         for request in requests.drain(..) {
-                            let (_, waiter) = handle
-                                .submit_and_watch(request)
+                            let waiter = handle
+                                .submit(request)
+                                .watch()
+                                .execute()
                                 .await
                                 .expect("Replace intake failed");
                             waiters.push(waiter);
@@ -748,8 +760,10 @@ fn bench_queue_workload(
 
                         let start = Instant::now();
                         for request in requests.drain(..) {
-                            let (_, waiter) = handle
-                                .submit_and_watch(request)
+                            let waiter = handle
+                                .submit(request)
+                                .watch()
+                                .execute()
                                 .await
                                 .expect("Queue intake failed");
                             waiters.push(waiter);
@@ -803,9 +817,9 @@ criterion_group! {
     name = benches;
     config = fixtures::criterion();
     targets =
-        bench_cold_first_try_submit,
-        bench_steady_try_submit,
-        bench_concurrent_try_submit,
+        bench_cold_first_submit_try_intake,
+        bench_steady_submit_try_intake,
+        bench_concurrent_submit_try_intake,
         bench_drop_busy_rejection,
         bench_replace_busy_placement,
         bench_queue_one_slot,

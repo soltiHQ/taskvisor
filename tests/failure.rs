@@ -122,10 +122,11 @@ async fn cooperative_cancellation_returning_ok_yields_succeeded_attempt_and_canc
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("coop-ok", make_coop()))
+            .execute()
             .await
             .expect("add ok");
 
-        assert!(handle.cancel(id).await.expect("cancel ok"));
+        assert!(handle.cancel(id).execute().await.expect("cancel ok"));
 
         assert!(
             collector
@@ -163,10 +164,11 @@ async fn cancellation_returning_canceled_error_yields_canceled_attempt_and_task(
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("cancel-err", task))
+            .execute()
             .await
             .expect("add ok");
 
-        assert!(handle.cancel(id).await.expect("cancel ok"));
+        assert!(handle.cancel(id).execute().await.expect("cancel ok"));
 
         assert!(
             collector
@@ -221,15 +223,19 @@ async fn cancellation_while_waiting_for_a_permit_finishes_without_an_attempt() {
 
     handle
         .add(TaskSpec::once("permit-owner", permit_owner))
+        .execute()
         .await
         .unwrap();
     started.notified().await;
 
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once("permit-waiter", make_ok_once()))
+    let waiter = handle
+        .add(TaskSpec::once("permit-waiter", make_ok_once()))
+        .watch()
+        .execute()
         .await
         .unwrap();
-    assert!(handle.cancel(id).await.unwrap());
+    let id = waiter.id();
+    assert!(handle.cancel(id).execute().await.unwrap());
     assert!(matches!(
         waiter.wait().await.unwrap(),
         TaskOutcome::Canceled

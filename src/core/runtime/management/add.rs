@@ -1,11 +1,12 @@
 //! Moves direct tasks, controller handoffs, and static batches into registry admission.
 //!
-//! [`SupervisorHandle`](crate::SupervisorHandle) direct add methods reserve cleanup ownership and bounded
-//! queue capacity before they transfer a [`TaskSpec`]. The optional controller can reserve queue capacity
-//! while it retains its owned task, then commit through the same final shutdown gate.
+//! The operation returned by [`SupervisorHandle::add`](crate::SupervisorHandle::add) reserves
+//! cleanup ownership and bounded queue capacity before it transfers a [`TaskSpec`].
+//! The optional controller can reserve queue capacity while it retains its owned task,
+//! then commit through the same final shutdown gate.
 //! A non-empty static run sends its complete initial set as one `AddBatch` command.
 //!
-//! Direct add methods do not report success before the registry's reply.
+//! Direct add operations do not report success before the registry's reply.
 //! Controller and static-run workflows receive the same direct reply channel.
 //! Request and result events are observability only. They do not confirm admission.
 

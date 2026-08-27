@@ -125,8 +125,11 @@ impl Supervisor {
     ///     Err(TaskError::Canceled)
     /// });
     ///
-    /// let id = handle.add(TaskSpec::once("worker", worker)).await?;
-    /// handle.cancel(id).await?;
+    /// let id = handle
+    ///     .add(TaskSpec::once("worker", worker))
+    ///     .execute()
+    ///     .await?;
+    /// handle.cancel(id).execute().await?;
     /// handle.shutdown().await?;
     /// # Ok(()) }
     /// ```
@@ -158,8 +161,9 @@ impl Supervisor {
     ///
     /// `Ok(())` means the bounded supervisor lifecycle and cleanup workflow completed successfully.
     /// It does not prove physical exit of force-aborted task code, detached subscriber callbacks, or isolated user destructors.
-    /// It also does not mean every task completed successfully. Use [`SupervisorHandle::add_and_watch`](crate::SupervisorHandle::add_and_watch)
-    /// when application logic needs one task's final outcome.
+    /// It also does not mean every task completed successfully. Add `watch()` to the operation
+    /// returned by [`SupervisorHandle::add`](crate::SupervisorHandle::add) when application logic
+    /// needs one task's final outcome.
     ///
     /// # Examples
     ///

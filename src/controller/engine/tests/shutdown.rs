@@ -688,6 +688,7 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
             ControllerSpec::queue(waiting_spec("blocked-shutdown-task"))
                 .with_slot("blocked-shutdown-slot"),
         )
+        .execute()
         .await
         .expect("the blocking submission must enter the controller queue");
     assert!(
@@ -698,21 +699,26 @@ async fn public_shutdown_waits_for_controller_join_and_survives_a_dropped_waiter
         "the controller must receive the command and block on the held slot lock"
     );
 
-    let (_queued_id, queued_waiter) = handle
-        .submit_and_watch(
+    let queued_waiter = handle
+        .submit(
             ControllerSpec::queue(waiting_spec("buffered-during-shutdown"))
                 .with_slot("buffered-during-shutdown"),
         )
+        .watch()
+        .execute()
         .await
         .expect("the watched command must be buffered behind the blocked handler");
-    let (_second_id, second_waiter) = handle
-        .submit_and_watch(ControllerSpec::queue(make_spec(
+    let second_waiter = handle
+        .submit(ControllerSpec::queue(make_spec(
             "second-buffered-during-shutdown",
         )))
+        .watch()
+        .execute()
         .await
         .expect("the second watched command must remain buffered for shutdown drain");
     let identity_handle = handle.clone();
-    let identity = tokio::spawn(async move { identity_handle.cancel(TaskId::next()).await });
+    let identity =
+        tokio::spawn(async move { identity_handle.cancel(TaskId::next()).execute().await });
     assert!(
         poll_until(Duration::from_secs(2), || async {
             ctrl.tx.capacity() == ctrl.config.queue_capacity().get() - 3
@@ -804,6 +810,7 @@ async fn no_queue_advancement_after_shutdown_starts() {
     let handle = sup.serve().expect("runtime startup");
     let id = handle
         .add(waiting_spec("occupant"))
+        .execute()
         .await
         .expect("task should register");
     let ctrl = Controller::new(ControllerConfig::default(), sup.core(), Bus::new(64));

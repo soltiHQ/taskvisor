@@ -195,8 +195,10 @@ impl SupervisorConfig {
 
     /// Returns the capacity of the registry management queue.
     ///
-    /// Regular management methods wait for this capacity.
-    /// Their `try_*` forms return [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when no slot is available immediately.
+    /// Default direct-registry operations wait for this capacity.
+    /// Operations configured with `fail_fast()` return
+    /// [`RuntimeError::CommandQueueFull`](crate::RuntimeError::CommandQueueFull) when no slot is
+    /// available immediately.
     #[must_use]
     pub const fn registry_queue_capacity(&self) -> NonZeroUsize {
         self.registry_queue_capacity

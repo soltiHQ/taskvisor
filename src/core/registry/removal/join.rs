@@ -26,7 +26,7 @@ impl Registry {
     /// publication are attempted. This barrier is separate from cancellation completion.
     ///
     /// Returns names for removal owners still active when `grace` expires.
-    pub async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
+    pub(in crate::core) async fn wait_joins_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let _ = tokio::time::timeout(grace, self.pending_joins.wait_drained()).await;
         self.pending_joins.pending_names()
     }
@@ -38,7 +38,7 @@ impl Registry {
     ///
     /// Returns names for actors claimed here that required force-abort.
     /// [`wait_joins_within`](Self::wait_joins_within) reports older owners.
-    pub async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
+    pub(in crate::core) async fn cancel_all_within(&self, grace: Duration) -> Vec<Arc<str>> {
         let handles: Vec<(TaskId, Arc<str>, Handle, RemovalCompletion)> = {
             let mut st = self.state.write().await;
             let ids: Vec<TaskId> = st.tasks.keys().copied().collect();

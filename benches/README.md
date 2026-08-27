@@ -34,7 +34,7 @@ cargo bench --bench controller --features controller --locked -- --color always
 Run matching cases from one suite:
 
 ```bash
-cargo bench --bench controller --features controller --locked -- 'controller/cold/first_try_submit'
+cargo bench --bench controller --features controller --locked -- 'controller/cold/first_submit_try_intake'
 ```
 
 The shared defaults are 30 samples, 1 second of warmup, and 3 seconds of measurement per case.
@@ -106,15 +106,15 @@ The pipelined case keeps the spawned-caller topology but polls all 32 admissions
 
 ### [Controller admission](controller.rs)
 
-| Case                  | Timed work                                                                                                              | What it does not measure                                                                           |
-|-----------------------|-------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| Cold first submission | First successful `try_submit` on a fresh served supervisor, including lazy cleanup-worker startup.                      | Supervisor/controller and Tokio runtime startup, request construction, task outcome, and shutdown. |
-| Reused intake burst   | Acceptance of a fixed burst of 64 requests from one caller.                                                             | Slot admission and final task outcomes.                                                            |
-| Concurrent producers  | Start-condvar release through exactly 1024 `try_submit` calls and completion-condvar observation by 1, 2, 4, or 8 persistent native callers while the current-thread controller is parked. | Thread spawn/join, batch construction and transfer, readiness wait, acceptance checks, all controller processing, reset, and shutdown. |
-| Busy-slot Drop        | 32 requests rejected with `SlotBusy` while an owner holds the slot.                                                     | Owner setup and cleanup.                                                                           |
-| Busy-slot Replace     | 32 watched submissions through 31 `SupersededByReplace` rejections, after the newest request replaces the pending head. | The retention snapshot check, newest task completion, and owner teardown.                          |
-| One-slot Queue        | 32 task completions through one serial slot, on Tokio current-thread only.                                              | Runtime startup, warmup, request construction, and ownership reset.                                |
-| Eight-slot Queue      | 64 task completions across eight slots, on both runtime variants.                                                       | Runtime startup, warmup, request construction, and ownership reset.                                |
+| Case                  | Timed work                                                                                                                                                                                               | What it does not measure                                                                                                               |
+|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| Cold first submission | First successful `submit(...).try_intake()` on a fresh served supervisor, including lazy cleanup-worker startup.                                                                                         | Supervisor/controller and Tokio runtime startup, request construction, task outcome, and shutdown.                                     |
+| Reused intake burst   | Acceptance of a fixed burst of 64 requests from one caller.                                                                                                                                              | Slot admission and final task outcomes.                                                                                                |
+| Concurrent producers  | Start-condvar release through exactly 1024 `submit(...).try_intake()` calls and completion-condvar observation by 1, 2, 4, or 8 persistent native callers while the current-thread controller is parked. | Thread spawn/join, batch construction and transfer, readiness wait, acceptance checks, all controller processing, reset, and shutdown. |
+| Busy-slot Drop        | 32 requests rejected with `SlotBusy` while an owner holds the slot.                                                                                                                                      | Owner setup and cleanup.                                                                                                               |
+| Busy-slot Replace     | 32 watched submissions through 31 `SupersededByReplace` rejections, after the newest request replaces the pending head.                                                                                  | The retention snapshot check, newest task completion, and owner teardown.                                                              |
+| One-slot Queue        | 32 task completions through one serial slot, on Tokio current-thread only.                                                                                                                               | Runtime startup, warmup, request construction, and ownership reset.                                                                    |
+| Eight-slot Queue      | 64 task completions across eight slots, on both runtime variants.                                                                                                                                        | Runtime startup, warmup, request construction, and ownership reset.                                                                    |
 
 In the reused intake burst, the current-thread runtime cannot consume commands during the synchronous producer loop.
 The multi-thread runtime can consume them concurrently. Both cases measure submission intake, not completed work.
@@ -122,7 +122,7 @@ The concurrent-producer family keeps total work fixed at 1024 and changes only t
 Those threads are spawned once, receive each prebuilt batch, and park at an observable start line before timing begins.
 This family uses the current-thread runtime, whose `block_on` root synchronously waits on the completion condvar.
 The controller therefore cannot consume its commands until the timer has stopped.
-The timer includes releasing that start condvar, all 1024 `try_submit` calls, and observing all callers on the completion condvar.
+The timer includes releasing that start condvar, all 1024 `submit(...).try_intake()` calls, and observing all callers on the completion condvar.
 It excludes thread spawn/join and per-iteration request construction, dispatch, and readiness synchronization.
 The controller queue and ownership capacities both equal 1024, every call must be accepted, and the queued commands, slots, and ownership are drained before the next iteration.
 The one-producer result includes the same start/completion synchronization as the multi-producer variants and is their matched reference.

@@ -231,7 +231,7 @@ async fn always_interval_none_restarts_repeatedly_no_backoff_scheduled() {
         TaskSpec::restartable("rerun", task).with_restart(RestartPolicy::Always { interval: None });
 
     with_timeout(15, async {
-        handle.add(spec).await.expect("add ok");
+        handle.add(spec).execute().await.expect("add ok");
         assert!(
             collector
                 .wait_until(Duration::from_secs(5), |events| {
@@ -271,7 +271,7 @@ async fn always_interval_some_emits_success_source_backoff_between_runs() {
     });
 
     with_timeout(15, async {
-        handle.add(spec).await.expect("add ok");
+        handle.add(spec).execute().await.expect("add ok");
         assert!(
             collector
                 .wait_until(Duration::from_secs(5), |events| {
@@ -322,7 +322,7 @@ async fn success_driven_restart_does_not_consume_failure_retry_budget() {
         .with_backoff(fast_backoff());
 
     with_timeout(15, async {
-        handle.add(spec).await.expect("add ok");
+        handle.add(spec).execute().await.expect("add ok");
         assert!(
             collector
                 .wait_until(Duration::from_secs(5), |events| {
@@ -412,6 +412,7 @@ async fn duplicate_static_batch_starts_no_task_body() {
     let handle = supervisor.serve().expect("runtime startup");
     handle
         .add(TaskSpec::restartable("after-batch-error", make_coop()))
+        .execute()
         .await
         .expect("a rejected batch must leave the runtime open");
     handle

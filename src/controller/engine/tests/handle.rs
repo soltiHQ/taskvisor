@@ -368,6 +368,7 @@ async fn minimum_queue_capacity_is_supported() {
             "minimum-capacity",
             task,
         )))
+        .execute()
         .await
         .expect("submission must work with the minimum non-zero capacity");
 

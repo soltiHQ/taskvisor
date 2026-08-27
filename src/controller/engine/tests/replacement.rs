@@ -385,6 +385,7 @@ async fn replace_stays_responsive_under_registry_backpressure() {
     let runtime_handle = sup.serve().expect("runtime startup");
     let owner_id = runtime_handle
         .add(waiting_spec("replace-owner"))
+        .execute()
         .await
         .expect("the owner must register");
 

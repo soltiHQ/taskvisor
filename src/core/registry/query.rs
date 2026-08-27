@@ -18,7 +18,7 @@ impl Registry {
     /// Waits until no registered or removing entries remain.
     ///
     /// Notification is registered before the check to prevent a lost wakeup.
-    pub async fn wait_until_empty(&self) {
+    pub(in crate::core) async fn wait_until_empty(&self) {
         loop {
             let notified = self.empty_notify.notified();
             tokio::pin!(notified);
@@ -33,7 +33,7 @@ impl Registry {
     /// Returns registered and removing tasks as `(identity, name)` pairs.
     ///
     /// Results are sorted by identity.
-    pub async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
+    pub(in crate::core) async fn list(&self) -> Vec<(TaskId, Arc<str>)> {
         let st = self.state.read().await;
         let mut tasks: Vec<(TaskId, Arc<str>)> = st
             .tasks
@@ -80,18 +80,18 @@ impl Registry {
 
     /// Returns true if `id` is registered or removing.
     #[cfg(test)]
-    pub async fn contains(&self, id: TaskId) -> bool {
+    pub(in crate::core) async fn contains(&self, id: TaskId) -> bool {
         self.state.read().await.tasks.contains_key(&id)
     }
 
     /// Resolves a name to its membership identity, including a removing entry.
     #[cfg(test)]
-    pub async fn id_for_name(&self, name: &str) -> Option<TaskId> {
+    pub(in crate::core) async fn id_for_name(&self, name: &str) -> Option<TaskId> {
         self.state.read().await.by_name.get(name).copied()
     }
 
     /// Returns true if no tasks are registered or removing.
-    pub async fn is_empty(&self) -> bool {
+    pub(super) async fn is_empty(&self) -> bool {
         self.state.read().await.tasks.is_empty()
     }
 }

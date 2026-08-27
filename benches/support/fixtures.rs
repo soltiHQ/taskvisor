@@ -97,8 +97,10 @@ pub async fn complete_batch(handle: &SupervisorHandle, tasks: Vec<TaskSpec>) {
     expect_within("a watched task batch", async {
         let mut waiters = Vec::with_capacity(tasks.len());
         for task in tasks {
-            let (_, waiter) = handle
-                .add_and_watch(task)
+            let waiter = handle
+                .add(task)
+                .watch()
+                .execute()
                 .await
                 .expect("batch admission failed");
             waiters.push(waiter);
@@ -133,9 +135,9 @@ pub async fn wait_for_ownership(handle: &SupervisorHandle, retained_units: usize
 }
 
 pub async fn warm_runtime(handle: &SupervisorHandle, retained_units: usize) {
-    let (_, waiter) = expect_within(
+    let waiter = expect_within(
         "warmup admission",
-        handle.add_and_watch(instant_task("warmup")),
+        handle.add(instant_task("warmup")).watch().execute(),
     )
     .await
     .expect("warmup admission failed");

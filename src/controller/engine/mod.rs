@@ -104,7 +104,11 @@ impl Controller {
     /// Creates a controller and its bounded ordered command channel.
     ///
     /// The controller is inert until [`run`](Self::run) is called.
-    pub fn new(config: ControllerConfig, supervisor: &Arc<SupervisorCore>, bus: Bus) -> Arc<Self> {
+    pub(crate) fn new(
+        config: ControllerConfig,
+        supervisor: &Arc<SupervisorCore>,
+        bus: Bus,
+    ) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(config.queue_capacity().get());
         let shutdown_token = supervisor.shutdown_started_token();
 
@@ -181,7 +185,7 @@ impl Controller {
     }
 
     /// Returns a cloneable client for the ordered controller command queue.
-    pub fn handle(&self) -> ControllerHandle {
+    pub(crate) fn handle(&self) -> ControllerHandle {
         ControllerHandle::new(self.tx.clone(), self.bus.clone(), self.drop_domain.clone())
     }
 }

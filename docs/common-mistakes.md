@@ -9,15 +9,15 @@ description: Avoid incorrect assumptions about task results, admission, cancella
 
 An `Ok(())` result from [`Supervisor::run`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.run) means the supervisor lifecycle and cleanup workflow completed.
 It does not report each task's final outcome.
-When application logic needs that outcome, use [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve), [`add_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch), [`TaskWaiter::wait`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html#method.wait), and then [`shutdown`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.shutdown).
+When application logic needs that outcome, use [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve), `add(spec).watch().execute()`, [`TaskWaiter::wait`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html#method.wait), and then [`shutdown`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.shutdown).
 See [Run Taskvisor](running-and-managing.md) and [Final outcomes and lifecycle events](outcomes-and-events.md).
 
 ## Do not treat submit success as admission
 
-[`submit().await?`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit) means that the controller accepted the command.
+[`submit(request).execute().await?`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit) means that the controller accepted the command.
 It does not confirm slot admission or runtime registration.
 The controller may process the command before or after the call returns.
-Use [`submit_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit_and_watch) and await its [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) when the application must distinguish rejection from an admitted task outcome.
+Use `submit(request).watch().execute()` and await its [`TaskWaiter`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.TaskWaiter.html) when the application must distinguish rejection from an admitted task outcome.
 See [Coordinate work by key](keyed-admission.md).
 
 ## Do not drive application logic from events

@@ -4,17 +4,31 @@ mod common;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::*;
+use taskvisor::TaskTarget;
 use taskvisor::prelude::*;
+
+struct CountedTarget {
+    conversions: Arc<AtomicUsize>,
+}
+
+impl From<CountedTarget> for TaskTarget {
+    fn from(target: CountedTarget) -> Self {
+        target.conversions.fetch_add(1, Ordering::SeqCst);
+        TaskTarget::from("missing-counted-target")
+    }
+}
 
 async fn stale_id(handle: &SupervisorHandle) -> TaskId {
     let id = handle
         .add(TaskSpec::restartable("throwaway", make_coop()))
+        .execute()
         .await
         .expect("add ok");
-    assert!(handle.cancel(id).await.expect("cancel ok"));
+    assert!(handle.cancel(id).execute().await.expect("cancel ok"));
     assert!(
         poll_until(Duration::from_secs(2), || async {
             !handle.list().await.iter().any(|(i, _)| *i == id)
@@ -25,11 +39,47 @@ async fn stale_id(handle: &SupervisorHandle) -> TaskId {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn management_target_conversion_starts_only_when_execute_is_polled() {
+    let (handle, _collector) = served_with_collector_and_grace(5);
+    let conversions = Arc::new(AtomicUsize::new(0));
+
+    let remove = handle.remove(CountedTarget {
+        conversions: Arc::clone(&conversions),
+    });
+    assert_eq!(conversions.load(Ordering::SeqCst), 0);
+    assert!(format!("{remove:?}").contains("RemoveOperation"));
+    assert_eq!(conversions.load(Ordering::SeqCst), 0);
+    drop(remove);
+    assert_eq!(conversions.load(Ordering::SeqCst), 0);
+
+    let cancel_future = handle
+        .cancel(CountedTarget {
+            conversions: Arc::clone(&conversions),
+        })
+        .execute();
+    assert_eq!(conversions.load(Ordering::SeqCst), 0);
+    drop(cancel_future);
+    assert_eq!(conversions.load(Ordering::SeqCst), 0);
+
+    let remove_future = handle
+        .remove(CountedTarget {
+            conversions: Arc::clone(&conversions),
+        })
+        .execute();
+    assert_eq!(conversions.load(Ordering::SeqCst), 0);
+    assert!(!remove_future.await.expect("missing target is a no-op"));
+    assert_eq!(conversions.load(Ordering::SeqCst), 1);
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn add_confirms_registration_returns_id_and_starts_task() {
     let (handle, collector) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("worker", make_coop()))
+            .execute()
             .await
             .expect("add ok");
         assert!(
@@ -58,6 +108,7 @@ async fn duplicate_add_returns_error_and_only_first_runs() {
     with_timeout(10, async {
         let id1 = handle
             .add(TaskSpec::restartable("dup", make_coop()))
+            .execute()
             .await
             .expect("add1");
 
@@ -69,6 +120,7 @@ async fn duplicate_add_returns_error_and_only_first_runs() {
         });
         let error = handle
             .add(TaskSpec::once("dup", rejected))
+            .execute()
             .await
             .expect_err("duplicate add must fail");
         assert!(matches!(
@@ -92,6 +144,7 @@ async fn fast_task_registration_has_no_library_timeout() {
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::once("fast-registration", make_ok_once()))
+            .execute()
             .await
             .expect("registry reply must confirm even a fast task");
         assert!(id.get() > 0);
@@ -106,14 +159,16 @@ async fn remove_by_id_removes_only_that_id() {
     with_timeout(10, async {
         let id_a = handle
             .add(TaskSpec::restartable("a", make_coop()))
+            .execute()
             .await
             .expect("add a");
         let id_b = handle
             .add(TaskSpec::restartable("b", make_coop()))
+            .execute()
             .await
             .expect("add b");
 
-        assert!(handle.remove(id_a).await.expect("remove a"));
+        assert!(handle.remove(id_a).execute().await.expect("remove a"));
 
         assert!(
             poll_until(Duration::from_secs(2), || async {
@@ -140,6 +195,7 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
     with_timeout(10, async {
         let id_keep = handle
             .add(TaskSpec::restartable("keep", make_coop()))
+            .execute()
             .await
             .expect("add keep");
         let stale = stale_id(&handle).await;
@@ -159,10 +215,24 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
             .filter(|event| event.kind == EventKind::TaskRemoved)
             .count();
 
-        assert!(!handle.remove(stale).await.expect("remove stale ok"));
-        assert!(!handle.try_remove(stale).await.expect("try_remove stale ok"));
+        assert!(
+            !handle
+                .remove(stale)
+                .execute()
+                .await
+                .expect("remove stale ok")
+        );
+        assert!(
+            !handle
+                .remove(stale)
+                .fail_fast()
+                .execute()
+                .await
+                .expect("fail-fast remove stale ok")
+        );
         let barrier = handle
             .add(TaskSpec::restartable("remove-unknown-barrier", make_coop()))
+            .execute()
             .await
             .expect("later add confirms that the unknown remove was processed");
         assert!(
@@ -192,7 +262,7 @@ async fn remove_unknown_id_is_noop_without_terminal_event() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn remove_by_name_returns_true_then_false() {
+async fn remove_name_target_returns_true_then_false() {
     let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let started = Arc::new(tokio::sync::Notify::new());
@@ -210,14 +280,22 @@ async fn remove_by_name_returns_true_then_false() {
         });
         let id = handle
             .add(TaskSpec::restartable("svc", task))
+            .execute()
             .await
             .expect("add svc");
         tokio::time::timeout(Duration::from_secs(2), started.notified())
             .await
             .expect("svc must start before removal");
 
-        assert!(handle.remove_by_name("svc").await.expect("remove1"));
-        assert!(!handle.try_remove_by_name("svc").await.expect("remove2"));
+        assert!(handle.remove("svc").execute().await.expect("remove1"));
+        assert!(
+            !handle
+                .remove("svc")
+                .fail_fast()
+                .execute()
+                .await
+                .expect("remove2")
+        );
         assert_eq!(handle.list().await, vec![(id, Arc::from("svc"))]);
 
         release.notify_one();
@@ -229,7 +307,8 @@ async fn remove_by_name_returns_true_then_false() {
         );
         assert!(
             !handle
-                .remove_by_name("never-existed")
+                .remove("never-existed")
+                .execute()
                 .await
                 .expect("remove unknown name")
         );
@@ -244,10 +323,11 @@ async fn cancel_by_id_true_then_false_on_double_cancel() {
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("c", make_coop()))
+            .execute()
             .await
             .expect("add c");
-        assert!(handle.cancel(id).await.expect("cancel1"));
-        assert!(!handle.cancel(id).await.expect("cancel2"));
+        assert!(handle.cancel(id).execute().await.expect("cancel1"));
+        assert!(!handle.cancel(id).execute().await.expect("cancel2"));
         assert!(!handle.is_alive("c").await);
         let _ = handle.shutdown().await;
     })
@@ -255,22 +335,23 @@ async fn cancel_by_id_true_then_false_on_double_cancel() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancel_by_name_true_then_false() {
+async fn cancel_name_target_returns_true_then_false() {
     let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
         let _ = handle
             .add(TaskSpec::restartable("lbl", make_coop()))
+            .execute()
             .await
             .expect("add lbl");
-        assert!(handle.cancel_by_name("lbl").await.expect("c1"));
+        assert!(handle.cancel("lbl").execute().await.expect("c1"));
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 !handle.list().await.iter().any(|(_, l)| &**l == "lbl")
             })
             .await
         );
-        assert!(!handle.cancel_by_name("lbl").await.expect("c2"));
-        assert!(!handle.cancel_by_name("ghost").await.expect("c3"));
+        assert!(!handle.cancel("lbl").execute().await.expect("c2"));
+        assert!(!handle.cancel("ghost").execute().await.expect("c3"));
         assert!(!handle.is_alive("lbl").await);
         let _ = handle.shutdown().await;
     })
@@ -281,29 +362,38 @@ async fn cancel_by_name_true_then_false() {
 async fn by_name_operations_return_false_for_missing_tasks() {
     let (handle, _c) = served_with_collector_and_grace(5);
     with_timeout(10, async {
-        assert!(!handle.remove_by_name("missing").await.expect("remove"));
+        assert!(!handle.remove("missing").execute().await.expect("remove"));
         assert!(
             !handle
-                .try_remove_by_name("missing")
+                .remove("missing")
+                .fail_fast()
+                .execute()
                 .await
                 .expect("try remove")
         );
-        assert!(!handle.cancel_by_name("missing").await.expect("cancel"));
+        assert!(!handle.cancel("missing").execute().await.expect("cancel"));
         assert!(
             !handle
-                .try_cancel_by_name("missing")
+                .cancel("missing")
+                .fail_fast()
+                .execute()
                 .await
                 .expect("try cancel")
         );
         assert!(
             !handle
-                .cancel_by_name_with_timeout("missing", Duration::ZERO)
+                .cancel("missing")
+                .termination_timeout(Duration::ZERO)
+                .execute()
                 .await
                 .expect("timed cancel")
         );
         assert!(
             !handle
-                .try_cancel_by_name_with_timeout("missing", Duration::ZERO)
+                .cancel("missing")
+                .termination_timeout(Duration::ZERO)
+                .fail_fast()
+                .execute()
                 .await
                 .expect("try timed cancel")
         );
@@ -318,36 +408,46 @@ async fn timed_cancel_variants_are_public_contracts() {
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("coop", make_coop()))
+            .execute()
             .await
             .expect("add coop");
         assert!(
             handle
-                .cancel_with_timeout(id, Duration::from_secs(2))
+                .cancel(id)
+                .termination_timeout(Duration::from_secs(2))
+                .execute()
                 .await
-                .expect("cancel_with_timeout")
+                .expect("cancel with termination timeout")
         );
         assert!(!handle.is_alive("coop").await);
 
         let _ = handle
             .add(TaskSpec::restartable("label-timeout", make_coop()))
+            .execute()
             .await
             .expect("add label-timeout");
         assert!(
             handle
-                .cancel_by_name_with_timeout("label-timeout", Duration::from_secs(2))
+                .cancel("label-timeout")
+                .termination_timeout(Duration::from_secs(2))
+                .execute()
                 .await
-                .expect("cancel_by_name_with_timeout")
+                .expect("cancel name target with termination timeout")
         );
 
         let _ = handle
             .add(TaskSpec::restartable("try-label-timeout", make_coop()))
+            .execute()
             .await
             .expect("add try-label-timeout");
         assert!(
             handle
-                .try_cancel_by_name_with_timeout("try-label-timeout", Duration::from_secs(2))
+                .cancel("try-label-timeout")
+                .termination_timeout(Duration::from_secs(2))
+                .fail_fast()
+                .execute()
                 .await
-                .expect("try_cancel_by_name_with_timeout")
+                .expect("fail-fast cancel name target with termination timeout")
         );
 
         let _ = handle.shutdown().await;
@@ -378,14 +478,14 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
             }
         });
         let id = handle
-            .add(TaskSpec::restartable("timeout-shared", task))
+            .add(TaskSpec::restartable("timeout-shared", task)).execute()
             .await
             .expect("add timeout-shared");
         tokio::time::timeout(Duration::from_secs(2), started.notified())
             .await
             .expect("task must start before cancellation");
 
-        match handle.cancel_with_timeout(id, Duration::ZERO).await {
+        match handle.cancel(id).termination_timeout(Duration::ZERO).execute().await {
             Err(RuntimeError::TaskTerminationTimeout {
                 id: timed_id,
                 timeout,
@@ -403,7 +503,7 @@ async fn cancel_timeout_does_not_stop_shared_removal() {
             .expect("timed-out caller must leave cancellation running");
         assert_eq!(handle.list().await, vec![(id, Arc::from("timeout-shared"))]);
 
-        let mut joined_cancel = Box::pin(handle.cancel(id));
+        let mut joined_cancel = Box::pin(handle.cancel(id).execute());
         assert!(
             tokio::time::timeout(Duration::from_millis(20), &mut joined_cancel)
                 .await
@@ -435,11 +535,12 @@ async fn individually_removed_stuck_task_is_force_aborted_after_grace() {
         let (task, started) = make_stubborn();
         let id = handle
             .add(TaskSpec::restartable("stuck-runner", task))
+            .execute()
             .await
             .expect("add stuck-runner");
         wait_for_start("stuck-runner", &started).await;
 
-        assert!(handle.remove(id).await.expect("remove"));
+        assert!(handle.remove(id).execute().await.expect("remove"));
 
         assert!(
             collector
@@ -473,14 +574,17 @@ async fn list_reflects_registered_set_sorted_by_id() {
     with_timeout(10, async {
         let id_x = handle
             .add(TaskSpec::restartable("x", make_coop()))
+            .execute()
             .await
             .unwrap();
         let id_y = handle
             .add(TaskSpec::restartable("y", make_coop()))
+            .execute()
             .await
             .unwrap();
         let id_z = handle
             .add(TaskSpec::restartable("z", make_coop()))
+            .execute()
             .await
             .unwrap();
 
@@ -494,7 +598,7 @@ async fn list_reflects_registered_set_sorted_by_id() {
         assert_eq!(names, HashSet::from(["x", "y", "z"]));
         assert!(ids.contains(&id_x) && ids.contains(&id_y) && ids.contains(&id_z));
 
-        assert!(handle.remove(id_y).await.expect("remove y"));
+        assert!(handle.remove(id_y).execute().await.expect("remove y"));
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 let l = handle.list().await;
@@ -517,10 +621,12 @@ async fn snapshot_and_is_alive_track_alive_set() {
 
         let _ = handle
             .add(TaskSpec::restartable("live", make_coop()))
+            .execute()
             .await
             .unwrap();
         let _ = handle
             .add(TaskSpec::once("oneshot", make_ok_once()))
+            .execute()
             .await
             .unwrap();
 
@@ -560,9 +666,10 @@ async fn events_carry_correct_id_across_full_lifecycle() {
     with_timeout(10, async {
         let id = handle
             .add(TaskSpec::restartable("life", make_coop()))
+            .execute()
             .await
             .unwrap();
-        assert!(handle.cancel(id).await.expect("cancel"));
+        assert!(handle.cancel(id).execute().await.expect("cancel"));
 
         assert!(
             poll_until(Duration::from_secs(2), || async {
@@ -593,9 +700,10 @@ async fn re_add_same_name_after_removal_succeeds_with_new_id() {
     with_timeout(10, async {
         let id1 = handle
             .add(TaskSpec::restartable("reuse", make_coop()))
+            .execute()
             .await
             .unwrap();
-        assert!(handle.cancel(id1).await.expect("cancel"));
+        assert!(handle.cancel(id1).execute().await.expect("cancel"));
         assert!(
             poll_until(Duration::from_secs(2), || async {
                 !handle.list().await.iter().any(|(_, l)| &**l == "reuse")
@@ -604,6 +712,7 @@ async fn re_add_same_name_after_removal_succeeds_with_new_id() {
         );
         let id2 = handle
             .add(TaskSpec::restartable("reuse", make_coop()))
+            .execute()
             .await
             .unwrap();
         assert_ne!(id1, id2, "re-added name must get a fresh id");
@@ -624,7 +733,9 @@ async fn add_after_shutdown_returns_shutting_down() {
             .await
             .expect("shutdown ok");
         assert!(matches!(
-            h2.add(TaskSpec::once("late", make_ok_once())).await,
+            h2.add(TaskSpec::once("late", make_ok_once()))
+                .execute()
+                .await,
             Err(RuntimeError::ShuttingDown)
         ));
     })

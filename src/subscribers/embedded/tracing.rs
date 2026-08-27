@@ -69,7 +69,7 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 /// let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TracingBridge;
 
 impl TracingBridge {
@@ -88,7 +88,7 @@ impl TracingBridge {
 /// Create this variant with [`TracingBridge::with_reasons`].
 /// It otherwise uses the same fields and level mapping as [`TracingBridge`].
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing")))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TracingBridgeWithReasons;
 
 fn rejection_level(kind: Option<RejectionKind>) -> Level {

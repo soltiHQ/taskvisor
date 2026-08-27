@@ -43,7 +43,7 @@ fn format_value(value: &str) -> String {
 /// let supervisor = Supervisor::new(SupervisorConfig::default(), subscribers);
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct LogWriter;
 
 impl Subscribe for LogWriter {

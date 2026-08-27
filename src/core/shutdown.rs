@@ -15,7 +15,7 @@
 ///
 /// Returns an I/O error when a signal listener cannot be installed.
 #[cfg(unix)]
-pub async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+pub(super) async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -36,6 +36,6 @@ pub async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 ///
 /// Returns an I/O error when Ctrl-C waiting fails.
 #[cfg(not(unix))]
-pub async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+pub(super) async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }

@@ -1,8 +1,8 @@
 //! Builds one keyed admission request for the controller.
 //!
 //! [`ControllerSpec`] combines the work described by [`TaskSpec`] with a slot and a busy-slot [`AdmissionPolicy`].
-//! Controller `submit*` methods consume this value. Direct runtime `add*` methods accept `TaskSpec`
-//! instead and bypass keyed admission.
+//! [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) consumes this value.
+//! [`SupervisorHandle::add`](crate::SupervisorHandle::add) accepts `TaskSpec` instead and bypasses keyed admission.
 //!
 //! See the [`controller`](crate::controller) module for the complete user flow.
 
@@ -19,10 +19,9 @@ use crate::TaskSpec;
 /// - an [`AdmissionPolicy`] for a busy slot;
 /// - an optional slot that groups work which must not overlap.
 ///
-/// Pass the request to
-/// [`SupervisorHandle::submit_and_watch`](crate::SupervisorHandle::submit_and_watch) when application
-/// logic needs to know whether work was rejected or how an admitted task ended.
-/// Use [`SupervisorHandle::submit`](crate::SupervisorHandle::submit) when command intake alone is enough.
+/// Pass the request to [`SupervisorHandle::submit`](crate::SupervisorHandle::submit), then add `watch()` before the terminal
+/// operation when application logic needs to know whether work was rejected or how an admitted task ended.
+/// Use the default unwatched operation when command intake alone is enough.
 /// Allocate its task ID before intake with [`SupervisorHandle::prepare_submission`](crate::SupervisorHandle::prepare_submission).
 ///
 /// # Admission flow
@@ -31,7 +30,7 @@ use crate::TaskSpec;
 /// application
 ///      │ ControllerSpec
 ///      ▼
-/// SupervisorHandle::submit*
+/// SupervisorHandle::submit
 ///      ▼
 /// controller command queue
 ///      ▼
@@ -130,7 +129,8 @@ impl ControllerSpec {
 
     /// Removes controller settings and returns the runtime task specification.
     ///
-    /// The returned value can be passed to a direct `add*` method when the caller decides to bypass slot admission.
+    /// The returned value can be passed to [`SupervisorHandle::add`](crate::SupervisorHandle::add)
+    /// when the caller decides to bypass slot admission.
     pub fn into_task_spec(self) -> TaskSpec {
         self.task_spec
     }
@@ -190,7 +190,7 @@ impl ControllerSpec {
     /// Creates a request that runs only when the slot is idle.
     ///
     /// A busy slot rejects the request without starting its task body.
-    /// Use a watched submit method when the caller must observe that decision.
+    /// Add `watch()` to the submission operation when the caller must observe that decision.
     /// See [`AdmissionPolicy::DropIfRunning`] for the full contract.
     pub fn drop_if_running(task_spec: TaskSpec) -> Self {
         Self::new(AdmissionPolicy::DropIfRunning, task_spec)

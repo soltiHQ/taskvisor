@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
     let handle = supervisor.serve()?;
 
-    let (_, waiter) = handle.add_and_watch(spec).await?;
+    let waiter = handle.add(spec).watch().execute().await?;
     println!("final outcome: {:?}", waiter.wait().await?);
 
     handle.shutdown().await?;
@@ -137,7 +137,7 @@ Without `with_slot`, the task name is used for both roles.
 ControllerSpec::replace(TaskSpec::once(task_name, task))
     .with_slot(application_key)
                ▼
-SupervisorHandle::submit_and_watch(request)
+SupervisorHandle::submit(request).watch().execute()
                ▼
 TaskWaiter::wait()
 ```

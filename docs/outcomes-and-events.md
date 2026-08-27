@@ -48,13 +48,13 @@ A [`TaskOutcome`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutco
 flowchart TB
 accTitle: API errors and final task outcomes
 accDescr: A watched add and its waiter return separate results at separate boundaries.
-Add["add_and_watch(spec).await"]
+Add["add(spec).watch().execute().await"]
 NoWaiter["No watched registration returned"]
 Wait["waiter.wait().await"]
 Unavailable["Result channel failed"]
 Outcome["Work reached a final state"]
 Add -->|"Err(RuntimeError)"| NoWaiter
-Add -->|"Ok((id, waiter))"| Wait
+Add -->|"Ok(waiter)"| Wait
 Wait -->|"Err(OutcomeUnavailable)"| Unavailable
 Wait -->|"Ok(TaskOutcome)"| Outcome
 ```
@@ -75,7 +75,7 @@ Use [try_build](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Superviso
 
 [`Ok(TaskOutcome::Failed { .. })`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Failed) means outcome delivery succeeded and the task ended in failure.
 It is not an API error.
-For controller work, [`submit_and_watch().await?`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.submit_and_watch) confirms command intake.
+For controller work, `submit(request).watch().execute().await?` confirms command intake.
 The waiter can later deliver [`TaskOutcome::Rejected`](https://docs.rs/taskvisor/latest/taskvisor/core/enum.TaskOutcome.html#variant.Rejected) if slot or registry admission fails.
 
 ## Handle final outcomes

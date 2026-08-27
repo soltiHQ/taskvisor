@@ -88,37 +88,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tenant_42_latest = SyncGate::new(false);
     let tenant_17 = SyncGate::new(false);
 
-    let (_, old_waiter) = handle
-        .submit_and_watch(
+    let old_waiter = handle
+        .submit(
             ControllerSpec::replace(tenant_sync("tenant-42", 1, Arc::clone(&tenant_42_old)))
                 .with_slot("tenant-42"),
         )
+        .watch()
+        .execute()
         .await?;
     tenant_42_old.started.notified().await;
 
-    let (_, other_waiter) = handle
-        .submit_and_watch(
+    let other_waiter = handle
+        .submit(
             ControllerSpec::replace(tenant_sync("tenant-17", 1, Arc::clone(&tenant_17)))
                 .with_slot("tenant-17"),
         )
+        .watch()
+        .execute()
         .await?;
     tenant_17.started.notified().await;
     println!("different tenant slots are running together\n");
 
-    let (_, pending_waiter) = handle
-        .submit_and_watch(
+    let pending_waiter = handle
+        .submit(
             ControllerSpec::replace(tenant_sync("tenant-42", 2, SyncGate::new(false)))
                 .with_slot("tenant-42"),
         )
+        .watch()
+        .execute()
         .await?;
     tenant_42_old.cancel_observed.notified().await;
     println!("tenant-42 revision 2 waits for revision 1 cleanup\n");
 
-    let (_, latest_waiter) = handle
-        .submit_and_watch(
+    let latest_waiter = handle
+        .submit(
             ControllerSpec::replace(tenant_sync("tenant-42", 3, Arc::clone(&tenant_42_latest)))
                 .with_slot("tenant-42"),
         )
+        .watch()
+        .execute()
         .await?;
     match pending_waiter.wait().await? {
         TaskOutcome::Rejected {

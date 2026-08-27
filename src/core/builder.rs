@@ -57,6 +57,21 @@ pub struct SupervisorBuilder {
     controller_config: Option<crate::controller::ControllerConfig>,
 }
 
+impl std::fmt::Debug for SupervisorBuilder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("SupervisorBuilder");
+        debug
+            .field("runtime", &self.runtime)
+            .field("task_defaults", &self.task_defaults)
+            .field("subscriber_count", &self.subscribers.len());
+
+        #[cfg(feature = "controller")]
+        debug.field("controller_config", &self.controller_config);
+
+        debug.finish_non_exhaustive()
+    }
+}
+
 impl SupervisorBuilder {
     /// Creates a builder with runtime settings and [`TaskDefaults::default`].
     ///
@@ -228,10 +243,13 @@ impl SupervisorBuilder {
         self
     }
 
-    /// Enables slot admission for `SupervisorHandle::submit*` methods.
+    /// Enables slot admission for operations returned by
+    /// [`SupervisorHandle::submit`](crate::SupervisorHandle::submit).
     ///
-    /// Without this setting, `submit*` methods return [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured).
-    /// Direct `add*` methods always bypass the controller and register with the runtime.
+    /// Without this setting, submission terminal methods return
+    /// [`ControllerError::NotConfigured`](crate::ControllerError::NotConfigured).
+    /// [`SupervisorHandle::add`](crate::SupervisorHandle::add) always bypasses the controller and
+    /// registers with the runtime.
     #[cfg(feature = "controller")]
     #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
     pub fn with_controller(mut self, config: crate::controller::ControllerConfig) -> Self {

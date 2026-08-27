@@ -96,7 +96,7 @@ pub(super) struct Submission {
     pub(super) id: TaskId,
     /// Admission policy and task spec coupled to pre-reserved destructor ownership.
     pub(super) owned: OwnedTask<ControllerSpec>,
-    /// Optional watched-outcome sender for `submit_and_watch`.
+    /// Optional outcome sender for a submission configured with `watch()`.
     pub(super) done: Option<OutcomeTx>,
 }
 

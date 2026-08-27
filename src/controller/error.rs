@@ -8,7 +8,9 @@ use thiserror::Error;
 ///
 /// [`NotConfigured`](Self::NotConfigured) can come from preparation or submission.
 /// Other variants describe submission command intake.
-/// `Ok` from preparation creates a local prepared value. `Ok` from a submit method confirms command intake. Neither result confirms slot admission.
+/// `Ok` from preparation creates a local prepared value.
+/// `Ok` from a submission terminal confirms command intake.
+/// Neither result confirms slot admission.
 ///
 /// Use the error variants as follows:
 ///
@@ -31,8 +33,9 @@ pub enum ControllerError {
 
     /// The ordered controller command queue has no capacity now.
     ///
-    /// Only fail-fast `try_submit*` methods return this variant.
-    /// It describes command intake, not a full per-slot queue. The corresponding async method waits for command capacity.
+    /// Only a fail-fast [`Submit`](crate::Submit) operation finished with `try_intake()` returns this variant.
+    /// It describes command intake, not a full per-slot queue.
+    /// `execute().await` waits for command capacity instead.
     #[error("submission queue full")]
     Full,
 

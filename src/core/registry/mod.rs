@@ -85,7 +85,7 @@ impl Registry {
     /// Builds a dormant registry.
     ///
     /// [`spawn_listener`](Self::spawn_listener) starts its listener and reaper.
-    pub fn new(
+    pub(super) fn new(
         bus: Bus,
         runtime_token: CancellationToken,
         semaphore: Option<Arc<Semaphore>>,

@@ -84,7 +84,7 @@ impl Registry {
     /// # Panics
     ///
     /// Panics without an active Tokio runtime or when called more than once.
-    pub fn spawn_listener(self: Arc<Self>) {
+    pub(in crate::core) fn spawn_listener(self: Arc<Self>) {
         self.actors.spawn();
         let mut cmd_rx = self
             .listener
@@ -237,7 +237,7 @@ impl Registry {
     ///
     /// Safe to call after shutdown has started. If the listener was never started, this is a no-op.
     /// Returns `false` when Tokio reports that the listener did not join cleanly.
-    pub async fn join_listener(&self) -> bool {
+    pub(in crate::core) async fn join_listener(&self) -> bool {
         let handle = self
             .listener
             .handle

@@ -18,9 +18,9 @@
 //! | `DropIfRunning` | reject the new submission                   |
 //!
 //! The slot defaults to the task name; `with_slot` sets another key.
-//! Direct `add*` methods bypass controller admission.
-//! A successful `submit*` call confirms intake only.
-//! This example uses `submit_and_watch` to verify the final result:
+//! Direct `add(...).execute()` operations bypass controller admission.
+//! A successful `submit(...).execute()` or `try_intake()` terminal confirms intake only.
+//! This example uses `submit(...).watch().execute()` to verify the final result:
 //!
 //! - `Queue`: all three tasks complete in submission order;
 //! - `Replace`: the long owner is canceled, then the short replacement completes;
@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let spec = job(name, Duration::from_millis(400));
         let request = ControllerSpec::queue(spec).with_slot("queue-demo");
-        let (_id, waiter) = handle.submit_and_watch(request).await?;
+        let waiter = handle.submit(request).watch().execute().await?;
         queued.push(waiter);
         println!("  submitted #{}", index + 1);
     }
@@ -110,12 +110,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Arc::clone(&long_started)),
     );
     let long_request = ControllerSpec::replace(long).with_slot("replace-demo");
-    let (_long_id, long_waiter) = handle.submit_and_watch(long_request).await?;
+    let long_waiter = handle.submit(long_request).watch().execute().await?;
     long_started.notified().await;
 
     let short = job("replace-v2", Duration::from_millis(200));
     let short_request = ControllerSpec::replace(short).with_slot("replace-demo");
-    let (_short_id, short_waiter) = handle.submit_and_watch(short_request).await?;
+    let short_waiter = handle.submit(short_request).watch().execute().await?;
     println!("  long -> {:?}", long_waiter.wait().await?);
     println!("  short -> {:?}", short_waiter.wait().await?);
 
@@ -130,12 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Arc::clone(&first_started)),
     );
     let first_request = ControllerSpec::drop_if_running(first).with_slot("drop-demo");
-    let (_first_id, first_waiter) = handle.submit_and_watch(first_request).await?;
+    let first_waiter = handle.submit(first_request).watch().execute().await?;
     first_started.notified().await;
 
     let second = job("drop-v2", Duration::from_millis(100));
     let second_request = ControllerSpec::drop_if_running(second).with_slot("drop-demo");
-    let (_second_id, second_waiter) = handle.submit_and_watch(second_request).await?;
+    let second_waiter = handle.submit(second_request).watch().execute().await?;
     println!("  second -> {:?}", second_waiter.wait().await?);
     println!("  first -> {:?}", first_waiter.wait().await?);
 

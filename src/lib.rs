@@ -112,12 +112,13 @@
 //!
 //! ## Get results or observe events
 //!
-//! [`SupervisorHandle::add_and_watch`] returns a [`TaskWaiter`] for a direct final [`TaskOutcome`].
+//! [`SupervisorHandle::add`] followed by `watch().execute().await` returns a [`TaskWaiter`] for a
+//! direct final [`TaskOutcome`].
 //! A watched result does not depend on the lossy event path, but it is still in-memory and is not
 //! durable across process termination.
 #![cfg_attr(
     feature = "controller",
-    doc = "Controller users can also choose [`SupervisorHandle::submit_and_watch`]."
+    doc = "Controller users can add `watch()` to the operation returned by [`SupervisorHandle::submit`]."
 )]
 //!
 //! [`Event`] and [`Subscribe`] are for logs, metrics, tracing, and live diagnostics. The shared event bus
@@ -137,7 +138,8 @@ ControllerSpec ──► controller slot
 ```
 
 A task name is the registry uniqueness key inside one supervisor. A controller slot is the key used to coordinate competing submissions.
-Different task names can share a slot. Direct `add*` methods bypass this layer; `submit*` methods use it.
+Different task names can share a slot. [`SupervisorHandle::add`] bypasses this layer;
+[`SupervisorHandle::submit`] uses it.
 See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 "#
 )]
@@ -158,8 +160,8 @@ See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 //! ```text
 //! application
 //!      ├── static batch ──► Supervisor::run*
-//!      ├── dynamic task ──► SupervisorHandle::add*
-//!      └── keyed task ──► SupervisorHandle::submit* ──► controller
+//!      ├── dynamic task ──► SupervisorHandle::add
+//!      └── keyed task ──► SupervisorHandle::submit ──► controller
 //!
 //! registry ──► TaskActor ──► sequential attempts
 //!
@@ -198,7 +200,7 @@ See [`AdmissionPolicy`] for the exact queue, replace, and reject behavior.
 //! - `test-util` exposes constructors intended for external tests.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![warn(missing_debug_implementations, missing_docs, unreachable_pub)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Compiles runnable Rust code blocks in `README.md` as doctests.
@@ -278,8 +280,9 @@ struct CommonMistakesGuideDoctests;
 
 pub mod core;
 pub use core::{
-    ConfigError, OwnershipSnapshot, Supervisor, SupervisorBuilder, SupervisorConfig,
-    SupervisorHandle, TaskDefaults, TaskOutcome, TaskOutcomeKind, TaskWaiter,
+    AddOperation, CancelOperation, ConfigError, OwnershipSnapshot, RemoveOperation, Supervisor,
+    SupervisorBuilder, SupervisorConfig, SupervisorHandle, TaskDefaults, TaskOutcome,
+    TaskOutcomeKind, TaskTarget, TaskWaiter,
 };
 
 pub mod tasks;
@@ -311,7 +314,7 @@ pub mod controller;
 #[cfg_attr(docsrs, doc(cfg(feature = "controller")))]
 pub use controller::{
     AdmissionPolicy, ControllerConfig, ControllerError, ControllerSnapshot, ControllerSpec,
-    PreparedSubmission, SlotStatusKind, SlotView,
+    PreparedSubmission, SlotStatusKind, SlotView, Submit,
 };
 
 #[cfg(feature = "logging")]

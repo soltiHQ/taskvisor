@@ -91,8 +91,10 @@ async fn admit_watched_batch(
     expect_within("pre-timed watched batch admission", async {
         let mut waiters = Vec::with_capacity(tasks.len());
         for task in tasks {
-            let (_, waiter) = handle
-                .add_and_watch(task)
+            let waiter = handle
+                .add(task)
+                .watch()
+                .execute()
                 .await
                 .expect("batch admission failed");
             waiters.push(waiter);

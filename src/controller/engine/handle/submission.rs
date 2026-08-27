@@ -22,7 +22,10 @@ use super::{
 impl ControllerHandle {
     /// Allocates an identity and sends a submission through the waiting path.
     #[cfg(test)]
-    pub async fn submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
+    pub(in crate::controller::engine) async fn submit(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.submit_prepared(id, spec).await
     }
@@ -70,7 +73,10 @@ impl ControllerHandle {
 
     /// Allocates an identity and sends a submission through the fail-fast path.
     #[cfg(test)]
-    pub fn try_submit(&self, spec: ControllerSpec) -> Result<TaskId, ControllerError> {
+    pub(in crate::controller::engine) fn try_submit(
+        &self,
+        spec: ControllerSpec,
+    ) -> Result<TaskId, ControllerError> {
         let id = TaskId::next();
         self.try_submit_prepared(id, spec)
     }
@@ -98,7 +104,7 @@ impl ControllerHandle {
 
     /// Allocates an identity and sends a watched submission through the waiting path.
     #[cfg(test)]
-    pub async fn submit_and_watch(
+    pub(in crate::controller::engine) async fn submit_and_watch(
         &self,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {
@@ -142,7 +148,7 @@ impl ControllerHandle {
 
     /// Allocates an identity and sends a watched submission through the fail-fast path.
     #[cfg(test)]
-    pub fn try_submit_and_watch(
+    pub(in crate::controller::engine) fn try_submit_and_watch(
         &self,
         spec: ControllerSpec,
     ) -> Result<(TaskId, oneshot::Receiver<TaskOutcome>), ControllerError> {

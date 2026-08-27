@@ -79,7 +79,7 @@ The [static-run code](../src/core/runtime/lifecycle/static_run.rs) owns these ra
 The wrapped Tokio sleep is safe to stop by dropping.
 A real receive, commit, or acknowledgement operation needs its own [cancellation-safety review](cancellation-and-shutdown.md#make-operations-cancellation-aware).
 
-Use [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) with [`add_and_watch`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorHandle.html#method.add_and_watch) when work arrives after startup or application logic needs each task's final outcome.
+Use [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) with `add(spec).watch().execute()` when work arrives after startup or application logic needs each task's final outcome.
 
 ## Understand the static lifecycle
 

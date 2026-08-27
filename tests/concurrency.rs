@@ -108,6 +108,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
 
     let first_id = handle
         .add(TaskSpec::restartable("blocked-poll", first))
+        .execute()
         .await
         .expect("register blocked poll");
     tokio::time::timeout(Duration::from_secs(2), first_started.notified())
@@ -115,7 +116,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
         .expect("first attempt must enter its blocking poll");
 
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), handle.cancel(first_id))
+        tokio::time::timeout(Duration::from_secs(1), handle.cancel(first_id).execute())
             .await
             .expect("logical force-abort must remain grace-bounded")
             .expect("cancel request")
@@ -131,6 +132,7 @@ async fn force_abort_retains_attempt_permit_until_blocked_poll_really_stops() {
     );
     handle
         .add(TaskSpec::restartable("replacement", second))
+        .execute()
         .await
         .expect("register replacement");
 
@@ -172,12 +174,19 @@ async fn force_aborted_attempt_keeps_its_name_reserved_until_physical_exit() {
     );
     let first_id = handle
         .add(TaskSpec::restartable("physically-reserved", first))
+        .execute()
         .await
         .expect("register blocked task");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("blocked attempt must start");
-    assert!(handle.cancel(first_id).await.expect("cancel blocked task"));
+    assert!(
+        handle
+            .cancel(first_id)
+            .execute()
+            .await
+            .expect("cancel blocked task")
+    );
     assert!(
         handle.is_alive("physically-reserved").await,
         "logical removal must still report a physically running reaped attempt"
@@ -198,6 +207,7 @@ async fn force_aborted_attempt_keeps_its_name_reserved_until_physical_exit() {
     });
     let duplicate = handle
         .add(TaskSpec::once("physically-reserved", rejected))
+        .execute()
         .await;
     assert!(
         matches!(
@@ -219,6 +229,7 @@ async fn force_aborted_attempt_keeps_its_name_reserved_until_physical_exit() {
             });
             match handle
                 .add(TaskSpec::once("physically-reserved", replacement))
+                .execute()
                 .await
             {
                 Ok(id) => break id,
@@ -257,15 +268,23 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
     );
     let first_id = handle
         .add(TaskSpec::restartable("budget-blocked-poll", first))
+        .execute()
         .await
         .expect("register blocked poll");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("blocked attempt must start");
-    assert!(handle.cancel(first_id).await.expect("cancel blocked poll"));
+    assert!(
+        handle
+            .cancel(first_id)
+            .execute()
+            .await
+            .expect("cancel blocked poll")
+    );
 
     let rejected = handle
         .add(TaskSpec::once("budget-after-reap", make_ok_once()))
+        .execute()
         .await;
     assert!(
         matches!(
@@ -284,6 +303,7 @@ async fn reaping_attempts_remain_charged_to_registered_resource_budget() {
         loop {
             match handle
                 .add(TaskSpec::once("budget-after-reap", make_ok_once()))
+                .execute()
                 .await
             {
                 Ok(id) => break id,
@@ -326,6 +346,7 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
     });
     let first_id = handle
         .add(TaskSpec::restartable("blocking-retry-drop", failing))
+        .execute()
         .await
         .expect("register retrying task");
     tokio::time::timeout(Duration::from_secs(2), drop_started.notified())
@@ -333,7 +354,7 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
         .expect("retry source destructor must start inside the attempt");
 
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), handle.cancel(first_id))
+        tokio::time::timeout(Duration::from_secs(1), handle.cancel(first_id).execute())
             .await
             .expect("logical cancellation must remain grace-bounded")
             .expect("cancel retrying task")
@@ -349,6 +370,7 @@ async fn retry_source_destructor_remains_inside_attempt_concurrency_boundary() {
             "after-blocking-retry-drop",
             replacement,
         ))
+        .execute()
         .await
         .expect("register replacement");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -373,6 +395,7 @@ async fn add_storm_unique_names_all_register_then_drain_to_empty() {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
                 h.add(TaskSpec::restartable(format!("w-{i}"), make_coop()))
+                    .execute()
                     .await
                     .expect("add")
             }));
@@ -394,7 +417,7 @@ async fn add_storm_unique_names_all_register_then_drain_to_empty() {
         let mut rjoins = Vec::new();
         for id in ids {
             let h = handle.clone();
-            rjoins.push(tokio::spawn(async move { h.remove(id).await }));
+            rjoins.push(tokio::spawn(async move { h.remove(id).execute().await }));
         }
         for j in rjoins {
             let _ = j.await;
@@ -419,7 +442,9 @@ async fn add_storm_duplicate_name_exactly_one_registers() {
         for _ in 0..N {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
-                h.add(TaskSpec::restartable("dup", make_coop())).await
+                h.add(TaskSpec::restartable("dup", make_coop()))
+                    .execute()
+                    .await
             }));
         }
         let mut accepted = 0;
@@ -468,9 +493,10 @@ async fn interleaved_add_and_remove_drains_to_empty() {
             joins.push(tokio::spawn(async move {
                 let id = h
                     .add(TaskSpec::restartable(format!("t-{i}"), make_coop()))
+                    .execute()
                     .await
                     .expect("add");
-                let _ = h.remove(id).await;
+                let _ = h.remove(id).execute().await;
                 id
             }));
         }
@@ -479,7 +505,7 @@ async fn interleaved_add_and_remove_drains_to_empty() {
             ids.push(j.await.unwrap());
         }
         for id in ids {
-            let _ = handle.remove(id).await;
+            let _ = handle.remove(id).execute().await;
         }
         assert!(
             poll_until(Duration::from_secs(15), || async {
@@ -510,6 +536,7 @@ async fn concurrent_remove_same_id_has_exactly_one_claim() {
     });
     let id = handle
         .add(TaskSpec::restartable("remove-race", task))
+        .execute()
         .await
         .expect("register remove-race");
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -523,6 +550,7 @@ async fn concurrent_remove_same_id_has_exactly_one_claim() {
         joins.push(tokio::spawn(async move {
             handle
                 .remove(id)
+                .execute()
                 .await
                 .expect("Remove must receive a reply")
         }));
@@ -558,6 +586,7 @@ async fn cancel_storm_by_id_returns_true_and_drains() {
             ids.push(
                 handle
                     .add(TaskSpec::restartable(format!("c-{i}"), make_coop()))
+                    .execute()
                     .await
                     .expect("register"),
             );
@@ -566,9 +595,9 @@ async fn cancel_storm_by_id_returns_true_and_drains() {
         let mut joins = Vec::new();
         for id in ids {
             let h = handle.clone();
-            joins.push(tokio::spawn(
-                async move { with_timeout(5, h.cancel(id)).await },
-            ));
+            joins.push(tokio::spawn(async move {
+                with_timeout(5, h.cancel(id).execute()).await
+            }));
         }
         for j in joins {
             assert!(
@@ -593,15 +622,16 @@ async fn concurrent_cancel_same_id_returns_exactly_one_true() {
     with_timeout(20, async {
         let id = handle
             .add(TaskSpec::restartable("one", make_coop()))
+            .execute()
             .await
             .expect("register");
 
         let mut joins = Vec::new();
         for _ in 0..K {
             let h = handle.clone();
-            joins.push(tokio::spawn(
-                async move { with_timeout(5, h.cancel(id)).await },
-            ));
+            joins.push(tokio::spawn(async move {
+                with_timeout(5, h.cancel(id).execute()).await
+            }));
         }
         let mut trues = 0;
         for j in joins {
@@ -633,6 +663,7 @@ async fn rapid_short_lived_once_tasks_alive_tracker_converges_empty() {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
                 h.add(TaskSpec::once(format!("o-{i}"), make_ok_once()))
+                    .execute()
                     .await
                     .expect("add")
             }));
@@ -670,6 +701,7 @@ async fn add_storm_with_concurrency_limit_bound_respected_no_deadlock() {
             );
             handle
                 .add(TaskSpec::restartable(name, task))
+                .execute()
                 .await
                 .expect("add");
         }
@@ -705,6 +737,7 @@ async fn add_then_immediate_shutdown_storm_returns_within_grace() {
             let h = handle.clone();
             adds.push(tokio::spawn(async move {
                 h.add(TaskSpec::restartable(format!("s-{i}"), make_coop()))
+                    .execute()
                     .await
             }));
         }
@@ -749,6 +782,7 @@ async fn controller_many_distinct_slots_all_settle() {
             joins.push(tokio::spawn(async move {
                 let spec = TaskSpec::restartable(format!("svc-{s}"), make_coop());
                 h.submit(ControllerSpec::queue(spec).with_slot(format!("slot-{s}")))
+                    .execute()
                     .await
             }));
         }
@@ -791,18 +825,22 @@ async fn controller_replace_storm_single_slot_one_alive() {
             let h = handle.clone();
             joins.push(tokio::spawn(async move {
                 let spec = TaskSpec::restartable(format!("run-{i}"), make_coop());
-                h.submit(ControllerSpec::replace(spec).with_slot("s")).await
+                h.submit(ControllerSpec::replace(spec).with_slot("s"))
+                    .execute()
+                    .await
             }));
         }
         for j in joins {
             j.await.unwrap().expect("submit ok");
         }
 
-        let (_, barrier) = handle
-            .submit_and_watch(
+        let barrier = handle
+            .submit(
                 ControllerSpec::queue(TaskSpec::once("replace-storm-barrier", make_ok_once()))
                     .with_slot("replace-storm-barrier"),
             )
+            .watch()
+            .execute()
             .await
             .expect("barrier submit ok");
         assert!(matches!(
@@ -870,6 +908,7 @@ async fn controller_drop_if_running_storm_one_runs_rest_rejected() {
             joins.push(tokio::spawn(async move {
                 let spec = TaskSpec::restartable(name, task);
                 h.submit(ControllerSpec::drop_if_running(spec).with_slot("s"))
+                    .execute()
                     .await
             }));
         }

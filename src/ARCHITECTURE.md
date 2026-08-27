@@ -14,8 +14,8 @@ The optional controller adds one admission step before the registry and can reje
 ```text
 application
 ├── run* ───► registry
-├── serve ──► SupervisorHandle ──► add* ─────► registry
-└── serve ──► SupervisorHandle ──► submit* ──► controller ──► registry
+├── serve ──► SupervisorHandle ──► add operation ─────► registry
+└── serve ──► SupervisorHandle ──► submit operation ──► controller ──► registry
 
 registry
 ├── admitted task ───────────► TaskActor ──► run_once ──► Task
@@ -28,8 +28,8 @@ terminal user values ──► deferred cleanup domain
 
 `run*` means `run`, `run_until`, or `run_with_os_signals`. These methods manage an initial batch.
 `serve` returns a `SupervisorHandle` for dynamic management.
-The handle exposes `add*`, `submit*`, and `prepare_submission`.
-A `PreparedSubmission` exposes its own `submit*` methods for the reserved `TaskId`.
+The handle exposes `add`, `remove`, `cancel`, `submit`, and `prepare_submission`.
+A `PreparedSubmission` creates a `submit` operation for the reserved `TaskId`.
 
 `SupervisorCore` connects the runtime components. The registry owns task membership.
 A `TaskActor` owns the lifecycle of one registered task. `run_once` executes one physical attempt.
@@ -112,7 +112,7 @@ Module docs under [`core/registry/`](core/registry) describe the admission and r
 ### 3. Coordinate work through the controller
 
 The `controller` feature is enabled by default, but controller admission is a runtime opt-in through `SupervisorBuilder::with_controller`.
-Direct `add*` methods bypass it. `SupervisorHandle::submit*` methods use it.
+`SupervisorHandle::add` bypasses it. `SupervisorHandle::submit` uses it.
 
 ```text
 ControllerSpec ──► controller slot
@@ -131,7 +131,7 @@ Events do not. Start with [`controller/mod.rs`](controller/mod.rs) for the publi
 
 With a controller configured, cancel and remove operations by `TaskId` pass through the controller before the registry.
 This lets them reach queued submissions and preserves controller command order.
-`cancel_by_name` and `remove_by_name` target registered work because queued submissions do not own a registered name.
+Name targets passed to `cancel` and `remove` address registered work because queued submissions do not own a registered name.
 
 ### 4. Return results or publish observations
 
@@ -147,7 +147,7 @@ Choose the source that answers the question:
 | What happened for logs, metrics, or tracing?                   | Best-effort events and subscribers                   |
 
 A management reply is not a final task result. A `TaskWaiter` is direct but not durable across process termination.
-Event loss does not change runtime state or watched outcomes. A controller `submit*` reply confirms command intake,
+Event loss does not change runtime state or watched outcomes. A controller submission reply confirms command intake,
 not positive slot admission.
 
 ### 5. Shut down and release ownership

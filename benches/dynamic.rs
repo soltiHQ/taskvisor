@@ -75,7 +75,7 @@ const OWNERSHIP_RELEASE: CaseFamily = CaseFamily::intake(
     "OWNERSHIP RELEASE TO WATCHED ADMISSION",
     "accepted watched add",
     "accepted watched adds",
-    "release of a completed task's blocked final Drop through acceptance of one already-parked add_and_watch at ownership capacity one",
+    "release of a completed task's blocked final Drop through acceptance of one already-parked watched add at ownership capacity one",
     "Supervisor startup and warmup, holder completion, gate-entry and parked-waiter checks, the next task's outcome, physical ownership reset, shutdown, and Tokio runtime construction",
 );
 
@@ -96,7 +96,7 @@ fn cooperative_task(name: impl Into<Arc<str>>, started: Option<Arc<AsyncFlag>>) 
 async fn cancel_held(handle: &SupervisorHandle, ids: impl IntoIterator<Item = taskvisor::TaskId>) {
     for id in ids {
         assert!(
-            expect_within("held-task cancellation", handle.cancel(id))
+            expect_within("held-task cancellation", handle.cancel(id).execute())
                 .await
                 .expect("held-task cancellation failed"),
             "benchmark must claim each held task"
@@ -159,7 +159,7 @@ fn bench_registry_add(c: &mut Criterion) {
                             let elapsed = expect_within("root-caller sequential adds", async {
                                 let start = Instant::now();
                                 for spec in specs {
-                                    accepted.push(handle.add(spec).await);
+                                    accepted.push(handle.add(spec).execute().await);
                                 }
                                 start.elapsed()
                             })
@@ -221,7 +221,7 @@ fn bench_registry_add(c: &mut Criterion) {
                                 let mut accepted = Vec::with_capacity(BURST_SIZE);
                                 let start = Instant::now();
                                 for spec in specs {
-                                    accepted.push(worker_handle.add(spec).await);
+                                    accepted.push(worker_handle.add(spec).execute().await);
                                 }
                                 (accepted, start.elapsed())
                             });
@@ -283,8 +283,11 @@ fn bench_registry_add(c: &mut Criterion) {
 
                             let worker_handle = handle.clone();
                             let caller = tokio::spawn(async move {
-                                let additions =
-                                    join_all(specs.into_iter().map(|spec| worker_handle.add(spec)));
+                                let additions = join_all(
+                                    specs
+                                        .into_iter()
+                                        .map(|spec| worker_handle.add(spec).execute()),
+                                );
                                 let start = Instant::now();
                                 let accepted = additions.await;
                                 (accepted, start.elapsed())
@@ -332,15 +335,18 @@ fn bench_cancel_started(c: &mut Criterion) {
                     for _ in 0..iters {
                         let started = AsyncFlag::new();
                         let spec = cooperative_task("cancel-started", Some(Arc::clone(&started)));
-                        let (id, waiter) =
-                            expect_within("cancel-case admission", handle.add_and_watch(spec))
-                                .await
-                                .expect("cancel-case admission failed");
+                        let waiter = expect_within(
+                            "cancel-case admission",
+                            handle.add(spec).watch().execute(),
+                        )
+                        .await
+                        .expect("cancel-case admission failed");
+                        let id = waiter.id();
                         expect_within("the task to start", started.wait()).await;
 
                         let elapsed = expect_within("started-task cancellation", async {
                             let start = Instant::now();
-                            let claimed = handle.cancel(id).await.expect("cancel failed");
+                            let claimed = handle.cancel(id).execute().await.expect("cancel failed");
                             expect_canceled(waiter).await;
                             let elapsed = start.elapsed();
                             assert!(claimed, "benchmark must claim its started task");
@@ -382,9 +388,12 @@ fn bench_list(c: &mut Criterion) {
                             let mut ids = Vec::with_capacity(count);
                             for i in 0..count {
                                 let spec = cooperative_task(format!("list-{i}"), None);
-                                let id = expect_within("snapshot prepopulation", handle.add(spec))
-                                    .await
-                                    .expect("snapshot prepopulation failed");
+                                let id = expect_within(
+                                    "snapshot prepopulation",
+                                    handle.add(spec).execute(),
+                                )
+                                .await
+                                .expect("snapshot prepopulation failed");
                                 ids.push(id);
                             }
                             wait_for_ownership(&handle, count).await;
@@ -445,9 +454,12 @@ fn bench_ownership_release(c: &mut Criterion) {
                         let task: TaskRef = Arc::new(RetainedFinalDrop {
                             gate: Arc::clone(&gate),
                         });
-                        let (_, holder) = expect_within(
+                        let holder = expect_within(
                             "cleanup-holder admission",
-                            handle.add_and_watch(TaskSpec::once("retained-final-drop", task)),
+                            handle
+                                .add(TaskSpec::once("retained-final-drop", task))
+                                .watch()
+                                .execute(),
                         )
                         .await
                         .expect("cleanup-holder admission failed");
@@ -458,7 +470,7 @@ fn bench_ownership_release(c: &mut Criterion) {
                         assert_eq!(blocked.cleanup_running, 1);
 
                         let mut admission =
-                            Box::pin(handle.add_and_watch(instant_task("after-release")));
+                            Box::pin(handle.add(instant_task("after-release")).watch().execute());
                         expect_within(
                             "ownership waiter registration",
                             poll_fn(|cx| {
@@ -484,10 +496,9 @@ fn bench_ownership_release(c: &mut Criterion) {
                                 (accepted, start.elapsed())
                             })
                             .await;
-                        let (id, waiter) =
-                            accepted.expect("released ownership must admit the next task");
+                        let waiter = accepted.expect("released ownership must admit the next task");
                         gate.assert_not_timed_out();
-                        black_box(id);
+                        black_box(waiter.id());
                         expect_completed(waiter).await;
                         wait_for_ownership(&handle, 0).await;
                         total += elapsed;

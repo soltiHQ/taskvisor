@@ -188,10 +188,12 @@ fn bench_completion(c: &mut Criterion) {
                         for _ in 0..iters {
                             let (task, attempts) = retry_task("watched", failures);
                             let start = Instant::now();
-                            let (_, waiter) =
-                                expect_within("watched admission", handle.add_and_watch(task))
-                                    .await
-                                    .expect("watched admission failed");
+                            let waiter = expect_within(
+                                "watched admission",
+                                handle.add(task).watch().execute(),
+                            )
+                            .await
+                            .expect("watched admission failed");
                             expect_completed(waiter).await;
                             total += start.elapsed();
 
@@ -232,17 +234,21 @@ fn bench_cancel_backoff(c: &mut Criterion) {
                         let task =
                             task.with_backoff(BackoffPolicy::constant(Duration::from_secs(60)));
                         let expected_events = observer.count() + 1;
-                        let (id, waiter) =
-                            expect_within("retry task admission", handle.add_and_watch(task))
-                                .await
-                                .expect("retry task admission failed");
+                        let waiter = expect_within(
+                            "retry task admission",
+                            handle.add(task).watch().execute(),
+                        )
+                        .await
+                        .expect("retry task admission failed");
+                        let id = waiter.id();
                         observer.wait_for_count(expected_events).await;
                         observer.assert_healthy();
 
                         let start = Instant::now();
-                        let claimed = expect_within("backoff cancellation", handle.cancel(id))
-                            .await
-                            .expect("backoff cancellation failed");
+                        let claimed =
+                            expect_within("backoff cancellation", handle.cancel(id).execute())
+                                .await
+                                .expect("backoff cancellation failed");
                         expect_canceled(waiter).await;
                         total += start.elapsed();
 
@@ -295,9 +301,9 @@ fn bench_periodic(c: &mut Criterion) {
                             };
 
                             let start = Instant::now();
-                            let (_, waiter) = expect_within(
+                            let waiter = expect_within(
                                 "finite periodic task admission",
-                                handle.add_and_watch(spec),
+                                handle.add(spec).watch().execute(),
                             )
                             .await
                             .expect("finite periodic task admission failed");
@@ -343,12 +349,15 @@ fn bench_requested_shutdown(c: &mut Criterion) {
                             let started = AsyncCounter::new();
                             let mut waiters = Vec::with_capacity(task_count);
                             for i in 0..task_count {
-                                let (_, waiter) = expect_within(
+                                let waiter = expect_within(
                                     "cooperative shutdown task admission",
-                                    handle.add_and_watch(cooperative_shutdown_task(
-                                        format!("shutdown-cooperative-{iteration}-{i}"),
-                                        Arc::clone(&started),
-                                    )),
+                                    handle
+                                        .add(cooperative_shutdown_task(
+                                            format!("shutdown-cooperative-{iteration}-{i}"),
+                                            Arc::clone(&started),
+                                        ))
+                                        .watch()
+                                        .execute(),
                                 )
                                 .await
                                 .expect("cooperative shutdown task admission failed");
@@ -397,12 +406,15 @@ fn bench_grace_exceeded(c: &mut Criterion) {
                             let started = AsyncCounter::new();
                             let mut waiters = Vec::with_capacity(task_count);
                             for i in 0..task_count {
-                                let (_, waiter) = expect_within(
+                                let waiter = expect_within(
                                     "stubborn shutdown task admission",
-                                    handle.add_and_watch(stubborn_shutdown_task(
-                                        format!("shutdown-stubborn-{iteration}-{i}"),
-                                        Arc::clone(&started),
-                                    )),
+                                    handle
+                                        .add(stubborn_shutdown_task(
+                                            format!("shutdown-stubborn-{iteration}-{i}"),
+                                            Arc::clone(&started),
+                                        ))
+                                        .watch()
+                                        .execute(),
                                 )
                                 .await
                                 .expect("stubborn shutdown task admission failed");

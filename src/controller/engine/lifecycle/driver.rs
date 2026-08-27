@@ -71,7 +71,7 @@ impl Controller {
     /// Starts the single owned controller loop.
     ///
     /// Later calls are no-ops. Runtime shutdown joins this task before cleanup completes.
-    pub fn run(self: &Arc<Self>) {
+    pub(crate) fn run(self: &Arc<Self>) {
         self.task.get_or_init(|| {
             let rx = self
                 .take_command_receiver()

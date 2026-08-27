@@ -1,4 +1,4 @@
-//! Integration tests for `add_and_watch` / `TaskWaiter`.
+//! Integration tests for `add(...).watch().execute()` / `TaskWaiter`.
 
 mod common;
 
@@ -61,10 +61,13 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
     let spec = TaskSpec::restartable("drifter", make_fail(Some(9)))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(2).unwrap());
-    let (id, waiter) = handle
-        .add_and_watch(spec)
+    let waiter = handle
+        .add(spec)
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
+    let id = waiter.id();
 
     let outcome = with_timeout(5, waiter.wait())
         .await
@@ -109,10 +112,13 @@ async fn outcome_reason_is_byte_identical_to_the_event_reason() {
 async fn watched_add_variants_return_the_same_completed_contract() {
     let handle = served();
 
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once("ok", make_ok_once()))
+    let waiter = handle
+        .add(TaskSpec::once("ok", make_ok_once()))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
+    let id = waiter.id();
     assert_eq!(waiter.id(), id);
 
     let outcome = with_timeout(5, waiter.wait())
@@ -121,10 +127,14 @@ async fn watched_add_variants_return_the_same_completed_contract() {
     assert!(matches!(outcome, TaskOutcome::Completed));
     assert!(outcome.is_success());
 
-    let (id, waiter) = handle
-        .try_add_and_watch(TaskSpec::once("try-ok", make_ok_once()))
+    let waiter = handle
+        .add(TaskSpec::once("try-ok", make_ok_once()))
+        .watch()
+        .fail_fast()
+        .execute()
         .await
         .expect("the management queue has capacity");
+    let id = waiter.id();
     assert_eq!(waiter.id(), id);
     assert!(matches!(
         with_timeout(5, waiter.wait()).await,
@@ -143,10 +153,12 @@ async fn completed_outcome_precedes_a_panicking_final_task_destructor() {
         gate: Arc::clone(&gate),
     });
 
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once("panicking-final-task-drop", task))
+    let waiter = handle
+        .add(TaskSpec::once("panicking-final-task-drop", task))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     assert!(
         poll_until(Duration::from_secs(2), || {
@@ -185,10 +197,12 @@ async fn completed_outcome_precedes_a_panicking_final_task_destructor() {
 async fn fatal_outcome_for_fatal_error() {
     let handle = served();
 
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("doomed", make_fatal(Some(137))))
+    let waiter = handle
+        .add(TaskSpec::restartable("doomed", make_fatal(Some(137))))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     match with_timeout(5, waiter.wait())
         .await
@@ -213,10 +227,12 @@ async fn fatal_outcome_for_fatal_error() {
 async fn failed_outcome_after_task_panic_with_never_policy() {
     let handle = served();
 
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once("kaboom", make_panic()))
+    let waiter = handle
+        .add(TaskSpec::once("kaboom", make_panic()))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     match with_timeout(5, waiter.wait())
         .await
@@ -239,10 +255,12 @@ async fn spurious_canceled_return_resolves_canceled_outcome() {
     let handle = served();
 
     let liar: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Err(TaskError::Canceled) });
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("liar-watch", liar))
+    let waiter = handle
+        .add(TaskSpec::restartable("liar-watch", liar))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     let outcome = with_timeout(5, waiter.wait())
         .await
@@ -262,10 +280,12 @@ async fn shutdown_drain_force_aborts_stubborn_watched_task() {
     let handle = sup.serve().expect("runtime startup");
 
     let (stubborn, started) = make_stubborn();
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once("stubborn-watch", stubborn))
+    let waiter = handle
+        .add(TaskSpec::once("stubborn-watch", stubborn))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
     wait_for_start("stubborn-watch", &started).await;
 
     let (shutdown_res, outcome) = tokio::join!(handle.shutdown(), with_timeout(5, waiter.wait()));
@@ -288,10 +308,13 @@ async fn waiter_stays_pending_across_periodic_reruns() {
             interval: Some(Duration::from_millis(20)),
         },
     );
-    let (id, waiter) = handle
-        .add_and_watch(spec)
+    let waiter = handle
+        .add(spec)
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
+    let id = waiter.id();
 
     let pending = tokio::time::timeout(Duration::from_millis(200), waiter.wait()).await;
     assert!(
@@ -299,7 +322,7 @@ async fn waiter_stays_pending_across_periodic_reruns() {
         "waiter must stay pending across successful Always re-runs"
     );
 
-    let _ = handle.cancel(id).await;
+    let _ = handle.cancel(id).execute().await;
     let _ = handle.shutdown().await;
 }
 
@@ -307,12 +330,19 @@ async fn waiter_stays_pending_across_periodic_reruns() {
 async fn cancelled_outcome_when_task_is_cancelled() {
     let handle = served();
 
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("coop", make_coop()))
+    let waiter = handle
+        .add(TaskSpec::restartable("coop", make_coop()))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
+    let id = waiter.id();
 
-    let removed = handle.cancel(id).await.expect("cancel should not error");
+    let removed = handle
+        .cancel(id)
+        .execute()
+        .await
+        .expect("cancel should not error");
     assert!(removed, "existing task must report removed=true");
 
     let outcome = with_timeout(5, waiter.wait())
@@ -330,14 +360,21 @@ async fn force_aborted_outcome_for_noncooperative_task() {
     let handle = sup.serve().expect("runtime startup");
 
     let (stubborn, started) = make_stubborn();
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::once("stubborn", stubborn))
+    let waiter = handle
+        .add(TaskSpec::once("stubborn", stubborn))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
+    let id = waiter.id();
     wait_for_start("stubborn", &started).await;
 
     assert!(
-        handle.cancel(id).await.expect("cancel should be accepted"),
+        handle
+            .cancel(id)
+            .execute()
+            .await
+            .expect("cancel should be accepted"),
         "plain cancel must wait through registry force-abort without a caller timeout"
     );
 
@@ -354,12 +391,16 @@ async fn duplicate_name_returns_already_exists_not_a_waiter() {
     let handle = served();
 
     let first = handle
-        .add_and_watch(TaskSpec::restartable("dup", make_coop()))
+        .add(TaskSpec::restartable("dup", make_coop()))
+        .watch()
+        .execute()
         .await;
     assert!(first.is_ok(), "first add must succeed");
 
     let second = handle
-        .add_and_watch(TaskSpec::restartable("dup", make_coop()))
+        .add(TaskSpec::restartable("dup", make_coop()))
+        .watch()
+        .execute()
         .await;
     assert!(
         matches!(second, Err(RuntimeError::TaskAlreadyExists { .. })),
@@ -373,10 +414,12 @@ async fn duplicate_name_returns_already_exists_not_a_waiter() {
 async fn shutdown_resolves_pending_waiters() {
     let handle = served();
 
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("worker", make_coop()))
+    let waiter = handle
+        .add(TaskSpec::restartable("worker", make_coop()))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     handle
         .clone()
@@ -397,10 +440,13 @@ async fn shutdown_resolves_pending_waiters() {
 async fn dropping_waiter_does_not_affect_task() {
     let handle = served();
 
-    let (id, waiter) = handle
-        .add_and_watch(TaskSpec::restartable("ignored", make_coop()))
+    let waiter = handle
+        .add(TaskSpec::restartable("ignored", make_coop()))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
+    let id = waiter.id();
     drop(waiter);
 
     assert!(
@@ -411,7 +457,11 @@ async fn dropping_waiter_does_not_affect_task() {
         "task must keep running after its waiter is dropped"
     );
 
-    let removed = handle.cancel(id).await.expect("cancel should not error");
+    let removed = handle
+        .cancel(id)
+        .execute()
+        .await
+        .expect("cancel should not error");
     assert!(removed);
 
     let _ = handle.shutdown().await;
@@ -427,10 +477,12 @@ async fn outcome_is_delivered_even_under_bus_lag() {
     let spec = TaskSpec::restartable("noisy", make_fail(None))
         .with_backoff(fast_backoff())
         .with_max_retries(NonZeroU32::new(5).unwrap());
-    let (_id, waiter) = handle
-        .add_and_watch(spec)
+    let waiter = handle
+        .add(spec)
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     match with_timeout(5, waiter.wait())
         .await
@@ -454,10 +506,12 @@ async fn task_error_source_survives_end_to_end_to_the_outcome() {
         )))
     });
 
-    let (_id, waiter) = handle
-        .add_and_watch(TaskSpec::once("io-fail", task))
+    let waiter = handle
+        .add(TaskSpec::once("io-fail", task))
+        .watch()
+        .execute()
         .await
-        .expect("add_and_watch should succeed");
+        .expect("watched add should succeed");
 
     let outcome = with_timeout(5, waiter.wait())
         .await

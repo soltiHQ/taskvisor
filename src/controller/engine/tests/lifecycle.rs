@@ -195,12 +195,15 @@ async fn completed_owner_progresses_under_continuously_ready_intake() {
             }
         }
     });
-    let (owner_id, owner_waiter) = handle
-        .submit_and_watch(
+    let owner_waiter = handle
+        .submit(
             ControllerSpec::queue(TaskSpec::once("starvation-owner", owner)).with_slot("hot-slot"),
         )
+        .watch()
+        .execute()
         .await
         .expect("the initial owner submission must enter the controller");
+    let owner_id = owner_waiter.id();
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("the initial owner must start");
@@ -225,7 +228,7 @@ async fn completed_owner_progresses_under_continuously_ready_intake() {
         let producer_failed = Arc::clone(&producer_failed);
         producers.push(std::thread::spawn(move || {
             while !producer_stop.load(Ordering::Relaxed) {
-                match producer_handle.try_submit(producer_spec.clone()) {
+                match producer_handle.submit(producer_spec.clone()).try_intake() {
                     Ok(_) => {}
                     Err(ControllerError::Full) => {
                         producer_saw_full.store(true, Ordering::Release);

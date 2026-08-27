@@ -11,11 +11,11 @@ One registration has one task ID. Its attempts run one at a time.
 
 ## Choose how work enters
 
-| Entry path                                                                                                             | Use it for                                                      |
-|------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| `Supervisor::run*`                                                                                                     | A fixed batch or resident workers known at startup.             |
-| [`Supervisor::serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) + `add*`    | Work discovered or managed while the service is running.        |
-| [`Supervisor::serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) + `submit*` | Work that first needs per-key queue, replace, or reject policy. |
+| Entry path                                                                                                                           | Use it for                                                      |
+|--------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| `Supervisor::run*`                                                                                                                   | A fixed batch or resident workers known at startup.             |
+| [`Supervisor::serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) + `add(...).execute()`    | Work discovered or managed while the service is running.        |
+| [`Supervisor::serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) + `submit(...).execute()` | Work that first needs per-key queue, replace, or reject policy. |
 
 Static batches and direct adds enter the same registry.
 Controller submissions apply slot admission first, then hand admitted work to that registry.
@@ -33,8 +33,8 @@ Registry["Registry: membership and removal"]
 Task["Task actor: sequential attempts"]
 Cleanup["Deferred cleanup: retained values"]
 
-API -->|"run* / add*"| Registry
-API -->|"submit*"| Controller
+API -->|"run* / add(...).execute()"| Registry
+API -->|"submit(...).execute()"| Controller
 Controller -->|"admitted work"| Registry
 Registry -->|"one actor per task ID"| Task
 Task -.->|"actor result"| Registry

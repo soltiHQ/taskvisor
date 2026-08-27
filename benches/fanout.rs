@@ -258,11 +258,12 @@ fn bench_saturated_subscriber(c: &mut Criterion) {
                             held.arm(Arc::clone(&gate));
                             let marker_counts: Vec<_> =
                                 healthy.iter().map(|counter| counter.count() + 1).collect();
-                            let (_, waiter) = expect_within(
+                            let waiter = expect_within(
                                 "gate marker admission",
-                                handle.add_and_watch(instant_task(format!(
-                                    "gate-marker-{iteration}"
-                                ))),
+                                handle
+                                    .add(instant_task(format!("gate-marker-{iteration}")))
+                                    .watch()
+                                    .execute(),
                             )
                             .await
                             .expect("gate marker admission failed");
