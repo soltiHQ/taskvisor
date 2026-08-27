@@ -111,6 +111,9 @@ The [shutdown coordinator](../src/core/runtime/shutdown_workflow/mod.rs) owns th
 The [cleanup workflow](../src/core/runtime/shutdown_workflow/cleanup.rs) owns the drain order and deadlines.
 
 After a shutdown future is first polled, dropping that caller's future does not stop the detached workflow.
+Taskvisor schedules that workflow on the Tokio runtime that successfully started the supervisor.
+Polling shutdown from another runtime does not transfer cleanup ownership to it.
+The startup runtime must remain alive and driven until the shared operation completes.
 Its return does not prove that force-aborted synchronous code, a running subscriber callback, or a user destructor has finished.
 Dropping the final public owner can request cancellation, but a destructor cannot await cleanup or report errors.
 

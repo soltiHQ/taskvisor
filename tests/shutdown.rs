@@ -5,13 +5,14 @@ mod common;
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -42,6 +43,90 @@ async fn assert_pending_once<F: Future>(mut future: Pin<&mut F>) {
         Poll::Ready(_) => panic!("future completed before the expected ordering point"),
     })
     .await;
+}
+
+fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+    let mut context = Context::from_waker(Waker::noop());
+    future.as_mut().poll(&mut context)
+}
+
+fn served_gated_runtime(
+    name: &'static str,
+) -> (
+    tokio::runtime::Runtime,
+    Arc<Supervisor>,
+    SupervisorHandle,
+    TaskWaiter,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("origin runtime");
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (handle, waiter) = runtime.block_on(async {
+        let handle = supervisor.serve().expect("runtime startup");
+        let waiter = handle
+            .add(TaskSpec::restartable(
+                name,
+                make_gated_cancel(
+                    Arc::clone(&started),
+                    Arc::clone(&cancellation_seen),
+                    Arc::clone(&release),
+                ),
+            ))
+            .watch()
+            .execute()
+            .await
+            .expect("the gated task must register");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the gated task must start");
+        (handle, waiter)
+    });
+    (
+        runtime,
+        supervisor,
+        handle,
+        waiter,
+        cancellation_seen,
+        release,
+    )
+}
+
+fn finish_detached_shutdown(
+    runtime: &tokio::runtime::Runtime,
+    handle: SupervisorHandle,
+    waiter: TaskWaiter,
+    cancellation_seen: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+) {
+    runtime.block_on(async {
+        let mut shutdown = Box::pin(handle.shutdown());
+        tokio::select! {
+            biased;
+            result = &mut shutdown => {
+                panic!("shared shutdown finished before task cancellation: {result:?}");
+            }
+            _ = cancellation_seen.notified() => {}
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("the detached shutdown owner must finish")
+            .expect("the detached shutdown owner must publish a clean result");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), waiter.wait())
+                .await
+                .expect("the watched task must publish its outcome")
+                .expect("the watched task outcome must remain available"),
+            TaskOutcome::Canceled
+        ));
+    });
 }
 
 #[derive(Default)]
@@ -849,6 +934,76 @@ async fn dropping_only_shutdown_waiter_does_not_override_detached_graceful_clean
         .await
         .expect("detached cleanup must publish its graceful result");
     assert_eq!(collector.count(EventKind::GraceExceeded), 0);
+}
+
+#[test]
+fn shutdown_first_poll_outside_tokio_uses_startup_runtime() {
+    let (runtime, _supervisor, handle, waiter, cancellation_seen, release) =
+        served_gated_runtime("shutdown-outside-tokio");
+    let late = handle.clone();
+    let mut shutdown = Box::pin(handle.shutdown());
+
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let first_poll = catch_unwind(AssertUnwindSafe(|| poll_once(shutdown.as_mut())))
+        .expect("first shutdown poll outside Tokio must not panic");
+    assert!(
+        matches!(first_poll, Poll::Pending),
+        "the gated task keeps shutdown pending until cancellation is released"
+    );
+    drop(shutdown);
+
+    finish_detached_shutdown(&runtime, late, waiter, cancellation_seen, release);
+}
+
+#[test]
+fn shutdown_owner_is_not_bound_to_temporary_polling_runtime() {
+    let (runtime, _supervisor, handle, waiter, cancellation_seen, release) =
+        served_gated_runtime("shutdown-temporary-runtime");
+    let late = handle.clone();
+    let mut shutdown = Box::pin(handle.shutdown());
+    let polling_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("temporary polling runtime");
+
+    let first_poll = {
+        let _entered = polling_runtime.enter();
+        catch_unwind(AssertUnwindSafe(|| poll_once(shutdown.as_mut())))
+            .expect("first shutdown poll on another runtime must not panic")
+    };
+    assert!(
+        matches!(first_poll, Poll::Pending),
+        "the gated task keeps shutdown pending until cancellation is released"
+    );
+    drop(shutdown);
+    drop(polling_runtime);
+
+    finish_detached_shutdown(&runtime, late, waiter, cancellation_seen, release);
+}
+
+#[test]
+fn shutdown_after_startup_runtime_drop_returns_shutting_down_without_panic() {
+    let startup_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("startup runtime");
+    let supervisor = Supervisor::new(SupervisorConfig::default(), vec![]);
+    let handle = {
+        let _entered = startup_runtime.enter();
+        supervisor.serve().expect("runtime startup")
+    };
+    drop(startup_runtime);
+
+    let caller_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("caller runtime");
+    let result = caller_runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("shutdown on a closed startup runtime must not hang")
+    });
+    assert!(matches!(result, Err(RuntimeError::ShuttingDown)));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -44,7 +44,8 @@ impl SupervisorCore {
             return Ok(());
         }
 
-        tokio::runtime::Handle::try_current().map_err(|_| RuntimeError::TokioRuntimeUnavailable)?;
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| RuntimeError::TokioRuntimeUnavailable)?;
         self.subs.start()?;
         if self.bus.is_enabled() {
             self.subscriber_listener();
@@ -54,6 +55,10 @@ impl SupervisorCore {
         if let Some(controller) = self.controller.get().and_then(std::sync::Weak::upgrade) {
             controller.run();
         }
+        assert!(
+            self.startup_runtime.set(runtime).is_ok(),
+            "serialized first startup must publish its Tokio runtime exactly once"
+        );
         self.started.store(true, Ordering::Release);
         Ok(())
     }

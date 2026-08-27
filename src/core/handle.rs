@@ -227,6 +227,9 @@ impl SupervisorHandle {
     /// # Cancel safety
     ///
     /// On its first poll this method creates or joins a detached shared shutdown operation.
+    /// Taskvisor schedules a new operation on the Tokio runtime that successfully started the supervisor.
+    /// Polling from another runtime does not transfer cleanup ownership to that runtime.
+    /// The startup runtime must remain alive and driven until the shared operation completes.
     /// Dropping this caller's future after that point does not stop cleanup.
     #[doc(alias = "graceful shutdown")]
     #[doc(alias = "graceful stop")]

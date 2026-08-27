@@ -2,7 +2,9 @@
 //!
 //! Explicit requests, static-run triggers, and natural registry completion enter [`ShutdownCoordinator`].
 //! The first trigger installs a detached owner.
+//! After successful startup, that owner is scheduled on the startup Tokio runtime.
 //! Canceling the initiating future does not cancel that owner.
+//! Polling shutdown from another runtime does not transfer cleanup ownership to it.
 //! Concurrent and later callers join the same operation and receive its cached result.
 //!
 //! ```text
@@ -196,6 +198,12 @@ impl SupervisorCore {
             return Arc::clone(operation);
         }
 
+        let owner_runtime = self
+            .startup_runtime
+            .get()
+            .cloned()
+            .or_else(|| tokio::runtime::Handle::try_current().ok());
+
         let (outcome_tx, outcome_rx) = watch::channel(None);
         let shared = Arc::new(ShutdownOperation {
             outcome: outcome_rx,
@@ -214,18 +222,23 @@ impl SupervisorCore {
         drop(operation);
 
         let core = Arc::clone(self);
-        tokio::spawn(async move {
-            let outcome =
-                match crate::core::panic_guard::guarded(core.perform_shutdown(trigger)).await {
-                    Ok(outcome) => outcome,
-                    Err(panic) => {
-                        core.report_shutdown_panic("owner", panic);
-                        let _ = core.finish_shutdown_cleanup().await;
-                        ShutdownOutcome::ShuttingDown
-                    }
-                };
-            outcome_tx.send_replace(Some(outcome));
-        });
+        if let Some(runtime) = owner_runtime {
+            runtime.spawn(async move {
+                let outcome =
+                    match crate::core::panic_guard::guarded(core.perform_shutdown(trigger)).await {
+                        Ok(outcome) => outcome,
+                        Err(panic) => {
+                            core.report_shutdown_panic("owner", panic);
+                            let _ = core.finish_shutdown_cleanup().await;
+                            ShutdownOutcome::ShuttingDown
+                        }
+                    };
+                outcome_tx.send_replace(Some(outcome));
+            });
+        } else {
+            core.runtime_token.cancel();
+            outcome_tx.send_replace(Some(ShutdownOutcome::ShuttingDown));
+        }
 
         shared
     }

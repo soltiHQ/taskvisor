@@ -67,6 +67,8 @@ pub(crate) struct SupervisorCore {
     started: AtomicBool,
     /// Serializes idempotent runtime startup.
     startup_gate: std::sync::Mutex<()>,
+    /// Tokio runtime selected by successful startup for detached shutdown ownership.
+    startup_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
     /// Owns the single static-run lifecycle claim.
     running: AtomicBool,
     /// Management-admission closure state.
@@ -135,6 +137,7 @@ impl SupervisorCore {
             runtime_token,
             started: AtomicBool::new(false),
             startup_gate: std::sync::Mutex::new(()),
+            startup_runtime: std::sync::OnceLock::new(),
             running: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             shutdown: ShutdownCoordinator::new(),
