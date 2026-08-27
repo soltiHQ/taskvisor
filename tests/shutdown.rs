@@ -138,6 +138,10 @@ impl Subscribe for BlockingSubscriber {
         "blocking-shutdown"
     }
 
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
+    }
+
     fn queue_capacity(&self) -> NonZeroUsize {
         NonZeroUsize::new(64).unwrap()
     }
@@ -185,6 +189,10 @@ impl Subscribe for TlsSubscriber {
 
     fn name(&self) -> &str {
         "tls-shutdown"
+    }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
     }
 
     fn queue_capacity(&self) -> NonZeroUsize {
@@ -489,9 +497,10 @@ fn subscriber_tls_teardown_child() {
         release_callback(&first_gate);
         release_callback(&second_gate);
 
+        let shutdown_task = tokio::spawn(async move { handle.shutdown().await });
         assert!(
             wait_for_callback(&tls_gate, |state| state.entered).await,
-            "an idle subscriber worker must enter its real TLS destructor"
+            "a dedicated subscriber worker must enter its real TLS destructor during shutdown"
         );
         assert_subscriber_tls_blocked(&tls_gate, "before the heartbeat");
         tokio::spawn(async {
@@ -501,9 +510,10 @@ fn subscriber_tls_teardown_child() {
         .expect("the current-thread heartbeat task must complete");
         assert_subscriber_tls_blocked(&tls_gate, "after the heartbeat");
 
-        handle
-            .shutdown()
+        tokio::time::timeout(Duration::from_secs(5), shutdown_task)
             .await
+            .expect("public shutdown must not join a dedicated subscriber worker")
+            .expect("the public shutdown task must not panic")
             .expect("public shutdown must finish");
         assert_subscriber_tls_blocked(&tls_gate, "after public shutdown");
     });

@@ -7,6 +7,60 @@ use crate::controller::engine::{
 };
 
 #[tokio::test]
+async fn buffered_identity_paths_receive_explicit_shutdown_reply() {
+    let config = ControllerConfig::default();
+    let queue_capacity = config.queue_capacity().get();
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = make_controller(config, bus);
+    let waiting_handle = ctrl.handle();
+    let fail_fast_handle = waiting_handle.clone();
+    let late_handle = waiting_handle.clone();
+    let mut waiting = Box::pin(waiting_handle.remove(TaskId::next()));
+    let mut fail_fast = Box::pin(fail_fast_handle.try_cancel(TaskId::next()));
+
+    std::future::poll_fn(|context| match waiting.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("waiting identity command must await its reply, got {result:?}")
+        }
+    })
+    .await;
+    std::future::poll_fn(|context| match fail_fast.as_mut().poll(context) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("fail-fast identity command must await its reply, got {result:?}")
+        }
+    })
+    .await;
+    assert_eq!(ctrl.tx.capacity(), queue_capacity - 2);
+
+    let mut rx = ctrl.take_command_receiver().expect("receiver present");
+    ctrl.finalize_pending_on_shutdown(&mut rx).await;
+
+    assert!(matches!(waiting.await, Err(RuntimeError::ShuttingDown)));
+    assert!(matches!(fail_fast.await, Err(RuntimeError::ShuttingDown)));
+    assert!(matches!(
+        late_handle.remove(TaskId::next()).await,
+        Err(RuntimeError::ShuttingDown)
+    ));
+    assert!(matches!(
+        late_handle.try_cancel(TaskId::next()).await,
+        Err(RuntimeError::ShuttingDown)
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    assert!(
+        drain_events(&mut events)
+            .iter()
+            .all(|event| event.kind != EventKind::ControllerRejected),
+        "identity shutdown replies must not publish submission rejection events"
+    );
+}
+
+#[tokio::test]
 async fn aborted_identity_operation_sends_explicit_shutdown_reply() {
     let (reply, reply_rx) = oneshot::channel();
     let (started, started_rx) = oneshot::channel();
@@ -210,7 +264,7 @@ async fn try_identity_operations_report_full_controller_command_queue() {
         Err(RuntimeError::CommandQueueFull)
     ));
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
     let _ = runtime_handle.shutdown().await;

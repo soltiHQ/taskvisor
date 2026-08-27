@@ -16,9 +16,10 @@ categories = ["asynchronous", "concurrency"]
 exclude = [
     ".env",
     ".github/",
+    "DEPLOY.md",
     ".gitignore",
-    "Taskfile.yml",
     "lychee.toml",
+    "Taskfile.yml",
     "rust-toolchain.toml",
 ]
 

@@ -152,14 +152,17 @@ The shared event bus and every subscriber queue are bounded.
 Events can be lost at the shared bus or in an individual subscriber queue.
 When the shared bus is full, it drops the oldest event and retains the newest one.
 When one subscriber queue is full, Taskvisor drops the incoming event for that subscriber.
-Callbacks run one at a time for each subscriber. Different subscribers can run at the same time.
+Callbacks run one at a time for each subscriber.
 
 Subscriber callbacks are synchronous and run outside Tokio worker threads. Keep them short.
 Forward async or long blocking work to an application-owned queue.
-Retiring callback threads keep their worker slots until their thread-local destructors finish.
-Slow thread-local destruction reduces available callback capacity until it returns.
-Taskvisor waits for these threads in a separate bounded OS thread pool, outside Tokio and its blocking pool.
-Shutdown does not wait for thread-local destruction.
+Short callbacks use one fixed library-owned OS worker by default.
+A blocked callback on that shared worker delays the other shared subscriber lanes.
+Override [`Subscribe::execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.execution) with `SubscriberExecution::Dedicated` when one subscriber needs blocking isolation.
+Each dedicated subscriber adds one native thread and can run concurrently with the shared worker and other dedicated subscribers.
+Taskvisor does not elastically add callback workers or retire them merely because they are idle.
+A callback still running when the shared shutdown deadline expires may continue on its detached worker after shutdown returns.
+Taskvisor does not wait for callback-worker thread-local destructors; they may also continue after shutdown returns.
 Shutdown deadlines can also drop events.
 [SubscriberOverflow](https://docs.rs/taskvisor/latest/taskvisor/events/enum.EventKind.html#variant.SubscriberOverflow) diagnostics report loss when possible.
 

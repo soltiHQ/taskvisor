@@ -4,9 +4,14 @@
 //! A burst limit gives command intake regular turns when internal results stay ready.
 //! Panic boundaries keep one failed work item from stopping the loop.
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use futures_util::StreamExt;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::Event;
@@ -17,23 +22,69 @@ use super::ControllerTask;
 /// Maximum internal-result burst before a non-blocking command check.
 pub(super) const INTERNAL_RESULT_BURST_LIMIT: usize = 64;
 
+/// Closes command admission when the receiver leaves the controller lifecycle.
+pub(in crate::controller::engine) struct ControllerReceiver {
+    inner: mpsc::Receiver<ControllerCommand>,
+}
+
+impl ControllerReceiver {
+    /// Wraps the receiver immediately after it leaves controller storage.
+    fn new(inner: mpsc::Receiver<ControllerCommand>) -> Self {
+        Self { inner }
+    }
+}
+
+impl Deref for ControllerReceiver {
+    type Target = mpsc::Receiver<ControllerCommand>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for ControllerReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for ControllerReceiver {
+    fn drop(&mut self) {
+        self.inner.close();
+    }
+}
+
 impl Controller {
+    /// Moves the single command receiver under its shutdown fence.
+    pub(in crate::controller::engine) fn take_command_receiver(
+        &self,
+    ) -> Result<ControllerReceiver, &'static str> {
+        let rx = self
+            .rx
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or("controller command receiver already taken")?;
+        Ok(ControllerReceiver::new(rx))
+    }
+
     /// Starts the single owned controller loop.
     ///
     /// Later calls are no-ops. Runtime shutdown joins this task before cleanup completes.
     pub fn run(self: &Arc<Self>) {
         self.task.get_or_init(|| {
+            let rx = self
+                .take_command_receiver()
+                .expect("controller command receiver must be present before first start");
             let controller = Arc::clone(self);
-            ControllerTask::new(tokio::spawn(async move {
-                controller.run_task().await;
-            }))
+            ControllerTask::new(tokio::spawn(controller.run_task(rx)))
         });
     }
 
     /// Runs the controller loop behind its outer panic boundary and final state cleanup.
-    async fn run_task(self: Arc<Self>) {
+    async fn run_task(self: Arc<Self>, rx: ControllerReceiver) {
         let token = self.shutdown_token.clone();
-        match crate::core::panic_guard::guarded(self.run_inner(token)).await {
+        match crate::core::panic_guard::guarded(self.run_inner(token, rx)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 self.bus.publish_lazy(|| {
@@ -78,14 +129,8 @@ impl Controller {
     pub(in crate::controller::engine) async fn run_inner(
         &self,
         token: CancellationToken,
+        mut rx: ControllerReceiver,
     ) -> Result<(), &'static str> {
-        let mut rx = self
-            .rx
-            .write()
-            .await
-            .take()
-            .ok_or("controller command receiver already taken")?;
-
         let mut operations = TrackedOperations::new(
             self.supervisor.clone(),
             self.config.admission_capacity().get(),
@@ -105,10 +150,10 @@ impl Controller {
                             internal_result_burst = 0;
                             continue;
                         }
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        Err(mpsc::error::TryRecvError::Empty) => {
                             internal_result_burst = 0;
                         }
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
                     }
                 }
 
@@ -223,8 +268,9 @@ impl Controller {
             }
         })
         .await;
+        self.close_command_intake(&mut rx);
         drop(operations);
-        self.finalize_pending_on_shutdown(&mut rx).await;
+        self.drain_pending_on_shutdown(&mut rx).await;
         self.finalize_slot_state_on_shutdown().await;
         if let Err(panic) = loop_result {
             self.bus.publish_lazy(|| {

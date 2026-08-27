@@ -9,6 +9,7 @@
 
 mod support;
 
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
@@ -44,6 +45,15 @@ const WITH_DEADLINE: CaseFamily = CaseFamily::lifecycle(
     "completed tasks",
     "first watched add through 256 Completed outcomes; each task yields once with a 60s attempt deadline, ensuring the timer is polled but never expires",
     "runtime and Supervisor startup, warmup, TaskSpec construction, ownership reset between batches, and shutdown",
+);
+
+const MAX_CONCURRENT: CaseFamily = CaseFamily::lifecycle(
+    "throughput/steady/max_concurrent_batch",
+    "STEADY TASK COMPLETION · MAX_CONCURRENT",
+    "completed task",
+    "completed tasks",
+    "first watched add through 256 Completed outcomes with max_concurrent disabled or set to 1, 4, or 256",
+    "runtime and Supervisor startup, warmup, TaskSpec construction, ownership reset between batches, shutdown, and Tokio runtime construction",
 );
 
 fn bench_completion(c: &mut Criterion) {
@@ -106,10 +116,62 @@ fn bench_completion(c: &mut Criterion) {
     }
 }
 
+fn bench_max_concurrent(c: &mut Criterion) {
+    const COUNT: usize = 256;
+    let mut group = c.benchmark_group(MAX_CONCURRENT.group_id);
+    group.throughput(Throughput::Elements(COUNT as u64));
+
+    for &(rt_name, rt_fn) in &RUNTIMES {
+        for (limit_name, limit) in [
+            ("unlimited", None),
+            ("limit_1", Some(1usize)),
+            ("limit_4", Some(4usize)),
+            ("limit_256", Some(COUNT)),
+        ] {
+            let parameter = format!("{COUNT}_completed_tasks_{limit_name}");
+            group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
+                record_case(MAX_CONCURRENT, rt_name, Some(parameter.clone()));
+                let rt = rt_fn();
+                b.iter_custom(|iters| {
+                    rt.block_on(async {
+                        let configured_limit = limit.and_then(NonZeroUsize::new);
+                        let config = bench_config().with_max_concurrent(configured_limit);
+                        let handle = Supervisor::new(config, vec![])
+                            .serve()
+                            .expect("runtime startup");
+                        warm_runtime(&handle, 0).await;
+                        let mut total = Duration::ZERO;
+
+                        for iteration in 0..iters {
+                            let tasks = (0..COUNT)
+                                .map(|i| {
+                                    instant_task(format!(
+                                        "max-concurrent-{limit_name}-{iteration}-{i}"
+                                    ))
+                                })
+                                .collect();
+
+                            let start = Instant::now();
+                            complete_batch(&handle, tasks).await;
+                            total += start.elapsed();
+
+                            wait_for_ownership(&handle, 0).await;
+                        }
+
+                        handle.shutdown().await.expect("shutdown failed");
+                        total
+                    })
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = support::fixtures::criterion();
-    targets = bench_completion
+    targets = bench_completion, bench_max_concurrent
 }
 
 fn main() {

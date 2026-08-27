@@ -12,7 +12,7 @@
 //! It is not a complete serialization of [`Event`]; use a custom subscriber or `TracingBridge` when every typed field is needed.
 
 use crate::events::{Event, EventKind};
-use crate::subscribers::Subscribe;
+use crate::subscribers::{Subscribe, SubscriberExecution};
 
 const MAX_VALUE_CHARS: usize = 4096;
 
@@ -28,6 +28,7 @@ fn format_value(value: &str) -> String {
 /// Prints each received event as one readable line on standard output.
 ///
 /// This type uses the queue, loss, panic, and shutdown contract defined by [`Subscribe`].
+/// It selects [`SubscriberExecution::Dedicated`] because writing to standard output can block.
 ///
 /// The output is designed for local visibility. Do not parse it as an API or rely on its field
 /// set for task correlation. It omits some [`Event`] fields, including `id` and `at`.
@@ -52,6 +53,10 @@ impl Subscribe for LogWriter {
 
     fn name(&self) -> &str {
         "LogWriter"
+    }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
     }
 }
 
@@ -226,6 +231,11 @@ fn ownership_capacity_retired_line(e: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_writer_uses_dedicated_execution() {
+        assert_eq!(LogWriter.execution(), SubscriberExecution::Dedicated);
+    }
 
     #[test]
     fn event_head_keeps_the_full_sequence_number() {

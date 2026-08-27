@@ -174,6 +174,105 @@ impl AsyncFlag {
     }
 }
 
+/// An observable monotonic counter for benchmark setup and finite task loops.
+pub struct AsyncCounter {
+    value: AtomicUsize,
+    changed: Notify,
+}
+
+impl AsyncCounter {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            value: AtomicUsize::new(0),
+            changed: Notify::new(),
+        })
+    }
+
+    pub fn increment(&self) -> usize {
+        let value = self.value.fetch_add(1, Ordering::AcqRel) + 1;
+        self.changed.notify_waiters();
+        value
+    }
+
+    pub fn load(&self) -> usize {
+        self.value.load(Ordering::Acquire)
+    }
+
+    pub async fn wait_for(&self, expected: usize) {
+        expect_within("an observable counter threshold", async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.load() >= expected {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await;
+    }
+}
+
+/// Holds async producer tasks at one observable start line.
+pub struct ProducerGate {
+    expected: usize,
+    ready: AtomicUsize,
+    released: AtomicBool,
+    changed: Notify,
+}
+
+impl ProducerGate {
+    pub fn new(expected: usize) -> Arc<Self> {
+        assert!(expected != 0, "a producer gate needs at least one caller");
+        Arc::new(Self {
+            expected,
+            ready: AtomicUsize::new(0),
+            released: AtomicBool::new(false),
+            changed: Notify::new(),
+        })
+    }
+
+    pub async fn arrive_and_wait(&self) {
+        let ready = self.ready.fetch_add(1, Ordering::AcqRel) + 1;
+        assert!(
+            ready <= self.expected,
+            "more producers reached the gate than configured"
+        );
+        self.changed.notify_waiters();
+
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.released.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub async fn wait_until_ready(&self) {
+        expect_within("all concurrent producers to reach the start gate", async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.ready.load(Ordering::Acquire) == self.expected {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await;
+    }
+
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+}
+
 /// Blocks only a dedicated callback or destructor worker, never a Tokio worker.
 pub struct BlockingGate {
     released: Mutex<bool>,

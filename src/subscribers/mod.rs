@@ -24,7 +24,10 @@
 //! Events can be lost at the shared bus or at an individual subscriber queue.
 //! A slow subscriber cannot fill another subscriber's queue.
 //!
-//! Each lane preserves FIFO callback order. Different lanes may run at the same time on a supervisor-local callback executor.
+//! Each lane preserves FIFO callback order.
+//! Short callbacks use one fixed shared worker by default;
+//! [`SubscriberExecution::Dedicated`] assigns one lane its own worker when blocking isolation is required.
+//! `LogWriter` and the tracing bridges select dedicated execution because their output sinks run synchronously.
 //! Shutdown gives all lanes one shared drain deadline. With no configured subscribers, the event bus stays disabled and
 //! no event relay or callback worker starts.
 //!
@@ -49,7 +52,7 @@ mod subscriber_set;
 
 mod embedded;
 
-pub use subscriber::Subscribe;
+pub use subscriber::{Subscribe, SubscriberExecution};
 pub(crate) use subscriber_set::SubscriberSet;
 
 #[cfg(feature = "logging")]

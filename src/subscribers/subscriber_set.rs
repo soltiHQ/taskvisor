@@ -1,12 +1,13 @@
 //! Implements the internal fan-out engine behind [`Subscribe`].
 //!
 //! [`SupervisorBuilder`](crate::SupervisorBuilder) creates a [`SubscriberSet`] from the configured subscribers.
-//! Construction reserves ownership for the complete set before it reads subscriber names or queue capacities.
-//! Runtime startup then creates one bounded lane per subscriber and starts the supervisor-local callback executor.
+//! Construction reserves ownership for the complete set before it reads subscriber metadata.
+//! Runtime startup then creates one bounded lane per subscriber.
+//! Shared lanes use one fixed worker; each dedicated lane uses its own fixed worker.
 //!
 //! ```text
 //! SupervisorBuilder ──► SubscriberSet::from_reserved ──► pending definitions
-//! runtime start ──────► SubscriberSet::start ──────────► lanes + callback executor
+//! runtime start ──────► SubscriberSet::start ──────────► shared + dedicated subscriber lanes
 //!
 //! runtime event relay
 //!      │ Arc<Event>
@@ -14,30 +15,28 @@
 //! SubscriberSet::emit_arc
 //!      ├── full lane for ordinary event ───────► count one lane drop
 //!      ├── full lane for internal diagnostic ──► discard silently
-//!      └── lane with room ─────────────────────► callback executor ──► Subscribe::on_event
+//!      └── lane with room ─────────────────────► lane worker ────────► Subscribe::on_event
 //! ```
 //!
 //! Fan-out performs one bounded enqueue attempt per subscriber and never waits for callbacks.
-//! Each lane preserves FIFO order. Separate lanes may run at the same time. For a non-empty set,
-//! the executor starts with one worker. It may add workers up to the subscriber count when lanes
-//! contend, and it retires idle extra workers. Ordinary drops in one full lane are counted and
-//! coalesced into a direct overflow callback after that lane catches up.
+//! Each lane preserves FIFO order.
+//! Shared lanes avoid per-subscriber thread wakeups; a subscriber that requires blocking isolation can select a dedicated worker.
+//! Ordinary drops in one full lane are counted and coalesced into a direct overflow callback after that lane catches up.
 //!
-//! Callback unwinding is isolated with `catch_unwind`. Taskvisor transfers its retained subscriber `Arc`
-//! to the supervisor's deferred-drop domain. Shutdown closes all lanes and gives them one shared
-//! drain deadline. A callback already running at that deadline may continue on a detached worker.
+//! Callback unwinding is isolated with `catch_unwind`.
+//! Taskvisor transfers its retained subscriber `Arc` to the supervisor's deferred-drop domain.
+//! Shutdown closes all lanes and gives them one shared drain deadline.
+//! A callback already running at that deadline may continue on a detached worker.
 
 use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-use tokio::sync::Notify;
 use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     BuildError, RuntimeError,
@@ -46,15 +45,14 @@ use crate::{
         deferred_drop::{DropBundle, DropReservation},
     },
     events::{Bus, Event},
-    subscribers::Subscribe,
+    subscribers::{Subscribe, SubscriberExecution},
 };
 
 /// Test default for the shared subscriber drain deadline.
 #[cfg(test)]
 pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-const CALLBACK_QUANTUM: usize = 64;
-const EXTRA_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+const SHARED_CALLBACK_QUANTUM: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LanePhase {
@@ -81,68 +79,59 @@ struct SubscriberLane {
     bus: Bus,
     finished: Arc<AtomicBool>,
     state: std::sync::Mutex<SubscriberLaneState>,
+    dedicated_ready: Option<std::sync::Condvar>,
 }
 
 type SubscriberJob = Arc<SubscriberLane>;
 
-struct ExecutorState {
+struct SharedQueueState {
     ready: VecDeque<SubscriberJob>,
     closed: bool,
 }
 
-/// Pending full-thread joins, bounded by the still-charged callback worker slots.
-struct WorkerExitState {
-    ready: VecDeque<std::thread::JoinHandle<()>>,
-    closed: bool,
-    workers: usize,
-    starting: usize,
-    idle: usize,
-    spawn_failed: bool,
-}
-
-struct SubscriberExecutor {
-    shared: Arc<ExecutorShared>,
-    coordinator: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-struct ExecutorShared {
-    state: std::sync::Mutex<ExecutorState>,
-    ready: std::sync::Condvar,
-    max_workers: usize,
-    worker_count: AtomicUsize,
-    idle_count: AtomicUsize,
-    starting_count: AtomicUsize,
-    runtime: tokio::runtime::Handle,
-    bus: Bus,
-    spawn_failed: AtomicBool,
-    control: Notify,
-    coordinator_stop: CancellationToken,
-    spawn_gate: std::sync::Mutex<()>,
-    workers: std::sync::Mutex<Vec<SubscriberWorkerHandle>>,
-    exits: std::sync::Mutex<WorkerExitState>,
-    exit_ready: std::sync::Condvar,
-    #[cfg(test)]
-    injected_spawn_failures: AtomicUsize,
-    #[cfg(test)]
-    injected_exit_spawn_failures: AtomicUsize,
-}
-
-/// Reports loop exit without releasing the physical worker's slot before TLS teardown.
-struct WorkerExitGuard {
-    shared: Arc<ExecutorShared>,
-    loop_exited: Arc<AtomicBool>,
-}
-
-impl Drop for WorkerExitGuard {
-    fn drop(&mut self) {
-        self.loop_exited.store(true, Ordering::Release);
-        self.shared.control.notify_one();
-    }
+struct SharedQueue {
+    state: std::sync::Mutex<SharedQueueState>,
+    available: std::sync::Condvar,
 }
 
 struct SubscriberWorkerHandle {
-    loop_exited: Arc<AtomicBool>,
-    thread: std::thread::JoinHandle<()>,
+    _thread: std::thread::JoinHandle<()>,
+}
+
+struct SubscriberWorkers {
+    shared: Option<Arc<SharedQueue>>,
+    handles: Vec<SubscriberWorkerHandle>,
+}
+
+enum SubscriberWorkerLaunch {
+    Shared {
+        queue: Arc<SharedQueue>,
+        runtime: tokio::runtime::Handle,
+    },
+    Dedicated {
+        lane: SubscriberJob,
+        runtime: tokio::runtime::Handle,
+    },
+}
+
+fn spawn_subscriber_worker(
+    index: usize,
+    receiver: std::sync::mpsc::Receiver<SubscriberWorkerLaunch>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name(format!("taskvisor-subscriber-{index}"))
+        .spawn(move || {
+            if let Ok(launch) = receiver.recv() {
+                contain_thread_unwind(move || match launch {
+                    SubscriberWorkerLaunch::Shared { queue, runtime } => {
+                        run_shared_worker(queue, runtime);
+                    }
+                    SubscriberWorkerLaunch::Dedicated { lane, runtime } => {
+                        run_dedicated_worker(lane, runtime);
+                    }
+                });
+            }
+        })
 }
 
 /// Contains escaping panic payloads on their own OS thread, never in a detached handle's packet.
@@ -159,6 +148,7 @@ fn contain_thread_unwind(run: impl FnOnce()) {
 struct SubscriberDefinition {
     name: Arc<str>,
     capacity: usize,
+    execution: SubscriberExecution,
     ownership: OwnedSubscriber,
 }
 
@@ -172,13 +162,13 @@ struct OwnedSubscriber {
 
 /// Mutually exclusive subscriber startup, delivery, and shutdown states.
 enum SubscriberState {
-    /// Metadata is ready, but the callback executor has not started.
+    /// Metadata is ready, but the callback workers have not started.
     Pending(Vec<SubscriberDefinition>),
-    /// Per-subscriber lanes and the callback executor are active.
+    /// Per-subscriber lanes and their selected callback workers are active.
     Started {
         lanes: Vec<SubscriberJob>,
         completions: Vec<oneshot::Receiver<()>>,
-        executor: Arc<SubscriberExecutor>,
+        workers: SubscriberWorkers,
     },
     /// Delivery is closed and later startup is disabled.
     Closed,
@@ -186,8 +176,72 @@ enum SubscriberState {
 
 enum EnqueueResult {
     Queued,
-    Schedule,
+    ScheduleShared,
     Closed(Arc<str>),
+}
+
+impl SharedQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::Mutex::new(SharedQueueState {
+                ready: VecDeque::new(),
+                closed: false,
+            }),
+            available: std::sync::Condvar::new(),
+        })
+    }
+
+    fn schedule(&self, lane: SubscriberJob) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return;
+        }
+        state.ready.push_back(lane);
+        self.available.notify_one();
+    }
+
+    fn next(&self) -> Option<SubscriberJob> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.ready.is_empty() && !state.closed {
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        state.ready.pop_front()
+    }
+
+    fn close(&self) {
+        let abandoned = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.closed = true;
+            self.available.notify_all();
+            std::mem::take(&mut state.ready)
+        };
+        drop(abandoned);
+    }
+}
+
+impl SubscriberWorkers {
+    fn schedule_shared(&self, lane: SubscriberJob) {
+        self.shared
+            .as_ref()
+            .expect("a shared subscriber lane has one fixed shared worker")
+            .schedule(lane);
+    }
+
+    fn detach(self) {
+        drop(self);
+    }
+}
+
+impl Drop for SubscriberWorkers {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.take() {
+            shared.close();
+        }
+        drop(std::mem::take(&mut self.handles));
+    }
 }
 
 impl SubscriberLane {
@@ -210,9 +264,18 @@ impl SubscriberLane {
         state.queue.push_back(Arc::clone(event));
         if state.phase == LanePhase::Idle {
             state.phase = LanePhase::Scheduled;
-            EnqueueResult::Schedule
-        } else {
-            EnqueueResult::Queued
+            if let Some(ready) = &self.dedicated_ready {
+                ready.notify_one();
+            } else {
+                return EnqueueResult::ScheduleShared;
+            }
+        }
+        EnqueueResult::Queued
+    }
+
+    fn notify_dedicated(&self) {
+        if let Some(ready) = &self.dedicated_ready {
+            ready.notify_all();
         }
     }
 
@@ -224,12 +287,14 @@ impl SubscriberLane {
             self.finished.store(true, Ordering::Release);
             let done = state.done.take();
             let ownership = state.ownership.take();
+            self.notify_dedicated();
             drop(state);
             if let Some(done) = done {
                 let _ = done.send(());
             }
             ownership
         } else {
+            self.notify_dedicated();
             None
         }
     }
@@ -245,12 +310,14 @@ impl SubscriberLane {
             self.finished.store(true, Ordering::Release);
             let done = state.done.take();
             let ownership = state.ownership.take();
+            self.notify_dedicated();
             drop(state);
             if let Some(done) = done {
                 let _ = done.send(());
             }
             (ownership, queued)
         } else {
+            self.notify_dedicated();
             (None, queued)
         }
     }
@@ -294,799 +361,141 @@ impl SubscriberLane {
     }
 }
 
-impl SubscriberExecutor {
-    fn new(max_workers: usize, runtime: tokio::runtime::Handle, bus: Bus) -> Arc<Self> {
-        Arc::new(Self {
-            shared: Arc::new(ExecutorShared {
-                state: std::sync::Mutex::new(ExecutorState {
-                    ready: VecDeque::new(),
-                    closed: false,
-                }),
-                ready: std::sync::Condvar::new(),
-                max_workers,
-                worker_count: AtomicUsize::new(usize::from(max_workers != 0)),
-                idle_count: AtomicUsize::new(0),
-                starting_count: AtomicUsize::new(usize::from(max_workers != 0)),
-                runtime,
-                bus,
-                spawn_failed: AtomicBool::new(false),
-                control: Notify::new(),
-                coordinator_stop: CancellationToken::new(),
-                spawn_gate: std::sync::Mutex::new(()),
-                workers: std::sync::Mutex::new(Vec::with_capacity(max_workers)),
-                exits: std::sync::Mutex::new(WorkerExitState {
-                    ready: VecDeque::new(),
-                    closed: false,
-                    workers: 0,
-                    starting: 0,
-                    idle: 0,
-                    spawn_failed: false,
-                }),
-                exit_ready: std::sync::Condvar::new(),
-                #[cfg(test)]
-                injected_spawn_failures: AtomicUsize::new(0),
-                #[cfg(test)]
-                injected_exit_spawn_failures: AtomicUsize::new(0),
-            }),
-            coordinator: std::sync::Mutex::new(None),
-        })
-    }
-
-    fn install_seed(&self, seed: std::thread::JoinHandle<()>, loop_exited: Arc<AtomicBool>) {
-        self.shared
-            .workers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(SubscriberWorkerHandle {
-                loop_exited,
-                thread: seed,
-            });
-    }
-
-    fn start_coordinator(&self) {
-        let shared = Arc::clone(&self.shared);
-        let coordinator = tokio::spawn(async move {
-            shared.coordinator_loop().await;
-        });
-        *self
-            .coordinator
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(coordinator);
-    }
-
-    fn schedule(&self, lane: SubscriberJob) {
-        self.shared.enqueue(lane);
-    }
-
-    async fn shutdown(&self) {
-        self.shared.close();
-        let coordinator = self
-            .coordinator
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(coordinator) = coordinator {
-            let _ = coordinator.await;
-        }
-        let workers = {
-            let _spawn = self
-                .shared
-                .spawn_gate
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            std::mem::take(
-                &mut *self
-                    .shared
-                    .workers
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-            )
-        };
-        drop(workers);
-    }
-}
-
-impl Drop for SubscriberExecutor {
-    fn drop(&mut self) {
-        self.shared.close();
-    }
-}
-
-impl ExecutorShared {
-    fn enqueue(&self, lane: SubscriberJob) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.closed {
-            return;
-        }
-        state.ready.push_back(lane);
-        self.ready.notify_one();
-        drop(state);
-        self.control.notify_one();
-    }
-
-    fn close(&self) {
-        let abandoned = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            state.closed = true;
-            self.ready.notify_all();
-            self.coordinator_stop.cancel();
-            std::mem::take(&mut state.ready)
-        };
-        let detached = {
-            let mut exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-            exits.closed = true;
-            self.exit_ready.notify_all();
-            std::mem::take(&mut exits.ready)
-        };
-        drop(abandoned);
-        drop(detached);
-    }
-
-    async fn coordinator_loop(self: Arc<Self>) {
-        loop {
-            tokio::select! {
-                _ = self.coordinator_stop.cancelled() => return,
-                _ = self.control.notified() => {}
-            }
-            self.reap_finished();
-            self.spawn_exit_worker();
-            let reserve = {
-                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                if state.closed {
-                    return;
-                }
-                let idle = self.idle_count.load(Ordering::Acquire);
-                !state.ready.is_empty()
-                    && state.ready.len() > idle
-                    && self.starting_count.load(Ordering::Acquire) == 0
-                    && self
-                        .worker_count
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |workers| {
-                            (workers < self.max_workers).then_some(workers + 1)
-                        })
-                        .is_ok()
-            };
-            if reserve {
-                self.starting_count.fetch_add(1, Ordering::AcqRel);
-                self.spawn_reserved();
-            }
-            let should_retry = {
-                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                !state.closed
-                    && !state.ready.is_empty()
-                    && self.spawn_failed.load(Ordering::Acquire)
-            };
-            let retry_exit_worker = {
-                let exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-                !exits.closed && !exits.ready.is_empty() && exits.spawn_failed
-            };
-            if should_retry || retry_exit_worker {
-                tokio::select! {
-                    _ = self.coordinator_stop.cancelled() => return,
-                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
-                }
-                self.control.notify_one();
-            }
-        }
-    }
-
-    fn reap_finished(&self) {
-        let finished = {
-            let mut workers = self
-                .workers
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let mut live = Vec::with_capacity(workers.len());
-            let mut finished = Vec::new();
-            for worker in std::mem::take(&mut *workers) {
-                if worker.loop_exited.load(Ordering::Acquire) {
-                    finished.push(worker);
-                } else {
-                    live.push(worker);
-                }
-            }
-            *workers = live;
-            finished
-        };
-        let mut exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-        if !exits.closed {
-            exits
-                .ready
-                .extend(finished.into_iter().map(|worker| worker.thread));
-            self.exit_ready.notify_all();
-        }
-    }
-
-    /// Starts bounded, persistent join workers without transferring a queued handle into the spawn closure.
-    fn spawn_exit_worker(self: &Arc<Self>) {
-        let _spawn = self
-            .spawn_gate
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let index = {
-            let mut exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-            if exits.closed
-                || exits.ready.len() <= exits.idle
-                || exits.starting != 0
-                || exits.workers == self.max_workers
-            {
-                return;
-            }
-            let index = exits.workers;
-            exits.workers += 1;
-            exits.starting += 1;
-            index
-        };
-        #[cfg(test)]
-        if self
-            .injected_exit_spawn_failures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
-            self.handle_exit_spawn_failure(std::io::Error::other(
-                "injected subscriber join worker spawn failure",
-            ));
-            return;
-        }
-        let shared = Arc::clone(self);
-        match std::thread::Builder::new()
-            .name(format!("taskvisor-subscriber-join-{index}"))
-            .spawn(move || contain_thread_unwind(move || shared.exit_worker_loop()))
-        {
-            Ok(thread) => {
-                self.exits
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .spawn_failed = false;
-                drop(thread);
-            }
-            Err(error) => self.handle_exit_spawn_failure(error),
-        }
-    }
-
-    fn handle_exit_spawn_failure(&self, error: std::io::Error) {
-        let report = {
-            let mut exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-            exits.workers -= 1;
-            exits.starting -= 1;
-            let report = !exits.spawn_failed;
-            exits.spawn_failed = true;
-            report
-        };
-        if report {
-            self.bus.publish_lazy(|| {
-                Event::runtime_failure(
-                    "subscriber_dispatch",
-                    format!("failed to start subscriber join workers: {error}"),
-                )
-            });
-        }
-    }
-
-    /// Keeps the callback slot charged through native join and any escaping result-payload cleanup.
-    fn exit_worker_loop(self: Arc<Self>) {
-        {
-            let mut exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-            exits.starting -= 1;
-        }
-        self.control.notify_one();
-        loop {
-            let thread = {
-                let mut exits = self.exits.lock().unwrap_or_else(|error| error.into_inner());
-                exits.idle += 1;
-                while exits.ready.is_empty() && !exits.closed {
-                    exits = self
-                        .exit_ready
-                        .wait(exits)
-                        .unwrap_or_else(|error| error.into_inner());
-                }
-                exits.idle -= 1;
-                if exits.closed {
-                    return;
-                }
-                exits
-                    .ready
-                    .pop_front()
-                    .expect("an open join worker has a queued handle")
-            };
-            self.control.notify_one();
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| thread.join())) {
-                Ok(result) => {
-                    contain_thread_unwind(|| drop(result));
-                    self.worker_count.fetch_sub(1, Ordering::AcqRel);
-                    self.control.notify_one();
-                }
-                Err(payload) => {
-                    contain_thread_unwind(|| drop(payload));
-                    self.bus.publish_lazy(|| {
-                        Event::runtime_failure(
-                            "subscriber_dispatch",
-                            "subscriber worker join panicked; its worker slot remains reserved",
-                        )
-                    });
-                }
-            }
-        }
-    }
-
-    fn spawn_reserved(self: &Arc<Self>) {
-        let _spawn = self
-            .spawn_gate
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let closed = self
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .closed;
-        if closed {
-            self.worker_count.fetch_sub(1, Ordering::AcqRel);
-            self.starting_count.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        #[cfg(test)]
-        if self
-            .injected_spawn_failures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
-            self.handle_spawn_failure(std::io::Error::other(
-                "injected subscriber callback worker spawn failure",
-            ));
-            return;
-        }
-        let shared = Arc::clone(self);
-        let loop_exited = Arc::new(AtomicBool::new(false));
-        let worker_exited = Arc::clone(&loop_exited);
-        let index = self.worker_count.load(Ordering::Acquire).saturating_sub(1);
-        match std::thread::Builder::new()
-            .name(format!("taskvisor-subscriber-{index}"))
-            .spawn(move || contain_thread_unwind(move || shared.worker_loop(false, worker_exited)))
-        {
-            Ok(thread) => {
-                self.spawn_failed.store(false, Ordering::Release);
-                self.workers
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .push(SubscriberWorkerHandle {
-                        loop_exited,
-                        thread,
-                    });
-            }
-            Err(error) => self.handle_spawn_failure(error),
-        }
-    }
-
-    fn handle_spawn_failure(&self, error: std::io::Error) {
-        self.worker_count.fetch_sub(1, Ordering::AcqRel);
-        self.starting_count.fetch_sub(1, Ordering::AcqRel);
-        if !self.spawn_failed.swap(true, Ordering::AcqRel) {
-            self.bus.publish_lazy(|| {
-                Event::runtime_failure(
-                    "subscriber_dispatch",
-                    format!("failed to expand subscriber callback workers: {error}"),
-                )
-            });
-        }
-    }
-
-    fn worker_loop(self: Arc<Self>, persistent: bool, loop_exited: Arc<AtomicBool>) {
-        let _exit = WorkerExitGuard {
-            shared: Arc::clone(&self),
-            loop_exited,
-        };
-        self.starting_count.fetch_sub(1, Ordering::AcqRel);
-        self.control.notify_one();
-        let _runtime = self.runtime.enter();
-        loop {
-            let lane = {
-                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                self.idle_count.fetch_add(1, Ordering::AcqRel);
-                while state.ready.is_empty() && !state.closed {
-                    if persistent {
-                        state = self
-                            .ready
-                            .wait(state)
-                            .unwrap_or_else(|error| error.into_inner());
-                    } else {
-                        let (next, timeout) = self
-                            .ready
-                            .wait_timeout(state, EXTRA_WORKER_IDLE_TIMEOUT)
-                            .unwrap_or_else(|error| error.into_inner());
-                        state = next;
-                        if timeout.timed_out() && state.ready.is_empty() && !state.closed {
-                            break;
-                        }
-                    }
-                }
-                self.idle_count.fetch_sub(1, Ordering::AcqRel);
-                match state.ready.pop_front() {
-                    Some(lane) => lane,
-                    None => break,
-                }
-            };
-            self.control.notify_one();
-
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_subscriber_quantum(&lane, &self);
-            }));
-            if let Err(payload) = result {
-                let message = extract_panic_info(&payload);
-                if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    drop(payload);
-                })) {
-                    std::mem::forget(nested);
-                }
-                lane.fail_running_after_unwind();
-                self.bus.publish_lazy(|| {
-                    Event::runtime_failure(
-                        "subscriber_dispatch",
-                        format!("subscriber callback worker panicked: {message}"),
-                    )
-                });
-            }
-        }
-    }
-}
-
-fn submit_owned_subscriber(owned: OwnedSubscriber) {
-    let OwnedSubscriber {
-        subscriber,
-        cleanup,
-    } = owned;
-    drop(subscriber);
-    cleanup.submit();
-}
-
-/// Owns subscriber definitions, active lanes, and callback shutdown.
-///
-/// The runtime event relay calls [`emit_arc`](Self::emit_arc).
-/// Callback workers consume each lane in FIFO order on library-owned OS threads.
-/// This keeps user callbacks outside Tokio's async and blocking pools.
-pub(crate) struct SubscriberSet {
-    /// Serializes startup, fan-out, and shutdown state changes.
-    ///
-    /// The runtime has one event relay, which is the normal `emit_arc` caller.
-    state: std::sync::Mutex<SubscriberState>,
-
-    /// Shared deadline for draining every lane.
-    shutdown_timeout: Duration,
-
-    /// Event bus used for callback and lane diagnostics.
-    bus: Bus,
-
-    /// Number of charged subscriber ownership slots.
-    ownership_slots: usize,
-}
-
-impl SubscriberSet {
-    /// Creates a test set with snapshotted metadata and no active executor.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
-        Self::new_with_shutdown_timeout(subs, bus, DEFAULT_SHUTDOWN_TIMEOUT)
-    }
-
-    /// Creates an isolated test set with an explicit drain timeout.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn new_with_shutdown_timeout(
-        subs: Vec<Arc<dyn Subscribe>>,
-        bus: Bus,
-        shutdown_timeout: Duration,
-    ) -> Self {
-        let source = crate::core::deferred_drop::TestReservationSource::new(subs.len().max(1));
-        Self::from_test_source(subs, bus, shutdown_timeout, &source)
-            .expect("the isolated subscriber test budget fits every definition")
-    }
-
-    #[cfg(test)]
-    fn from_test_source(
-        subs: Vec<Arc<dyn Subscribe>>,
-        bus: Bus,
-        shutdown_timeout: Duration,
-        source: &crate::core::deferred_drop::TestReservationSource,
-    ) -> Result<Self, crate::core::deferred_drop::DropCapacityError> {
-        let reservations = source.try_reserve_many(subs.len())?;
-        Ok(
-            Self::from_reserved(subs, reservations, bus, shutdown_timeout)
-                .expect("subscriber test capacities fit the async structural limit"),
+fn finish_panicked_lane(lane: &SubscriberJob, payload: Box<dyn std::any::Any + Send>) {
+    let message = extract_panic_info(&payload);
+    contain_thread_unwind(|| drop(payload));
+    lane.fail_running_after_unwind();
+    lane.bus.publish_lazy(|| {
+        Event::runtime_failure(
+            "subscriber_dispatch",
+            format!("subscriber callback worker panicked: {message}"),
         )
-    }
+    });
+}
 
-    /// Creates an inactive set from a complete ownership reservation batch.
-    ///
-    /// The caller acquires one reservation per subscriber before this method
-    /// reads [`Subscribe::name`] or [`Subscribe::queue_capacity`].
-    /// Both values are stored for the lifetime of the lane.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BuildError::CapacityTooLarge`] when a subscriber queue exceeds Tokio's structural bounded-channel limit.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the reservation count differs from the subscriber count.
-    /// A panic from either metadata method reaches the caller with ownership already transferred to deferred-drop isolation.
-    pub(crate) fn from_reserved(
-        subs: Vec<Arc<dyn Subscribe>>,
-        reservations: Vec<DropReservation>,
-        bus: Bus,
-        shutdown_timeout: Duration,
-    ) -> Result<Self, BuildError> {
-        assert_eq!(
-            subs.len(),
-            reservations.len(),
-            "every subscriber must have one ownership reservation"
-        );
-        // Complete ownership transfer for the whole atomic batch before the
-        // first user metadata callback. If one callback unwinds, current and
-        // not-yet-visited subscribers all retain charged final references.
-        let owned: Vec<OwnedSubscriber> = subs
-            .into_iter()
-            .zip(reservations)
-            .map(|(subscriber, reservation)| {
-                let cleanup = reservation.bundle(Arc::clone(&subscriber));
-                OwnedSubscriber {
-                    subscriber,
-                    cleanup,
-                }
-            })
-            .collect();
-        let ownership_slots = owned.len();
-        let definitions: Vec<SubscriberDefinition> = owned
-            .into_iter()
-            .map(|mut owned| {
-                let metadata = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let capacity = owned.subscriber.queue_capacity().get();
-                    let name = Arc::from(owned.subscriber.name());
-                    (name, capacity)
-                }));
-                match metadata {
-                    Ok((name, capacity)) if capacity <= MAX_ASYNC_CAPACITY => {
-                        Ok(SubscriberDefinition {
-                            name,
-                            capacity,
-                            ownership: owned,
-                        })
-                    }
-                    Ok((_name, capacity)) => Err(BuildError::CapacityTooLarge {
-                        field: "subscriber_queue_capacity",
-                        value: capacity,
-                        max: MAX_ASYNC_CAPACITY,
-                    }),
-                    Err(payload) => {
-                        let message = extract_panic_info(&payload);
-                        owned.cleanup.attach_panic_payload(payload);
-                        drop(owned);
-                        panic!("subscriber metadata panicked: {message}")
-                    }
-                }
-            })
-            .collect::<Result<_, _>>()?;
-
-        if !definitions.is_empty() {
-            bus.enable();
+fn run_shared_worker(queue: Arc<SharedQueue>, runtime: tokio::runtime::Handle) {
+    let _runtime = runtime.enter();
+    while let Some(lane) = queue.next() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_shared_quantum(&lane, &queue);
+        }));
+        if let Err(payload) = result {
+            finish_panicked_lane(&lane, payload);
         }
-
-        Ok(Self {
-            state: std::sync::Mutex::new(SubscriberState::Pending(definitions)),
-            shutdown_timeout,
-            bus,
-            ownership_slots,
-        })
-    }
-
-    /// Returns the number of ownership slots charged to these subscribers.
-    pub(crate) fn ownership_slots(&self) -> usize {
-        self.ownership_slots
-    }
-
-    /// Creates subscriber lanes and starts the callback executor.
-    ///
-    /// This operation is idempotent. A closed set cannot be started again.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RuntimeError::TokioRuntimeUnavailable`] outside a Tokio runtime.
-    /// Returns [`RuntimeError::ThreadStartFailed`] if the seed callback worker cannot start.
-    pub(crate) fn start(&self) -> Result<(), RuntimeError> {
-        self.start_with(|shared, loop_exited| {
-            std::thread::Builder::new()
-                .name("taskvisor-subscriber-0".to_owned())
-                .spawn(move || contain_thread_unwind(move || shared.worker_loop(true, loop_exited)))
-        })
-    }
-
-    fn start_with(
-        &self,
-        spawn_seed: impl FnOnce(
-            Arc<ExecutorShared>,
-            Arc<AtomicBool>,
-        ) -> std::io::Result<std::thread::JoinHandle<()>>,
-    ) -> Result<(), RuntimeError> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let definitions = match &mut *state {
-            SubscriberState::Pending(definitions) => definitions,
-            SubscriberState::Started { .. } | SubscriberState::Closed => return Ok(()),
-        };
-        if definitions.is_empty() {
-            *state = SubscriberState::Started {
-                lanes: Vec::new(),
-                completions: Vec::new(),
-                executor: SubscriberExecutor::new(
-                    0,
-                    tokio::runtime::Handle::try_current()
-                        .map_err(|_| RuntimeError::TokioRuntimeUnavailable)?,
-                    self.bus.clone(),
-                ),
-            };
-            return Ok(());
-        }
-
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| RuntimeError::TokioRuntimeUnavailable)?;
-        let executor = SubscriberExecutor::new(definitions.len(), runtime, self.bus.clone());
-        let seed_exited = Arc::new(AtomicBool::new(false));
-        let seed = spawn_seed(Arc::clone(&executor.shared), Arc::clone(&seed_exited)).map_err(
-            |source| {
-                executor.shared.worker_count.store(0, Ordering::Release);
-                executor.shared.starting_count.store(0, Ordering::Release);
-                RuntimeError::ThreadStartFailed {
-                    component: "subscriber_dispatch",
-                    source,
-                }
-            },
-        )?;
-        executor.install_seed(seed, seed_exited);
-        executor.start_coordinator();
-        let definitions = std::mem::take(definitions);
-        let mut lanes = Vec::with_capacity(definitions.len());
-        let mut completions = Vec::with_capacity(definitions.len());
-        for definition in definitions {
-            let SubscriberDefinition {
-                name,
-                capacity,
-                ownership,
-            } = definition;
-            let finished = Arc::new(AtomicBool::new(false));
-            let (done, done_rx) = oneshot::channel();
-            lanes.push(Arc::new(SubscriberLane {
-                name,
-                capacity,
-                bus: self.bus.clone(),
-                finished,
-                state: std::sync::Mutex::new(SubscriberLaneState {
-                    queue: VecDeque::new(),
-                    dropped: 0,
-                    phase: LanePhase::Idle,
-                    closing: false,
-                    abort: false,
-                    closed_reported: false,
-                    ownership: Some(ownership),
-                    done: Some(done),
-                }),
-            }));
-            completions.push(done_rx);
-        }
-        *state = SubscriberState::Started {
-            lanes,
-            completions,
-            executor,
-        };
-        Ok(())
-    }
-
-    /// Attempts to enqueue one shared event into every subscriber lane.
-    ///
-    /// The method does not wait for callbacks.
-    /// A call before startup or after closure has no effect.
-    /// A full lane drops the event only for that subscriber.
-    pub(crate) fn emit_arc(&self, event: Arc<Event>) {
-        let closed_subscribers = {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started {
-                lanes, executor, ..
-            } = &*state
-            else {
-                return;
-            };
-            let mut closed_subscribers = Vec::new();
-            for lane in lanes {
-                match lane.enqueue(&event) {
-                    EnqueueResult::Schedule => executor.schedule(Arc::clone(lane)),
-                    EnqueueResult::Closed(name) => closed_subscribers.push(name),
-                    EnqueueResult::Queued => {}
-                }
-            }
-            closed_subscribers
-        };
-
-        for subscriber in closed_subscribers {
-            self.bus
-                .publish_lazy(|| Event::subscriber_overflow(subscriber, "closed"));
-        }
-    }
-
-    /// Closes all lanes and drains them within one shared deadline.
-    ///
-    /// At the deadline, queued events are dropped.
-    /// A callback already running can continue on its worker after this method returns.
-    /// Later calls do nothing.
-    pub(crate) async fn close(&self) {
-        let (lanes, mut completions, executor) = {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            match std::mem::replace(&mut *state, SubscriberState::Closed) {
-                SubscriberState::Pending(_) | SubscriberState::Closed => return,
-                SubscriberState::Started {
-                    lanes,
-                    completions,
-                    executor,
-                } => (lanes, completions, executor),
-            }
-        };
-
-        if lanes.is_empty() {
-            return;
-        }
-
-        let idle_ownership: Vec<_> = lanes.iter().filter_map(|lane| lane.begin_close()).collect();
-        for owned in idle_ownership {
-            submit_owned_subscriber(owned);
-        }
-
-        let drained = if self.shutdown_timeout.is_zero() {
-            false
-        } else {
-            tokio::time::timeout(self.shutdown_timeout, async {
-                for completion in &mut completions {
-                    let _ = completion.await;
-                }
-            })
-            .await
-            .is_ok()
-        };
-
-        if !drained {
-            let mut ownership = Vec::new();
-            let mut queued = Vec::new();
-            for lane in &lanes {
-                let (owned, events) = lane.abort();
-                ownership.extend(owned);
-                queued.push(events);
-            }
-            drop(queued);
-            for owned in ownership {
-                submit_owned_subscriber(owned);
-            }
-        }
-        executor.shutdown().await;
     }
 }
 
-/// Destroys a caught panic payload only on the active callback worker.
-///
-/// A blocking payload destructor keeps that callback worker and its ownership reservation alive.
-/// It cannot extend the public shutdown deadline or become uncharged.
-/// If destruction panics again, the nested payload and its charged slot are retained permanently.
-fn destroy_worker_panic_payload(
-    payload: Box<dyn std::any::Any + Send>,
-    cleanup: &mut DropBundle,
-) -> bool {
-    if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))) {
-        std::mem::forget(nested);
-        cleanup.poison();
-        return false;
+fn run_dedicated_worker(lane: SubscriberJob, runtime: tokio::runtime::Handle) {
+    let _runtime = runtime.enter();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_dedicated_lane(&lane);
+    }));
+    if let Err(payload) = result {
+        finish_panicked_lane(&lane, payload);
     }
-    true
 }
 
-/// Runs one scheduling quantum from a subscriber's serial lane.
-fn run_subscriber_quantum(lane: &SubscriberJob, executor: &Arc<ExecutorShared>) {
+fn run_dedicated_lane(lane: &SubscriberJob) {
+    let ready = lane
+        .dedicated_ready
+        .as_ref()
+        .expect("a dedicated subscriber lane has its own condition variable");
+    loop {
+        let mut owned = {
+            let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
+            while state.phase == LanePhase::Idle {
+                state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+            }
+            match state.phase {
+                LanePhase::Scheduled => {
+                    state.phase = LanePhase::Running;
+                    state
+                        .ownership
+                        .take()
+                        .expect("a scheduled subscriber lane must retain its ownership")
+                }
+                LanePhase::Finished => return,
+                LanePhase::Idle | LanePhase::Running => {
+                    unreachable!("a dedicated subscriber worker owns one serial lane")
+                }
+            }
+        };
+
+        loop {
+            enum Next {
+                Event(Arc<Event>),
+                Overflow(u64),
+                Finish,
+                Idle,
+            }
+
+            let next = {
+                let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
+                if state.abort {
+                    Next::Finish
+                } else if let Some(event) = state.queue.pop_front() {
+                    Next::Event(event)
+                } else if state.dropped != 0 {
+                    Next::Overflow(std::mem::take(&mut state.dropped))
+                } else if state.closing {
+                    Next::Finish
+                } else {
+                    Next::Idle
+                }
+            };
+
+            match next {
+                Next::Event(event) => {
+                    if !invoke_subscriber(
+                        &owned.subscriber,
+                        event.as_ref(),
+                        &lane.name,
+                        &lane.bus,
+                        &mut owned.cleanup,
+                    ) {
+                        lane.finish_running(owned);
+                        return;
+                    }
+                }
+                Next::Overflow(dropped) => {
+                    let event = Event::subscriber_overflow(Arc::clone(&lane.name), "full")
+                        .with_dropped(dropped);
+                    if !invoke_subscriber(
+                        &owned.subscriber,
+                        &event,
+                        &lane.name,
+                        &lane.bus,
+                        &mut owned.cleanup,
+                    ) {
+                        lane.finish_running(owned);
+                        return;
+                    }
+                }
+                Next::Finish => {
+                    lane.finish_running(owned);
+                    return;
+                }
+                Next::Idle => {
+                    let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
+                    if state.abort || state.closing {
+                        drop(state);
+                        lane.finish_running(owned);
+                        return;
+                    }
+                    if state.queue.is_empty() && state.dropped == 0 {
+                        state.ownership = Some(owned);
+                        state.phase = LanePhase::Idle;
+                        break;
+                    }
+                    drop(state);
+                }
+            }
+        }
+    }
+}
+
+/// Runs one fixed fairness quantum from a lane on the shared callback worker.
+fn run_shared_quantum(lane: &SubscriberJob, shared: &Arc<SharedQueue>) {
     let mut owned = {
         let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.phase != LanePhase::Scheduled || state.abort {
@@ -1099,13 +508,14 @@ fn run_subscriber_quantum(lane: &SubscriberJob, executor: &Arc<ExecutorShared>) 
             .expect("a scheduled subscriber lane must retain its ownership")
     };
 
-    for _ in 0..CALLBACK_QUANTUM {
+    for _ in 0..SHARED_CALLBACK_QUANTUM {
         enum Next {
             Event(Arc<Event>),
             Overflow(u64),
             Finish,
             Idle,
         }
+
         let next = {
             let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.abort {
@@ -1113,8 +523,7 @@ fn run_subscriber_quantum(lane: &SubscriberJob, executor: &Arc<ExecutorShared>) 
             } else if let Some(event) = state.queue.pop_front() {
                 Next::Event(event)
             } else if state.dropped != 0 {
-                let dropped = std::mem::take(&mut state.dropped);
-                Next::Overflow(dropped)
+                Next::Overflow(std::mem::take(&mut state.dropped))
             } else if state.closing {
                 Next::Finish
             } else {
@@ -1165,7 +574,7 @@ fn run_subscriber_quantum(lane: &SubscriberJob, executor: &Arc<ExecutorShared>) 
                     state.ownership = Some(owned);
                     state.phase = LanePhase::Scheduled;
                     drop(state);
-                    executor.enqueue(Arc::clone(lane));
+                    shared.schedule(Arc::clone(lane));
                 }
                 return;
             }
@@ -1173,15 +582,443 @@ fn run_subscriber_quantum(lane: &SubscriberJob, executor: &Arc<ExecutorShared>) 
     }
 
     let mut state = lane.state.lock().unwrap_or_else(|error| error.into_inner());
-    if state.abort || (state.closing && state.queue.is_empty() && state.dropped == 0) {
+    let empty = state.queue.is_empty() && state.dropped == 0;
+    if state.abort || (state.closing && empty) {
         drop(state);
         lane.finish_running(owned);
+    } else if empty {
+        state.ownership = Some(owned);
+        state.phase = LanePhase::Idle;
     } else {
         state.ownership = Some(owned);
         state.phase = LanePhase::Scheduled;
         drop(state);
-        executor.enqueue(Arc::clone(lane));
+        shared.schedule(Arc::clone(lane));
     }
+}
+
+fn submit_owned_subscriber(owned: OwnedSubscriber) {
+    let OwnedSubscriber {
+        subscriber,
+        cleanup,
+    } = owned;
+    drop(subscriber);
+    cleanup.submit();
+}
+
+/// Owns subscriber definitions, active lanes, and callback shutdown.
+///
+/// The runtime event relay calls [`emit_arc`](Self::emit_arc).
+/// Callback workers consume each lane in FIFO order on library-owned OS threads.
+/// This keeps user callbacks outside Tokio's async and blocking pools.
+pub(crate) struct SubscriberSet {
+    /// Serializes startup, fan-out, and shutdown state changes.
+    ///
+    /// The runtime has one event relay, which is the normal `emit_arc` caller.
+    state: std::sync::Mutex<SubscriberState>,
+
+    /// Shared deadline for draining every lane.
+    shutdown_timeout: Duration,
+
+    /// Event bus used for callback and lane diagnostics.
+    bus: Bus,
+
+    /// Number of charged subscriber ownership slots.
+    ownership_slots: usize,
+}
+
+impl SubscriberSet {
+    /// Creates a test set with snapshotted metadata and no active callback workers.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new(subs: Vec<Arc<dyn Subscribe>>, bus: Bus) -> Self {
+        Self::new_with_shutdown_timeout(subs, bus, DEFAULT_SHUTDOWN_TIMEOUT)
+    }
+
+    /// Creates an isolated test set with an explicit drain timeout.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new_with_shutdown_timeout(
+        subs: Vec<Arc<dyn Subscribe>>,
+        bus: Bus,
+        shutdown_timeout: Duration,
+    ) -> Self {
+        let source = crate::core::deferred_drop::TestReservationSource::new(subs.len().max(1));
+        Self::from_test_source(subs, bus, shutdown_timeout, &source)
+            .expect("the isolated subscriber test budget fits every definition")
+    }
+
+    #[cfg(test)]
+    fn from_test_source(
+        subs: Vec<Arc<dyn Subscribe>>,
+        bus: Bus,
+        shutdown_timeout: Duration,
+        source: &crate::core::deferred_drop::TestReservationSource,
+    ) -> Result<Self, crate::core::deferred_drop::DropCapacityError> {
+        let reservations = source.try_reserve_many(subs.len())?;
+        Ok(
+            Self::from_reserved(subs, reservations, bus, shutdown_timeout)
+                .expect("subscriber test capacities fit the async structural limit"),
+        )
+    }
+
+    /// Creates an inactive set from a complete ownership reservation batch.
+    ///
+    /// The caller acquires one reservation per subscriber before this method reads
+    /// [`Subscribe::name`], [`Subscribe::queue_capacity`], or [`Subscribe::execution`].
+    /// All values are stored for the lifetime of the lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError::CapacityTooLarge`] when a subscriber queue exceeds Tokio's structural bounded-channel limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the reservation count differs from the subscriber count.
+    /// A panic from any metadata method reaches the caller with ownership already transferred to deferred-drop isolation.
+    pub(crate) fn from_reserved(
+        subs: Vec<Arc<dyn Subscribe>>,
+        reservations: Vec<DropReservation>,
+        bus: Bus,
+        shutdown_timeout: Duration,
+    ) -> Result<Self, BuildError> {
+        assert_eq!(
+            subs.len(),
+            reservations.len(),
+            "every subscriber must have one ownership reservation"
+        );
+        let owned: Vec<OwnedSubscriber> = subs
+            .into_iter()
+            .zip(reservations)
+            .map(|(subscriber, reservation)| {
+                let cleanup = reservation.bundle(Arc::clone(&subscriber));
+                OwnedSubscriber {
+                    subscriber,
+                    cleanup,
+                }
+            })
+            .collect();
+        let ownership_slots = owned.len();
+        let definitions: Vec<SubscriberDefinition> = owned
+            .into_iter()
+            .map(|mut owned| {
+                let metadata = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let capacity = owned.subscriber.queue_capacity().get();
+                    let name = Arc::from(owned.subscriber.name());
+                    let execution = owned.subscriber.execution();
+                    (name, capacity, execution)
+                }));
+                match metadata {
+                    Ok((name, capacity, execution)) if capacity <= MAX_ASYNC_CAPACITY => {
+                        Ok(SubscriberDefinition {
+                            name,
+                            capacity,
+                            execution,
+                            ownership: owned,
+                        })
+                    }
+                    Ok((_name, capacity, _execution)) => Err(BuildError::CapacityTooLarge {
+                        field: "subscriber_queue_capacity",
+                        value: capacity,
+                        max: MAX_ASYNC_CAPACITY,
+                    }),
+                    Err(payload) => {
+                        let message = extract_panic_info(&payload);
+                        owned.cleanup.attach_panic_payload(payload);
+                        drop(owned);
+                        panic!("subscriber metadata panicked: {message}")
+                    }
+                }
+            })
+            .collect::<Result<_, _>>()?;
+
+        if !definitions.is_empty() {
+            bus.enable();
+        }
+
+        Ok(Self {
+            state: std::sync::Mutex::new(SubscriberState::Pending(definitions)),
+            shutdown_timeout,
+            bus,
+            ownership_slots,
+        })
+    }
+
+    /// Returns the number of ownership slots charged to these subscribers.
+    pub(crate) fn ownership_slots(&self) -> usize {
+        self.ownership_slots
+    }
+
+    /// Creates subscriber lanes, one fixed shared worker, and any selected dedicated workers.
+    ///
+    /// This operation is idempotent. A closed set cannot be started again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::TokioRuntimeUnavailable`] outside a Tokio runtime.
+    /// Returns [`RuntimeError::ThreadStartFailed`] if any callback worker cannot start.
+    pub(crate) fn start(&self) -> Result<(), RuntimeError> {
+        self.start_with(spawn_subscriber_worker)
+    }
+
+    fn start_with(
+        &self,
+        mut spawn_worker: impl FnMut(
+            usize,
+            std::sync::mpsc::Receiver<SubscriberWorkerLaunch>,
+        ) -> std::io::Result<std::thread::JoinHandle<()>>,
+    ) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let definitions = match &mut *state {
+            SubscriberState::Pending(definitions) => definitions,
+            SubscriberState::Started { .. } | SubscriberState::Closed => return Ok(()),
+        };
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| RuntimeError::TokioRuntimeUnavailable)?;
+        if definitions.is_empty() {
+            *state = SubscriberState::Started {
+                lanes: Vec::new(),
+                completions: Vec::new(),
+                workers: SubscriberWorkers {
+                    shared: None,
+                    handles: Vec::new(),
+                },
+            };
+            return Ok(());
+        }
+
+        let shared_needed = definitions
+            .iter()
+            .any(|definition| definition.execution == SubscriberExecution::Shared);
+        let dedicated_workers = definitions
+            .iter()
+            .filter(|definition| definition.execution == SubscriberExecution::Dedicated)
+            .count();
+        let worker_count = usize::from(shared_needed) + dedicated_workers;
+        let mut launchers = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            let (launch, receiver) = std::sync::mpsc::channel();
+            match spawn_worker(index, receiver) {
+                Ok(thread) => launchers.push((launch, thread)),
+                Err(source) => {
+                    drop(launch);
+                    let threads: Vec<_> = launchers
+                        .into_iter()
+                        .map(|(launch, thread)| {
+                            drop(launch);
+                            thread
+                        })
+                        .collect();
+                    for thread in threads {
+                        contain_thread_unwind(|| drop(thread.join()));
+                    }
+                    return Err(RuntimeError::ThreadStartFailed {
+                        component: "subscriber_dispatch",
+                        source,
+                    });
+                }
+            }
+        }
+
+        let definitions = std::mem::take(definitions);
+        let mut lanes = Vec::with_capacity(definitions.len());
+        let mut completions = Vec::with_capacity(definitions.len());
+        let mut launchers = launchers.into_iter();
+        let mut handles = Vec::with_capacity(worker_count);
+        let shared = shared_needed.then(SharedQueue::new);
+        if let Some(queue) = &shared {
+            let (launch, thread) = launchers
+                .next()
+                .expect("the shared subscriber worker was started before commit");
+            launch
+                .send(SubscriberWorkerLaunch::Shared {
+                    queue: Arc::clone(queue),
+                    runtime: runtime.clone(),
+                })
+                .expect("a subscriber launcher waits for exactly one committed worker");
+            handles.push(SubscriberWorkerHandle { _thread: thread });
+        }
+
+        for definition in definitions {
+            let SubscriberDefinition {
+                name,
+                capacity,
+                execution,
+                ownership,
+            } = definition;
+            let finished = Arc::new(AtomicBool::new(false));
+            let (done, done_rx) = oneshot::channel();
+            let lane = Arc::new(SubscriberLane {
+                name,
+                capacity,
+                bus: self.bus.clone(),
+                finished,
+                state: std::sync::Mutex::new(SubscriberLaneState {
+                    queue: VecDeque::new(),
+                    dropped: 0,
+                    phase: LanePhase::Idle,
+                    closing: false,
+                    abort: false,
+                    closed_reported: false,
+                    ownership: Some(ownership),
+                    done: Some(done),
+                }),
+                dedicated_ready: (execution == SubscriberExecution::Dedicated)
+                    .then(std::sync::Condvar::new),
+            });
+            if execution == SubscriberExecution::Dedicated {
+                let (launch, thread) = launchers
+                    .next()
+                    .expect("each dedicated subscriber worker was started before commit");
+                launch
+                    .send(SubscriberWorkerLaunch::Dedicated {
+                        lane: Arc::clone(&lane),
+                        runtime: runtime.clone(),
+                    })
+                    .expect("a subscriber launcher waits for exactly one committed worker");
+                handles.push(SubscriberWorkerHandle { _thread: thread });
+            }
+            lanes.push(lane);
+            completions.push(done_rx);
+        }
+        debug_assert!(launchers.next().is_none());
+        *state = SubscriberState::Started {
+            lanes,
+            completions,
+            workers: SubscriberWorkers { shared, handles },
+        };
+        Ok(())
+    }
+
+    /// Attempts to enqueue one shared event into every subscriber lane.
+    ///
+    /// The method does not wait for callbacks.
+    /// A call before startup or after closure has no effect.
+    /// A full lane drops the event only for that subscriber.
+    pub(crate) fn emit_arc(&self, event: Arc<Event>) {
+        let closed_subscribers = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let SubscriberState::Started { lanes, workers, .. } = &*state else {
+                return;
+            };
+            let mut closed_subscribers = Vec::new();
+            for lane in lanes {
+                match lane.enqueue(&event) {
+                    EnqueueResult::ScheduleShared => {
+                        workers.schedule_shared(Arc::clone(lane));
+                    }
+                    EnqueueResult::Closed(name) => closed_subscribers.push(name),
+                    EnqueueResult::Queued => {}
+                }
+            }
+            closed_subscribers
+        };
+
+        for subscriber in closed_subscribers {
+            self.bus
+                .publish_lazy(|| Event::subscriber_overflow(subscriber, "closed"));
+        }
+    }
+
+    /// Closes all lanes and drains them within one shared deadline.
+    ///
+    /// At the deadline, queued events are dropped.
+    /// A callback already running can continue on its worker after this method returns.
+    /// Later calls do nothing.
+    pub(crate) async fn close(&self) {
+        let (lanes, mut completions, workers) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            match std::mem::replace(&mut *state, SubscriberState::Closed) {
+                SubscriberState::Pending(_) | SubscriberState::Closed => return,
+                SubscriberState::Started {
+                    lanes,
+                    completions,
+                    workers,
+                } => (lanes, completions, workers),
+            }
+        };
+
+        if lanes.is_empty() {
+            workers.detach();
+            return;
+        }
+
+        let idle_ownership: Vec<_> = lanes.iter().filter_map(|lane| lane.begin_close()).collect();
+        for owned in idle_ownership {
+            submit_owned_subscriber(owned);
+        }
+
+        let drained = if self.shutdown_timeout.is_zero() {
+            false
+        } else {
+            tokio::time::timeout(self.shutdown_timeout, async {
+                for completion in &mut completions {
+                    let _ = completion.await;
+                }
+            })
+            .await
+            .is_ok()
+        };
+
+        if !drained {
+            let mut ownership = Vec::new();
+            let mut queued = Vec::new();
+            for lane in &lanes {
+                let (owned, events) = lane.abort();
+                ownership.extend(owned);
+                queued.push(events);
+            }
+            drop(queued);
+            for owned in ownership {
+                submit_owned_subscriber(owned);
+            }
+        }
+        workers.detach();
+    }
+}
+
+impl Drop for SubscriberSet {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        let SubscriberState::Started { lanes, workers, .. } =
+            std::mem::replace(state, SubscriberState::Closed)
+        else {
+            return;
+        };
+
+        let mut ownership = Vec::new();
+        let mut queued = Vec::new();
+        for lane in &lanes {
+            let (owned, events) = lane.abort();
+            ownership.extend(owned);
+            queued.push(events);
+        }
+        drop(queued);
+        for owned in ownership {
+            submit_owned_subscriber(owned);
+        }
+        workers.detach();
+    }
+}
+
+/// Destroys a caught panic payload only on the active callback worker.
+///
+/// A blocking payload destructor keeps that callback worker and its ownership reservation alive.
+/// It cannot extend the public shutdown deadline or become uncharged.
+/// If destruction panics again, the nested payload and its charged slot are retained permanently.
+fn destroy_worker_panic_payload(
+    payload: Box<dyn std::any::Any + Send>,
+    cleanup: &mut DropBundle,
+) -> bool {
+    if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))) {
+        std::mem::forget(nested);
+        cleanup.poison();
+        return false;
+    }
+    true
 }
 
 /// Calls user subscriber code behind its panic boundary.
@@ -1324,12 +1161,17 @@ mod tests {
         };
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].capacity, 8);
+        assert_eq!(definitions[0].execution, SubscriberExecution::Shared);
         assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn metadata_panic_keeps_current_and_unvisited_subscribers_isolated() {
-        for panic_behavior in [MetadataBehavior::PanicCapacity, MetadataBehavior::PanicName] {
+        for panic_behavior in [
+            MetadataBehavior::PanicCapacity,
+            MetadataBehavior::PanicName,
+            MetadataBehavior::PanicExecution,
+        ] {
             let source = crate::core::deferred_drop::TestReservationSource::new(2);
             let caller = std::thread::current().id();
             let (dropped_on, drops) = std_mpsc::channel();
@@ -1464,7 +1306,7 @@ mod tests {
         let subscribers: Vec<Arc<dyn Subscribe>> = (0..3)
             .map(|_| {
                 Arc::new(MetadataOwnershipProbe {
-                    behavior: MetadataBehavior::Ready,
+                    behavior: MetadataBehavior::Dedicated,
                     dropped_on: Some(dropped_on.clone()),
                 }) as Arc<dyn Subscribe>
             })
@@ -1478,8 +1320,13 @@ mod tests {
         )
         .expect("the isolated budget fits every subscriber");
 
-        let start_result =
-            set.start_with(|_, _| Err(std::io::Error::other("injected subscriber spawn failure")));
+        let start_result = set.start_with(|index, receiver| {
+            if index == 1 {
+                Err(std::io::Error::other("injected subscriber spawn failure"))
+            } else {
+                spawn_subscriber_worker(index, receiver)
+            }
+        });
         assert!(matches!(
             start_result,
             Err(RuntimeError::ThreadStartFailed {
@@ -1495,17 +1342,15 @@ mod tests {
             assert_eq!(definitions.len(), 3);
         }
         set.start()
-            .expect("a failed seed must permit an exact retry");
+            .expect("a failed worker batch must permit an exact retry");
         {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started {
-                lanes, executor, ..
-            } = &*state
-            else {
+            let SubscriberState::Started { lanes, workers, .. } = &*state else {
                 panic!("the retry must commit a started subscriber set")
             };
             assert_eq!(lanes.len(), 3);
-            assert_eq!(executor.shared.worker_count.load(Ordering::Acquire), 1);
+            assert!(workers.shared.is_none());
+            assert_eq!(workers.handles.len(), 3);
         }
         set.close().await;
         drop(set);
@@ -1551,8 +1396,7 @@ mod tests {
             ],
             Bus::new(64),
         );
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.emit_arc(ev("first"));
 
         let first_blocked = wait_for_gate(&gate, |state| state.entered).await;
@@ -1569,450 +1413,123 @@ mod tests {
         assert!(first_blocked);
         assert!(
             healthy_ran,
-            "a blocked seed worker must trigger elastic progress for a ready independent lane"
+            "a dedicated blocked lane must not occupy the fixed shared worker"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lazy_worker_spawn_failure_retries_without_another_emit() {
-        let bus = Bus::new(64);
-        let mut events = bus.subscribe();
-        let (blocking, gate) = blocking_order_sub();
-        let (healthy_count, healthy) = CountingSub::new(8);
-        let set = SubscriberSet::new(
-            vec![
-                Arc::clone(&blocking) as Arc<dyn Subscribe>,
-                healthy as Arc<dyn Subscribe>,
-            ],
-            bus,
-        );
-        set.start()
-            .expect("subscriber callback executor must start");
-        {
-            let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started { executor, .. } = &*state else {
-                panic!("subscriber callback executor must be started")
-            };
-            executor
-                .shared
-                .injected_spawn_failures
-                .store(1, Ordering::Release);
-        }
+    async fn blocked_shared_lane_does_not_delay_a_dedicated_lane() {
+        let (blocking, gate) = shared_blocking_sub();
+        let dedicated_second = Arc::new(AtomicUsize::new(0));
+        let dedicated = Arc::new(DedicatedTaskCounter {
+            task: "second",
+            count: Arc::clone(&dedicated_second),
+        });
+        let set = SubscriberSet::new(vec![blocking, dedicated], Bus::new(64));
+        set.start().expect("hybrid subscriber workers must start");
 
         set.emit_arc(ev("first"));
         assert!(wait_for_gate(&gate, |state| state.entered).await);
-        let healthy_ran = tokio::time::timeout(Duration::from_secs(2), async {
-            while healthy_count.load(Ordering::Acquire) == 0 {
+        set.emit_arc(ev("second"));
+        let dedicated_ran = tokio::time::timeout(Duration::from_secs(2), async {
+            while dedicated_second.load(Ordering::Acquire) == 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .is_ok();
+
         release_gate(&gate);
         set.close().await;
-
         assert!(
-            healthy_ran,
-            "a failed lazy spawn must retry while ready work remains"
-        );
-        assert_eq!(
-            count(&mut events, EventKind::RuntimeFailure),
-            1,
-            "one failure episode must publish one diagnostic"
+            dedicated_ran,
+            "a blocked shared callback must not delay a dedicated subscriber lane"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn extra_callback_workers_retire_back_to_the_seed() {
-        let (blocking, gate) = blocking_order_sub();
-        let (count, healthy) = CountingSub::new(8);
-        let set = SubscriberSet::new(
-            vec![
-                Arc::clone(&blocking) as Arc<dyn Subscribe>,
-                healthy as Arc<dyn Subscribe>,
-            ],
-            Bus::new(64),
-        );
+    async fn shared_worker_yields_a_busy_lane_after_one_finite_quantum() {
+        let first_gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let next_quantum_gate =
+            Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let busy = Arc::new(SharedQuantumSub {
+            first_gate: Arc::clone(&first_gate),
+            next_quantum_gate: Arc::clone(&next_quantum_gate),
+            calls: AtomicUsize::new(0),
+        });
+        let (healthy_count, healthy) = CountingSub::new(SHARED_CALLBACK_QUANTUM * 2);
+        let set = SubscriberSet::new(vec![busy, healthy], Bus::new(SHARED_CALLBACK_QUANTUM * 2));
         set.start()
-            .expect("subscriber callback executor must start");
+            .expect("the shared subscriber worker must start");
+
         set.emit_arc(ev("first"));
-        assert!(wait_for_gate(&gate, |state| state.entered).await);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while count.load(Ordering::Acquire) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the elastic worker must service the healthy lane");
-        release_gate(&gate);
+        assert!(wait_for_gate(&first_gate, |state| state.entered).await);
+        for index in 1..(SHARED_CALLBACK_QUANTUM * 2) {
+            set.emit_arc(ev(&format!("queued-{index}")));
+        }
 
-        let executor = {
-            let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started { executor, .. } = &*state else {
-                panic!("subscriber callback executor must remain started")
-            };
-            Arc::clone(executor)
-        };
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while executor.shared.worker_count.load(Ordering::Acquire) != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("elastic workers must retire to one persistent seed");
+        release_gate(&first_gate);
+        let next_quantum_entered = wait_for_gate(&next_quantum_gate, |state| state.entered).await;
+        let healthy_calls_before_busy_resumed = healthy_count.load(Ordering::Acquire);
+        release_gate(&next_quantum_gate);
         set.close().await;
+
+        assert!(
+            next_quantum_entered,
+            "the busy shared lane must resume for its next quantum"
+        );
+        assert_eq!(
+            healthy_calls_before_busy_resumed, SHARED_CALLBACK_QUANTUM as u64,
+            "one ready shared lane must run before a busy lane receives its next quantum"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn repeated_growth_reaps_retired_worker_handles() {
-        let (blocking, gate) = blocking_order_sub();
-        let _release = ReleaseGateOnDrop(Arc::clone(&gate));
-        let (healthy_count, healthy) = CountingSub::new(64);
-        let set = SubscriberSet::new(
-            vec![
-                Arc::clone(&blocking) as Arc<dyn Subscribe>,
-                healthy as Arc<dyn Subscribe>,
-            ],
-            Bus::new(64),
-        );
+    async fn shared_quantum_does_not_requeue_a_lane_that_just_became_empty() {
+        let first_gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let unused_next_quantum_gate =
+            Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        let busy = Arc::new(SharedQuantumSub {
+            first_gate: Arc::clone(&first_gate),
+            next_quantum_gate: unused_next_quantum_gate,
+            calls: AtomicUsize::new(0),
+        });
+        let (next, next_gate) = shared_blocking_sub();
+        let set = SubscriberSet::new(vec![busy, next], Bus::new(SHARED_CALLBACK_QUANTUM));
         set.start()
-            .expect("subscriber callback executor must start");
-        let executor = {
+            .expect("the shared subscriber worker must start");
+
+        set.emit_arc(ev("first"));
+        assert!(wait_for_gate(&first_gate, |state| state.entered).await);
+        for index in 1..SHARED_CALLBACK_QUANTUM {
+            set.emit_arc(ev(&format!("queued-{index}")));
+        }
+
+        release_gate(&first_gate);
+        let next_entered = wait_for_gate(&next_gate, |state| state.entered).await;
+        let ready_is_empty = {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started { executor, .. } = &*state else {
-                panic!("subscriber callback executor must be started")
+            let SubscriberState::Started { workers, .. } = &*state else {
+                panic!("the subscriber worker must remain started")
             };
-            Arc::clone(executor)
-        };
-
-        let mut initial_exit_workers = None;
-        for iteration in 0..3_u64 {
-            set.emit_arc(ev("first"));
-            assert!(wait_for_gate(&gate, |state| state.entered).await);
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while healthy_count.load(Ordering::Acquire) <= iteration {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the elastic worker must service the healthy lane");
-            release_gate(&gate);
-            tokio::time::timeout(Duration::from_secs(3), async {
-                while executor.shared.worker_count.load(Ordering::Acquire) != 1 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the extra worker must retire");
-            assert!(
-                wait_for_condition(|| {
-                    let exits = executor
-                        .shared
-                        .exits
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    exits.workers != 0
-                        && exits.starting == 0
-                        && exits.ready.is_empty()
-                        && exits.idle == exits.workers
-                })
-                .await,
-                "completed joins must leave their persistent workers available for reuse"
-            );
-            let exit_workers = executor
+            workers
                 .shared
-                .exits
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .workers;
-            assert!(exit_workers <= executor.shared.max_workers);
-            assert_eq!(
-                *initial_exit_workers.get_or_insert(exit_workers),
-                exit_workers,
-                "later retirements must reuse the idle join workers"
-            );
-
-            if iteration != 2 {
-                let mut state = gate.0.lock().unwrap_or_else(|error| error.into_inner());
-                state.entered = false;
-                state.released = false;
-                state.finished = false;
-            }
-        }
-
-        executor.shared.control.notify_one();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let handles = executor
-                    .shared
-                    .workers
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .len();
-                if handles == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("retired callback worker handles must be reaped");
-        set.close().await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn retiring_callback_tls_keeps_its_slot_until_native_join() {
-        let (blocking, callback_gate) = blocking_order_sub();
-        let _release_callback = ReleaseGateOnDrop(Arc::clone(&callback_gate));
-        let tls_gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
-        let _release_tls = ReleaseGateOnDrop(Arc::clone(&tls_gate));
-        let watchdog = spawn_gate_watchdog(Arc::clone(&tls_gate));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let set = SubscriberSet::new(
-            vec![
-                blocking as Arc<dyn Subscribe>,
-                Arc::new(ThreadLocalSub {
-                    gate: Arc::clone(&tls_gate),
-                    calls: Arc::clone(&calls),
-                }),
-            ],
-            Bus::new(64),
-        );
-        set.start().expect("subscriber workers must start");
-        let (lanes, executor) = {
-            let state = set.state.lock().unwrap_or_else(|e| e.into_inner());
-            let SubscriberState::Started {
-                lanes, executor, ..
-            } = &*state
-            else {
-                panic!("the subscriber set must be started")
-            };
-            (lanes.clone(), Arc::clone(executor))
-        };
-
-        assert!(
-            wait_for_condition(|| executor.shared.idle_count.load(Ordering::Acquire) == 1).await
-        );
-        assert!(matches!(
-            lanes[0].enqueue(&ev("first")),
-            EnqueueResult::Schedule
-        ));
-        executor.schedule(Arc::clone(&lanes[0]));
-        assert!(wait_for_gate(&callback_gate, |state| state.entered).await);
-        assert!(matches!(
-            lanes[1].enqueue(&ev("tls-first")),
-            EnqueueResult::Schedule
-        ));
-        executor.schedule(Arc::clone(&lanes[1]));
-        assert!(wait_for_gate(&tls_gate, |state| state.entered).await);
-
-        assert_eq!(calls.load(Ordering::Acquire), 1);
-        assert_eq!(executor.shared.worker_count.load(Ordering::Acquire), 2);
-        assert!(matches!(
-            lanes[1].enqueue(&ev("tls-second")),
-            EnqueueResult::Schedule
-        ));
-        executor.schedule(Arc::clone(&lanes[1]));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        {
-            let state = tls_gate.0.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(!state.released && !state.watchdog_fired);
-        }
-        assert_eq!(
-            calls.load(Ordering::Acquire),
-            1,
-            "a TLS-blocked worker must not free a slot for a third physical callback thread"
-        );
-        assert_eq!(executor.shared.worker_count.load(Ordering::Acquire), 2);
-        assert_eq!(executor.shared.starting_count.load(Ordering::Acquire), 0);
-
-        release_gate(&tls_gate);
-        assert!(
-            wait_for_condition(|| calls.load(Ordering::Acquire) == 2).await,
-            "native join must free the slot and wake pending callback work"
-        );
-        release_gate(&callback_gate);
-        set.close().await;
-        watchdog.join().expect("the TLS watchdog must not panic");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn blocked_native_join_does_not_strand_another_completed_worker() {
-        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
-        let _release = ReleaseGateOnDrop(Arc::clone(&gate));
-        let watchdog = spawn_gate_watchdog(Arc::clone(&gate));
-        let executor = executor_with_exited_tls_worker(2, Arc::clone(&gate));
-        assert!(wait_for_gate(&gate, |state| state.entered).await);
-        executor.shared.reap_finished();
-        executor.shared.spawn_exit_worker();
-        assert!(
-            wait_for_condition(|| {
-                let exits = executor
-                    .shared
-                    .exits
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                exits.workers == 1 && exits.starting == 0 && exits.ready.is_empty()
-            })
-            .await
-        );
-
-        let completed = std::thread::spawn(|| {});
-        assert!(wait_for_condition(|| completed.is_finished()).await);
-        executor.shared.worker_count.fetch_add(1, Ordering::AcqRel);
-        executor
-            .shared
-            .exits
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .ready
-            .push_back(completed);
-        executor.start_coordinator();
-        executor.shared.control.notify_one();
-        assert!(
-            wait_for_condition(|| executor.shared.worker_count.load(Ordering::Acquire) == 1).await,
-            "a second join worker must reclaim the completed thread while the first join blocks"
-        );
-        {
-            let state = gate.0.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(!state.released && !state.watchdog_fired);
-        }
-        assert_eq!(
-            executor
-                .shared
-                .exits
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .workers,
-            2
-        );
-
-        release_gate(&gate);
-        assert!(
-            wait_for_condition(|| executor.shared.worker_count.load(Ordering::Acquire) == 0).await
-        );
-        executor.shutdown().await;
-        watchdog.join().expect("the TLS watchdog must not panic");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn failed_join_worker_spawn_preserves_charge_and_retries_without_callbacks() {
-        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
-        let _release = ReleaseGateOnDrop(Arc::clone(&gate));
-        let watchdog = spawn_gate_watchdog(Arc::clone(&gate));
-        let executor = executor_with_exited_tls_worker(1, Arc::clone(&gate));
-        assert!(wait_for_gate(&gate, |state| state.entered).await);
-        executor.shared.reap_finished();
-        executor
-            .shared
-            .injected_exit_spawn_failures
-            .store(1, Ordering::Release);
-        executor.shared.spawn_exit_worker();
-        {
-            let exits = executor
-                .shared
-                .exits
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            assert_eq!(
-                exits.ready.len(),
-                1,
-                "failed spawn must not detach the queued handle"
-            );
-            assert_eq!((exits.workers, exits.starting), (0, 0));
-            assert!(exits.spawn_failed);
-        }
-        assert_eq!(executor.shared.worker_count.load(Ordering::Acquire), 1);
-        assert!(
-            executor
-                .shared
+                .as_ref()
+                .expect("both lanes use the shared worker")
                 .state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .ready
                 .is_empty()
-        );
+        };
+        release_gate(&next_gate);
+        set.close().await;
 
-        executor
-            .shared
-            .injected_exit_spawn_failures
-            .store(1, Ordering::Release);
-        executor.start_coordinator();
+        assert!(next_entered, "the already-ready second lane must run");
         assert!(
-            wait_for_condition(|| {
-                let exits = executor
-                    .shared
-                    .exits
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                exits.workers == 1
-                    && exits.starting == 0
-                    && exits.ready.is_empty()
-                    && !exits.spawn_failed
-            })
-            .await,
-            "join startup must retry without another event or a ready callback lane"
+            ready_is_empty,
+            "an empty lane must return to Idle instead of consuming another scheduler turn"
         );
-        {
-            let state = gate.0.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(!state.released && !state.watchdog_fired);
-        }
-        assert_eq!(executor.shared.worker_count.load(Ordering::Acquire), 1);
-        release_gate(&gate);
-        assert!(
-            wait_for_condition(|| executor.shared.worker_count.load(Ordering::Acquire) == 0).await
-        );
-        executor.shutdown().await;
-        watchdog.join().expect("the TLS watchdog must not panic");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_detaches_remaining_handle_while_its_tls_destructor_runs() {
-        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
-        let _release = ReleaseGateOnDrop(Arc::clone(&gate));
-        let watchdog = spawn_gate_watchdog(Arc::clone(&gate));
-        let executor = executor_with_exited_tls_worker(1, Arc::clone(&gate));
-        assert!(wait_for_gate(&gate, |state| state.entered).await);
-        {
-            let workers = executor
-                .shared
-                .workers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            assert_eq!(workers.len(), 1);
-            assert!(
-                workers[0].thread.is_finished(),
-                "main has returned, but TLS still blocks native join"
-            );
-        }
-        assert!(
-            executor
-                .coordinator
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_none()
-        );
-
-        executor.shutdown().await;
-        {
-            let state = gate.0.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(
-                !state.released && !state.watchdog_fired,
-                "shutdown must not wait for TLS teardown"
-            );
-        }
-        assert_eq!(
-            executor
-                .shared
-                .exits
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .workers,
-            0
-        );
-        release_gate(&gate);
-        assert!(wait_for_gate(&gate, |state| state.finished).await);
-        watchdog.join().expect("the TLS watchdog must not panic");
     }
 
     #[test]
@@ -2053,34 +1570,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn repeated_start_and_close_cannot_lose_coordinator_stop() {
+    async fn repeated_start_and_close_wakes_the_idle_shared_worker() {
         for _ in 0..64 {
             let (_count, subscriber) = CountingSub::new(1);
             let set = SubscriberSet::new(vec![subscriber], Bus::new(8));
             set.start()
-                .expect("subscriber callback executor must start");
+                .expect("the shared subscriber worker must start");
             tokio::time::timeout(Duration::from_secs(1), set.close())
                 .await
-                .expect("coordinator stop is a retained cancellation signal");
+                .expect("closing the last idle lane must wake the shared worker");
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn configured_subscribers_start_with_one_callback_worker() {
-        let subscribers: Vec<Arc<dyn Subscribe>> = (0..64)
+    async fn configured_shared_subscribers_start_one_fixed_callback_worker() {
+        let subscribers: Vec<Arc<dyn Subscribe>> = (0..8)
             .map(|_| CountingSub::new(1).1 as Arc<dyn Subscribe>)
             .collect();
         let set = SubscriberSet::new(subscribers, Bus::new(8));
         set.start()
-            .expect("subscriber callback executor must start");
-        let worker_count = {
+            .expect("the shared subscriber worker must start");
+        {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started { executor, .. } = &*state else {
-                panic!("subscriber callback executor must be started")
+            let SubscriberState::Started { lanes, workers, .. } = &*state else {
+                panic!("subscriber workers must be started")
             };
-            executor.shared.worker_count.load(Ordering::Acquire)
-        };
-        assert_eq!(worker_count, 1);
+            assert_eq!(lanes.len(), 8);
+            assert!(lanes.iter().all(|lane| lane.dedicated_ready.is_none()));
+            assert!(workers.shared.is_some());
+            assert_eq!(workers.handles.len(), 1);
+            assert_eq!(
+                workers.handles[0]._thread.thread().name(),
+                Some("taskvisor-subscriber-0")
+            );
+        }
+        set.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dedicated_subscribers_add_exactly_one_worker_each() {
+        struct DedicatedNoop;
+
+        impl Subscribe for DedicatedNoop {
+            fn on_event(&self, _event: &Event) {}
+
+            fn execution(&self) -> SubscriberExecution {
+                SubscriberExecution::Dedicated
+            }
+        }
+
+        let shared = CountingSub::new(1).1 as Arc<dyn Subscribe>;
+        let subscribers: Vec<Arc<dyn Subscribe>> = vec![
+            shared,
+            Arc::new(DedicatedNoop),
+            Arc::new(DedicatedNoop),
+            Arc::new(DedicatedNoop),
+        ];
+        let set = SubscriberSet::new(subscribers, Bus::new(8));
+        set.start().expect("hybrid subscriber workers must start");
+        {
+            let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
+            let SubscriberState::Started { lanes, workers, .. } = &*state else {
+                panic!("subscriber workers must be started")
+            };
+            assert_eq!(lanes.len(), 4);
+            assert_eq!(
+                lanes
+                    .iter()
+                    .filter(|lane| lane.dedicated_ready.is_some())
+                    .count(),
+                3
+            );
+            assert!(workers.shared.is_some());
+            assert_eq!(workers.handles.len(), 4);
+        }
         set.close().await;
     }
 
@@ -2089,10 +1652,8 @@ mod tests {
         let (count, subscriber) = CountingSub::new(8);
         let set = SubscriberSet::new(vec![subscriber], Bus::new(8));
 
-        set.start()
-            .expect("subscriber callback executor must start");
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
+        set.start().expect("subscriber callback workers must start");
         for _ in 0..3 {
             set.emit_arc(ev("started"));
         }
@@ -2101,8 +1662,7 @@ mod tests {
             .expect("close must drain started subscriber workers");
 
         assert_eq!(count.load(Ordering::Relaxed), 3);
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.close().await;
         assert!(matches!(
             *set.state.lock().unwrap_or_else(|e| e.into_inner()),
@@ -2111,7 +1671,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn normal_worker_exit_releases_subscriber_ownership() {
+    async fn normal_lane_close_releases_subscriber_ownership() {
         let source = crate::core::deferred_drop::TestReservationSource::new(1);
         let (_count, subscriber) = CountingSub::new(8);
         let set = SubscriberSet::from_test_source(
@@ -2122,15 +1682,118 @@ mod tests {
         )
         .expect("the isolated budget has one subscriber slot");
 
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.close().await;
 
         let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
             .await
-            .expect("clean physical worker exit must release ownership")
+            .expect("clean lane close must release ownership")
             .expect("clean subscriber destruction keeps admission open");
         drop(released);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_started_set_wakes_its_idle_worker_without_joining() {
+        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+        let (_count, subscriber) = CountingSub::new(8);
+        let set = SubscriberSet::from_test_source(
+            vec![subscriber],
+            Bus::new(8),
+            Duration::from_secs(1),
+            &source,
+        )
+        .expect("the isolated budget has one subscriber slot");
+
+        set.start().expect("the subscriber worker must start");
+        let lane = {
+            let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
+            let SubscriberState::Started { lanes, .. } = &*state else {
+                panic!("the subscriber lane must be started")
+            };
+            Arc::downgrade(&lanes[0])
+        };
+
+        drop(set);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while lane.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping a started set must wake and detach its idle worker");
+        let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("dropping a started set must release idle lane ownership")
+            .expect("clean subscriber destruction keeps admission open");
+        drop(released);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_close_closes_the_shared_queue_and_releases_its_worker() {
+        let (subscriber, gate) = shared_blocking_sub();
+        let set = Arc::new(SubscriberSet::new_with_shutdown_timeout(
+            vec![subscriber],
+            Bus::new(8),
+            Duration::from_secs(30),
+        ));
+        set.start()
+            .expect("the shared subscriber worker must start");
+        let shared = {
+            let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
+            let SubscriberState::Started { workers, .. } = &*state else {
+                panic!("the subscriber worker must be started")
+            };
+            Arc::downgrade(
+                workers
+                    .shared
+                    .as_ref()
+                    .expect("the default subscriber uses the shared worker"),
+            )
+        };
+
+        let watchdog = spawn_gate_watchdog(Arc::clone(&gate));
+        set.emit_arc(ev("block"));
+        assert!(wait_for_gate(&gate, |state| state.entered).await);
+
+        let close_set = Arc::clone(&set);
+        let close_task = tokio::spawn(async move { close_set.close().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    *set.state.lock().unwrap_or_else(|error| error.into_inner()),
+                    SubscriberState::Closed
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("close must transfer the worker bundle into its future");
+
+        close_task.abort();
+        let close_error = close_task
+            .await
+            .expect_err("the blocked close task must be canceled");
+        assert!(close_error.is_cancelled());
+        assert!(
+            shared.upgrade().is_some(),
+            "the running callback still retains the shared worker queue"
+        );
+
+        release_gate(&gate);
+        assert!(wait_for_gate(&gate, |state| state.finished).await);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while shared.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("canceling close must close the queue and let its shared worker exit");
+        watchdog
+            .join()
+            .expect("the callback watchdog must not panic");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2189,8 +1852,7 @@ mod tests {
         let set = SubscriberSet::new(vec![subscriber], Bus::new(8));
 
         set.close().await;
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.emit_arc(ev("after-close"));
         set.close().await;
 
@@ -2294,6 +1956,90 @@ mod tests {
         overflow_reports: Mutex<Vec<(String, u64)>>,
     }
 
+    struct SharedBlockingSub {
+        gate: BlockingGate,
+    }
+
+    struct DedicatedTaskCounter {
+        task: &'static str,
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Subscribe for DedicatedTaskCounter {
+        fn on_event(&self, event: &Event) {
+            if event.task.as_deref() == Some(self.task) {
+                self.count.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        fn execution(&self) -> SubscriberExecution {
+            SubscriberExecution::Dedicated
+        }
+    }
+
+    struct SharedQuantumSub {
+        first_gate: BlockingGate,
+        next_quantum_gate: BlockingGate,
+        calls: AtomicUsize,
+    }
+
+    impl Subscribe for SharedQuantumSub {
+        fn on_event(&self, _event: &Event) {
+            let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+            let gate = if call == 1 {
+                Some(&self.first_gate)
+            } else if call == SHARED_CALLBACK_QUANTUM + 1 {
+                Some(&self.next_quantum_gate)
+            } else {
+                None
+            };
+            let Some(gate) = gate else {
+                return;
+            };
+            let (state, ready) = &**gate;
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state.entered = true;
+            ready.notify_all();
+            while !state.released {
+                state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+            }
+            state.finished = true;
+            ready.notify_all();
+        }
+
+        fn queue_capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(SHARED_CALLBACK_QUANTUM * 2).expect("test capacity is non-zero")
+        }
+    }
+
+    impl Subscribe for SharedBlockingSub {
+        fn on_event(&self, _event: &Event) {
+            let (state, ready) = &*self.gate;
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            state.entered = true;
+            ready.notify_all();
+            while !state.released {
+                state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+            }
+            state.finished = true;
+            ready.notify_all();
+        }
+
+        fn queue_capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(8).expect("test capacity is non-zero")
+        }
+    }
+
+    fn shared_blocking_sub() -> (Arc<SharedBlockingSub>, BlockingGate) {
+        let gate = Arc::new((Mutex::new(BlockingGateState::default()), Condvar::new()));
+        (
+            Arc::new(SharedBlockingSub {
+                gate: Arc::clone(&gate),
+            }),
+            gate,
+        )
+    }
+
     impl Subscribe for BlockingOrderSub {
         fn on_event(&self, event: &Event) {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2333,6 +2079,10 @@ mod tests {
 
         fn name(&self) -> &str {
             "blocking-order"
+        }
+
+        fn execution(&self) -> SubscriberExecution {
+            SubscriberExecution::Dedicated
         }
 
         fn queue_capacity(&self) -> NonZeroUsize {
@@ -2397,73 +2147,6 @@ mod tests {
         }
     }
 
-    struct ReleaseGateOnDrop(BlockingGate);
-
-    impl Drop for ReleaseGateOnDrop {
-        fn drop(&mut self) {
-            release_gate(&self.0);
-        }
-    }
-
-    std::thread_local! {
-        static BLOCKING_WORKER_TLS: std::cell::RefCell<Option<BlockingPanicPayload>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    fn install_blocking_worker_tls(gate: &BlockingGate) {
-        BLOCKING_WORKER_TLS.with(|value| {
-            let mut value = value.borrow_mut();
-            if value.is_none() {
-                *value = Some(BlockingPanicPayload(Arc::clone(gate)));
-            }
-        });
-    }
-
-    struct ThreadLocalSub {
-        gate: BlockingGate,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Subscribe for ThreadLocalSub {
-        fn on_event(&self, _: &Event) {
-            install_blocking_worker_tls(&self.gate);
-            self.calls.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    fn executor_with_exited_tls_worker(
-        max_workers: usize,
-        gate: BlockingGate,
-    ) -> Arc<SubscriberExecutor> {
-        let executor =
-            SubscriberExecutor::new(max_workers, tokio::runtime::Handle::current(), Bus::new(64));
-        let shared = Arc::clone(&executor.shared);
-        let loop_exited = Arc::new(AtomicBool::new(false));
-        let worker_exited = Arc::clone(&loop_exited);
-        let worker = std::thread::spawn(move || {
-            contain_thread_unwind(|| {
-                let _exit = WorkerExitGuard {
-                    shared: Arc::clone(&shared),
-                    loop_exited: worker_exited,
-                };
-                shared.starting_count.fetch_sub(1, Ordering::AcqRel);
-                install_blocking_worker_tls(&gate);
-            });
-        });
-        executor.install_seed(worker, loop_exited);
-        executor
-    }
-
-    async fn wait_for_condition(predicate: impl Fn() -> bool) -> bool {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !predicate() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-
     struct PanickingFinalSubscriberDrop {
         gate: BlockingGate,
     }
@@ -2510,8 +2193,10 @@ mod tests {
 
     enum MetadataBehavior {
         Ready,
+        Dedicated,
         PanicName,
         PanicCapacity,
+        PanicExecution,
         PanicCapacityPayload(BlockingGate),
         BlockCapacity(BlockingGate),
     }
@@ -2546,9 +2231,20 @@ mod tests {
                         state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
                     }
                 }
-                MetadataBehavior::Ready | MetadataBehavior::PanicName => {}
+                MetadataBehavior::Ready
+                | MetadataBehavior::Dedicated
+                | MetadataBehavior::PanicName
+                | MetadataBehavior::PanicExecution => {}
             }
             NonZeroUsize::new(8).expect("test capacity is non-zero")
+        }
+
+        fn execution(&self) -> SubscriberExecution {
+            match self.behavior {
+                MetadataBehavior::Dedicated => SubscriberExecution::Dedicated,
+                MetadataBehavior::PanicExecution => panic!("subscriber execution panic"),
+                _ => SubscriberExecution::Shared,
+            }
         }
     }
 
@@ -2581,14 +2277,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn blocking_callback_keeps_runtime_responsive_and_close_joins_it() {
+    async fn blocking_callback_keeps_runtime_responsive_and_close_waits_for_it() {
         let (sub, first_gate) = blocking_order_sub();
         let set = Arc::new(SubscriberSet::new(
             vec![Arc::clone(&sub) as Arc<dyn Subscribe>],
             Bus::new(64),
         ));
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
 
         let watchdog = spawn_gate_watchdog(Arc::clone(&first_gate));
 
@@ -2675,8 +2370,7 @@ mod tests {
 
             let (count, subscriber) = CountingSub::new(8);
             let set = SubscriberSet::new(vec![subscriber], Bus::new(8));
-            set.start()
-                .expect("subscriber callback executor must start");
+            set.start().expect("subscriber callback workers must start");
             set.emit_arc(ev("dedicated-thread"));
             let callback_ran_while_pool_was_occupied =
                 tokio::time::timeout(Duration::from_secs(1), async {
@@ -2710,17 +2404,16 @@ mod tests {
             &source,
         )
         .expect("the isolated budget has one subscriber slot");
-        set.start()
-            .expect("subscriber callback executor must start");
-        let worker_finished = {
+        set.start().expect("subscriber callback workers must start");
+        let lane_finished = {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
             let SubscriberState::Started { lanes, .. } = &*state else {
-                panic!("subscriber worker must be started")
+                panic!("subscriber lane must be started")
             };
             Arc::clone(
                 &lanes
                     .first()
-                    .expect("the test configures one subscriber worker")
+                    .expect("the test configures one subscriber lane")
                     .finished,
             )
         };
@@ -2733,7 +2426,7 @@ mod tests {
         let first_entered = wait_for_gate(&first_gate, |state| state.entered).await;
 
         let close_result = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
-        let worker_was_still_running = !worker_finished.load(Ordering::Acquire);
+        let lane_was_still_running = !lane_finished.load(Ordering::Acquire);
         let first_was_still_running = !first_gate
             .0
             .lock()
@@ -2745,8 +2438,8 @@ mod tests {
 
         release_gate(&first_gate);
         let first_finished = wait_for_gate(&first_gate, |state| state.finished).await;
-        let worker_stopped_after_release = tokio::time::timeout(Duration::from_secs(1), async {
-            while !worker_finished.load(Ordering::Acquire) {
+        let lane_finished_after_release = tokio::time::timeout(Duration::from_secs(1), async {
+            while !lane_finished.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
         })
@@ -2761,7 +2454,7 @@ mod tests {
         let repeated_close = tokio::time::timeout(Duration::from_secs(1), set.close()).await;
         let released = tokio::time::timeout(Duration::from_secs(1), source.reserve())
             .await
-            .expect("physical worker exit must release subscriber ownership")
+            .expect("the returned callback must release subscriber ownership")
             .expect("clean subscriber destruction keeps admission open");
         drop(released);
 
@@ -2771,7 +2464,7 @@ mod tests {
             "zero subscriber shutdown timeout must return immediately"
         );
         assert!(
-            worker_was_still_running,
+            lane_was_still_running,
             "close must detach a callback that outlives the zero deadline"
         );
         assert!(
@@ -2784,21 +2477,21 @@ mod tests {
         );
         assert!(
             queued_event_was_dropped,
-            "the detached receiver must release queued events before close returns"
+            "the detached lane must release queued events before close returns"
         );
         assert!(
             ownership_stayed_charged,
-            "detached callback ownership must remain charged until physical return"
+            "detached callback ownership must remain charged until the callback returns"
         );
         assert!(first_finished, "cleanup must release the running callback");
         assert!(
-            worker_stopped_after_release,
-            "the detached worker must stop after its running callback returns"
+            lane_finished_after_release,
+            "the detached lane must finish after its running callback returns"
         );
         assert_eq!(
             seen,
             ["first"],
-            "releasing the detached worker cannot revive queued callbacks"
+            "releasing the detached callback cannot revive queued events"
         );
         assert!(!sub.second_entered.load(Ordering::Acquire));
         assert!(repeated_close.is_ok(), "repeated close must remain a no-op");
@@ -2818,8 +2511,7 @@ mod tests {
             &source,
         )
         .expect("the isolated budget has one subscriber slot");
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
 
         let close_result = tokio::time::timeout(Duration::from_millis(500), set.close()).await;
         let payload_destructor_ran = gate
@@ -2835,7 +2527,7 @@ mod tests {
         );
         assert!(
             !payload_destructor_ran,
-            "the supervisor-local charged executor must retain, not destroy, a hostile destructor panic payload"
+            "the charged subscriber callback worker must retain, not destroy, a hostile destructor panic payload"
         );
         assert!(
             poisoned_slot_stays_charged,
@@ -2860,8 +2552,7 @@ mod tests {
             Bus::new(64),
             Duration::from_millis(200),
         );
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.emit_arc(ev("first"));
         let all_entered = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -2911,8 +2602,7 @@ mod tests {
         let mut bus_events = bus.subscribe();
         let (sub, gate) = blocking_order_sub();
         let set = SubscriberSet::new(vec![Arc::clone(&sub) as Arc<dyn Subscribe>], bus.clone());
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.emit_arc(ev("first"));
         assert!(wait_for_gate(&gate, |state| state.entered).await);
 
@@ -2944,8 +2634,7 @@ mod tests {
     async fn dropped_internal_diagnostics_do_not_create_an_overflow_report() {
         let (sub, gate) = blocking_order_sub();
         let set = SubscriberSet::new(vec![Arc::clone(&sub) as Arc<dyn Subscribe>], Bus::new(64));
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
         set.emit_arc(ev("first"));
         assert!(wait_for_gate(&gate, |state| state.entered).await);
 
@@ -2972,8 +2661,7 @@ mod tests {
         let bus = Bus::new(64);
         let mut rx = bus.subscribe();
         let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
 
         for _ in 0..3 {
             set.emit_arc(ev("t"));
@@ -2990,40 +2678,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn panic_payload_destructor_panic_stops_that_subscriber_worker() {
-        let source = crate::core::deferred_drop::TestReservationSource::new(1);
+    async fn panic_payload_destructor_panic_stops_only_that_shared_lane() {
+        struct HealthySharedProbe {
+            calls: AtomicUsize,
+            callback_thread: Mutex<Option<std::thread::ThreadId>>,
+        }
+
+        impl Subscribe for HealthySharedProbe {
+            fn on_event(&self, _event: &Event) {
+                *self
+                    .callback_thread
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(std::thread::current().id());
+                self.calls.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        let source = crate::core::deferred_drop::TestReservationSource::new(2);
         let bus = Bus::new(64);
         let mut events = bus.subscribe();
         let calls = Arc::new(AtomicUsize::new(0));
-        let subscriber: Arc<dyn Subscribe> = Arc::new(NestedDropPanicSub {
+        let panicking: Arc<dyn Subscribe> = Arc::new(NestedDropPanicSub {
             calls: Arc::clone(&calls),
         });
+        let healthy = Arc::new(HealthySharedProbe {
+            calls: AtomicUsize::new(0),
+            callback_thread: Mutex::new(None),
+        });
         let set = Arc::new(
-            SubscriberSet::from_test_source(vec![subscriber], bus, Duration::from_secs(1), &source)
-                .expect("the isolated budget has one subscriber slot"),
+            SubscriberSet::from_test_source(
+                vec![panicking, Arc::clone(&healthy) as Arc<dyn Subscribe>],
+                bus,
+                Duration::from_secs(1),
+                &source,
+            )
+            .expect("the isolated budget has two subscriber slots"),
         );
-        set.start()
-            .expect("subscriber callback executor must start");
-        let worker_finished = {
+        set.start().expect("subscriber callback workers must start");
+        let (lane_finished, shared_thread) = {
             let state = set.state.lock().unwrap_or_else(|error| error.into_inner());
-            let SubscriberState::Started { lanes, .. } = &*state else {
-                panic!("the subscriber worker must be started")
+            let SubscriberState::Started { lanes, workers, .. } = &*state else {
+                panic!("the shared subscriber worker must be started")
             };
-            Arc::clone(&lanes[0].finished)
+            assert_eq!(workers.handles.len(), 1);
+            (
+                Arc::clone(&lanes[0].finished),
+                workers.handles[0]._thread.thread().id(),
+            )
         };
 
         set.emit_arc(ev("nested-drop"));
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !worker_finished.load(Ordering::Acquire) {
+            while !lane_finished.load(Ordering::Acquire)
+                || healthy.calls.load(Ordering::Acquire) == 0
+            {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("the poisoned subscriber worker must terminate");
+        .expect("the poisoned lane must finish and the healthy shared lane must run");
         let emitters: Vec<_> = (0..8)
             .map(|_| {
                 let set = Arc::clone(&set);
-                std::thread::spawn(move || set.emit_arc(ev("after-worker-exit")))
+                std::thread::spawn(move || set.emit_arc(ev("after-lane-exit")))
             })
             .collect();
         for emitter in emitters {
@@ -3031,8 +2748,17 @@ mod tests {
         }
         tokio::time::timeout(Duration::from_secs(1), set.close())
             .await
-            .expect("the poisoned subscriber worker must terminate");
+            .expect("the healthy shared lane must close cleanly");
+        let callback_thread = *healthy
+            .callback_thread
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let clean_slot = tokio::time::timeout(Duration::from_secs(1), source.reserve())
+            .await
+            .expect("the healthy subscriber must release its ownership slot")
+            .expect("healthy subscriber cleanup keeps admission open");
         let poisoned_slot_stays_charged = source.try_reserve().is_err();
+        drop(clean_slot);
         let panicked = first(&mut events, EventKind::SubscriberPanicked)
             .expect("the callback panic must be reported");
         let closed = first(&mut events, EventKind::SubscriberOverflow)
@@ -3041,7 +2767,13 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::Acquire),
             1,
-            "a nested panic-payload destructor failure must permanently stop that worker"
+            "a nested panic-payload destructor failure must permanently stop only that lane"
+        );
+        assert_eq!(healthy.calls.load(Ordering::Acquire), 9);
+        assert_eq!(
+            callback_thread,
+            Some(shared_thread),
+            "the same physical shared worker must continue with the healthy lane"
         );
         assert_eq!(panicked.task.as_deref(), Some("nested-drop-panic"));
         assert_eq!(closed.task.as_deref(), Some("nested-drop-panic"));
@@ -3067,8 +2799,7 @@ mod tests {
             let bus = Bus::new(64);
             let mut rx = bus.subscribe();
             let set = SubscriberSet::new(vec![PanicSub::new()], bus.clone());
-            set.start()
-                .expect("subscriber callback executor must start");
+            set.start().expect("subscriber callback workers must start");
 
             set.emit_arc(kind_ev(diagnostic));
             set.close().await;
@@ -3086,8 +2817,7 @@ mod tests {
         let bus = Bus::new(64);
         let mut rx = bus.subscribe();
         let set = SubscriberSet::new(vec![PanicSub::named("slack-#alerts")], bus.clone());
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
 
         set.emit_arc(ev("t"));
         set.close().await;
@@ -3109,8 +2839,7 @@ mod tests {
             seen: Arc::clone(&seen),
         });
         let set = SubscriberSet::new(vec![PanicSub::new(), recorder], bus);
-        set.start()
-            .expect("subscriber callback executor must start");
+        set.start().expect("subscriber callback workers must start");
 
         for i in 0..5 {
             set.emit_arc(ev(&format!("e{i}")));

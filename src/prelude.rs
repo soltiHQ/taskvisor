@@ -36,8 +36,8 @@ pub use crate::events::{BackoffSource, Event, EventKind, RejectionKind};
 /// Build, runtime, task, and combined error types.
 pub use crate::error::{BuildError, Error, RuntimeError, TaskError};
 
-/// Application callback interface for best-effort events.
-pub use crate::subscribers::Subscribe;
+/// Application callback interface and worker selection for best-effort events.
+pub use crate::subscribers::{Subscribe, SubscriberExecution};
 
 /// Process-local task submission identity.
 pub use crate::identity::TaskId;

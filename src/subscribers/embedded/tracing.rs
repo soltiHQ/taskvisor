@@ -29,7 +29,7 @@ use tracing::Level;
 
 use crate::TaskOutcomeKind;
 use crate::events::{Event, EventKind, RejectionKind};
-use crate::subscribers::Subscribe;
+use crate::subscribers::{Subscribe, SubscriberExecution};
 
 const MAX_TEXT_CHARS: usize = 4096;
 
@@ -48,6 +48,8 @@ fn bounded_text(value: &str) -> Cow<'_, str> {
 /// Register this value with Taskvisor, then configure a `tracing` subscriber in the application.
 /// Filter on target `taskvisor` and the stable `event` field.
 /// Other typed labels are suitable for structured filtering and metrics.
+/// The bridge selects [`SubscriberExecution::Dedicated`] because the configured dispatcher runs
+/// synchronously inside the callback.
 ///
 /// Event kinds map to tracing levels as follows:
 ///
@@ -221,6 +223,10 @@ impl Subscribe for TracingBridge {
     fn name(&self) -> &str {
         "TracingBridge"
     }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
+    }
 }
 
 impl Subscribe for TracingBridgeWithReasons {
@@ -230,6 +236,10 @@ impl Subscribe for TracingBridgeWithReasons {
 
     fn name(&self) -> &str {
         "TracingBridgeWithReasons"
+    }
+
+    fn execution(&self) -> SubscriberExecution {
+        SubscriberExecution::Dedicated
     }
 }
 
@@ -244,6 +254,15 @@ mod tests {
     use tracing::{Level, Metadata, span};
 
     type Captured = (Level, HashMap<String, String>);
+
+    #[test]
+    fn tracing_bridges_use_dedicated_execution() {
+        assert_eq!(TracingBridge.execution(), SubscriberExecution::Dedicated);
+        assert_eq!(
+            TracingBridge::with_reasons().execution(),
+            SubscriberExecution::Dedicated
+        );
+    }
 
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Captured>>>);

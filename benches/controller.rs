@@ -21,8 +21,8 @@ use taskvisor::{
 };
 
 use support::fixtures::{
-    self, AsyncFlag, RUNTIMES, RtFactory, bench_config, expect_canceled, expect_completed,
-    expect_within, instant_task, wait_for_ownership,
+    self, AsyncFlag, ProducerGate, RUNTIMES, RtFactory, bench_config, expect_canceled,
+    expect_completed, expect_within, instant_task, wait_for_ownership,
 };
 use support::{CaseFamily, print_suite_header, record_case};
 
@@ -42,6 +42,15 @@ const STEADY_INTAKE: CaseFamily = CaseFamily::intake(
     "accepted submissions",
     "64 caller-side try_submit acceptances on a reused supervisor; the multi-thread controller can consume concurrently",
     "Supervisor/controller startup, named-slot warmup, request construction, waiting for controller decisions and outcomes, post-batch ownership drain, shutdown, and Tokio runtime construction",
+);
+
+const CONCURRENT_INTAKE: CaseFamily = CaseFamily::intake(
+    "controller/reused/concurrent_intake_try_submit",
+    "CONCURRENT TRY_SUBMIT PRODUCERS",
+    "accepted submission",
+    "accepted submissions",
+    "synchronized release of 1, 2, 4, or 8 producer tasks through 64 caller-side try_submit acceptances on one reused multi-thread supervisor",
+    "Supervisor/controller startup, named-slot warmup, request construction, producer task creation and readiness, controller decisions and outcomes, post-batch ownership drain, shutdown, and Tokio runtime construction",
 );
 
 const DROP_REJECTION: CaseFamily = CaseFamily::policy(
@@ -278,6 +287,84 @@ fn bench_steady_try_submit(c: &mut Criterion) {
                         // Either policy rejection or completion must release ownership.
                         drain_controller(&handle).await;
                     }
+                    handle.shutdown().await.expect("shutdown failed");
+                    total
+                })
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_concurrent_try_submit(c: &mut Criterion) {
+    const COUNT: usize = 64;
+
+    let mut group = c.benchmark_group(CONCURRENT_INTAKE.group_id);
+    group.throughput(Throughput::Elements(COUNT as u64));
+
+    for producers in [1usize, 2, 4, 8] {
+        let rt_name = "multi_thread";
+        let parameter = format!("{COUNT}_accepted_submissions_{producers}_producers");
+        group.bench_function(BenchmarkId::new(rt_name, &parameter), |b| {
+            record_case(CONCURRENT_INTAKE, rt_name, Some(parameter.clone()));
+            b.iter_custom(|iters| {
+                let rt = fixtures::rt_multi_thread();
+                rt.block_on(async {
+                    let supervisor = Supervisor::builder(bench_config())
+                        .with_controller(
+                            ControllerConfig::default()
+                                .with_queue_capacity(NonZeroUsize::new(COUNT).unwrap()),
+                        )
+                        .build();
+                    let handle = supervisor.serve().expect("runtime startup");
+                    warm_controller_slots(&handle, &["concurrent-intake-slot"]).await;
+
+                    let mut total = Duration::ZERO;
+                    for iteration in 0..iters {
+                        let per_producer = COUNT / producers;
+                        assert_eq!(per_producer * producers, COUNT);
+                        let gate = ProducerGate::new(producers);
+                        let mut joins = Vec::with_capacity(producers);
+
+                        for producer in 0..producers {
+                            let requests: Vec<_> = (0..per_producer)
+                                .map(|i| {
+                                    ControllerSpec::drop_if_running(instant_task(format!(
+                                        "concurrent-intake-{iteration}-{producer}-{i}"
+                                    )))
+                                    .with_slot("concurrent-intake-slot")
+                                })
+                                .collect();
+                            let producer_handle = handle.clone();
+                            let producer_gate = Arc::clone(&gate);
+                            joins.push(tokio::spawn(async move {
+                                producer_gate.arrive_and_wait().await;
+                                requests
+                                    .into_iter()
+                                    .map(|request| {
+                                        producer_handle
+                                            .try_submit(request)
+                                            .expect("concurrent try_submit intake failed")
+                                    })
+                                    .collect::<Vec<_>>()
+                            }));
+                        }
+
+                        gate.wait_until_ready().await;
+                        let start = Instant::now();
+                        gate.release();
+                        let mut accepted = 0usize;
+                        for join in joins {
+                            let ids = join.await.expect("concurrent producer task failed");
+                            accepted += ids.len();
+                            black_box(ids);
+                        }
+                        total += start.elapsed();
+                        assert_eq!(accepted, COUNT);
+
+                        drain_controller(&handle).await;
+                    }
+
                     handle.shutdown().await.expect("shutdown failed");
                     total
                 })
@@ -525,6 +612,7 @@ criterion_group! {
     targets =
         bench_cold_first_try_submit,
         bench_steady_try_submit,
+        bench_concurrent_try_submit,
         bench_drop_busy_rejection,
         bench_replace_busy_placement,
         bench_queue_one_slot,

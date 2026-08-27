@@ -75,6 +75,54 @@ fn controller_spec_components_are_configured_through_accessors() {
     assert_eq!(spec.into_task_spec().name(), "replacement");
 }
 
+#[test]
+fn runtime_drop_before_first_controller_poll_closes_command_channel() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let (supervisor, handle, preaccepted) = runtime.block_on(async {
+        let supervisor = Supervisor::builder(SupervisorConfig::default())
+            .with_controller(ControllerConfig::default())
+            .build();
+        let handle = supervisor.serve().expect("runtime startup");
+        let (_id, waiter) = handle
+            .try_submit_and_watch(ControllerSpec::queue(TaskSpec::once(
+                "before-first-controller-poll",
+                make_ok_once(),
+            )))
+            .expect("the open command channel accepts work before the controller is first polled");
+        (supervisor, handle, waiter)
+    });
+
+    drop(runtime);
+
+    let late = handle.try_submit_and_watch(ControllerSpec::queue(TaskSpec::once(
+        "after-controller-runtime-drop",
+        make_ok_once(),
+    )));
+    assert!(matches!(late, Err(ControllerError::Closed)));
+
+    let outcome_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("outcome runtime");
+    let preaccepted = outcome_runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1), preaccepted.wait())
+            .await
+            .expect("receiver teardown must resolve the preaccepted waiter")
+    });
+    assert!(matches!(
+        preaccepted,
+        Err(RuntimeError::OutcomeUnavailable { .. })
+    ));
+
+    drop(outcome_runtime);
+    drop(handle);
+    drop(supervisor);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn prepared_submission_exposes_identity_before_events_and_preserves_it() {
     let (handle, collector) = served_controller(ControllerConfig::default());

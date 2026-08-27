@@ -295,7 +295,7 @@ pub mod events;
 pub use events::{BackoffSource, Event, EventKind, RejectionKind};
 
 pub mod subscribers;
-pub use subscribers::Subscribe;
+pub use subscribers::{Subscribe, SubscriberExecution};
 
 pub mod identity;
 pub use identity::TaskId;

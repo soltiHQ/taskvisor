@@ -35,7 +35,7 @@ async fn shutdown_finalizes_buffered_submission_as_rejected() {
         .await
         .expect("explicit-slot submission accepted into channel");
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
     drop(rx);
 
@@ -79,6 +79,64 @@ async fn shutdown_finalizes_buffered_submission_as_rejected() {
             .as_ref()
             .expect("explicit slot must be present on the event"),
         &explicit_task_name
+    ));
+}
+
+#[tokio::test]
+async fn outstanding_channel_permit_is_drained_with_explicit_terminal() {
+    let bus = Bus::new(64);
+    let mut events = bus.subscribe();
+    let ctrl = make_controller(ControllerConfig::default(), bus);
+    let permit = ctrl
+        .tx
+        .try_reserve()
+        .expect("command capacity reserved before shutdown");
+    let id = TaskId::next();
+    let (done, outcome) = oneshot::channel();
+    let command = ControllerCommand::Submit(Box::new(Submission {
+        id,
+        owned: owned_controller_spec(
+            ControllerSpec::queue(waiting_spec("active-shutdown-commit"))
+                .with_slot("active-shutdown-commit-slot"),
+        ),
+        done: Some(done),
+    }));
+    let mut rx = ctrl.take_command_receiver().expect("receiver present");
+    let mut finalize = Box::pin(ctrl.finalize_pending_on_shutdown(&mut rx));
+
+    let completed_early = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(finalize.as_mut().poll(context).is_ready())
+    })
+    .await;
+    assert!(ctrl.tx.is_closed());
+    assert!(
+        !completed_early,
+        "shutdown must wait for a channel permit reserved before closure"
+    );
+
+    permit.send(command);
+    tokio::time::timeout(Duration::from_secs(1), &mut finalize)
+        .await
+        .expect("shutdown must resume after the active commit sends");
+    drop(finalize);
+
+    let outcome = receive_oneshot(outcome, "active shutdown commit").await;
+    assert!(matches!(
+        &outcome,
+        TaskOutcome::Rejected {
+            kind: crate::events::RejectionKind::ControllerShuttingDown,
+            reason,
+        } if reason.as_ref() == crate::reasons::CONTROLLER_SHUTTING_DOWN
+    ));
+    let rejections: Vec<_> = drain_events(&mut events)
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ControllerRejected && event.id == Some(id))
+        .collect();
+    assert_eq!(rejections.len(), 1);
+    assert_rejection_parity(&rejections[0], id, &outcome);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
     ));
 }
 
@@ -367,7 +425,7 @@ async fn shutdown_resolves_buffered_removal_reply() {
         })
         .expect("the controller command channel has capacity");
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
 
     assert!(matches!(
@@ -381,7 +439,7 @@ async fn submit_after_shutdown_finalize_is_rejected_not_leaked() {
     let bus = Bus::new(64);
     let ctrl = make_controller(ControllerConfig::default(), bus);
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
 
     let task: TaskRef = TaskFn::arc(|_ctx: TaskContext| async { Ok(()) });
@@ -390,10 +448,7 @@ async fn submit_after_shutdown_finalize_is_rejected_not_leaked() {
         .submit_and_watch(ControllerSpec::queue(TaskSpec::once("late", task)).with_slot("s"))
         .await;
 
-    assert!(
-        result.is_err(),
-        "a submission after shutdown finalization must be rejected, not handed a doomed waiter"
-    );
+    assert!(matches!(result, Err(ControllerError::Closed)));
     drop(rx);
 }
 
@@ -568,7 +623,7 @@ async fn buffered_shutdown_drain_continues_after_task_drop_panic() {
         })
         .expect("buffered identity operation");
 
-    let mut rx = ctrl.rx.write().await.take().expect("rx present");
+    let mut rx = ctrl.take_command_receiver().expect("rx present");
     ctrl.finalize_pending_on_shutdown(&mut rx).await;
 
     assert!(

@@ -45,11 +45,14 @@ Setup, checks, and cleanup can make the full command take longer than the measur
 
 ### [Lifecycle](lifecycle.rs)
 
-| Case                     | Timed work                                                                                                              | What it does not measure                                                                                          |
-|--------------------------|-------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| Cold single task         | Fresh supervisor construction, one instant task, and shared shutdown. The task body is checked to have run.             | Tokio runtime and task-value construction.                                                                        |
-| Watched completion       | Admission through `Completed`, either on the first attempt or after two failed attempts and a successful third attempt. | Startup, task-value construction, deferred ownership cleanup, or a positive backoff delay. Retry backoff is zero. |
-| Cancel scheduled backoff | Cancellation through the reliable `Canceled` outcome after a subscriber has confirmed `BackoffScheduled`.               | Scheduling and waiting out the configured 60-second backoff. The case cancels that wait.                          |
+| Case                       | Timed work                                                                                                                                                | What it does not measure                                                                                          |
+|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Cold single task           | Fresh supervisor construction, one instant task, and shared shutdown. The task body is checked to have run.                                               | Tokio runtime and task-value construction.                                                                        |
+| Watched completion         | Admission through `Completed`, either on the first attempt or after two failed attempts and a successful third attempt.                                   | Startup, task-value construction, deferred ownership cleanup, or a positive backoff delay. Retry backoff is zero. |
+| Cancel scheduled backoff   | Cancellation through the reliable `Canceled` outcome after a subscriber has confirmed `BackoffScheduled`.                                                 | Scheduling and waiting out the configured 60-second backoff. The case cancels that wait.                          |
+| Finite periodic / `Always` | Admission through exactly eight attempts and a terminal `Canceled` outcome, using `TaskSpec::periodic` or explicit `RestartPolicy::Always`.                 | Startup, task construction, ownership reset, and shutdown.                                                        |
+| Cooperative shutdown       | One requested shutdown through shared cleanup with zero or 32 already-started cooperative tasks.                                                          | Startup, admission, start handshakes, and outcome checks.                                                          |
+| Grace exceeded             | One requested shutdown through `GraceExceeded` and force-abort commitment with one or 32 already-started non-cooperative tasks under one shared 10ms grace. | Startup, admission, start handshakes, and outcome checks.                                                          |
 
 ### [Throughput](throughput.rs)
 
@@ -57,19 +60,26 @@ These cases admit and wait for batches of 256 successful tasks on a warmed super
 Each task must return `Completed`. Startup, task-value construction, and ownership cleanup stay outside the timer.
 There is no synthetic CPU loop in the task body.
 
-The instant-task case is the baseline for the subscriber cases. A second pair uses identical tasks that explicitly yield once, with and without a 60-second attempt deadline. 
+The instant-task case is the no-subscriber reference. The fan-out suite repeats that same reference as its zero-subscriber variant so subscriber-count comparisons stay in one benchmark family and binary.
+A second pair uses identical tasks that explicitly yield once, with and without a 60-second attempt deadline.
 The yield ensures the deadline timer is polled before the task succeeds.
 This comparison includes timer registration and removal, deadline selection, and scheduling; it is not a pure timer microbenchmark.
 It does not promise that another task runs during the yield, and it does not measure timeout expiry.
 Positive delays and deadline expiry are exercised in the [lifecycle tests](../tests/lifecycle.rs)
 and [timeout tests](../tests/timeout.rs); these benchmarks do not measure their elapsed latency.
 
+The `max_concurrent` family runs the same 256 instant tasks with the limit disabled and with limits of 1, 4, and 256.
+It times watched admission through every `Completed` outcome, including semaphore acquisition, cancellation selection, permit release, and any configured contention.
+
 ### [Subscriber fan-out](fanout.rs)
 
-- **Healthy subscribers:** 256 tasks with 1, 4, or 8 subscribers. Timing includes watched task completion and every subscriber receiving all `TaskFinished` events with `Completed` outcomes. Overflow is not allowed in this case.
-- **Saturated subscriber:** 256 tasks, one healthy subscriber, and one blocked callback whose queue capacity is one. Timing includes all watched `Completed` outcomes and delivery of their `TaskFinished` events to the healthy subscriber. The blocked callback is confirmed before timing; gate release and verification of its overflow happen afterward.
+- **Matched shared delivery:** 256 tasks with 0, 1, 4, or 8 short-callback subscribers using the default `SubscriberExecution::Shared` worker. Timing includes watched task completion and every configured subscriber receiving all `TaskFinished` events with `Completed` outcomes. The zero-subscriber case keeps the event bus disabled. Overflow is not allowed.
+- **Dedicated short callbacks:** 256 tasks with 1 or 8 short-callback subscribers, each using `SubscriberExecution::Dedicated`. This separate family exposes the native-thread delivery cost without mixing it into the default shared-worker curve.
+- **Saturated subscriber:** 256 tasks, one blocked `Dedicated` callback whose queue capacity is one, and 1, 3, or 7 healthy `Shared` subscribers. Timing includes all watched `Completed` outcomes and delivery of their `TaskFinished` events to every healthy subscriber. The blocked callback is confirmed before timing; gate release and verification of its overflow happen afterward.
 
-These rates count completed tasks, not callbacks. The saturated case exercises overflow in one subscriber lane while tasks and another subscriber progress.
+These rates count completed tasks, not callbacks. The saturated case exercises overflow in one dedicated subscriber lane while tasks and multiple shared healthy subscriber lanes progress.
+The zero-to-one delta includes enabling the event bus, the relay, one native callback worker, and cross-thread runtime wake latency; it is not a callback CPU microbenchmark.
+Use the matched one-to-four-to-eight `Shared` cases to evaluate subscriber-count scaling.
 It does not measure shared event-bus overflow, delivery to the blocked subscriber, or its recovery time.
 Setup, final shutdown, and ownership reset are excluded.
 
@@ -87,7 +97,8 @@ Setup, final shutdown, and ownership reset are excluded.
 | Case                  | Timed work                                                                                                              | What it does not measure                                                                           |
 |-----------------------|-------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
 | Cold first submission | First successful `try_submit` on a fresh served supervisor, including lazy cleanup-worker startup.                      | Supervisor/controller and Tokio runtime startup, request construction, task outcome, and shutdown. |
-| Reused intake burst   | Acceptance of a fixed burst of 64 requests.                                                                             | Slot admission and final task outcomes.                                                            |
+| Reused intake burst   | Acceptance of a fixed burst of 64 requests from one caller.                                                             | Slot admission and final task outcomes.                                                            |
+| Concurrent producers  | Synchronized release of 1, 2, 4, or 8 producer tasks through 64 `try_submit` acceptances on Tokio multi-thread.         | Producer creation/readiness, controller decisions and outcomes, reset, and shutdown.               |
 | Busy-slot Drop        | 32 requests rejected with `SlotBusy` while an owner holds the slot.                                                     | Owner setup and cleanup.                                                                           |
 | Busy-slot Replace     | 32 watched submissions through 31 `SupersededByReplace` rejections, after the newest request replaces the pending head. | The retention snapshot check, newest task completion, and owner teardown.                          |
 | One-slot Queue        | 32 task completions through one serial slot, on Tokio current-thread only.                                              | Runtime startup, warmup, request construction, and ownership reset.                                |
@@ -95,6 +106,7 @@ Setup, final shutdown, and ownership reset are excluded.
 
 In the reused intake burst, the current-thread runtime cannot consume commands during the synchronous producer loop.
 The multi-thread runtime can consume them concurrently. Both cases measure submission intake, not completed work.
+The concurrent-producer family keeps total work fixed at 64 and changes only the number of producer tasks.
 
 ## Measurement boundaries and reset
 
@@ -104,6 +116,8 @@ Each iteration uses a fixed operation or batch. Gates establish required running
 A watched outcome can arrive before deferred destruction releases ownership. The fixtures wait for ownership and cleanup to return
 to the case's starting level before reusing state. This reset is outside the timer unless `Boundary` explicitly includes it.
 Criterion's iteration count therefore does not turn a fixed burst into a growing queue or change the available capacity between iterations.
+
+Shutdown remains outside unrelated steady throughput timers. It is timed only by the cold `Supervisor::run` case and the dedicated requested-shutdown families described above.
 
 The shared fixtures live in [support/fixtures.rs](support/fixtures.rs); the report wrapper stays in [support/mod.rs](support/mod.rs).
 `current_thread` uses Tokio's current-thread runtime. `multi_thread` uses four Tokio workers.

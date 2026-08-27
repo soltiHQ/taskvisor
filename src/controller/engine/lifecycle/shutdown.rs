@@ -16,18 +16,36 @@ use crate::events::{Event, EventKind, RejectionKind};
 use super::super::{Controller, ControllerCommand, Submission};
 
 impl Controller {
+    /// Closes sender admission. Receiver draining waits for outstanding channel permits.
+    pub(in crate::controller::engine) fn close_command_intake(
+        &self,
+        rx: &mut mpsc::Receiver<ControllerCommand>,
+    ) {
+        self.mark_shutting_down();
+        rx.close();
+    }
+
     /// Closes command intake and resolves every buffered command.
     ///
     /// Buffered watched submissions resolve as [`TaskOutcome::Rejected`].
     /// Identity commands resolve with `RuntimeError::ShuttingDown`.
+    #[cfg(test)]
     pub(in crate::controller::engine) async fn finalize_pending_on_shutdown(
         &self,
         rx: &mut mpsc::Receiver<ControllerCommand>,
     ) {
-        rx.close();
+        self.close_command_intake(rx);
+        self.drain_pending_on_shutdown(rx).await;
+    }
+
+    /// Resolves buffered commands until the closed channel has no outstanding permits.
+    pub(in crate::controller::engine) async fn drain_pending_on_shutdown(
+        &self,
+        rx: &mut mpsc::Receiver<ControllerCommand>,
+    ) {
         let mut deferred_drops = Vec::new();
 
-        while let Ok(command) = rx.try_recv() {
+        while let Some(command) = rx.recv().await {
             match command {
                 ControllerCommand::Submit(sub) => {
                     let Submission { id, owned, done } = *sub;

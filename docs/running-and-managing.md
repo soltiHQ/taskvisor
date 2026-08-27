@@ -21,7 +21,7 @@ Choose an entry point based on how tasks are supplied and who requests shutdown:
 Use [`Supervisor::new`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.new) for runtime configuration and subscribers.
 Use [`Supervisor::builder`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.builder) for task defaults or a controller.
 The builder's [`try_build`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.SupervisorBuilder.html#method.try_build) returns typed construction errors.
-Panics from subscriber metadata methods ([`name`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.name) or [`queue_capacity`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.queue_capacity)) still reach the caller.
+Panics from subscriber metadata methods ([`execution`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.execution), [`name`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.name), or [`queue_capacity`](https://docs.rs/taskvisor/latest/taskvisor/subscribers/trait.Subscribe.html#method.queue_capacity)) still reach the caller.
 
 Construction does not start Tokio tasks.
 [`serve`](https://docs.rs/taskvisor/latest/taskvisor/core/struct.Supervisor.html#method.serve) or a static run starts the runtime. First startup needs an active Tokio runtime.

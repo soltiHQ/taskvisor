@@ -263,7 +263,8 @@ impl SupervisorBuilder {
     /// # Panics
     ///
     /// Panics when [`try_build`](Self::try_build) would return an error.
-    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] also reaches the caller.
+    /// A panic from [`Subscribe::execution`], [`Subscribe::name`], or [`Subscribe::queue_capacity`]
+    /// also reaches the caller.
     #[must_use]
     pub fn build(self) -> Arc<Supervisor> {
         self.try_build().unwrap_or_else(|error| {
@@ -276,8 +277,9 @@ impl SupervisorBuilder {
     /// Builds a stopped supervisor and returns typed construction failures.
     ///
     /// This method is safe to call outside Tokio and does not spawn Tokio tasks.
-    /// It reserves all subscriber ownership slots as one batch before calling [`Subscribe::name`] or [`Subscribe::queue_capacity`].
-    /// A rejected batch calls neither method and keeps no ownership slots.
+    /// It reserves all subscriber ownership slots as one batch before calling [`Subscribe::execution`],
+    /// [`Subscribe::name`], or [`Subscribe::queue_capacity`].
+    /// A rejected batch calls none of these methods and keeps no ownership slots.
     ///
     /// # Errors
     ///
@@ -287,8 +289,8 @@ impl SupervisorBuilder {
     ///
     /// # Panics
     ///
-    /// A panic from [`Subscribe::name`] or [`Subscribe::queue_capacity`] reaches the caller after Taskvisor reserves
-    /// subscriber ownership for deferred cleanup.
+    /// A panic from [`Subscribe::execution`], [`Subscribe::name`], or [`Subscribe::queue_capacity`] reaches the caller
+    /// after Taskvisor reserves subscriber ownership for deferred cleanup.
     pub fn try_build(self) -> Result<Arc<Supervisor>, BuildError> {
         self.validate_configuration()?;
         let drop_domain = deferred_drop::DropDomain::unstarted(self.runtime.ownership_capacity());

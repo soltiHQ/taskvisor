@@ -8,7 +8,7 @@
 //! builder-wired core
 //!         ▼
 //!       start
-//!         ├── subscribers ──► callback executor
+//!         ├── subscribers ──► shared + dedicated callback workers
 //!         ├── enabled bus ──► event relay
 //!         ├── registry ─────► listener and force-abort tracker
 //!         └── controller ───► optional worker
