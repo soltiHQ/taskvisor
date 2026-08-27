@@ -9,7 +9,7 @@ Taskvisor requires Rust 1.90 or newer.
 Add the [taskvisor crate](https://crates.io/crates/taskvisor) to your dependencies:
 
 ```toml
-taskvisor = "0.8"
+taskvisor = "0.9"
 ```
 
 The default install includes the controller API.
@@ -26,13 +26,13 @@ To use it, build the supervisor with [with_controller](https://docs.rs/taskvisor
 Enable an optional integration:
 
 ```toml
-taskvisor = { version = "0.8", features = ["tracing"] }
+taskvisor = { version = "0.9", features = ["tracing"] }
 ```
 
 Build without keyed admission:
 
 ```toml
-taskvisor = { version = "0.8", default-features = false }
+taskvisor = { version = "0.9", default-features = false }
 ```
 
 ## Test helpers
@@ -45,7 +45,7 @@ Add the test-only feature and the Tokio test runtime:
 
 ```toml
 [dev-dependencies]
-taskvisor = { version = "0.8", features = ["test-util"] }
+taskvisor = { version = "0.9", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 

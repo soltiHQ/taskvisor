@@ -39,7 +39,7 @@ Your task keeps the application logic.
 
 ```toml
 [dependencies]
-taskvisor = "0.8"
+taskvisor = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 

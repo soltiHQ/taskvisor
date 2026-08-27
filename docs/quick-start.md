@@ -17,7 +17,7 @@ The default Taskvisor install includes everything this example uses; no addition
 ```sh
 cargo new taskvisor-quick-start
 cd taskvisor-quick-start
-cargo add taskvisor@0.8
+cargo add taskvisor@0.9
 cargo add tokio@1 --features full
 ```
 
